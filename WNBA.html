@@ -1452,18 +1452,16 @@ document.addEventListener("keydown", e => {
 
 // ── TOTALS MODEL ───────────────────────────────────────────────────────────
 // Sums blended player projections per team to produce projected team/game totals.
-// Auto-pulls today's games from ESPN and lets user paste Betstamp odds to find best price + EV.
+// Slate is determined entirely from the Betstamp paste — no external API.
 
-let totalsDate = null; // ISO date — defaults to today
-let totalsGames = []; // [{eventId, awayAbbr, awayName, homeAbbr, homeName, status, ...}]
-let betstampMarkets = {}; // gameKey -> [{book, line, overOdds, underOdds}]
+let betstampGames = []; // ordered: [{awayAbbr, homeAbbr, awayName, homeName, time, books:[...]}]
 
-// Map ESPN team abbr → your projection abbrs (Roto/Saber/RotoWire use different conventions)
+// Map source team abbrs to canonical (Roto/Saber/RotoWire vs Betstamp use slight variants)
 const ESPN_TO_PROJ = {
-  "ATL":"ATL", "CHI":"CHI", "CON":"CON", "DAL":"DAL",
-  "GS":"GSV", "GSV":"GSV", "IND":"IND", "LV":"LVA", "LVA":"LVA",
-  "LA":"LAS", "LAS":"LAS", "MIN":"MIN", "NY":"NYL", "NYL":"NYL",
-  "PHX":"PHX", "PHO":"PHX", "SEA":"SEA", "TOR":"TOR", "WAS":"WAS", "WSH":"WAS"
+  "ATL":"ATL","CHI":"CHI","CON":"CON","DAL":"DAL",
+  "GS":"GSV","GSV":"GSV","IND":"IND","LV":"LVA","LVA":"LVA",
+  "LA":"LAS","LAS":"LAS","MIN":"MIN","NY":"NYL","NYL":"NYL",
+  "PHX":"PHX","PHO":"PHX","SEA":"SEA","TOR":"TOR","WAS":"WAS","WSH":"WAS","POR":"POR"
 };
 function normTeamAbbr(abbr) {
   if (!abbr) return "";
@@ -1471,59 +1469,67 @@ function normTeamAbbr(abbr) {
   return ESPN_TO_PROJ[u] || u;
 }
 
-function isoToday() {
-  const d = new Date();
-  return d.toISOString().slice(0,10);
-}
-
-async function loadTotalsGames() {
-  const date = totalsDate || isoToday();
-  const yyyymmdd = date.replace(/-/g, "");
-  try {
-    const res = await fetch(`https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/scoreboard?dates=${yyyymmdd}`);
-    if (!res.ok) throw new Error(`ESPN ${res.status}`);
-    const j = await res.json();
-    totalsGames = (j.events || []).map(ev => {
-      const comp = ev.competitions?.[0];
-      const home = comp?.competitors?.find(c => c.homeAway === "home");
-      const away = comp?.competitors?.find(c => c.homeAway === "away");
-      return {
-        eventId: ev.id,
-        date: ev.date,
-        status: ev.status?.type?.shortDetail || ev.status?.type?.name || "",
-        completed: ev.status?.type?.completed === true,
-        awayAbbr: normTeamAbbr(away?.team?.abbreviation),
-        awayName: away?.team?.displayName || "",
-        awayShort: away?.team?.shortDisplayName || "",
-        homeAbbr: normTeamAbbr(home?.team?.abbreviation),
-        homeName: home?.team?.displayName || "",
-        homeShort: home?.team?.shortDisplayName || "",
-        awayScore: parseInt(away?.score) || null,
-        homeScore: parseInt(home?.score) || null,
-      };
-    });
-  } catch (e) {
-    totalsGames = [];
-    setLog("ESPN scoreboard error: " + e.message);
+const TEAM_NAME_ALIASES = {
+  "atlanta dream":"ATL","chicago sky":"CHI","connecticut sun":"CON",
+  "dallas wings":"DAL","golden state valkyries":"GSV","indiana fever":"IND",
+  "las vegas aces":"LVA","los angeles sparks":"LAS","minnesota lynx":"MIN",
+  "new york liberty":"NYL","phoenix mercury":"PHX","seattle storm":"SEA",
+  "toronto tempo":"TOR","washington mystics":"WAS","portland fire":"POR",
+  "atlanta":"ATL","chicago":"CHI","connecticut":"CON","dallas":"DAL",
+  "golden state":"GSV","valkyries":"GSV","indiana":"IND","fever":"IND",
+  "las vegas":"LVA","aces":"LVA","los angeles":"LAS","sparks":"LAS",
+  "minnesota":"MIN","lynx":"MIN","new york":"NYL","liberty":"NYL",
+  "phoenix":"PHX","mercury":"PHX","seattle":"SEA","storm":"SEA",
+  "toronto":"TOR","tempo":"TOR","washington":"WAS","mystics":"WAS",
+  "portland":"POR","fire":"POR"
+};
+function teamLineToAbbr(line) {
+  if (!line) return null;
+  const cleaned = line.toLowerCase().replace(/^@\s*/,"").replace(/[^a-z\s]/g,"").trim();
+  if (TEAM_NAME_ALIASES[cleaned]) return TEAM_NAME_ALIASES[cleaned];
+  for (const k of Object.keys(TEAM_NAME_ALIASES)) {
+    if (cleaned.includes(k)) return TEAM_NAME_ALIASES[k];
   }
+  const u = cleaned.toUpperCase().replace(/\s/g,"");
+  if (u.length >= 2 && u.length <= 4) return normTeamAbbr(u);
+  return null;
 }
 
+const BOOK_ALIASES = {
+  "dk":"DraftKings","draftkings":"DraftKings",
+  "fd":"FanDuel","fanduel":"FanDuel",
+  "mgm":"BetMGM","betmgm":"BetMGM",
+  "czr":"Caesars","caesars":"Caesars",
+  "espn":"ESPNBet","espnbet":"ESPNBet",
+  "pin":"Pinnacle","pinnacle":"Pinnacle",
+  "fanatic":"Fanatics","fanatics":"Fanatics",
+  "bet365":"Bet365","365":"Bet365","bet105":"Bet105",
+  "novig":"NoVig","nv":"NoVig",
+  "prophetx":"ProphetX","prophet":"ProphetX",
+  "circa":"Circa","hard":"HardRock","hardrock":"HardRock",
+  "bovada":"Bovada","bov":"Bovada",
+  "pb":"PointsBet","pointsbet":"PointsBet",
+  "bookmaker":"Bookmaker","bm":"Bookmaker"
+};
+function normBook(s) {
+  if (!s) return null;
+  const k = s.toLowerCase().replace(/[^a-z0-9]/g,"");
+  return BOOK_ALIASES[k] || (k.length >= 2 ? s.trim() : null);
+}
+
+// Build team projection by summing blended PTS from merged
 function buildTeamProjection(teamAbbr) {
-  // Sum PTS projections for all players on that team using the merged blend.
-  // Returns { total, byPlayer: [{name, pts, sources}], sourceTotals: {roto, saber, rotowire} }
   if (!merged) return null;
   const target = normTeamAbbr(teamAbbr);
   const teamPlayers = merged.filter(r => normTeamAbbr(r.team) === target && r.found > 0 && r.con.pts != null);
   if (!teamPlayers.length) return null;
-
   let total = 0;
   const sourceTotals = {};
   SOURCES.forEach(s => sourceTotals[s.key] = { sum: 0, count: 0 });
-
+  const lookups = getSlotLookups();
   const byPlayer = teamPlayers.map(r => {
     total += r.con.pts;
-    const lookups = getSlotLookups();
-    SOURCES.forEach((s, i) => {
+    SOURCES.forEach((s,i) => {
       const lk = lookups[i];
       if (!lk) return;
       const m = lk[r.norm];
@@ -1534,160 +1540,108 @@ function buildTeamProjection(teamAbbr) {
     });
     return { name: r.rawName, pts: r.con.pts };
   }).sort((a,b) => b.pts - a.pts);
-
   return { total, byPlayer, sourceTotals };
 }
 
-function buildGameProjections() {
-  // For each ESPN game, build a projection if we have player data for both teams
-  return totalsGames.map(g => {
-    const away = buildTeamProjection(g.awayAbbr);
-    const home = buildTeamProjection(g.homeAbbr);
-    const projTotal = (away && home) ? away.total + home.total : null;
-    return { game: g, away, home, projTotal };
-  });
-}
-
-// ── BETSTAMP TOTALS PARSER ─────────────────────────────────────────────────
-const BOOK_ALIASES = {
-  "dk":"DraftKings", "draftkings":"DraftKings",
-  "fd":"FanDuel", "fanduel":"FanDuel",
-  "mgm":"BetMGM", "betmgm":"BetMGM",
-  "czr":"Caesars", "caesars":"Caesars",
-  "espn":"ESPNBet", "espnbet":"ESPNBet",
-  "pin":"Pinnacle", "pinnacle":"Pinnacle",
-  "fanatic":"Fanatics", "fanatics":"Fanatics",
-  "bet365":"Bet365", "365":"Bet365",
-  "novig":"NoVig", "nv":"NoVig",
-  "prophetx":"ProphetX", "prophet":"ProphetX",
-  "circa":"Circa", "hard":"HardRock", "hardrock":"HardRock",
-  "bovada":"Bovada", "bov":"Bovada",
-  "pb":"PointsBet", "pointsbet":"PointsBet",
-  "bookmaker":"Bookmaker", "bm":"Bookmaker"
-};
-function normBook(s) {
-  if (!s) return null;
-  const k = s.toLowerCase().replace(/[^a-z0-9]/g, "");
-  return BOOK_ALIASES[k] || (k.length >= 2 ? s.trim() : null);
-}
-
-const TEAM_NAME_ALIASES = {
-  // Full name → abbr for Betstamp parsing
-  "atlanta dream":"ATL", "chicago sky":"CHI", "connecticut sun":"CON",
-  "dallas wings":"DAL", "golden state valkyries":"GSV", "indiana fever":"IND",
-  "las vegas aces":"LVA", "los angeles sparks":"LAS", "minnesota lynx":"MIN",
-  "new york liberty":"NYL", "phoenix mercury":"PHX", "seattle storm":"SEA",
-  "toronto tempo":"TOR", "washington mystics":"WAS",
-  // common shortcuts
-  "atlanta":"ATL","chicago":"CHI","connecticut":"CON","dallas":"DAL",
-  "golden state":"GSV","valkyries":"GSV","indiana":"IND","fever":"IND",
-  "las vegas":"LVA","aces":"LVA","los angeles":"LAS","sparks":"LAS",
-  "minnesota":"MIN","lynx":"MIN","new york":"NYL","liberty":"NYL",
-  "phoenix":"PHX","mercury":"PHX","seattle":"SEA","storm":"SEA",
-  "toronto":"TOR","tempo":"TOR","washington":"WAS","mystics":"WAS"
-};
-function teamLineToAbbr(line) {
-  if (!line) return null;
-  const cleaned = line.toLowerCase().replace(/^@\s*/, "").replace(/[^a-z\s]/g, "").trim();
-  if (TEAM_NAME_ALIASES[cleaned]) return TEAM_NAME_ALIASES[cleaned];
-  // Try last token (city/team)
-  for (const k of Object.keys(TEAM_NAME_ALIASES)) {
-    if (cleaned.includes(k)) return TEAM_NAME_ALIASES[k];
-  }
-  // Last resort: 2-3 letter abbr
-  const u = cleaned.toUpperCase().replace(/\s/g,"");
-  if (u.length >= 2 && u.length <= 4) return normTeamAbbr(u);
-  return null;
-}
-
-function parseBetstampTotals(text) {
-  // Group lines into game blocks. A block starts with a team name (no @), ends before the next team-block.
-  // Inside each block we look for lines like: "O 168.5 -110 DK" or "U 168.5 -110 FanDuel" or
-  // "O 168.5 -110" followed by separate book line.
+// ── BETSTAMP "BEST AVAILABLE FULLTIME" PARSER ─────────────────────────────
+// Real format: each game is a 12-line price block following two team links.
+// Markdown copy looks like:
+//   [TIME](url)
+//   [Away Team](url)
+//   [PCT%](url)
+//   [Home Team](url)
+//   [PCT%](url)
+//   <Away ML> <Book>
+//   <Spread> <Odds> <Book>
+//   o<TOT> <Odds> <Book>      ← FULLTIME OVER (idx 2)
+//   <Home ML> <Book>
+//   <Spread> <Odds> <Book>
+//   u<TOT> <Odds> <Book>      ← FULLTIME UNDER (idx 5)
+//   <Away 1H ML> <Book>
+//   ... (1H markets — ignored)
+function parseBetstamp(text) {
   const lines = text.split("\n").map(l=>l.trim()).filter(Boolean);
-  const games = []; // [{awayAbbr, homeAbbr, books:[{book,line,overOdds,underOdds}]}]
-  let cur = null;
-  let lastTeams = []; // track team lines until we have 2
+  const teamLineRe = /^\[([^\]]+)\]\(https:\/\/betstamp\.com\/app\/games\/(\d+)\)$/;
+  const timeLineRe = /^\[(\d{1,2}:\d{2}(am|pm))\]\(https:\/\/betstamp\.com\/app\/games\/(\d+)\)$/i;
+  const pctLineRe = /^\[\d+%\]\(/;
+  const overLineRe = /^o([\d.]+)\s+([+\-]\d{2,4})\s+(.+)$/i;
+  const underLineRe = /^u([\d.]+)\s+([+\-]\d{2,4})\s+(.+)$/i;
 
-  for (const raw of lines) {
-    const line = raw.replace(/\s+/g," ").trim();
-    // Try to detect over/under price lines first
-    // Format A: O 168.5 -110 DK   (or U 168.5 -110 FanDuel)
-    let m = line.match(/^([OoUu])\s*([\d.]+)\s+([+\-]\d{2,4})\s+(.+)$/);
-    // Format B: just "O 168.5 -110" with book elsewhere
-    if (!m) m = line.match(/^([OoUu])\s*([\d.]+)\s+([+\-]\d{2,4})\s*$/);
-    if (m && cur) {
-      const ou = m[1].toUpperCase();
-      const ln = parseFloat(m[2]);
-      const odds = parseInt(m[3]);
-      const book = m[4] ? normBook(m[4]) : null;
-      // Find existing book/line entry or create
-      let entry = cur.books.find(b => b.book === book && b.line === ln);
-      if (!entry) {
-        entry = { book: book || "Unknown", line: ln, overOdds: null, underOdds: null };
-        cur.books.push(entry);
-      }
-      if (ou === "O") entry.overOdds = odds;
-      else entry.underOdds = odds;
-      continue;
+  const games = [];
+  let i = 0;
+  while (i < lines.length) {
+    const ln = lines[i];
+    const tm = ln.match(timeLineRe);
+    if (!tm) { i++; continue; }
+    const time = tm[1];
+    const gameId = tm[3];
+
+    // Find away team (next team link with same game id, but skip percentage anchors)
+    let j = i + 1;
+    let awayName = null, homeName = null;
+    while (j < lines.length && j < i + 8) {
+      if (pctLineRe.test(lines[j])) { j++; continue; }
+      const t = lines[j].match(teamLineRe);
+      if (t && t[2] === gameId) { awayName = t[1]; j++; break; }
+      j++;
     }
-    // Otherwise treat as team line
-    const abbr = teamLineToAbbr(line);
-    if (abbr) {
-      if (!cur) cur = { awayAbbr: null, homeAbbr: null, books: [] };
-      if (line.startsWith("@") || cur.awayAbbr) {
-        cur.homeAbbr = abbr;
-        // Game block complete (we have both teams), but books come next, so don't push yet
-      } else {
-        cur.awayAbbr = abbr;
-      }
-      // If we have both teams, we wait for odds lines to flow in
-      continue;
+    if (!awayName) { i++; continue; }
+
+    // Skip pct anchor, find home (also skip pct anchors)
+    while (j < lines.length && j < i + 12) {
+      if (pctLineRe.test(lines[j])) { j++; continue; }
+      const t = lines[j].match(teamLineRe);
+      if (t && t[2] === gameId) { homeName = t[1]; j++; break; }
+      j++;
     }
-    // Blank/separator pushes the current game
-    if (!line && cur && cur.awayAbbr && cur.homeAbbr && cur.books.length) {
-      games.push(cur);
-      cur = null;
+    if (!homeName) { i++; continue; }
+
+    // Skip home pct
+    while (j < lines.length && pctLineRe.test(lines[j])) j++;
+
+    // Collect odds rows until next time anchor or end
+    const oddsRows = [];
+    while (j < lines.length && oddsRows.length < 16) {
+      if (timeLineRe.test(lines[j])) break;
+      if (teamLineRe.test(lines[j]) || pctLineRe.test(lines[j])) { j++; continue; }
+      oddsRows.push(lines[j]);
+      j++;
     }
+
+    // Index 2 = fulltime over, index 5 = fulltime under
+    const oM = (oddsRows[2]||"").match(overLineRe);
+    const uM = (oddsRows[5]||"").match(underLineRe);
+
+    const awayAbbr = teamLineToAbbr(awayName);
+    const homeAbbr = teamLineToAbbr(homeName);
+    if (!awayAbbr || !homeAbbr) { i = j; continue; }
+
+    const books = [];
+    if (oM) books.push({ book: normBook(oM[3]), line: parseFloat(oM[1]), overOdds: parseInt(oM[2]), underOdds: null, side: "over" });
+    if (uM) books.push({ book: normBook(uM[3]), line: parseFloat(uM[1]), overOdds: null, underOdds: parseInt(uM[2]), side: "under" });
+
+    games.push({ awayAbbr, homeAbbr, awayName, homeName, time, books });
+    i = j;
   }
-  if (cur && cur.awayAbbr && cur.homeAbbr && cur.books.length) games.push(cur);
-
-  // Build keyed map: "AWAY@HOME" -> books[]
-  const out = {};
-  games.forEach(g => {
-    const key = `${g.awayAbbr}@${g.homeAbbr}`;
-    out[key] = g.books;
-  });
-  return { games: out, count: games.length };
+  return games;
 }
 
-function findBestNumberAgainstProj(books, projTotal) {
-  // Return the best book line + odds for both OVER and UNDER given our projected total
-  // "Best" = the book whose line gives us the most edge in our preferred direction.
-  if (!books || !books.length || projTotal == null) return null;
-  let bestOver = null, bestUnder = null;
-  books.forEach(b => {
-    if (b.overOdds != null && b.line != null) {
-      // Edge for OVER: we want low line + good price. Compare projTotal vs line, then EV from price.
-      const lineEdge = projTotal - b.line; // positive = over has model edge
-      const ev = lineEdge >= 0 ? americanEvRough(b.overOdds, projTotal, b.line, "over") : null;
-      if (lineEdge > 0 && (!bestOver || ev > bestOver.ev)) {
-        bestOver = { book: b.book, line: b.line, odds: b.overOdds, lineEdge, ev };
-      }
-    }
-    if (b.underOdds != null && b.line != null) {
-      const lineEdge = b.line - projTotal;
-      const ev = lineEdge >= 0 ? americanEvRough(b.underOdds, projTotal, b.line, "under") : null;
-      if (lineEdge > 0 && (!bestUnder || ev > bestUnder.ev)) {
-        bestUnder = { book: b.book, line: b.line, odds: b.underOdds, lineEdge, ev };
-      }
-    }
-  });
-  return { bestOver, bestUnder };
+function pasteBetstamp() {
+  const ta = document.getElementById("betstamp-paste");
+  const text = ta?.value || "";
+  if (!text.trim()) { showToast("Paste Betstamp text first"); return; }
+  betstampGames = parseBetstamp(text);
+  showToast(`Parsed ${betstampGames.length} games`);
+  renderTotals();
+}
+function clearBetstamp() {
+  betstampGames = [];
+  const ta = document.getElementById("betstamp-paste");
+  if (ta) ta.value = "";
+  renderTotals();
 }
 
-// Rough EV calc using normal-ish assumption around line.
-// stdev ~ 12 pts for WNBA totals (close to NBA's ~14 scaled by minutes).
+// EV using normal approx around projected total
 function americanEvRough(odds, projTotal, line, side) {
   const stdev = 12;
   const z = (line - projTotal) / stdev;
@@ -1699,90 +1653,81 @@ function americanEvRough(odds, projTotal, line, side) {
   return ((winProb * dec) - 1) * 100;
 }
 function erf(x) {
-  // Abramowitz & Stegun approx
   const a1=0.254829592,a2=-0.284496736,a3=1.421413741,a4=-1.453152027,a5=1.061405429,p=0.3275911;
-  const sign = x < 0 ? -1 : 1;
-  x = Math.abs(x);
+  const sign = x < 0 ? -1 : 1; x = Math.abs(x);
   const t = 1.0 / (1.0 + p * x);
   const y = 1.0 - (((((a5*t+a4)*t)+a3)*t+a2)*t+a1)*t*Math.exp(-x*x);
   return sign * y;
 }
 
-function pasteBetstampTotals() {
-  const ta = document.getElementById("betstamp-paste");
-  const text = ta?.value || "";
-  if (!text.trim()) { showToast("Paste Betstamp text first"); return; }
-  const parsed = parseBetstampTotals(text);
-  betstampMarkets = parsed.games;
-  showToast(`Parsed ${parsed.count} games from Betstamp`);
-  renderTotals();
-}
-
-function clearBetstampTotals() {
-  betstampMarkets = {};
-  const ta = document.getElementById("betstamp-paste");
-  if (ta) ta.value = "";
-  renderTotals();
-}
-
-async function refreshTotalsGames() {
-  await loadTotalsGames();
-  renderTotals();
-}
-
-function setTotalsDate(iso) {
-  totalsDate = iso;
-  refreshTotalsGames();
-}
-
 function renderTotals() {
   const el = document.getElementById("totals-tab");
-  const date = totalsDate || isoToday();
-  const projGames = buildGameProjections();
-
   const noProjections = !merged;
-  const noGames = totalsGames.length === 0;
+  const noGames = betstampGames.length === 0;
 
-  const gameCards = projGames.map(pg => {
-    const g = pg.game;
-    const key = `${g.awayAbbr}@${g.homeAbbr}`;
-    const books = betstampMarkets[key] || [];
-    const best = pg.projTotal != null ? findBestNumberAgainstProj(books, pg.projTotal) : null;
+  const cards = betstampGames.map(g => {
+    const away = buildTeamProjection(g.awayAbbr);
+    const home = buildTeamProjection(g.homeAbbr);
+    const projTotal = (away && home) ? away.total + home.total : null;
 
-    const sourceBreakdown = pg.away && pg.home ? SOURCES.map(s => {
-      const a = pg.away.sourceTotals[s.key];
-      const h = pg.home.sourceTotals[s.key];
+    const sourceBreakdown = (away && home) ? SOURCES.map(s => {
+      const a = away.sourceTotals[s.key];
+      const h = home.sourceTotals[s.key];
       const total = a.sum + h.sum;
       const players = a.count + h.count;
       return players > 0 ? `<span style="color:${s.color};font-weight:600">${s.label} ${total.toFixed(1)}</span>` : null;
     }).filter(Boolean).join(" · ") : "";
 
-    const bookRows = books.length
-      ? books.map(b => {
-          const overOk = pg.projTotal != null && pg.projTotal > b.line;
-          const underOk = pg.projTotal != null && pg.projTotal < b.line;
+    // Compute EV for each book entry
+    const enrichedBooks = g.books.map(b => {
+      let ev = null, edge = null;
+      if (projTotal != null) {
+        if (b.side === "over") {
+          edge = projTotal - b.line;
+          ev = americanEvRough(b.overOdds, projTotal, b.line, "over");
+        } else {
+          edge = b.line - projTotal;
+          ev = americanEvRough(b.underOdds, projTotal, b.line, "under");
+        }
+      }
+      return { ...b, ev, edge };
+    });
+
+    // Best of each side
+    const bestOver = enrichedBooks.filter(b => b.side === "over" && b.ev != null).sort((a,b)=>b.ev-a.ev)[0];
+    const bestUnder = enrichedBooks.filter(b => b.side === "under" && b.ev != null).sort((a,b)=>b.ev-a.ev)[0];
+
+    const bookRows = enrichedBooks.length
+      ? enrichedBooks.map(b => {
+          const odds = b.side === "over" ? b.overOdds : b.underOdds;
+          const sideLbl = b.side === "over" ? "OVER" : "UNDER";
+          const sideColor = b.side === "over" ? "#22c55e" : "#f87171";
+          const evColor = b.ev == null ? "#7d8590" : b.ev >= 5 ? "#22c55e" : b.ev > 0 ? "#5eead4" : "#7d8590";
           return `<tr>
-            <td style="padding:4px 10px;color:#e2e8f0;font-weight:600">${b.book}</td>
-            <td style="padding:4px 10px;text-align:center;color:#fff;font-weight:700">${b.line}</td>
-            <td style="padding:4px 10px;text-align:center;color:${overOk?'#22c55e':'#7d8590'}">${b.overOdds!=null?(b.overOdds>0?'+':'')+b.overOdds:'—'}</td>
-            <td style="padding:4px 10px;text-align:center;color:${underOk?'#22c55e':'#7d8590'}">${b.underOdds!=null?(b.underOdds>0?'+':'')+b.underOdds:'—'}</td>
+            <td style="padding:6px 10px;color:#e2e8f0;font-weight:600">${b.book||""}</td>
+            <td style="padding:6px 10px;text-align:center;color:${sideColor};font-weight:700">${sideLbl} ${b.line}</td>
+            <td style="padding:6px 10px;text-align:center;color:#fff">${odds!=null?(odds>0?'+':'')+odds:'—'}</td>
+            <td style="padding:6px 10px;text-align:center;color:${evColor};font-weight:${b.ev!=null&&b.ev>0?700:400}">${b.ev!=null?(b.ev>0?'+':'')+b.ev.toFixed(1)+'%':'—'}</td>
           </tr>`;
         }).join("")
-      : `<tr><td colspan="4" style="padding:12px;color:#30363d;text-align:center;font-size:12px">No Betstamp prices yet</td></tr>`;
+      : `<tr><td colspan="4" style="padding:12px;color:#30363d;text-align:center;font-size:12px">No prices parsed</td></tr>`;
 
     let bestSummary = "";
-    if (best) {
-      const o = best.bestOver, u = best.bestUnder;
+    if (projTotal != null) {
       const parts = [];
-      if (o && o.ev != null) parts.push(`<span style="color:#22c55e;font-weight:700">OVER ${o.line} @ ${o.odds>0?'+':''}${o.odds} ${o.book}</span> <span style="color:#5eead4">${o.ev.toFixed(1)}% EV</span>`);
-      if (u && u.ev != null) parts.push(`<span style="color:#f87171;font-weight:700">UNDER ${u.line} @ ${u.odds>0?'+':''}${u.odds} ${u.book}</span> <span style="color:#5eead4">${u.ev.toFixed(1)}% EV</span>`);
+      if (bestOver && bestOver.ev > 0) {
+        parts.push(`<span style="color:#22c55e;font-weight:700">OVER ${bestOver.line} @ ${bestOver.overOdds>0?'+':''}${bestOver.overOdds} ${bestOver.book}</span> <span style="color:#5eead4">${bestOver.ev.toFixed(1)}% EV</span>`);
+      }
+      if (bestUnder && bestUnder.ev > 0) {
+        parts.push(`<span style="color:#f87171;font-weight:700">UNDER ${bestUnder.line} @ ${bestUnder.underOdds>0?'+':''}${bestUnder.underOdds} ${bestUnder.book}</span> <span style="color:#5eead4">${bestUnder.ev.toFixed(1)}% EV</span>`);
+      }
       if (parts.length) bestSummary = `<div style="margin-top:10px;padding:10px 12px;background:#0e2926;border:1px solid #14b8a644;border-radius:6px;font-size:13px;">${parts.join(" &nbsp;|&nbsp; ")}</div>`;
     }
 
-    const projDisplay = pg.projTotal != null
-      ? `<div style="font-size:34px;font-weight:800;color:#5eead4">${pg.projTotal.toFixed(1)}</div>
+    const projDisplay = projTotal != null
+      ? `<div style="font-size:34px;font-weight:800;color:#5eead4">${projTotal.toFixed(1)}</div>
          <div style="font-size:11px;color:#7d8590;margin-top:2px">PROJECTED TOTAL</div>`
-      : `<div style="font-size:14px;color:#7d8590;padding:14px 0">No projection — load sources & run blend</div>`;
+      : `<div style="font-size:13px;color:#7d8590;padding:14px 0">No projection — load sources & run blend</div>`;
 
     const teamLine = (t, abbr) => t
       ? `<div><span style="font-weight:700;color:#fff">${abbr}</span> <span style="color:#5eead4;font-weight:700;font-size:18px">${t.total.toFixed(1)}</span></div>`
@@ -1792,31 +1737,27 @@ function renderTotals() {
       <div style="background:#161b22;border:1px solid #1f2733;border-radius:10px;padding:18px 20px;margin-bottom:14px;">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;flex-wrap:wrap;gap:12px;">
           <div>
-            <div style="font-size:16px;font-weight:800;color:#fff;">${g.awayAbbr || "?"} <span style="color:#7d8590;font-weight:500">@</span> ${g.homeAbbr || "?"}</div>
-            <div style="font-size:12px;color:#7d8590;margin-top:2px">${g.awayName} at ${g.homeName} · ${g.status}</div>
+            <div style="font-size:16px;font-weight:800;color:#fff;">${g.awayAbbr} <span style="color:#7d8590;font-weight:500">@</span> ${g.homeAbbr}</div>
+            <div style="font-size:12px;color:#7d8590;margin-top:2px">${g.awayName} at ${g.homeName} · ${g.time}</div>
           </div>
           <div style="text-align:right">${projDisplay}</div>
         </div>
-
         <div style="display:flex;gap:24px;margin-bottom:8px;font-size:14px;">
-          ${teamLine(pg.away, g.awayAbbr)}
-          ${teamLine(pg.home, g.homeAbbr)}
+          ${teamLine(away, g.awayAbbr)}
+          ${teamLine(home, g.homeAbbr)}
         </div>
-
         ${sourceBreakdown ? `<div style="font-size:11px;margin-bottom:14px;color:#7d8590">By source: ${sourceBreakdown}</div>` : ""}
-
         <table style="width:100%;border-collapse:collapse;font-size:13px;">
           <thead>
             <tr style="background:#0d1117;">
               <th style="padding:6px 10px;text-align:left;font-size:10px;color:#7d8590;letter-spacing:1px;text-transform:uppercase;font-weight:600">Book</th>
               <th style="padding:6px 10px;text-align:center;font-size:10px;color:#7d8590;letter-spacing:1px;text-transform:uppercase;font-weight:600">Line</th>
-              <th style="padding:6px 10px;text-align:center;font-size:10px;color:#7d8590;letter-spacing:1px;text-transform:uppercase;font-weight:600">Over</th>
-              <th style="padding:6px 10px;text-align:center;font-size:10px;color:#7d8590;letter-spacing:1px;text-transform:uppercase;font-weight:600">Under</th>
+              <th style="padding:6px 10px;text-align:center;font-size:10px;color:#7d8590;letter-spacing:1px;text-transform:uppercase;font-weight:600">Odds</th>
+              <th style="padding:6px 10px;text-align:center;font-size:10px;color:#7d8590;letter-spacing:1px;text-transform:uppercase;font-weight:600">EV</th>
             </tr>
           </thead>
           <tbody>${bookRows}</tbody>
         </table>
-
         ${bestSummary}
       </div>`;
   }).join("");
@@ -1825,32 +1766,26 @@ function renderTotals() {
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;flex-wrap:wrap;gap:12px;">
       <div>
         <div style="font-size:22px;font-weight:800;color:#fff;margin-bottom:4px;">Totals Model</div>
-        <div style="font-size:13px;color:#7d8590;">Sums blended player projections by team · compares to book lines</div>
-      </div>
-      <div style="display:flex;gap:8px;align-items:center;">
-        <input type="date" value="${date}" onchange="setTotalsDate(this.value)"
-          style="background:#161b22;border:1px solid #1f2733;border-radius:6px;padding:7px 12px;font-size:13px;color:#e2e8f0;outline:none;font-family:'Inter',sans-serif;color-scheme:dark;"/>
-        <button onclick="refreshTotalsGames()" style="background:#161b22;border:1px solid #14b8a6;color:#5eead4;border-radius:6px;padding:7px 16px;font-size:12px;font-weight:700;cursor:pointer;font-family:'Inter',sans-serif;">REFRESH</button>
+        <div style="font-size:13px;color:#7d8590;">Sums blended player projections by team · paste Betstamp for the slate</div>
       </div>
     </div>
 
     ${noProjections ? `<div style="padding:18px;background:#161b22;border:1px solid #1f2733;border-radius:8px;color:#f87171;font-size:13px;margin-bottom:16px;">Run blend on Upload tab first to enable projections.</div>` : ""}
-    ${noGames ? `<div style="padding:18px;background:#161b22;border:1px solid #1f2733;border-radius:8px;color:#7d8590;font-size:13px;margin-bottom:16px;">No WNBA games on ${date}. Try a different date.</div>` : ""}
 
     <div style="background:#161b22;border:1px solid #1f2733;border-radius:8px;padding:14px;margin-bottom:18px;">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px;">
-        <div style="font-size:13px;font-weight:700;color:#7d8590;letter-spacing:1px;text-transform:uppercase;">Betstamp Totals Paste</div>
+        <div style="font-size:13px;font-weight:700;color:#7d8590;letter-spacing:1px;text-transform:uppercase;">Betstamp Paste — Best Available Fulltime</div>
         <div style="display:flex;gap:8px;">
-          <button onclick="pasteBetstampTotals()" style="background:#14b8a6;border:none;color:#0d1117;border-radius:6px;padding:7px 16px;font-size:12px;font-weight:700;cursor:pointer;font-family:'Inter',sans-serif;">PARSE</button>
-          <button onclick="clearBetstampTotals()" style="background:#161b22;border:1px solid #1f2733;color:#7d8590;border-radius:6px;padding:7px 16px;font-size:12px;font-weight:600;cursor:pointer;font-family:'Inter',sans-serif;">CLEAR</button>
+          <button onclick="pasteBetstamp()" style="background:#14b8a6;border:none;color:#0d1117;border-radius:6px;padding:7px 16px;font-size:12px;font-weight:700;cursor:pointer;font-family:'Inter',sans-serif;">PARSE</button>
+          <button onclick="clearBetstamp()" style="background:#161b22;border:1px solid #1f2733;color:#7d8590;border-radius:6px;padding:7px 16px;font-size:12px;font-weight:600;cursor:pointer;font-family:'Inter',sans-serif;">CLEAR</button>
         </div>
       </div>
-      <textarea id="betstamp-paste" placeholder="Paste Betstamp totals page here..." spellcheck="false"
+      <textarea id="betstamp-paste" placeholder="Copy the Betstamp WNBA Best Available page and paste here..." spellcheck="false"
         style="width:100%;min-height:80px;background:#0d1117;border:1px solid #1f2733;border-radius:6px;padding:10px 12px;color:#e2e8f0;font-family:'JetBrains Mono','Menlo',monospace;font-size:12px;outline:none;resize:vertical;"></textarea>
-      ${Object.keys(betstampMarkets).length ? `<div style="font-size:11px;color:#5eead4;margin-top:8px;">${Object.keys(betstampMarkets).length} games matched: ${Object.keys(betstampMarkets).join(", ")}</div>` : ""}
+      ${noGames ? `<div style="font-size:11px;color:#30363d;margin-top:8px;">Paste the Betstamp slate above to load games.</div>` : `<div style="font-size:11px;color:#5eead4;margin-top:8px;">${betstampGames.length} games loaded</div>`}
     </div>
 
-    ${gameCards}`;
+    ${cards}`;
 }
 
 // Init
