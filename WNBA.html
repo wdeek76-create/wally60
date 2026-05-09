@@ -871,6 +871,51 @@ function recomputeFairFromProj() {
   updateEvPreview();
 }
 
+// Back-solve fair odds from a target EV % and the offered odds.
+// (fair_implied_prob × decimal_odds_offered) - 1 = ev/100
+// fair_implied_prob = (1 + ev/100) / decimal_odds_offered
+function recomputeFairFromEvInput() {
+  const evEl = document.getElementById("modal-ev-input");
+  const fairEl = document.getElementById("modal-fair");
+  const preview = document.getElementById("ev-input-preview");
+  if (!evEl || !fairEl) return;
+  const evRaw = evEl.value.trim();
+  if (!evRaw) {
+    if (preview) preview.textContent = "";
+    // Don't clear fair — let proj-based auto-calc resume if user hasn't overridden
+    if (!window._modalFairManual) recomputeFairFromProj();
+    updateEvPreview();
+    return;
+  }
+  const evPct = parseFloat(evRaw);
+  if (isNaN(evPct)) {
+    if (preview) { preview.textContent = "Enter a number like 5 or 7.5"; preview.style.color = "#f87171"; }
+    return;
+  }
+  const oddsVal = parseInt(document.getElementById("modal-odds").value);
+  if (isNaN(oddsVal)) {
+    if (preview) { preview.textContent = "Enter offered odds first"; preview.style.color = "#f87171"; }
+    return;
+  }
+  const dec = oddsToDecimal(oddsVal);
+  if (!dec) return;
+  const fairProb = (1 + evPct/100) / dec;
+  if (fairProb <= 0 || fairProb >= 1) {
+    if (preview) { preview.textContent = "Out of range — pick a smaller EV %"; preview.style.color = "#f87171"; }
+    return;
+  }
+  const fairOdds = probToAmerican(fairProb);
+  if (fairOdds != null) {
+    fairEl.value = fairOdds > 0 ? "+" + fairOdds : String(fairOdds);
+    window._modalFairManual = true; // EV-driven fair counts as manual override
+    if (preview) {
+      preview.innerHTML = `Fair set to <span style="color:#5eead4;font-weight:700">${fairOdds>0?'+':''}${fairOdds}</span> for ${evPct.toFixed(1)}% EV vs ${oddsVal>0?'+':''}${oddsVal}`;
+      preview.style.color = "#7d8590";
+    }
+  }
+  updateEvPreview();
+}
+
 function parseLineInput(el) {
   const raw = el.value.trim().toLowerCase();
   const preview = document.getElementById("line-preview");
@@ -936,6 +981,10 @@ function openTrackModal(player, pos, stat, proj, team) {
   document.getElementById("modal-line").value = "";
   document.getElementById("modal-odds").value = "";
   document.getElementById("modal-fair").value = "";
+  const evIn = document.getElementById("modal-ev-input");
+  if (evIn) evIn.value = "";
+  const evInPrev = document.getElementById("ev-input-preview");
+  if (evInPrev) evInPrev.innerHTML = "";
   window._modalLine = null;
   window._modalFairManual = false;
   clearAltBooks();
@@ -1059,20 +1108,73 @@ function updateEvPreview() {
 
 // ── ALT BOOKS ──────────────────────────────────────────────────────
 function addAltBookRow(presetBook, presetOdds) {
+  // Legacy stub — pre-rendered list now lives in HTML.
+  // If specifically asked to add a custom book, append a freeform row.
   const list = document.getElementById("modal-altbooks-list");
   if (!list) return;
   const row = document.createElement("div");
   row.style.cssText = "display:flex;gap:6px;align-items:center;";
   row.innerHTML = `
-    <input type="text" class="alt-book" list="alt-book-options" placeholder="Type book..." style="flex:1;background:#0d1117;border:1px solid #1f2733;color:#e2e8f0;border-radius:6px;padding:7px 10px;font-size:13px;font-family:'Inter',sans-serif;" autocomplete="off" spellcheck="false"/>
+    <input type="text" class="alt-book" list="alt-book-options" placeholder="Custom book..." style="flex:1;background:#0d1117;border:1px solid #1f2733;color:#e2e8f0;border-radius:6px;padding:7px 10px;font-size:13px;font-family:'Inter',sans-serif;" autocomplete="off" spellcheck="false"/>
     <input type="text" class="alt-odds" placeholder="-110" style="width:90px;background:#0d1117;border:1px solid #1f2733;color:#e2e8f0;border-radius:6px;padding:7px 10px;font-size:13px;font-family:'Inter',sans-serif;text-align:center;" autocomplete="off" spellcheck="false"/>
     <button type="button" onclick="this.parentElement.remove()" style="background:transparent;border:none;color:#7d8590;cursor:pointer;font-size:18px;line-height:1;padding:4px 10px;">×</button>
   `;
   list.appendChild(row);
   if (presetBook) row.querySelector(".alt-book").value = presetBook;
   if (presetOdds != null) row.querySelector(".alt-odds").value = presetOdds;
-  // Auto-focus the new row's book input for instant typing
   setTimeout(() => row.querySelector(".alt-book")?.focus(), 0);
+}
+
+// Fixed alt-book ordering — used as both the pre-rendered list and the summary order
+const ALT_BOOKS_ORDER = ["FanDuel","Prop Builder","Novig","ProphetX","Fliff","Bet105","Pinnacle","DraftKings","Onyx","Bookmaker"];
+
+function buildAltBookList() {
+  const list = document.getElementById("modal-altbooks-list");
+  if (!list) return;
+  list.innerHTML = ALT_BOOKS_ORDER.map(book => `
+    <div style="display:flex;gap:8px;align-items:center;">
+      <span style="flex:0 0 110px;font-size:11px;color:#7d8590;font-weight:600;letter-spacing:0.3px;">${book}</span>
+      <input type="text" class="alt-odds" data-book="${book}" placeholder="—" style="flex:1;background:#0d1117;border:1px solid #1f2733;color:#e2e8f0;border-radius:6px;padding:7px 10px;font-size:13px;font-family:'Inter',sans-serif;text-align:center;" autocomplete="off" spellcheck="false"/>
+    </div>
+  `).join("");
+}
+
+function getAltBooks() {
+  const list = document.getElementById("modal-altbooks-list");
+  if (!list) return [];
+  const result = [];
+  // Read pre-rendered odds inputs (data-book attribute holds the book name)
+  list.querySelectorAll('input.alt-odds[data-book]').forEach(inp => {
+    const o = inp.value?.trim();
+    const b = inp.dataset.book;
+    if (b && o) {
+      const m = o.match(/^([+\-]?)(\d{2,4})$/);
+      if (m) {
+        const sign = m[1] === "-" ? -1 : 1;
+        result.push({ book: b, odds: sign * parseInt(m[2]) });
+      }
+    }
+  });
+  // Also read any freeform rows (legacy support)
+  list.querySelectorAll(':scope > div').forEach(r => {
+    const bookInp = r.querySelector('input.alt-book');
+    const oddsInp = r.querySelector('input.alt-odds:not([data-book])');
+    if (!bookInp || !oddsInp) return;
+    const b = normBookInput(bookInp.value);
+    const o = oddsInp.value?.trim();
+    if (b && o) {
+      const m = o.match(/^([+\-]?)(\d{2,4})$/);
+      if (m) {
+        const sign = m[1] === "-" ? -1 : 1;
+        result.push({ book: b, odds: sign * parseInt(m[2]) });
+      }
+    }
+  });
+  return result;
+}
+
+function clearAltBooks() {
+  buildAltBookList();
 }
 
 // Map shorthand and common variants to canonical book names
@@ -1092,31 +1194,6 @@ function normBookInput(s) {
   if (!s) return s;
   const key = s.trim().toLowerCase();
   return BOOK_SHORTHAND[key] || s.trim();
-}
-
-function getAltBooks() {
-  const list = document.getElementById("modal-altbooks-list");
-  if (!list) return [];
-  const rows = list.querySelectorAll(":scope > div");
-  const result = [];
-  rows.forEach(r => {
-    const bRaw = r.querySelector(".alt-book")?.value;
-    const o = r.querySelector(".alt-odds")?.value?.trim();
-    const b = normBookInput(bRaw);
-    if (b && o) {
-      const m = o.match(/^([+\-]?)(\d{2,4})$/);
-      if (m) {
-        const sign = m[1] === "-" ? -1 : 1;
-        result.push({ book: b, odds: sign * parseInt(m[2]) });
-      }
-    }
-  });
-  return result;
-}
-
-function clearAltBooks() {
-  const list = document.getElementById("modal-altbooks-list");
-  if (list) list.innerHTML = "";
 }
 
 function saveBet() {
@@ -1579,48 +1656,56 @@ function _copyOpenFiltered(kind) {
   const isTotal = b => (b.stat || "").toUpperCase() === "GAME_TOTAL";
   const filtered = open.filter(b => kind === "totals" ? isTotal(b) : !isTotal(b));
   if (!filtered.length) { showToast(kind === "totals" ? "No open totals" : "No open props"); return; }
-  // Only include plays at 5%+ EV (must have fair value to qualify)
-  const qualified = filtered.filter(b => {
-    const ev = calcEdge(b.odds, b.fair);
-    return ev != null && ev >= 5;
-  });
-  if (!qualified.length) { showToast(`No ${kind} at 5%+ EV`); return; }
-  const byBook = {};
-  qualified.forEach(b => {
-    if (!byBook[b.book]) byBook[b.book] = [];
-    byBook[b.book].push(b);
-  });
-  const headerLabel = kind === "totals" ? "totals" : "props";
-  const lines = [`WNBA early ${headerLabel}: (${qualified.length})`, ""];
-  const bookKeys = Object.keys(byBook).sort();
-  bookKeys.forEach((book, bi) => {
-    lines.push(book);
-    lines.push("");
-    byBook[book].sort((a,b) => calcEdge(b.odds, b.fair) - calcEdge(a.odds, a.fair));
-    byBook[book].forEach((b, pi) => {
-      const oddsStr = b.odds > 0 ? `+${b.odds}` : `${b.odds}`;
-      const ouLower = (b.ou || "").toLowerCase();
-      const ev = calcEdge(b.odds, b.fair);
-      const playTo = playToOdds(b.fair, 5);
-      const playToStr = playTo != null ? ` play to ${playTo > 0 ? "+" + playTo : playTo}` : "";
-      let row;
-      if (kind === "totals") {
-        // ATL @ MIN  over 157 -109 play to -135
-        row = `${b.player}  ${ouLower} ${b.line} ${oddsStr}${playToStr}`;
-      } else {
-        // Brittney Sykes (TOR)  over 12.5 points -110 play to -135
-        const teamStr = b.team ? ` (${b.team})` : "";
-        const statName = STAT_FULL_NAME[b.stat] || b.stat;
-        row = `${b.player}${teamStr}  ${ouLower} ${b.line} ${statName} ${oddsStr}${playToStr}`;
-      }
-      lines.push(row);
-      if (pi < byBook[book].length - 1) lines.push("");
+
+  // For each bet, scan primary + alt books, pick the highest-EV price
+  const pickBest = (b) => {
+    if (!b.fair) return null;
+    const candidates = [{ book: b.book, odds: b.odds }];
+    if (Array.isArray(b.altBooks)) {
+      b.altBooks.forEach(a => {
+        if (a && a.book && a.odds != null) candidates.push({ book: a.book, odds: a.odds });
+      });
+    }
+    let best = null;
+    candidates.forEach(c => {
+      const ev = calcEdge(c.odds, b.fair);
+      if (ev == null) return;
+      if (!best || ev > best.ev) best = { book: c.book, odds: c.odds, ev };
     });
-    if (bi < bookKeys.length - 1) lines.push("");
+    return best;
+  };
+
+  const enriched = filtered.map(b => {
+    const best = pickBest(b);
+    return best ? { bet: b, best } : null;
+  }).filter(x => x && x.best.ev >= 5);
+
+  if (!enriched.length) { showToast(`No ${kind} at 5%+ EV`); return; }
+
+  // Sort by EV descending — best plays first
+  enriched.sort((a,b) => b.best.ev - a.best.ev);
+
+  const headerLabel = kind === "totals" ? "totals" : "props";
+  const lines = [`WNBA early ${headerLabel}: (${enriched.length})`, ""];
+  enriched.forEach(({bet, best}) => {
+    const oddsStr = best.odds > 0 ? `+${best.odds}` : `${best.odds}`;
+    const ouLower = (bet.ou || "").toLowerCase();
+    const playTo = playToOdds(bet.fair, 5);
+    const playToStr = playTo != null ? ` play to ${playTo > 0 ? "+" + playTo : playTo}` : "";
+    let row;
+    if (kind === "totals") {
+      row = `${bet.player}  ${ouLower} ${bet.line} ${oddsStr} ${best.book}${playToStr}`;
+    } else {
+      const teamStr = bet.team ? ` (${bet.team})` : "";
+      const statName = STAT_FULL_NAME[bet.stat] || bet.stat;
+      row = `${bet.player}${teamStr}  ${ouLower} ${bet.line} ${statName} ${oddsStr} ${best.book}${playToStr}`;
+    }
+    lines.push(row);
   });
+
   const text = lines.join("\n").trimEnd();
   navigator.clipboard.writeText(text).then(() => {
-    showToast(`Copied ${qualified.length} ${kind} at 5%+ EV`);
+    showToast(`Copied ${enriched.length} ${kind} at 5%+ EV`);
   });
 }
 
@@ -2310,9 +2395,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
     <!-- Alt books (book + odds pairs) -->
     <div style="margin-top:6px;">
-      <label style="font-size:11px;color:#7d8590;letter-spacing:1px;text-transform:uppercase;font-weight:600;">Alt Books (optional)</label>
+      <label style="font-size:11px;color:#7d8590;letter-spacing:1px;text-transform:uppercase;font-weight:600;">Alt Books (optional, only filled ones save)</label>
       <div id="modal-altbooks-list" style="margin-top:6px;display:flex;flex-direction:column;gap:6px;"></div>
-      <button type="button" onclick="addAltBookRow()" style="margin-top:6px;background:#0d1117;border:1px dashed #1f2733;color:#7d8590;border-radius:6px;padding:6px 12px;font-size:12px;font-weight:600;cursor:pointer;font-family:'Inter',sans-serif;">+ Add alt book</button>
     </div>
     <datalist id="alt-book-options">
       <option value="FanDuel"></option>
@@ -2326,6 +2410,17 @@ document.addEventListener("DOMContentLoaded", () => {
       <option value="Pinnacle"></option>
       <option value="Bet105"></option>
     </datalist>
+
+    <!-- EV% backsolve: type EV%, fair fills in based on offered odds -->
+    <div class="modal-row" style="margin-top:10px;">
+      <div class="modal-field" style="flex:1;">
+        <label>OR Type EV % (back-solves Fair)</label>
+        <input type="text" id="modal-ev-input" placeholder="e.g. 5 or 7.5"
+          autocomplete="off" spellcheck="false"
+          oninput="recomputeFairFromEvInput()"/>
+        <div id="ev-input-preview" style="font-size:11px;color:#7d8590;margin-top:3px;min-height:14px;"></div>
+      </div>
+    </div>
 
     <div id="modal-proj-display" style="margin-top:14px;"></div>
     <div id="modal-stake-preview"></div>
