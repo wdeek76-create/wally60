@@ -840,13 +840,14 @@ function playToOdds(fairOdds, evCutoff) {
 const BDL_KEY = "9cdb249f-9635-4cca-a998-37c7b98a9372";
 const BDL_BASE = "https://api.balldontlie.io/wnba/v1";
 const _bdlCache = {}; // key: ISO date, value: array of player_stats
+const _bdlGamesCache = {}; // key: ISO date, value: array of games (with status)
 
 async function fetchBDLStatsForDate(isoDate) {
   if (_bdlCache[isoDate]) return _bdlCache[isoDate];
   const all = [];
   let cursor = null;
   for (let i = 0; i < 10; i++) {
-    const url = new URL(`${BDL_BASE}/stats`);
+    const url = new URL(`${BDL_BASE}/player_stats`);
     url.searchParams.set("dates[]", isoDate);
     url.searchParams.set("per_page", "100");
     if (cursor != null) url.searchParams.set("cursor", cursor);
@@ -864,6 +865,26 @@ async function fetchBDLStatsForDate(isoDate) {
     if (cursor == null) break;
   }
   _bdlCache[isoDate] = all;
+  return all;
+}
+
+async function fetchBDLGamesForDate(isoDate) {
+  if (_bdlGamesCache[isoDate]) return _bdlGamesCache[isoDate];
+  const all = [];
+  let cursor = null;
+  for (let i = 0; i < 5; i++) {
+    const url = new URL(`${BDL_BASE}/games`);
+    url.searchParams.set("dates[]", isoDate);
+    url.searchParams.set("per_page", "100");
+    if (cursor != null) url.searchParams.set("cursor", cursor);
+    const res = await fetch(url.toString(), { headers: { "Authorization": BDL_KEY } });
+    if (!res.ok) throw new Error(`BDL games ${res.status}: ${await res.text()}`);
+    const j = await res.json();
+    if (Array.isArray(j.data)) all.push(...j.data);
+    cursor = j.meta?.next_cursor;
+    if (cursor == null) break;
+  }
+  _bdlGamesCache[isoDate] = all;
   return all;
 }
 
@@ -912,23 +933,26 @@ function getBetISODate(b) {
 async function gradeBet(b) {
   const iso = getBetISODate(b);
   if (!iso) return { ok: false, reason: "No date on bet" };
-  let stats;
-  try { stats = await fetchBDLStatsForDate(iso); }
-  catch (e) { return { ok: false, reason: "API error: " + e.message }; }
+  let stats, games;
+  try {
+    stats = await fetchBDLStatsForDate(iso);
+    games = await fetchBDLGamesForDate(iso);
+  } catch (e) { return { ok: false, reason: "API error: " + e.message }; }
   if (!stats || !stats.length) return { ok: false, reason: "No game data found for " + iso };
   const playerNorm = norm(b.player);
   const playerStats = stats.filter(s => bdlPlayerMatch(s, playerNorm));
   if (!playerStats.length) return { ok: false, reason: `${b.player} not found in ${iso} games` };
-  // Only grade if every relevant game is final
-  const isGameFinal = (g) => {
-    if (!g) return false;
-    const status = String(g.status || "").toLowerCase().trim();
-    // Accept: "final", "final/ot", "final/2ot", "post" (postseason ended), "completed"
+  // Map game_id → game status from /games endpoint
+  const gameStatusMap = {};
+  games.forEach(g => { gameStatusMap[g.id] = g.status; });
+  const isGameFinal = (gameId) => {
+    const status = String(gameStatusMap[gameId] || "").toLowerCase().trim();
     return status.startsWith("final") || status === "post" || status === "completed";
   };
-  const finalRows = playerStats.filter(s => isGameFinal(s.game));
+  // Only grade if every relevant game is final
+  const finalRows = playerStats.filter(s => isGameFinal(s.game?.id));
   if (!finalRows.length) {
-    const liveStatus = playerStats[0]?.game?.status || "unknown";
+    const liveStatus = gameStatusMap[playerStats[0]?.game?.id] || "unknown";
     return { ok: false, reason: `Game not final yet (status: ${liveStatus})` };
   }
   // Sum across all final games (in case of multiple appearances same day, rare but safe)
