@@ -754,9 +754,63 @@ function setOU(val) {
     preview.textContent = val === "over" ? `OVER ${window._modalLine}` : val === "under" ? `UNDER ${window._modalLine}` : "";
     preview.style.color = val === "over" ? "#22c55e" : "#f87171";
   }
+  recomputeFairFromProj();
 }
 
 function getOU() { return window._modalOU || "under"; }
+
+// Stdev assumptions for fair-value calc by stat
+function stdevForStat(stat) {
+  switch ((stat||"").toUpperCase()) {
+    case "GAME_TOTAL": return 12;
+    case "PTS": return 5.5;
+    case "REB": return 3.0;
+    case "AST": return 2.2;
+    case "3PM": return 1.4;
+    case "PRA": return 7.5;
+    case "PR":  return 6.0;
+    case "PA":  return 5.5;
+    case "RA":  return 3.6;
+    case "MIN": return 4.0;
+    default: return 6;
+  }
+}
+
+function probToAmerican(p) {
+  if (p == null || p <= 0 || p >= 1) return null;
+  if (p >= 0.5) return Math.round(-100 * p / (1 - p));
+  return Math.round(100 * (1 - p) / p);
+}
+
+function modelWinProb(proj, line, side, stat) {
+  if (proj == null || line == null) return null;
+  const sd = stdevForStat(stat);
+  const z = (line - proj) / sd;
+  const pUnder = 0.5 * (1 + erf(z / Math.SQRT2));
+  const pOver = 1 - pUnder;
+  return side === "over" ? pOver : pUnder;
+}
+
+function recomputeFairFromProj() {
+  const fairEl = document.getElementById("modal-fair");
+  const projVal = window._modalProj;
+  const line = window._modalLine;
+  const ou = window._modalOU || "under";
+  const statEl = document.getElementById("modal-stat");
+  const stat = statEl ? statEl.value : null;
+  if (!fairEl) return;
+  // Only auto-fill if user hasn't manually overridden (track manual override flag)
+  if (window._modalFairManual) return;
+  if (projVal == null || line == null) {
+    fairEl.value = "";
+    return;
+  }
+  const p = modelWinProb(projVal, line, ou, stat);
+  const fairOdds = probToAmerican(p);
+  if (fairOdds != null) {
+    fairEl.value = fairOdds > 0 ? "+" + fairOdds : String(fairOdds);
+  }
+}
 
 function parseLineInput(el) {
   const raw = el.value.trim().toLowerCase();
@@ -781,12 +835,38 @@ function parseLineInput(el) {
     el.style.borderColor = "#f8717155";
     if (preview) { preview.textContent = "Type u17.5 or o17.5"; preview.style.color = "#f87171"; }
   }
+  recomputeFairFromProj();
 }
 
 function trackRow(i) {
   const r = rowCache[i];
   if (!r) return;
   openTrackModal(r.player, r.pos, r.stat, r.proj, r.team);
+}
+
+function trackTotal(awayAbbr, homeAbbr, side, line, odds, book, projTotal) {
+  // Use the matchup as the "player" label, GAME_TOTAL as stat
+  const label = `${awayAbbr} @ ${homeAbbr}`;
+  openTrackModal(label, "TOT", "GAME_TOTAL", projTotal, `${awayAbbr}/${homeAbbr}`);
+  // Pre-fill line and odds based on the row clicked
+  setTimeout(() => {
+    const lineEl = document.getElementById("modal-line");
+    const oddsEl = document.getElementById("modal-odds");
+    const bookEl = document.getElementById("modal-book");
+    if (lineEl) {
+      const prefix = side === "over" ? "o" : "u";
+      lineEl.value = `${prefix}${line}`;
+      // Trigger parseLineInput to update preview state
+      lineEl.dispatchEvent(new Event("input"));
+    }
+    if (oddsEl) oddsEl.value = String(odds);
+    if (bookEl && book) {
+      // Try to set if option exists; otherwise set "Other"
+      const opts = Array.from(bookEl.options).map(o => o.value);
+      bookEl.value = opts.includes(book) ? book : "Other";
+    }
+    setOU(side); // pre-set over/under toggle
+  }, 0);
 }
 
 function openTrackModal(player, pos, stat, proj, team) {
@@ -796,6 +876,7 @@ function openTrackModal(player, pos, stat, proj, team) {
   document.getElementById("modal-player-sub").textContent = (pos||"") + " · Add a bet";
   document.getElementById("modal-line").value = "";
   window._modalLine = null;
+  window._modalFairManual = false; // reset — auto-fill is back on
   const lp = document.getElementById("line-preview"); if(lp) lp.textContent = "";
   const dateEl = document.getElementById("modal-date"); if(dateEl) dateEl.value = new Date().toISOString().split("T")[0];
   document.getElementById("modal-odds").value = "";
@@ -908,7 +989,7 @@ function playToOdds(fairOdds, evCutoff) {
 
 // ── ESPN AUTOGRADE ─────────────────────────────────────────────────────────
 const _espnCache = {}; // key: ISO date, value: array of {playerNorm, displayName, completed, stats}
-const _espnGameCountCache = {}; // key: ISO date, value: {total, completed}
+const _espnGameCountCache = {}; // key: ISO date, value: {total, completed, statuses, games}
 
 async function fetchESPNStatsForDate(isoDate) {
   if (_espnCache[isoDate]) return { rows: _espnCache[isoDate], meta: _espnGameCountCache[isoDate] };
@@ -922,12 +1003,25 @@ async function fetchESPNStatsForDate(isoDate) {
   } catch (e) { throw new Error("ESPN scoreboard error: " + e.message); }
 
   const events = scoreboard.events || [];
-  const meta = { total: events.length, completed: 0, statuses: [] };
+  const meta = { total: events.length, completed: 0, statuses: [], games: [] };
   const allRows = [];
   for (const ev of events) {
     const completed = ev.status?.type?.completed === true;
     const statusName = ev.status?.type?.shortDetail || ev.status?.type?.name || "Unknown";
     meta.statuses.push(statusName);
+    // Capture team abbrs and final scores for game-level grading (totals/spreads/ML)
+    const comp = ev.competitions?.[0];
+    const home = comp?.competitors?.find(c => c.homeAway === "home");
+    const away = comp?.competitors?.find(c => c.homeAway === "away");
+    meta.games.push({
+      eventId: ev.id,
+      completed,
+      status: statusName,
+      awayAbbr: normTeamAbbr(away?.team?.abbreviation),
+      homeAbbr: normTeamAbbr(home?.team?.abbreviation),
+      awayScore: parseInt(away?.score) || null,
+      homeScore: parseInt(home?.score) || null,
+    });
     if (!completed) continue;
     meta.completed++;
     let summary;
@@ -1018,6 +1112,35 @@ async function gradeBet(b) {
     meta = result.meta;
   } catch (e) { return { ok: false, reason: "ESPN error: " + e.message }; }
 
+  // GAME TOTAL grading branch — uses team scores, not player stats
+  if ((b.stat||"").toUpperCase() === "GAME_TOTAL") {
+    if (!meta || !meta.games || !meta.games.length) {
+      return { ok: false, reason: `No WNBA games scheduled on ${iso}` };
+    }
+    // b.player is "AWAY @ HOME" label; b.team should be "AWAY/HOME"
+    let awayAbbr = null, homeAbbr = null;
+    if (b.team && b.team.includes("/")) {
+      [awayAbbr, homeAbbr] = b.team.split("/").map(s => normTeamAbbr(s.trim()));
+    } else if (b.player && b.player.includes("@")) {
+      const parts = b.player.split("@").map(s => s.trim());
+      awayAbbr = normTeamAbbr(parts[0]);
+      homeAbbr = normTeamAbbr(parts[1]);
+    }
+    if (!awayAbbr || !homeAbbr) return { ok: false, reason: "Could not parse matchup from bet" };
+    const game = meta.games.find(g => normTeamAbbr(g.awayAbbr) === awayAbbr && normTeamAbbr(g.homeAbbr) === homeAbbr);
+    if (!game) return { ok: false, reason: `${awayAbbr} @ ${homeAbbr} not in ESPN games for ${iso}` };
+    if (!game.completed) return { ok: false, reason: `${awayAbbr} @ ${homeAbbr} not final yet (${game.status})` };
+    if (game.awayScore == null || game.homeScore == null) return { ok: false, reason: "ESPN final scores not available yet" };
+    const total = game.awayScore + game.homeScore;
+    const line = b.line, ou = b.ou;
+    let result;
+    if (Math.abs(total - line) < 0.001) result = "void";
+    else if (ou === "over") result = total > line ? "hit" : "miss";
+    else result = total < line ? "hit" : "miss";
+    return { ok: true, result, total };
+  }
+
+  // Player prop grading (default)
   // No box score data found
   if (!rows || !rows.length) {
     if (!meta || meta.total === 0) {
@@ -1313,7 +1436,7 @@ function renderTracker() {
     return `<tr style="border-bottom:1px solid #161b22;">
       <td style="padding:8px 12px;font-size:14px;font-weight:600;color:#fff;white-space:nowrap">${b.player}</td>
       <td style="padding:8px 8px;font-size:12px;color:#7d8590;text-align:center;white-space:nowrap">${b.timestamp||b.date}</td>
-      <td style="padding:8px 8px;font-size:13px;color:#5eead4;text-align:center;font-weight:700">${b.stat}</td>
+      <td style="padding:8px 8px;font-size:13px;color:#5eead4;text-align:center;font-weight:700">${b.stat === "GAME_TOTAL" ? "TOTAL" : b.stat}</td>
       <td style="padding:8px 8px;font-size:13px;color:#fff;text-align:center">${b.ou.toUpperCase()} ${b.line}</td>
       <td style="padding:8px 8px;font-size:13px;color:#5eead4;text-align:center;font-weight:600">${b.proj!=null?b.proj.toFixed(2):"—"}</td>
       <td style="padding:8px 8px;font-size:13px;text-align:center;font-weight:700;color:${actualColor}">${actualStr}</td>
@@ -1459,9 +1582,12 @@ let betstampGames = []; // ordered: [{awayAbbr, homeAbbr, awayName, homeName, ti
 // Map source team abbrs to canonical (Roto/Saber/RotoWire vs Betstamp use slight variants)
 const ESPN_TO_PROJ = {
   "ATL":"ATL","CHI":"CHI","CON":"CON","DAL":"DAL",
-  "GS":"GSV","GSV":"GSV","IND":"IND","LV":"LVA","LVA":"LVA",
-  "LA":"LAS","LAS":"LAS","MIN":"MIN","NY":"NYL","NYL":"NYL",
-  "PHX":"PHX","PHO":"PHX","SEA":"SEA","TOR":"TOR","WAS":"WAS","WSH":"WAS","POR":"POR"
+  "GS":"GSV","GSV":"GSV","IND":"IND",
+  "LV":"LVA","LVA":"LVA","LAV":"LVA",
+  "LA":"LAS","LAS":"LAS",
+  "MIN":"MIN","NY":"NYL","NYL":"NYL",
+  "PHX":"PHX","PHO":"PHX",
+  "SEA":"SEA","TOR":"TOR","WAS":"WAS","WSH":"WAS","POR":"POR"
 };
 function normTeamAbbr(abbr) {
   if (!abbr) return "";
@@ -1517,7 +1643,11 @@ function normBook(s) {
   return BOOK_ALIASES[k] || (k.length >= 2 ? s.trim() : null);
 }
 
-// Build team projection by summing blended PTS from merged
+// Build team projection by summing blended PTS from merged.
+// Returns both:
+//   total: union total (sum of every player projected by any source, blended avg)
+//   bySource: { roto: 170.7, saber: 168.2, rotowire: 172.6 } — each source's standalone team total
+//   sourceAvg: mean of all available source standalone totals (apples-to-apples)
 function buildTeamProjection(teamAbbr) {
   if (!merged) return null;
   const target = normTeamAbbr(teamAbbr);
@@ -1543,86 +1673,115 @@ function buildTeamProjection(teamAbbr) {
   return { total, byPlayer, sourceTotals };
 }
 
-// ── BETSTAMP "BEST AVAILABLE FULLTIME" PARSER ─────────────────────────────
-// Real format: each game is a 12-line price block following two team links.
-// Markdown copy looks like:
-//   [TIME](url)
-//   [Away Team](url)
-//   [PCT%](url)
-//   [Home Team](url)
-//   [PCT%](url)
-//   <Away ML> <Book>
-//   <Spread> <Odds> <Book>
-//   o<TOT> <Odds> <Book>      ← FULLTIME OVER (idx 2)
-//   <Home ML> <Book>
-//   <Spread> <Odds> <Book>
-//   u<TOT> <Odds> <Book>      ← FULLTIME UNDER (idx 5)
-//   <Away 1H ML> <Book>
-//   ... (1H markets — ignored)
+// ── BETSTAMP "BEST AVAILABLE" PARSER (plain-text format from app) ──────────
+// Block structure when copying from the Betstamp web app (rendered text):
+//   "WNBA"          ← sport header (may not appear at top, but appears between games)
+//   "1:00pm"        ← time
+//   "DAL"           ← away abbrev
+//   "Dallas Wings"  ← away full name
+//   "33%"           ← away win%
+//   "IND"           ← home abbrev
+//   "Indiana Fever" ← home full name
+//   "67%"           ← home win%
+//   "+200"          ← away ML       [bare odds, no space]
+//   "DraftKings"    ← book
+//   "+5.5 -106"     ← spread        [HAS space — skip]
+//   "FanDuel"       ← book
+//   "o177.5 -108"   ← OVER total    ← keep
+//   "Pinnacle"      ← book
+//   "-223"          ← home ML
+//   ...
+//   "u177.5 -110"   ← UNDER total   ← keep
+//   "DraftKings"    ← book
+//   ... fulltime/1H market group repeats below ...
 function parseBetstamp(text) {
-  const lines = text.split("\n").map(l=>l.trim()).filter(Boolean);
-  const teamLineRe = /^\[([^\]]+)\]\(https:\/\/betstamp\.com\/app\/games\/(\d+)\)$/;
-  const timeLineRe = /^\[(\d{1,2}:\d{2}(am|pm))\]\(https:\/\/betstamp\.com\/app\/games\/(\d+)\)$/i;
-  const pctLineRe = /^\[\d+%\]\(/;
-  const overLineRe = /^o([\d.]+)\s+([+\-]\d{2,4})\s+(.+)$/i;
-  const underLineRe = /^u([\d.]+)\s+([+\-]\d{2,4})\s+(.+)$/i;
-
+  const lines = text.split("\n").map(l => l.trim()).filter(Boolean);
   const games = [];
+  const timeRe = /^\d{1,2}:\d{2}(am|pm)$/i;
+  const pctRe = /^\d+%$/;
+  const overTotalRe = /^o([\d.]+)\s+([+\-]\d{2,4})$/i;
+  const underTotalRe = /^u([\d.]+)\s+([+\-]\d{2,4})$/i;
+  const bareOddsRe = /^[+\-]\d{2,4}$/; // ML (no space)
+  const spreadRe = /^[+\-][\d.]+\s+[+\-]\d{2,4}$/; // spread with space (skip)
+
+  // Skip header noise from Betstamp web layout (logos, navigation, my-picks)
+  const skipLineRe = /^(All Leagues|Best Available|Last Refresh|Sat |Sun |Mon |Tue |Wed |Thu |Fri |betstamp|Games|Odds Comparison|Futures|My Picks|Accounting|Analysis|Find Bettors|Sportsbooks|Help|stacktheunits|SINGLES|PARLAY|Track|Your bet|Add Bet|\$0)/i;
+
+  // Walk lines looking for time anchors. For each time, expect away/home blocks then odds.
   let i = 0;
   while (i < lines.length) {
-    const ln = lines[i];
-    const tm = ln.match(timeLineRe);
-    if (!tm) { i++; continue; }
-    const time = tm[1];
-    const gameId = tm[3];
+    if (skipLineRe.test(lines[i])) { i++; continue; }
+    if (!timeRe.test(lines[i])) { i++; continue; }
+    const time = lines[i];
+    i++;
 
-    // Find away team (next team link with same game id, but skip percentage anchors)
-    let j = i + 1;
-    let awayName = null, homeName = null;
-    while (j < lines.length && j < i + 8) {
-      if (pctLineRe.test(lines[j])) { j++; continue; }
-      const t = lines[j].match(teamLineRe);
-      if (t && t[2] === gameId) { awayName = t[1]; j++; break; }
+    // Skip optional "WNBA" sport header right after time, if present
+    if (lines[i] && /^(WNBA|NBA|NHL|NFL|MLB)$/i.test(lines[i])) i++;
+
+    // Capture away abbrev / full / pct
+    const awayAbbr = lines[i]; i++;
+    const awayFull = lines[i]; i++;
+    if (!pctRe.test(lines[i] || "")) {
+      // Structure didn't match; reset and continue searching
+      continue;
+    }
+    i++; // skip pct
+
+    // Capture home abbrev / full / pct
+    const homeAbbr = lines[i]; i++;
+    const homeFull = lines[i]; i++;
+    if (!pctRe.test(lines[i] || "")) continue;
+    i++;
+
+    // Now scan odds rows until next time anchor or end. Capture o<line> and u<line>.
+    const overEntries = []; // [{line, odds, book}]
+    const underEntries = [];
+    let j = i;
+    while (j < lines.length) {
+      const ln = lines[j];
+      if (timeRe.test(ln)) break;
+      if (skipLineRe.test(ln)) { j++; continue; }
+
+      const oM = ln.match(overTotalRe);
+      const uM = ln.match(underTotalRe);
+      if (oM) {
+        // Next non-skip line is the book
+        let k = j + 1;
+        while (k < lines.length && skipLineRe.test(lines[k])) k++;
+        const book = (k < lines.length) ? lines[k] : null;
+        overEntries.push({ line: parseFloat(oM[1]), odds: parseInt(oM[2]), book: normBook(book) });
+        j = k + 1;
+        continue;
+      }
+      if (uM) {
+        let k = j + 1;
+        while (k < lines.length && skipLineRe.test(lines[k])) k++;
+        const book = (k < lines.length) ? lines[k] : null;
+        underEntries.push({ line: parseFloat(uM[1]), odds: parseInt(uM[2]), book: normBook(book) });
+        j = k + 1;
+        continue;
+      }
       j++;
     }
-    if (!awayName) { i++; continue; }
 
-    // Skip pct anchor, find home (also skip pct anchors)
-    while (j < lines.length && j < i + 12) {
-      if (pctLineRe.test(lines[j])) { j++; continue; }
-      const t = lines[j].match(teamLineRe);
-      if (t && t[2] === gameId) { homeName = t[1]; j++; break; }
-      j++;
-    }
-    if (!homeName) { i++; continue; }
+    // The Betstamp page repeats fulltime block twice when toggle = "Best Available Fulltime"
+    // and shows fulltime + 1H when toggle = "Best Available 1st Half".
+    // We pick the FIRST over and FIRST under, since first appearance is fulltime.
+    const firstOver = overEntries[0];
+    const firstUnder = underEntries[0];
 
-    // Skip home pct
-    while (j < lines.length && pctLineRe.test(lines[j])) j++;
-
-    // Collect odds rows until next time anchor or end
-    const oddsRows = [];
-    while (j < lines.length && oddsRows.length < 16) {
-      if (timeLineRe.test(lines[j])) break;
-      if (teamLineRe.test(lines[j]) || pctLineRe.test(lines[j])) { j++; continue; }
-      oddsRows.push(lines[j]);
-      j++;
-    }
-
-    // Index 2 = fulltime over, index 5 = fulltime under
-    const oM = (oddsRows[2]||"").match(overLineRe);
-    const uM = (oddsRows[5]||"").match(underLineRe);
-
-    const awayAbbr = teamLineToAbbr(awayName);
-    const homeAbbr = teamLineToAbbr(homeName);
-    if (!awayAbbr || !homeAbbr) { i = j; continue; }
+    const aA = teamLineToAbbr(awayFull) || normTeamAbbr(awayAbbr);
+    const hA = teamLineToAbbr(homeFull) || normTeamAbbr(homeAbbr);
+    if (!aA || !hA) { i = j; continue; }
 
     const books = [];
-    if (oM) books.push({ book: normBook(oM[3]), line: parseFloat(oM[1]), overOdds: parseInt(oM[2]), underOdds: null, side: "over" });
-    if (uM) books.push({ book: normBook(uM[3]), line: parseFloat(uM[1]), overOdds: null, underOdds: parseInt(uM[2]), side: "under" });
+    if (firstOver) books.push({ book: firstOver.book, line: firstOver.line, overOdds: firstOver.odds, underOdds: null, side: "over" });
+    if (firstUnder) books.push({ book: firstUnder.book, line: firstUnder.line, overOdds: null, underOdds: firstUnder.odds, side: "under" });
 
-    games.push({ awayAbbr, homeAbbr, awayName, homeName, time, books });
+    games.push({ awayAbbr: aA, homeAbbr: hA, awayName: awayFull, homeName: homeFull, time, books });
     i = j;
   }
+
   return games;
 }
 
@@ -1668,29 +1827,51 @@ function renderTotals() {
   const cards = betstampGames.map(g => {
     const away = buildTeamProjection(g.awayAbbr);
     const home = buildTeamProjection(g.homeAbbr);
+
+    // Union projection: sum of every player's blended con.pts across both teams
+    // Captures all projected playing time. Source totals shown below for reference.
     const projTotal = (away && home) ? away.total + home.total : null;
+    const perSourceGameTotal = {};
+    if (away && home) {
+      SOURCES.forEach(s => {
+        const a = away.sourceTotals[s.key];
+        const h = home.sourceTotals[s.key];
+        const sum = a.sum + h.sum;
+        const players = a.count + h.count;
+        if (players > 0) perSourceGameTotal[s.key] = sum;
+      });
+    }
 
     const sourceBreakdown = (away && home) ? SOURCES.map(s => {
-      const a = away.sourceTotals[s.key];
-      const h = home.sourceTotals[s.key];
-      const total = a.sum + h.sum;
-      const players = a.count + h.count;
-      return players > 0 ? `<span style="color:${s.color};font-weight:600">${s.label} ${total.toFixed(1)}</span>` : null;
+      const t = perSourceGameTotal[s.key];
+      return t != null ? `<span style="color:${s.color};font-weight:600">${s.label} ${t.toFixed(1)}</span>` : null;
     }).filter(Boolean).join(" · ") : "";
 
-    // Compute EV for each book entry
+    // Compute Edge (line vs proj) and Implied Edge (model win% vs de-vigged market %)
+    // For Implied Edge we need the OPPOSITE side's odds at the same book/line to de-vig.
+    // If we only have one side at a book, we approximate by treating the offered odds' implied prob
+    // as inflated by ~5% vig for a one-sided lookup.
     const enrichedBooks = g.books.map(b => {
-      let ev = null, edge = null;
+      let ev = null, edge = null, impliedEdge = null;
       if (projTotal != null) {
-        if (b.side === "over") {
-          edge = projTotal - b.line;
-          ev = americanEvRough(b.overOdds, projTotal, b.line, "over");
-        } else {
-          edge = b.line - projTotal;
-          ev = americanEvRough(b.underOdds, projTotal, b.line, "under");
+        const odds = b.side === "over" ? b.overOdds : b.underOdds;
+        // Edge in points
+        edge = b.side === "over" ? (projTotal - b.line) : (b.line - projTotal);
+        // EV uses normal model win prob × decimal odds
+        const stdev = 12;
+        const z = (b.line - projTotal) / stdev;
+        const pUnder = 0.5 * (1 + erf(z / Math.SQRT2));
+        const pOver = 1 - pUnder;
+        const winProb = b.side === "over" ? pOver : pUnder;
+        const dec = oddsToDecimal(odds);
+        if (dec) ev = ((winProb * dec) - 1) * 100;
+        // Implied edge: model win% minus raw market implied prob (no de-vig)
+        const marketProb = oddsToImplied(odds);
+        if (marketProb != null && !isNaN(marketProb)) {
+          impliedEdge = (winProb - marketProb) * 100;
         }
       }
-      return { ...b, ev, edge };
+      return { ...b, ev, edge, impliedEdge };
     });
 
     // Best of each side
@@ -1702,15 +1883,22 @@ function renderTotals() {
           const odds = b.side === "over" ? b.overOdds : b.underOdds;
           const sideLbl = b.side === "over" ? "OVER" : "UNDER";
           const sideColor = b.side === "over" ? "#22c55e" : "#f87171";
-          const evColor = b.ev == null ? "#7d8590" : b.ev >= 5 ? "#22c55e" : b.ev > 0 ? "#5eead4" : "#7d8590";
+          const edgeColor = b.edge == null ? "#7d8590" : b.edge > 0 ? "#22c55e" : b.edge < 0 ? "#f87171" : "#fff";
+          const ieColor = b.impliedEdge == null ? "#7d8590" : b.impliedEdge >= 3 ? "#22c55e" : b.impliedEdge > 0 ? "#5eead4" : b.impliedEdge < 0 ? "#f87171" : "#fff";
+          const evColor = b.ev == null ? "#7d8590" : b.ev >= 5 ? "#22c55e" : b.ev > 0 ? "#5eead4" : b.ev < 0 ? "#f87171" : "#fff";
+          const projForTrack = projTotal != null ? projTotal.toFixed(2) : "null";
+          const bookSafe = (b.book||"").replace(/'/g,"\\'");
           return `<tr>
             <td style="padding:6px 10px;color:#e2e8f0;font-weight:600">${b.book||""}</td>
             <td style="padding:6px 10px;text-align:center;color:${sideColor};font-weight:700">${sideLbl} ${b.line}</td>
             <td style="padding:6px 10px;text-align:center;color:#fff">${odds!=null?(odds>0?'+':'')+odds:'—'}</td>
-            <td style="padding:6px 10px;text-align:center;color:${evColor};font-weight:${b.ev!=null&&b.ev>0?700:400}">${b.ev!=null?(b.ev>0?'+':'')+b.ev.toFixed(1)+'%':'—'}</td>
+            <td style="padding:6px 10px;text-align:center;color:${edgeColor};font-weight:700">${b.edge!=null?(b.edge>0?'+':'')+b.edge.toFixed(1):'—'}</td>
+            <td style="padding:6px 10px;text-align:center;color:${ieColor};font-weight:700">${b.impliedEdge!=null?(b.impliedEdge>0?'+':'')+b.impliedEdge.toFixed(1)+'%':'—'}</td>
+            <td style="padding:6px 10px;text-align:center;color:${evColor};font-weight:700">${b.ev!=null?(b.ev>0?'+':'')+b.ev.toFixed(1)+'%':'—'}</td>
+            <td style="padding:6px 10px;text-align:center"><button onclick="trackTotal('${g.awayAbbr}','${g.homeAbbr}','${b.side}',${b.line},${odds},'${bookSafe}',${projForTrack})" style="background:#14b8a622;border:1px solid #14b8a655;color:#5eead4;border-radius:4px;padding:3px 10px;font-size:11px;font-weight:600;cursor:pointer;font-family:'Inter',sans-serif;">TRACK</button></td>
           </tr>`;
         }).join("")
-      : `<tr><td colspan="4" style="padding:12px;color:#30363d;text-align:center;font-size:12px">No prices parsed</td></tr>`;
+      : `<tr><td colspan="7" style="padding:12px;color:#30363d;text-align:center;font-size:12px">No prices parsed</td></tr>`;
 
     let bestSummary = "";
     if (projTotal != null) {
@@ -1753,7 +1941,10 @@ function renderTotals() {
               <th style="padding:6px 10px;text-align:left;font-size:10px;color:#7d8590;letter-spacing:1px;text-transform:uppercase;font-weight:600">Book</th>
               <th style="padding:6px 10px;text-align:center;font-size:10px;color:#7d8590;letter-spacing:1px;text-transform:uppercase;font-weight:600">Line</th>
               <th style="padding:6px 10px;text-align:center;font-size:10px;color:#7d8590;letter-spacing:1px;text-transform:uppercase;font-weight:600">Odds</th>
-              <th style="padding:6px 10px;text-align:center;font-size:10px;color:#7d8590;letter-spacing:1px;text-transform:uppercase;font-weight:600">EV</th>
+              <th style="padding:6px 10px;text-align:center;font-size:10px;color:#7d8590;letter-spacing:1px;text-transform:uppercase;font-weight:600" title="Points difference: model proj minus line">Edge</th>
+              <th style="padding:6px 10px;text-align:center;font-size:10px;color:#7d8590;letter-spacing:1px;text-transform:uppercase;font-weight:600" title="Model win% minus de-vigged market %">Implied</th>
+              <th style="padding:6px 10px;text-align:center;font-size:10px;color:#7d8590;letter-spacing:1px;text-transform:uppercase;font-weight:600" title="Expected value at this price">EV</th>
+              <th style="padding:6px 10px;text-align:center;font-size:10px;color:#7d8590;letter-spacing:1px;text-transform:uppercase;font-weight:600"></th>
             </tr>
           </thead>
           <tbody>${bookRows}</tbody>
@@ -1805,7 +1996,7 @@ document.addEventListener("DOMContentLoaded", () => {
     <div class="modal-row">
       <div class="modal-field">
         <label>Stat</label>
-        <select id="modal-stat">
+        <select id="modal-stat" onchange="recomputeFairFromProj()">
           <option value="PTS">PTS</option>
           <option value="REB">REB</option>
           <option value="AST">AST</option>
@@ -1815,6 +2006,7 @@ document.addEventListener("DOMContentLoaded", () => {
           <option value="PR">PR</option>
           <option value="PA">PA</option>
           <option value="RA">RA</option>
+          <option value="GAME_TOTAL">GAME TOTAL</option>
         </select>
       </div>
       <div class="modal-field">
@@ -1832,7 +2024,7 @@ document.addEventListener("DOMContentLoaded", () => {
       </div>
       <div class="modal-field">
         <label>Fair Value Odds</label>
-        <input type="number" id="modal-fair" placeholder="e.g. -140" autocomplete="off" spellcheck="false"/>
+        <input type="number" id="modal-fair" placeholder="auto-calc from proj" autocomplete="off" spellcheck="false" oninput="window._modalFairManual = (this.value.trim() !== '');"/>
       </div>
     </div>
     <div class="modal-row">
