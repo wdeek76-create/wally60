@@ -963,6 +963,94 @@ function getBetISODate(b) {
   return `${y}-${String(m).padStart(2,"0")}-${String(d).padStart(2,"0")}`;
 }
 
+// ── ESPN FALLBACK ──────────────────────────────────────────────────────────
+const _espnCache = {}; // key: ISO date, value: array of {playerNorm, completed, stats:{pts,reb,ast,fg3m,min}}
+
+async function fetchESPNStatsForDate(isoDate) {
+  if (_espnCache[isoDate]) return _espnCache[isoDate];
+  const yyyymmdd = isoDate.replace(/-/g, "");
+  const sbUrl = `https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/scoreboard?dates=${yyyymmdd}`;
+  let scoreboard;
+  try {
+    const res = await fetch(sbUrl);
+    if (!res.ok) throw new Error(`ESPN scoreboard ${res.status}`);
+    scoreboard = await res.json();
+  } catch (e) { throw new Error("ESPN scoreboard error: " + e.message); }
+
+  const events = scoreboard.events || [];
+  const allRows = [];
+  for (const ev of events) {
+    const completed = ev.status?.type?.completed === true;
+    if (!completed) continue;
+    // Fetch boxscore for each completed game
+    let summary;
+    try {
+      const r = await fetch(`https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/summary?event=${ev.id}`);
+      if (!r.ok) continue;
+      summary = await r.json();
+    } catch { continue; }
+
+    const teamPlayerGroups = summary.boxscore?.players || [];
+    for (const teamGroup of teamPlayerGroups) {
+      const stats = teamGroup.statistics || [];
+      for (const statGroup of stats) {
+        const labels = (statGroup.labels || statGroup.keys || []).map(s => s.toString().toLowerCase());
+        const idx = {
+          min: labels.findIndex(l => l === "min"),
+          pts: labels.findIndex(l => l === "pts"),
+          reb: labels.findIndex(l => l === "reb"),
+          ast: labels.findIndex(l => l === "ast"),
+          // ESPN uses "3pt" formatted as "made-attempted"
+          tpt: labels.findIndex(l => l === "3pt" || l === "fg3" || l === "3p")
+        };
+        const athletes = statGroup.athletes || [];
+        for (const a of athletes) {
+          const player = a.athlete || {};
+          const fullName = player.displayName || `${player.firstName||""} ${player.lastName||""}`.trim();
+          if (!fullName) continue;
+          const stRow = a.stats || [];
+          const parseInt0 = (s) => { const n = parseInt(s); return isNaN(n) ? 0 : n; };
+          let fg3m = 0;
+          if (idx.tpt >= 0 && stRow[idx.tpt]) {
+            const m = String(stRow[idx.tpt]).match(/^(\d+)/);
+            if (m) fg3m = parseInt(m[1]);
+          }
+          allRows.push({
+            playerNorm: norm(fullName),
+            displayName: fullName,
+            stats: {
+              min: idx.min >= 0 ? parseInt0(stRow[idx.min]) : 0,
+              pts: idx.pts >= 0 ? parseInt0(stRow[idx.pts]) : 0,
+              reb: idx.reb >= 0 ? parseInt0(stRow[idx.reb]) : 0,
+              ast: idx.ast >= 0 ? parseInt0(stRow[idx.ast]) : 0,
+              fg3m: fg3m,
+            }
+          });
+        }
+      }
+    }
+  }
+  _espnCache[isoDate] = allRows;
+  return allRows;
+}
+
+function getStatValueForESPN(row, statKey) {
+  const s = row.stats || {};
+  const pts = s.pts || 0, reb = s.reb || 0, ast = s.ast || 0, fg3m = s.fg3m || 0;
+  switch ((statKey||"").toUpperCase()) {
+    case "PTS": return pts;
+    case "REB": return reb;
+    case "AST": return ast;
+    case "3PM": return fg3m;
+    case "PRA": return pts + reb + ast;
+    case "PR":  return pts + reb;
+    case "PA":  return pts + ast;
+    case "RA":  return reb + ast;
+    case "MIN": return s.min || 0;
+    default: return null;
+  }
+}
+
 async function gradeBet(b) {
   const iso = getBetISODate(b);
   if (!iso) return { ok: false, reason: "No date on bet" };
@@ -971,12 +1059,28 @@ async function gradeBet(b) {
     stats = await fetchBDLStatsForDate(iso);
     games = await fetchBDLGamesForDate(iso);
   } catch (e) { return { ok: false, reason: "API error: " + e.message }; }
-  // If no stats yet, look at games to explain why
+  // If BDL has no stats yet, try ESPN as fallback
   if (!stats || !stats.length) {
+    let espnRows;
+    try { espnRows = await fetchESPNStatsForDate(iso); }
+    catch (e) { espnRows = null; }
+    if (espnRows && espnRows.length) {
+      const playerNorm = norm(b.player);
+      const matches = espnRows.filter(r => r.playerNorm === playerNorm);
+      if (!matches.length) return { ok: false, reason: `${b.player} not in ESPN box scores for ${iso}` };
+      let total = 0;
+      matches.forEach(m => { total += getStatValueForESPN(m, b.stat); });
+      const line = b.line, ou = b.ou;
+      let result;
+      if (Math.abs(total - line) < 0.001) result = "void";
+      else if (ou === "over") result = total > line ? "hit" : "miss";
+      else result = total < line ? "hit" : "miss";
+      return { ok: true, result, total, source: "ESPN" };
+    }
+    // Neither source has data; fall through to original BDL diagnostic
     if (!games || !games.length) {
       return { ok: false, reason: `No WNBA games scheduled on ${iso}` };
     }
-    // Games exist but no stats yet
     const statuses = games.map(g => g.status || "unknown");
     const finalCount = statuses.filter(s => /final|post|completed/i.test(s)).length;
     const liveCount = statuses.filter(s => !/final|post|completed/i.test(s) && !/^\d{4}-/.test(s) && s !== "unknown").length;
@@ -1047,7 +1151,7 @@ async function gradeAllPending() {
         if (r.result === "hit") hit++;
         else if (r.result === "miss") miss++;
         else if (r.result === "void") voided++;
-        logGrade(`${b.player} ${lineStr} ${b.stat}: actual ${r.total} → ${r.result.toUpperCase()}`, r.result);
+        logGrade(`${b.player} ${lineStr} ${b.stat}: actual ${r.total} → ${r.result.toUpperCase()}${r.source?` (${r.source})`:""}`, r.result);
       }
     } else {
       const isNotFinal = /not final|ingesting|in progress|not started/i.test(r.reason);
