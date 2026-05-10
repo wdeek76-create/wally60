@@ -238,6 +238,17 @@ let tolerance = 15;
 let currentTab = "upload";
 let rowCache = [];
 let bets = [];
+// Totals model toggle: 'avg' (σ=14, conservative) or 'union' (σ≈8.5, team-level union)
+// Persisted across reloads. Each tracked total bet stores which model it was made under.
+let totalsModel = (typeof localStorage !== "undefined" && localStorage.getItem("wnba_totals_model")) || "avg";
+function setTotalsModel(m) {
+  totalsModel = m;
+  try { localStorage.setItem("wnba_totals_model", m); } catch(e) {}
+  renderTotals();
+}
+// σ for each model — single source of truth used by every totals math path
+const TOTALS_SIGMA = { avg: 14, union: 8.5 };
+function totalsSigma() { return TOTALS_SIGMA[totalsModel] || 14; }
 let modalPlayer = "";
 let modalPos = "";
 
@@ -836,7 +847,7 @@ function getOU() { return window._modalOU || "under"; }
 // Stdev assumptions for fair-value calc by stat
 function stdevForStat(stat) {
   switch ((stat||"").toUpperCase()) {
-    case "GAME_TOTAL": return 14;
+    case "GAME_TOTAL": return totalsSigma();
     case "PTS": return 5.5;
     case "REB": return 3.0;
     case "AST": return 2.2;
@@ -973,7 +984,13 @@ function trackTotal(awayAbbr, homeAbbr, side, line, odds, book, projTotal) {
     if (shorthand) {
       const dir = side === "over" ? "o" : "u";
       const oddsStr = odds > 0 ? `+${odds}` : `${odds}`;
-      shorthand.value = `${dir}${line} ${oddsStr}`;
+      // Auto-compute EV from current totals model so fair back-solves to match the card
+      let evToken = "";
+      if (projTotal != null) {
+        const ev = americanEvRough(odds, projTotal, line, side);
+        if (ev != null && !isNaN(ev)) evToken = ` ${ev.toFixed(2)}`;
+      }
+      shorthand.value = `${dir}${line} ${oddsStr}${evToken}`;
       shorthand.dispatchEvent(new Event("input"));
     }
     if (bookEl && book) {
@@ -1300,6 +1317,7 @@ function getAltBooks() {
     const entry = { book: b, odds };
     if (line != null) entry.line = line;
     if (evPct != null) {
+      // Explicit EV% wins — back-solve fair from offered odds
       const dec = oddsToDecimal(odds);
       if (dec) {
         const fairProb = (1 + evPct/100) / dec;
@@ -1307,6 +1325,21 @@ function getAltBooks() {
           const fo = probToAmerican(fairProb);
           if (fo != null) entry.fair = fo;
         }
+      }
+    } else if (line != null && window._modalProj != null) {
+      // For TOTALS only: when an alt has a different line and no typed EV%,
+      // auto-compute fair from the projection so play-to is line-aware.
+      // Props inherit main fair as before — no auto-recalc on props.
+      const stat = document.getElementById("modal-stat")?.value;
+      if (stat === "GAME_TOTAL") {
+        const ou = window._modalOU || "under";
+        try {
+          const winProb = modelWinProb(window._modalProj, line, ou, stat);
+          if (winProb != null && winProb > 0 && winProb < 1) {
+            const fo = probToAmerican(winProb);
+            if (fo != null) entry.fair = fo;
+          }
+        } catch(e) { /* swallow — leave fair undefined to inherit main */ }
       }
     }
     result.push(entry);
@@ -1375,6 +1408,8 @@ function saveBet() {
     book, proj: window._modalProj, team: window._modalTeam,
     result: "pending"
   };
+  // Stamp the totals model that was active when this bet was tracked
+  if (stat === "GAME_TOTAL") bet.totalsModel = totalsModel;
   bets.unshift(bet);
   saveBets();
   closeTrackModal();
@@ -1424,11 +1459,20 @@ function copySingleBet(id) {
   });
   if (!best) best = { book: b.book, odds: b.odds, fair: b.fair, line: b.line, ev: null };
 
-  const oddsStr = best.odds > 0 ? `+${best.odds}` : `${best.odds}`;
-  const ouLower = (b.ou || "").toLowerCase();
-  const playTo = best.fair != null ? playToOdds(best.fair, 5) : null;
+  // Append alts (excluding the one we used as headline). Dedupe by book+odds+line.
+  const seenK = new Set();
+  const remaining = candidates.filter(c => {
+    if (c.book === best.book && c.odds === best.odds && c.line === bestLine) return false;
+    const key = `${c.book}|${c.odds}|${c.line}`;
+    if (seenK.has(key)) return false;
+    seenK.add(key);
+    return true;
+  });
+
+  // If alts share headline's line, drop play-to from headline (alts row owns it)
+  const altsAtBestLine = remaining.some(p => (p.line ?? b.line) === bestLine);
+  const playTo = (!altsAtBestLine && best.fair != null) ? playToOdds(best.fair, 5) : null;
   const playToStr = playTo != null ? ` play to ${playTo > 0 ? "+" + playTo : playTo}` : "";
-  const bestLine = best.line != null ? best.line : b.line;
 
   let line;
   if (isTotal) {
@@ -1439,23 +1483,18 @@ function copySingleBet(id) {
     line = `${b.player}${teamStr}  ${ouLower} ${bestLine} ${statName} ${oddsStr} ${best.book}${playToStr}`;
   }
 
-  // Append alts (excluding the one we used as headline). Dedupe by book+odds+line.
-  const seenK = new Set();
-  const remaining = candidates.filter(c => {
-    if (c.book === best.book && c.odds === best.odds && c.line === bestLine) return false;
-    const key = `${c.book}|${c.odds}|${c.line}`;
-    if (seenK.has(key)) return false;
-    seenK.add(key);
-    return true;
-  });
   if (remaining.length) {
     const byLine = {};
+    // Seed group at bestLine with the headline so its play-to includes the headline price
+    if (altsAtBestLine) {
+      byLine[String(bestLine)] = { line: bestLine, fair: best.fair, items: [] };
+    }
     remaining.forEach(p => {
       const k = String(p.line ?? b.line);
       if (!byLine[k]) byLine[k] = { line: p.line, fair: p.fair, items: [] };
       byLine[k].items.push(p);
     });
-    const groupStrs = Object.values(byLine).map(g => {
+    const groupStrs = Object.values(byLine).filter(g => g.items.length > 0).map(g => {
       const items = g.items.map(p => {
         const o = p.odds > 0 ? `+${p.odds}` : `${p.odds}`;
         const lineHint = (p.line != null && p.line !== bestLine) ? `${p.line} ` : "";
@@ -1966,20 +2005,9 @@ function _copyOpenFiltered(kind) {
   enriched.forEach(({bet, best}, idx) => {
     const oddsStr = best.odds > 0 ? `+${best.odds}` : `${best.odds}`;
     const ouLower = (bet.ou || "").toLowerCase();
-    const playTo = playToOdds(best.fair, 5);
-    const playToStr = playTo != null ? ` play to ${playTo > 0 ? "+" + playTo : playTo}` : "";
     const bestLine = best.line != null ? best.line : bet.line;
-    let row;
-    if (kind === "totals") {
-      row = `${bet.player}  ${ouLower} ${bestLine} ${oddsStr} ${best.book}${playToStr}`;
-    } else {
-      const teamStr = bet.team ? ` (${bet.team})` : "";
-      const statName = STAT_FULL_NAME[bet.stat] || bet.stat;
-      row = `${bet.player}${teamStr}  ${ouLower} ${bestLine} ${statName} ${oddsStr} ${best.book}${playToStr}`;
-    }
-    lines.push(row);
 
-    // Append alt books — every available price excluding the best one we already showed
+    // Build the candidate set + dedupe (same logic used for alts)
     const allPrices = [{ book: bet.book, odds: bet.odds, line: bet.line, fair: bet.fair }];
     if (Array.isArray(bet.altBooks)) {
       bet.altBooks.forEach(a => {
@@ -1993,8 +2021,6 @@ function _copyOpenFiltered(kind) {
         }
       });
     }
-    // Filter out the "best" entry we already used (match by book + odds + line)
-    // Also dedupe identical entries (e.g., primary + auto-filled alt at same price)
     const seen = new Set();
     const remaining = allPrices.filter(p => {
       if (p.book === best.book && p.odds === best.odds && p.line === bestLine) return false;
@@ -2003,19 +2029,40 @@ function _copyOpenFiltered(kind) {
       seen.add(key);
       return true;
     });
+
+    // If any alt is at the same line as the headline, the alts row will own the play-to.
+    // Otherwise the headline shows its own.
+    const altsAtBestLine = remaining.some(p => (p.line ?? bet.line) === bestLine);
+    const headlinePlayTo = altsAtBestLine ? null : playToOdds(best.fair, 5);
+    const headlinePlayToStr = headlinePlayTo != null ? ` play to ${headlinePlayTo > 0 ? "+" + headlinePlayTo : headlinePlayTo}` : "";
+
+    let row;
+    if (kind === "totals") {
+      row = `${bet.player}  ${ouLower} ${bestLine} ${oddsStr} ${best.book}${headlinePlayToStr}`;
+    } else {
+      const teamStr = bet.team ? ` (${bet.team})` : "";
+      const statName = STAT_FULL_NAME[bet.stat] || bet.stat;
+      row = `${bet.player}${teamStr}  ${ouLower} ${bestLine} ${statName} ${oddsStr} ${best.book}${headlinePlayToStr}`;
+    }
+    lines.push(row);
+
+    // Alts row — group by line, one play-to per group.
+    // For the group at the headline's line, prepend the headline's price so its play-to covers everyone at that line.
     if (remaining.length) {
-      // Group alts by line — same line means same play-to, so we only show it once per group
       const byLine = {};
+      // Seed groups with the headline at its own line so alts at same line get the play-to including it
+      if (altsAtBestLine) {
+        byLine[String(bestLine)] = { line: bestLine, fair: best.fair, items: [] };
+      }
       remaining.forEach(p => {
         const k = String(p.line ?? bet.line);
         if (!byLine[k]) byLine[k] = { line: p.line, fair: p.fair, items: [] };
         byLine[k].items.push(p);
       });
-      // Render each line group: alt list followed by single play-to for that group
-      const groupStrs = Object.values(byLine).map(g => {
+      // Only render groups that have items
+      const groupStrs = Object.values(byLine).filter(g => g.items.length > 0).map(g => {
         const items = g.items.map(p => {
           const o = p.odds > 0 ? `+${p.odds}` : `${p.odds}`;
-          // Show line if it differs from the HEADLINE line (so reader can tell apart)
           const lineHint = (p.line != null && p.line !== bestLine) ? `${p.line} ` : "";
           return `${p.book} ${lineHint}${o}`;
         }).join("  ");
@@ -2112,6 +2159,15 @@ function renderTracker() {
     if (b.ou === "over" || b.ou === "under") accum(ouBreak[b.ou], b);
   });
 
+  // Totals model comparison: tag each settled GAME_TOTAL bet by its stored model
+  const modelBreak = { avg: empty(), union: empty(), unknown: empty() };
+  settled.forEach(b => {
+    if (b.stat !== "GAME_TOTAL") return;
+    const key = b.totalsModel === "avg" || b.totalsModel === "union" ? b.totalsModel : "unknown";
+    accum(modelBreak[key], b);
+  });
+  const hasTotalsHistory = modelBreak.avg.total + modelBreak.union.total + modelBreak.unknown.total > 0;
+
   const pct = (h,t) => t>0 ? `${((h/t)*100).toFixed(0)}%` : "—";
   const card = (label, v, opts={}) => {
     const r = v.staked > 0 ? ((v.pl/v.staked)*100).toFixed(1) : "—";
@@ -2177,7 +2233,7 @@ function renderTracker() {
           <div style="font-size:15px;font-weight:700;color:#fff;line-height:1.2;">
             ${b.player} <span style="color:#5eead4;font-weight:600;">${b.ou} ${b.line} ${statLbl}</span>
           </div>
-          <div style="font-size:11px;color:#d4dae3;">${b.timestamp || b.date}${b.team?` · ${b.team}`:''}</div>
+          <div style="font-size:11px;color:#d4dae3;">${b.timestamp || b.date}${b.team?` · ${b.team}`:''}${b.stat==="GAME_TOTAL" && b.totalsModel ? ` · <span style="color:#5eead4;font-weight:700;letter-spacing:0.5px;">${b.totalsModel.toUpperCase()}</span>` : ''}</div>
         </div>
         <div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap;">
           ${b.result === "pending" ? `
@@ -2271,7 +2327,17 @@ function renderTracker() {
     <div class="tracker-section">
       <h4 style="font-size:11px;color:#d4dae3;letter-spacing:1px;text-transform:uppercase;font-weight:700;border:none;padding-bottom:0;margin-bottom:8px;">By Sportsbook</h4>
       ${Object.entries(bookBreak).length === 0 ? '<p style="color:#525a64;font-size:13px;padding:8px 0;">No settled bets yet</p>' : `<div class="overview-strip" style="flex-wrap:wrap;">${Object.entries(bookBreak).map(([k,v])=>card(k,v,{book:true})).join("")}</div>`}
-    </div>`;
+    </div>
+
+    ${hasTotalsHistory ? `
+    <div class="tracker-section">
+      <h4 style="font-size:11px;color:#d4dae3;letter-spacing:1px;text-transform:uppercase;font-weight:700;border:none;padding-bottom:0;margin-bottom:8px;">Totals Model · AVG vs UNION</h4>
+      <div class="overview-strip" style="flex-wrap:wrap;">
+        ${modelBreak.avg.total > 0 ? card("AVG (σ14)", modelBreak.avg) : ""}
+        ${modelBreak.union.total > 0 ? card("UNION (σ8.5)", modelBreak.union) : ""}
+        ${modelBreak.unknown.total > 0 ? card("Untagged", modelBreak.unknown) : ""}
+      </div>
+    </div>` : ""}`;
 }
 
 function filterBetRows(val) {
@@ -2569,7 +2635,7 @@ function clearBetstamp() {
 
 // EV using normal approx around projected total
 function americanEvRough(odds, projTotal, line, side) {
-  const stdev = 14;
+  const stdev = totalsSigma();
   const z = (line - projTotal) / stdev;
   const pUnder = 0.5 * (1 + erf(z / Math.SQRT2));
   const pOver = 1 - pUnder;
@@ -2630,7 +2696,7 @@ function renderTotals() {
         // Edge in points
         edge = b.side === "over" ? (projTotal - b.line) : (b.line - projTotal);
         // EV uses normal model win prob × decimal odds
-        const stdev = 14;
+        const stdev = totalsSigma();
         const z = (b.line - projTotal) / stdev;
         const pUnder = 0.5 * (1 + erf(z / Math.SQRT2));
         const pOver = 1 - pUnder;
@@ -2730,6 +2796,13 @@ function renderTotals() {
       <div>
         <div style="font-size:22px;font-weight:800;color:#fff;margin-bottom:4px;">Totals Model</div>
         <div style="font-size:13px;color:#d4dae3;">Sums blended player projections by team · paste Betstamp for the slate</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+        <span style="font-size:11px;color:#a8b0bb;letter-spacing:1px;text-transform:uppercase;font-weight:700;">Model</span>
+        <div style="display:inline-flex;background:#161b22;border:1px solid #1f2733;border-radius:8px;padding:3px;gap:2px;">
+          <button onclick="setTotalsModel('avg')" title="Average source totals · σ=14 · conservative" style="background:${totalsModel==='avg'?'#14b8a6':'transparent'};border:none;color:${totalsModel==='avg'?'#0d1117':'#d4dae3'};border-radius:5px;padding:6px 14px;font-size:11px;font-weight:700;cursor:pointer;font-family:'Inter',sans-serif;letter-spacing:0.5px;">AVG · σ14</button>
+          <button onclick="setTotalsModel('union')" title="Independent team distributions · σ≈8.5 · tighter" style="background:${totalsModel==='union'?'#14b8a6':'transparent'};border:none;color:${totalsModel==='union'?'#0d1117':'#d4dae3'};border-radius:5px;padding:6px 14px;font-size:11px;font-weight:700;cursor:pointer;font-family:'Inter',sans-serif;letter-spacing:0.5px;">UNION · σ8.5</button>
+        </div>
       </div>
     </div>
 
