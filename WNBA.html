@@ -1002,6 +1002,7 @@ function openTrackModal(player, pos, stat, proj, team) {
   if (evInPrev) evInPrev.innerHTML = "";
   window._modalLine = null;
   window._modalFairManual = false;
+  window._modalEvTyped = null;
   clearAltBooks();
   const dateEl = document.getElementById("modal-date"); if(dateEl) dateEl.value = new Date().toISOString().split("T")[0];
   document.getElementById("modal-stat").value = stat || "PTS";
@@ -1045,10 +1046,12 @@ function parseShorthand(el) {
     el.style.borderColor = "#1f2733";
     if (preview) preview.textContent = "";
     lineHidden.value = ""; oddsHidden.value = ""; fairHidden.value = "";
-    window._modalLine = null; window._modalFairManual = false;
+    window._modalLine = null; window._modalFairManual = false; window._modalEvTyped = null;
     updateEvPreview();
     return;
   }
+  // Clear typed-EV cache at start of every parse — only re-set if user provides one
+  window._modalEvTyped = null;
   // Tokenize on whitespace. Format: u17.5 [odds] [book?] [ev%? OR fair odds?]
   // Examples:
   //   u17.5 +200                 → line + offered odds, fair auto-calcs from proj
@@ -1111,6 +1114,7 @@ function parseShorthand(el) {
     } else if (/^\d+(\.\d+)?$/.test(t)) {
       // Treat as EV%
       evPct = parseFloat(t);
+      window._modalEvTyped = evPct;
     }
   }
 
@@ -1119,7 +1123,7 @@ function parseShorthand(el) {
   if (bookVal && bookEl) {
     bookEl.value = bookVal;
     if (oddsVal != null) {
-      const altInput = document.querySelector(`input.alt-odds[data-book="${bookVal}"]`);
+      const altInput = document.querySelector(`input.alt-input[data-book="${bookVal}"]`);
       if (altInput) {
         altInput.value = oddsVal > 0 ? `+${oddsVal}` : String(oddsVal);
       }
@@ -1171,12 +1175,15 @@ function updateEvPreview() {
   const odds = parseInt(document.getElementById("modal-odds").value);
   const fair = parseInt(document.getElementById("modal-fair").value);
   if (isNaN(odds) || isNaN(fair)) { el.textContent = ""; return; }
-  const ev = calcEdge(odds, fair);
+  // If user typed an EV% directly in shorthand, prefer that exact number (avoid rounding loss)
+  let ev = window._modalEvTyped != null ? window._modalEvTyped : calcEdge(odds, fair);
   if (ev == null || isNaN(ev)) { el.textContent = ""; return; }
   const meets = ev >= 5;
   const color = meets ? "#22c55e" : ev > 0 ? "#5eead4" : "#f87171";
   const note = meets ? "" : " — needs 5% to save";
-  el.innerHTML = `EV: <span style="color:${color}">${ev>0?'+':''}${ev.toFixed(1)}%</span>${note ? `<span style="color:#d4dae3">${note}</span>` : ''}`;
+  // Use 2 decimals if user typed something like 11.81, else 1 decimal
+  const decimals = (window._modalEvTyped != null && Math.abs(ev*10 - Math.round(ev*10)) > 0.01) ? 2 : 1;
+  el.innerHTML = `EV: <span style="color:${color}">${ev>0?'+':''}${ev.toFixed(decimals)}%</span>${note ? `<span style="color:#d4dae3">${note}</span>` : ''}`;
 }
 
 // ── ALT BOOKS ──────────────────────────────────────────────────────
@@ -1225,44 +1232,84 @@ function buildAltBookList() {
       ? `<img src="${logo}" alt="${book}" style="width:18px;height:18px;border-radius:4px;object-fit:cover;flex:0 0 auto;"/>`
       : `<span style="width:18px;height:18px;border-radius:4px;background:#1f2733;color:#d4dae3;font-size:8px;font-weight:700;display:flex;align-items:center;justify-content:center;flex:0 0 auto;letter-spacing:-0.3px;">${book.slice(0,2).toUpperCase()}</span>`;
     return `
-    <div style="display:flex;gap:6px;align-items:center;">
+    <div class="alt-row" data-book="${book}" style="display:flex;gap:6px;align-items:center;">
       ${logoEl}
-      <span style="flex:0 0 80px;font-size:11px;color:#d4dae3;font-weight:600;letter-spacing:0.2px;">${book}</span>
-      <input type="text" class="alt-odds" data-book="${book}" placeholder="—" style="flex:1;background:#0d1117;border:1px solid #1f2733;color:#e2e8f0;border-radius:5px;padding:5px 8px;font-size:12px;font-family:'Inter',sans-serif;text-align:center;" autocomplete="off" spellcheck="false"/>
+      <span style="font-size:11px;color:#d4dae3;font-weight:600;letter-spacing:0.2px;width:80px;flex:0 0 auto;">${book}</span>
+      <input type="text" class="alt-input" data-book="${book}" placeholder="-110  or  u19.5 -110 11.7" title="odds  OR  altLine odds EV%" style="flex:1;background:#0d1117;border:1px solid #1f2733;color:#e2e8f0;border-radius:5px;padding:5px 8px;font-size:12px;font-family:'Inter',sans-serif;" autocomplete="off" spellcheck="false"/>
     </div>`;
   }).join("");
+}
+
+// Toggle the alt-line input visibility for a given book
+function toggleAltLine(book) {
+  const wrap = document.querySelector(`.alt-line-wrap[data-book="${book}"]`);
+  if (!wrap) return;
+  const isOpen = wrap.style.display !== "none";
+  if (isOpen) {
+    // Closing — clear value too so we don't store stale data
+    const inp = wrap.querySelector("input.alt-line");
+    if (inp) inp.value = "";
+    wrap.style.display = "none";
+  } else {
+    wrap.style.display = "block";
+    setTimeout(() => wrap.querySelector("input.alt-line")?.focus(), 0);
+  }
 }
 
 function getAltBooks() {
   const list = document.getElementById("modal-altbooks-list");
   if (!list) return [];
   const result = [];
-  // Read pre-rendered odds inputs (data-book attribute holds the book name)
-  list.querySelectorAll('input.alt-odds[data-book]').forEach(inp => {
-    const o = inp.value?.trim();
+  list.querySelectorAll('input.alt-input[data-book]').forEach(inp => {
+    const raw = inp.value?.trim().toLowerCase();
     const b = inp.dataset.book;
-    if (b && o) {
-      const m = o.match(/^([+\-]?)(\d{2,4})$/);
-      if (m) {
-        const sign = m[1] === "-" ? -1 : 1;
-        result.push({ book: b, odds: sign * parseInt(m[2]) });
+    if (!b || !raw) return;
+
+    // Tokenize and classify each token
+    // Recognized formats per token:
+    //   u19.5, o2.5            → alt line (with direction prefix)
+    //   -110, +125, 100        → American odds
+    //   11.7, 5.2              → EV% (decimal or small number, no sign)
+    let line = null, odds = null, evPct = null;
+    raw.split(/\s+/).forEach(t => {
+      // Line: starts with o/u then number
+      const lineM = t.match(/^([ou])([\d.]+)$/);
+      if (lineM) {
+        const ln = parseFloat(lineM[2]);
+        if (!isNaN(ln)) line = ln;
+        return;
+      }
+      // Odds: explicit sign or 3+ digit integer
+      if (/^[+\-]\d{2,4}$/.test(t) || /^\d{3,4}$/.test(t)) {
+        const m = t.match(/^([+\-]?)(\d+)$/);
+        if (m) {
+          const sign = m[1] === "-" ? -1 : 1;
+          odds = sign * parseInt(m[2]);
+        }
+        return;
+      }
+      // EV%: decimal or 1-2 digit integer (no sign)
+      if (/^\d+(\.\d+)?$/.test(t)) {
+        const v = parseFloat(t);
+        if (!isNaN(v)) evPct = v;
+        return;
+      }
+    });
+
+    if (odds == null) return; // need at least odds to register
+    const entry = { book: b, odds };
+    if (line != null) entry.line = line;
+    if (evPct != null) {
+      const dec = oddsToDecimal(odds);
+      if (dec) {
+        const fairProb = (1 + evPct/100) / dec;
+        if (fairProb > 0 && fairProb < 1) {
+          const fo = probToAmerican(fairProb);
+          if (fo != null) entry.fair = fo;
+        }
       }
     }
-  });
-  // Also read any freeform rows (legacy support)
-  list.querySelectorAll(':scope > div').forEach(r => {
-    const bookInp = r.querySelector('input.alt-book');
-    const oddsInp = r.querySelector('input.alt-odds:not([data-book])');
-    if (!bookInp || !oddsInp) return;
-    const b = normBookInput(bookInp.value);
-    const o = oddsInp.value?.trim();
-    if (b && o) {
-      const m = o.match(/^([+\-]?)(\d{2,4})$/);
-      if (m) {
-        const sign = m[1] === "-" ? -1 : 1;
-        result.push({ book: b, odds: sign * parseInt(m[2]) });
-      }
-    }
+    result.push(entry);
   });
   return result;
 }
@@ -1356,41 +1403,52 @@ function copySingleBet(id) {
   if (!b) return;
   const isTotal = (b.stat || "").toUpperCase() === "GAME_TOTAL";
 
-  // Find best price across primary + alts
-  const candidates = [{ book: b.book, odds: b.odds }];
+  // Find best price across primary + alts (each alt may carry its own fair + line)
+  const candidates = [{ book: b.book, odds: b.odds, fair: b.fair, line: b.line }];
   if (Array.isArray(b.altBooks)) {
     b.altBooks.forEach(a => {
-      if (a && a.book && a.odds != null) candidates.push({ book: a.book, odds: a.odds });
+      if (a && a.book && a.odds != null) {
+        candidates.push({
+          book: a.book,
+          odds: a.odds,
+          fair: a.fair != null ? a.fair : b.fair,
+          line: a.line != null ? a.line : b.line
+        });
+      }
     });
   }
   let best = null;
   candidates.forEach(c => {
-    const ev = b.fair != null ? calcEdge(c.odds, b.fair) : null;
+    const ev = c.fair != null ? calcEdge(c.odds, c.fair) : null;
     if (!best || (ev != null && (best.ev == null || ev > best.ev))) best = { ...c, ev };
   });
-  if (!best) best = { book: b.book, odds: b.odds, ev: null };
+  if (!best) best = { book: b.book, odds: b.odds, fair: b.fair, line: b.line, ev: null };
 
   const oddsStr = best.odds > 0 ? `+${best.odds}` : `${best.odds}`;
   const ouLower = (b.ou || "").toLowerCase();
-  const playTo = b.fair != null ? playToOdds(b.fair, 5) : null;
+  const playTo = best.fair != null ? playToOdds(best.fair, 5) : null;
   const playToStr = playTo != null ? ` play to ${playTo > 0 ? "+" + playTo : playTo}` : "";
+  const bestLine = best.line != null ? best.line : b.line;
 
   let line;
   if (isTotal) {
-    line = `${b.player}  ${ouLower} ${b.line} ${oddsStr} ${best.book}${playToStr}`;
+    line = `${b.player}  ${ouLower} ${bestLine} ${oddsStr} ${best.book}${playToStr}`;
   } else {
     const teamStr = b.team ? ` (${b.team})` : "";
     const statName = STAT_FULL_NAME[b.stat] || b.stat;
-    line = `${b.player}${teamStr}  ${ouLower} ${b.line} ${statName} ${oddsStr} ${best.book}${playToStr}`;
+    line = `${b.player}${teamStr}  ${ouLower} ${bestLine} ${statName} ${oddsStr} ${best.book}${playToStr}`;
   }
 
   // Append alts (excluding the one we used as headline)
-  const remaining = candidates.filter(c => !(c.book === best.book && c.odds === best.odds));
+  const remaining = candidates.filter(c => !(c.book === best.book && c.odds === best.odds && c.line === bestLine));
   if (remaining.length) {
     const altLine = remaining.map(p => {
       const o = p.odds > 0 ? `+${p.odds}` : `${p.odds}`;
-      return `${p.book} ${o}`;
-    }).join("  ");
+      const lineHint = (p.line != null && p.line !== b.line) ? `${p.line} ` : "";
+      const altPlayTo = p.fair != null ? playToOdds(p.fair, 5) : null;
+      const altPlayToStr = altPlayTo != null ? ` play to ${altPlayTo > 0 ? "+" + altPlayTo : altPlayTo}` : "";
+      return `${p.book} ${lineHint}${o}${altPlayToStr}`;
+    }).join("  ·  ");
     line += `\nalts: ${altLine}`;
   }
 
@@ -1851,20 +1909,28 @@ function _copyOpenFiltered(kind) {
   const filtered = open.filter(b => kind === "totals" ? isTotal(b) : !isTotal(b));
   if (!filtered.length) { showToast(kind === "totals" ? "No open totals" : "No open props"); return; }
 
-  // For each bet, scan primary + alt books, pick the highest-EV price
+  // For each bet, scan primary + alt books, pick the highest-EV price.
+  // Each alt may carry its own fair (back-solved from a per-alt EV%) and its own line.
   const pickBest = (b) => {
-    if (!b.fair) return null;
-    const candidates = [{ book: b.book, odds: b.odds }];
+    const candidates = [{ book: b.book, odds: b.odds, fair: b.fair, line: b.line }];
     if (Array.isArray(b.altBooks)) {
       b.altBooks.forEach(a => {
-        if (a && a.book && a.odds != null) candidates.push({ book: a.book, odds: a.odds });
+        if (a && a.book && a.odds != null) {
+          candidates.push({
+            book: a.book,
+            odds: a.odds,
+            fair: a.fair != null ? a.fair : b.fair,
+            line: a.line != null ? a.line : b.line
+          });
+        }
       });
     }
     let best = null;
     candidates.forEach(c => {
-      const ev = calcEdge(c.odds, b.fair);
+      if (!c.fair) return;
+      const ev = calcEdge(c.odds, c.fair);
       if (ev == null) return;
-      if (!best || ev > best.ev) best = { book: c.book, odds: c.odds, ev };
+      if (!best || ev > best.ev) best = { ...c, ev };
     });
     return best;
   };
@@ -1884,32 +1950,44 @@ function _copyOpenFiltered(kind) {
   enriched.forEach(({bet, best}, idx) => {
     const oddsStr = best.odds > 0 ? `+${best.odds}` : `${best.odds}`;
     const ouLower = (bet.ou || "").toLowerCase();
-    const playTo = playToOdds(bet.fair, 5);
+    const playTo = playToOdds(best.fair, 5);
     const playToStr = playTo != null ? ` play to ${playTo > 0 ? "+" + playTo : playTo}` : "";
+    const bestLine = best.line != null ? best.line : bet.line;
     let row;
     if (kind === "totals") {
-      row = `${bet.player}  ${ouLower} ${bet.line} ${oddsStr} ${best.book}${playToStr}`;
+      row = `${bet.player}  ${ouLower} ${bestLine} ${oddsStr} ${best.book}${playToStr}`;
     } else {
       const teamStr = bet.team ? ` (${bet.team})` : "";
       const statName = STAT_FULL_NAME[bet.stat] || bet.stat;
-      row = `${bet.player}${teamStr}  ${ouLower} ${bet.line} ${statName} ${oddsStr} ${best.book}${playToStr}`;
+      row = `${bet.player}${teamStr}  ${ouLower} ${bestLine} ${statName} ${oddsStr} ${best.book}${playToStr}`;
     }
     lines.push(row);
 
     // Append alt books — every available price excluding the best one we already showed
-    const allPrices = [{ book: bet.book, odds: bet.odds }];
+    const allPrices = [{ book: bet.book, odds: bet.odds, line: bet.line, fair: bet.fair }];
     if (Array.isArray(bet.altBooks)) {
       bet.altBooks.forEach(a => {
-        if (a && a.book && a.odds != null) allPrices.push({ book: a.book, odds: a.odds });
+        if (a && a.book && a.odds != null) {
+          allPrices.push({
+            book: a.book,
+            odds: a.odds,
+            line: a.line != null ? a.line : bet.line,
+            fair: a.fair != null ? a.fair : bet.fair
+          });
+        }
       });
     }
-    // Filter out the "best" entry we already used (match by book + odds)
-    const remaining = allPrices.filter(p => !(p.book === best.book && p.odds === best.odds));
+    // Filter out the "best" entry we already used (match by book + odds + line)
+    const remaining = allPrices.filter(p => !(p.book === best.book && p.odds === best.odds && p.line === bestLine));
     if (remaining.length) {
       const altLine = remaining.map(p => {
         const o = p.odds > 0 ? `+${p.odds}` : `${p.odds}`;
-        return `${p.book} ${o}`;
-      }).join("  ");
+        // If alt has a different line than the bet's main line, show it inline
+        const lineHint = (p.line != null && p.line !== bet.line) ? `${p.line} ` : "";
+        const altPlayTo = p.fair != null ? playToOdds(p.fair, 5) : null;
+        const altPlayToStr = altPlayTo != null ? ` play to ${altPlayTo > 0 ? "+" + altPlayTo : altPlayTo}` : "";
+        return `${p.book} ${lineHint}${o}${altPlayToStr}`;
+      }).join("  ·  ");
       lines.push(`alts: ${altLine}`);
     }
     if (idx < enriched.length - 1) lines.push("");
