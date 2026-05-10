@@ -1439,17 +1439,33 @@ function copySingleBet(id) {
     line = `${b.player}${teamStr}  ${ouLower} ${bestLine} ${statName} ${oddsStr} ${best.book}${playToStr}`;
   }
 
-  // Append alts (excluding the one we used as headline)
-  const remaining = candidates.filter(c => !(c.book === best.book && c.odds === best.odds && c.line === bestLine));
+  // Append alts (excluding the one we used as headline). Dedupe by book+odds+line.
+  const seenK = new Set();
+  const remaining = candidates.filter(c => {
+    if (c.book === best.book && c.odds === best.odds && c.line === bestLine) return false;
+    const key = `${c.book}|${c.odds}|${c.line}`;
+    if (seenK.has(key)) return false;
+    seenK.add(key);
+    return true;
+  });
   if (remaining.length) {
-    const altLine = remaining.map(p => {
-      const o = p.odds > 0 ? `+${p.odds}` : `${p.odds}`;
-      const lineHint = (p.line != null && p.line !== b.line) ? `${p.line} ` : "";
-      const altPlayTo = p.fair != null ? playToOdds(p.fair, 5) : null;
-      const altPlayToStr = altPlayTo != null ? ` play to ${altPlayTo > 0 ? "+" + altPlayTo : altPlayTo}` : "";
-      return `${p.book} ${lineHint}${o}${altPlayToStr}`;
-    }).join("  ·  ");
-    line += `\nalts: ${altLine}`;
+    const byLine = {};
+    remaining.forEach(p => {
+      const k = String(p.line ?? b.line);
+      if (!byLine[k]) byLine[k] = { line: p.line, fair: p.fair, items: [] };
+      byLine[k].items.push(p);
+    });
+    const groupStrs = Object.values(byLine).map(g => {
+      const items = g.items.map(p => {
+        const o = p.odds > 0 ? `+${p.odds}` : `${p.odds}`;
+        const lineHint = (p.line != null && p.line !== bestLine) ? `${p.line} ` : "";
+        return `${p.book} ${lineHint}${o}`;
+      }).join("  ");
+      const altPlayTo = g.fair != null ? playToOdds(g.fair, 5) : null;
+      const altPlayToStr = altPlayTo != null ? `  play to ${altPlayTo > 0 ? "+" + altPlayTo : altPlayTo}` : "";
+      return `${items}${altPlayToStr}`;
+    });
+    line += `\nalts: ${groupStrs.join("  ")}`;
   }
 
   // Bulletproof copy
@@ -1978,17 +1994,36 @@ function _copyOpenFiltered(kind) {
       });
     }
     // Filter out the "best" entry we already used (match by book + odds + line)
-    const remaining = allPrices.filter(p => !(p.book === best.book && p.odds === best.odds && p.line === bestLine));
+    // Also dedupe identical entries (e.g., primary + auto-filled alt at same price)
+    const seen = new Set();
+    const remaining = allPrices.filter(p => {
+      if (p.book === best.book && p.odds === best.odds && p.line === bestLine) return false;
+      const key = `${p.book}|${p.odds}|${p.line}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
     if (remaining.length) {
-      const altLine = remaining.map(p => {
-        const o = p.odds > 0 ? `+${p.odds}` : `${p.odds}`;
-        // If alt has a different line than the bet's main line, show it inline
-        const lineHint = (p.line != null && p.line !== bet.line) ? `${p.line} ` : "";
-        const altPlayTo = p.fair != null ? playToOdds(p.fair, 5) : null;
-        const altPlayToStr = altPlayTo != null ? ` play to ${altPlayTo > 0 ? "+" + altPlayTo : altPlayTo}` : "";
-        return `${p.book} ${lineHint}${o}${altPlayToStr}`;
-      }).join("  ·  ");
-      lines.push(`alts: ${altLine}`);
+      // Group alts by line — same line means same play-to, so we only show it once per group
+      const byLine = {};
+      remaining.forEach(p => {
+        const k = String(p.line ?? bet.line);
+        if (!byLine[k]) byLine[k] = { line: p.line, fair: p.fair, items: [] };
+        byLine[k].items.push(p);
+      });
+      // Render each line group: alt list followed by single play-to for that group
+      const groupStrs = Object.values(byLine).map(g => {
+        const items = g.items.map(p => {
+          const o = p.odds > 0 ? `+${p.odds}` : `${p.odds}`;
+          // Show line if it differs from the HEADLINE line (so reader can tell apart)
+          const lineHint = (p.line != null && p.line !== bestLine) ? `${p.line} ` : "";
+          return `${p.book} ${lineHint}${o}`;
+        }).join("  ");
+        const playTo = g.fair != null ? playToOdds(g.fair, 5) : null;
+        const playToStr = playTo != null ? `  play to ${playTo > 0 ? "+" + playTo : playTo}` : "";
+        return `${items}${playToStr}`;
+      });
+      lines.push(`alts: ${groupStrs.join("  ")}`);
     }
     if (idx < enriched.length - 1) lines.push("");
   });
