@@ -2853,31 +2853,20 @@ function renderTotals() {
       return t != null ? `<span style="color:${s.color};font-weight:600">${s.label} ${t.toFixed(1)}</span>` : null;
     }).filter(Boolean).join(" · ") : "";
 
-    // Compute Edge (line vs proj) and Implied Edge (model win% vs de-vigged market %)
-    // For Implied Edge we need the OPPOSITE side's odds at the same book/line to de-vig.
-    // If we only have one side at a book, we approximate by treating the offered odds' implied prob
-    // as inflated by ~5% vig for a one-sided lookup.
     const enrichedBooks = g.books.map(b => {
-      let ev = null, edge = null, impliedEdge = null;
+      let edge = null, winProb = null;
       if (projTotal != null) {
         const odds = b.side === "over" ? b.overOdds : b.underOdds;
         // Edge in points
         edge = b.side === "over" ? (projTotal - b.line) : (b.line - projTotal);
-        // EV uses normal model win prob × decimal odds
+        // Model win probability using normal approx
         const stdev = totalsSigma();
         const z = (b.line - projTotal) / stdev;
         const pUnder = 0.5 * (1 + erf(z / Math.SQRT2));
         const pOver = 1 - pUnder;
-        const winProb = b.side === "over" ? pOver : pUnder;
-        const dec = oddsToDecimal(odds);
-        if (dec) ev = ((winProb * dec) - 1) * 100;
-        // Implied edge: model win% minus raw market implied prob (no de-vig)
-        const marketProb = oddsToImplied(odds);
-        if (marketProb != null && !isNaN(marketProb)) {
-          impliedEdge = (winProb - marketProb) * 100;
-        }
+        winProb = b.side === "over" ? pOver : pUnder;
       }
-      return { ...b, ev, edge, impliedEdge };
+      return { ...b, edge, winProb };
     });
 
     // Best of each side (by point-edge)
@@ -2890,6 +2879,13 @@ function renderTotals() {
           const sideLbl = b.side === "over" ? "OVER" : "UNDER";
           const sideColor = b.side === "over" ? "#22c55e" : "#f87171";
           const edgeColor = b.edge == null ? "#d4dae3" : b.edge > 0 ? "#22c55e" : b.edge < 0 ? "#f87171" : "#fff";
+          // Win % color: bright green ≥ 60%, teal 50-60%, white 45-50%, red < 45%
+          const wpPct = b.winProb != null ? b.winProb * 100 : null;
+          const wpColor = wpPct == null ? "#d4dae3"
+            : wpPct >= 60 ? "#22c55e"
+            : wpPct >= 50 ? "#5eead4"
+            : wpPct >= 45 ? "#fff"
+            : "#f87171";
           const projForTrack = projTotal != null ? projTotal.toFixed(2) : "null";
           const bookSafe = (b.book||"").replace(/'/g,"\\'");
           return `<tr>
@@ -2897,10 +2893,11 @@ function renderTotals() {
             <td style="padding:6px 10px;text-align:center;color:${sideColor};font-weight:700">${sideLbl} ${b.line}</td>
             <td style="padding:6px 10px;text-align:center;color:#fff">${odds!=null?(odds>0?'+':'')+odds:'—'}</td>
             <td style="padding:6px 10px;text-align:center;color:${edgeColor};font-weight:700">${b.edge!=null?(b.edge>0?'+':'')+b.edge.toFixed(1):'—'}</td>
+            <td style="padding:6px 10px;text-align:center;color:${wpColor};font-weight:700">${wpPct!=null?wpPct.toFixed(1)+'%':'—'}</td>
             <td style="padding:6px 10px;text-align:center"><button onclick="trackTotal('${g.awayAbbr}','${g.homeAbbr}','${b.side}',${b.line},${odds},'${bookSafe}',${projForTrack},'${projSource}')" style="background:#14b8a622;border:1px solid #14b8a655;color:#5eead4;border-radius:4px;padding:3px 10px;font-size:11px;font-weight:600;cursor:pointer;font-family:'Inter',sans-serif;">TRACK</button></td>
           </tr>`;
         }).join("")
-      : `<tr><td colspan="5" style="padding:12px;color:#525a64;text-align:center;font-size:12px">No prices parsed</td></tr>`;
+      : `<tr><td colspan="6" style="padding:12px;color:#525a64;text-align:center;font-size:12px">No prices parsed</td></tr>`;
 
     let bestSummary = "";
     if (projTotal != null) {
@@ -2937,9 +2934,48 @@ function renderTotals() {
       ? `<span style="font-size:9px;color:#f59e0b;font-weight:700;letter-spacing:0.5px;margin-left:4px;" title="${g.awayAbbr}: ${indepInfo.aSource} · ${g.homeAbbr}: ${indepInfo.bSource}">⚠ FALLBACK</span>`
       : "";
 
+    // Source-year badge — tells you whether P×E is using 2025, 2026, or blend
+    const sourceYearBadge = (() => {
+      if (!indepInfo) return "";
+      const a = indepInfo.aSource || "", b = indepInfo.bSource || "";
+      // Both teams from the same source → single label
+      if (a === b && a) {
+        const color = a === "2025" ? "#8b5cf6" : a === "2026" ? "#5eead4" : a.startsWith("blend") ? "#f59e0b" : "#a8b0bb";
+        return `<span style="font-size:9px;color:${color};font-weight:700;letter-spacing:0.5px;margin-left:4px;">${a.toUpperCase()}</span>`;
+      }
+      // Different sources per team
+      return `<span style="font-size:9px;color:#a8b0bb;font-weight:700;letter-spacing:0.5px;margin-left:4px;" title="${g.awayAbbr}: ${a} · ${g.homeAbbr}: ${b}">MIXED</span>`;
+    })();
+
     const agreementBadge = agreement
       ? `<span style="font-size:10px;font-weight:700;color:${agreement.agree?'#22c55e':'#f59e0b'};margin-left:6px;">${agreement.agree?'✓ AGREE':'⚠ DISAGREE'} ${agreement.diff>=0?'+':''}${agreement.diff.toFixed(1)}</span>`
       : "";
+
+    // Total Probability — over% / under% against the most common book line for this game.
+    // Pick the line that appears most often across books (handles half-point variations).
+    let dominantLine = null;
+    if (g.books && g.books.length) {
+      const lineCount = {};
+      g.books.forEach(b => { lineCount[b.line] = (lineCount[b.line] || 0) + 1; });
+      dominantLine = Object.entries(lineCount).sort((a,b) => b[1] - a[1])[0][0];
+      dominantLine = parseFloat(dominantLine);
+    }
+    let totalProbBlock = "";
+    if (projTotal != null && dominantLine != null) {
+      const z = (dominantLine - projTotal) / totalsSigma();
+      const pUnder = 0.5 * (1 + erf(z / Math.SQRT2));
+      const pOver = 1 - pUnder;
+      const overC = pOver >= 0.6 ? "#22c55e" : pOver >= 0.5 ? "#5eead4" : "#d4dae3";
+      const underC = pUnder >= 0.6 ? "#22c55e" : pUnder >= 0.5 ? "#5eead4" : "#d4dae3";
+      totalProbBlock = `
+        <div style="margin-top:10px;padding:8px 10px;background:#0d1117;border:1px solid #1f2733;border-radius:6px;">
+          <div style="font-size:9px;color:#a8b0bb;letter-spacing:0.5px;text-transform:uppercase;font-weight:700;margin-bottom:4px;">Total Probability @ ${dominantLine}</div>
+          <div style="display:flex;justify-content:space-between;gap:10px;font-size:13px;font-weight:700;">
+            <div style="color:${overC};">O ${(pOver*100).toFixed(1)}%</div>
+            <div style="color:${underC};">U ${(pUnder*100).toFixed(1)}%</div>
+          </div>
+        </div>`;
+    }
 
     const rightPanel = `
       <div style="text-align:right;min-width:240px;">
@@ -2955,9 +2991,10 @@ function renderTotals() {
         </div>
         <div style="margin-top:8px;font-size:11px;color:#a8b0bb;display:flex;flex-direction:column;gap:3px;text-align:right;">
           <div>Blend: ${fmtTotal(blendedTotal)}</div>
-          <div>P×E: ${fmtTotal(paceEffTotal, indepInfo && indepInfo.usedFallback ? "#f59e0b" : "#fff")}${fallbackBadge}</div>
+          <div>P×E: ${fmtTotal(paceEffTotal, indepInfo && indepInfo.usedFallback ? "#f59e0b" : "#fff")}${sourceYearBadge}${fallbackBadge}</div>
           ${agreementBadge ? `<div>${agreementBadge}</div>` : ""}
         </div>
+        ${totalProbBlock}
       </div>`;
 
     const teamLine = (t, abbr) => t
@@ -2985,6 +3022,7 @@ function renderTotals() {
               <th style="padding:6px 10px;text-align:center;font-size:10px;color:#d4dae3;letter-spacing:1px;text-transform:uppercase;font-weight:600">Line</th>
               <th style="padding:6px 10px;text-align:center;font-size:10px;color:#d4dae3;letter-spacing:1px;text-transform:uppercase;font-weight:600">Odds</th>
               <th style="padding:6px 10px;text-align:center;font-size:10px;color:#d4dae3;letter-spacing:1px;text-transform:uppercase;font-weight:600" title="Points difference: model proj minus line">Edge</th>
+              <th style="padding:6px 10px;text-align:center;font-size:10px;color:#d4dae3;letter-spacing:1px;text-transform:uppercase;font-weight:600" title="Model probability this side hits at this line">Win %</th>
               <th style="padding:6px 10px;text-align:center;font-size:10px;color:#d4dae3;letter-spacing:1px;text-transform:uppercase;font-weight:600"></th>
             </tr>
           </thead>
