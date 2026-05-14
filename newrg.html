@@ -537,6 +537,7 @@ select.sel:focus { border-color: var(--teal); }
   <div class="top-actions">
     <button class="btn primary" onclick="openPasteModal()">+ Paste PropShop</button>
     <button class="btn" onclick="openGradeModal()" title="Auto-grade from MLB API">⟳ Grade</button>
+    <button class="btn ghost" id="copyStatsBtn" onclick="copyAllStats()" title="Copy a plain-text breakdown of all stats">⧉ Copy Stats</button>
     <button class="btn ghost" onclick="exportExcel()">↓ Excel</button>
     <button class="btn ghost" onclick="openManageModal()">⋯ Manage</button>
   </div>
@@ -1549,6 +1550,49 @@ function renderDashboard() {
     return `<tr class="mkt-group-header"><td colspan="9" style="background:var(--bg3);padding:6px 12px"><span class="mkt-tag ${mInfo.group}" style="font-size:11px">${mInfo.label}</span></td></tr>${subRows}`;
   }).filter(Boolean).join('');
 
+  // FLAT: every market × tier × side combo as its own row, sortable by ROI
+  const flatCombos = [];
+  markets.forEach(m => {
+    tiers.forEach(b => {
+      ['O','U'].forEach(side => {
+        const subset = props.filter(p => p.market === m && bucket(p.ev||0) === b && p.side === side);
+        if (subset.length === 0) return;
+        const s = calcStats(subset);
+        if (s.settled === 0 && s.total === 0) return;
+        flatCombos.push({ market: m, tier: b, side, stats: s });
+      });
+    });
+  });
+  // Sort by ROI desc (nulls last), then by P&L desc
+  flatCombos.sort((a, b) => {
+    const ra = a.stats.roi, rb = b.stats.roi;
+    if (ra === null && rb === null) return b.stats.pnl - a.stats.pnl;
+    if (ra === null) return 1;
+    if (rb === null) return -1;
+    if (ra !== rb) return rb - ra;
+    return b.stats.pnl - a.stats.pnl;
+  });
+  const flatRows = flatCombos.map(c => {
+    const mInfo = MARKET_MAP[c.market] || { label: c.market, group: '' };
+    const tierBadge = c.tier.startsWith('Elite') ? 'elite' : c.tier.startsWith('Strong') ? 'strong' : 'value';
+    const tierLabel = c.tier.startsWith('Elite') ? 'Elite' : c.tier.startsWith('Strong') ? 'Strong' : 'Value';
+    const sideLabel = c.side === 'O' ? '<span class="side-o strong">Over</span>' : '<span class="side-u strong">Under</span>';
+    const s = c.stats;
+    const pnlC = s.pnl > 0 ? 'pos' : s.pnl < 0 ? 'neg' : 'muted';
+    const roiC = s.roi !== null && s.roi >= 0 ? 'pos' : s.roi !== null ? 'neg' : 'muted';
+    return `<tr>
+      <td><span class="mkt-tag ${mInfo.group}">${mInfo.label}</span></td>
+      <td><span class="ev-bd ${tierBadge}">${tierLabel}</span></td>
+      <td>${sideLabel}</td>
+      <td class="c mono">${s.w}-${s.l}${s.pu?'-'+s.pu:''}</td>
+      <td class="c mono">${s.wr!==null?s.wr.toFixed(0)+'%':'—'}</td>
+      <td class="r mono ${pnlC}">${fmtU(s.pnl)}</td>
+      <td class="r mono ${roiC}">${s.roi!==null?(s.roi>=0?'+':'')+s.roi.toFixed(1)+'%':'—'}</td>
+      <td class="c mono dim">${s.total}</td>
+    </tr>`;
+  }).join('');
+
+
 
   wrap.innerHTML = `
     ${kpiStrip(props)}
@@ -1619,6 +1663,23 @@ function renderDashboard() {
             <th class="c" style="font-size:9px">W-L</th><th class="c" style="font-size:9px">W%</th><th class="r" style="font-size:9px">P&L</th><th class="r" style="font-size:9px">ROI</th>
           </tr></thead>
           <tbody>${marketTierSideRows || '<tr><td colspan="9" class="c dim" style="padding:20px">No settled bets yet</td></tr>'}</tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">
+        <span class="panel-title">Lookup — Market × Tier × Side</span>
+        <span class="muted" style="font-size:11px">Sorted by ROI · ${flatCombos.length} combo${flatCombos.length===1?'':'s'}</span>
+      </div>
+      <div class="panel-body compact">
+        <table class="tbl">
+          <thead><tr>
+            <th>Market</th><th>Tier</th><th>Side</th>
+            <th class="c">W-L</th><th class="c">W%</th>
+            <th class="r">P&L</th><th class="r">ROI</th><th class="c">Bets</th>
+          </tr></thead>
+          <tbody>${flatRows || '<tr><td colspan="8" class="c dim" style="padding:20px">No settled bets yet</td></tr>'}</tbody>
         </table>
       </div>
     </div>
@@ -2077,6 +2138,228 @@ function renderPropTable(arr, compact) {
       <tbody>${rows}</tbody>
     </table>
   </div>`;
+}
+
+// ===== COPY STATS AS PLAIN TEXT =====
+function copyAllStats() {
+  if (!props.length) { alert('No props to copy.'); return; }
+
+  // ---- helpers (no special chars, ASCII only) ----
+  const fmtPnl = n => (n >= 0 ? '+' : '') + n.toFixed(2) + 'u';
+  const fmtRoi = r => r === null ? '--' : (r >= 0 ? '+' : '') + r.toFixed(1) + '%';
+  const fmtWr = w => w === null ? '--' : w.toFixed(1) + '%';
+  const fmtRec = s => s.w + '-' + s.l + (s.pu ? '-' + s.pu : '');
+  const pad = (s, n, right) => {
+    s = String(s);
+    if (s.length >= n) return s;
+    return right ? s + ' '.repeat(n - s.length) : ' '.repeat(n - s.length) + s;
+  };
+  const padR = (s, n) => pad(s, n, true);
+  const padL = (s, n) => pad(s, n, false);
+
+  const lines = [];
+  const sep = '-'.repeat(78);
+  const dsep = '='.repeat(78);
+
+  // ---- HEADER ----
+  lines.push('ROTOGRINDERS MLB PITCHER PROPS');
+  lines.push('Export: ' + new Date().toLocaleDateString() + ' ' + new Date().toLocaleTimeString());
+  lines.push(dsep);
+  lines.push('');
+
+  // ---- OVERALL ----
+  const ov = calcStats(props);
+  lines.push('OVERALL');
+  lines.push(sep);
+  lines.push(padR('Record', 18) + padR('W%', 10) + padR('P&L', 14) + padR('ROI', 12) + 'Bets');
+  lines.push(padR(fmtRec(ov), 18) + padR(fmtWr(ov.wr), 10) + padR(fmtPnl(ov.pnl), 14) + padR(fmtRoi(ov.roi), 12) + ov.total + ' (' + ov.settled + ' settled, ' + ov.pending + ' pending)');
+  lines.push('');
+
+  // ---- HELPER: table block ----
+  function tableBlock(title, rows) {
+    // rows: [{ label, stats }]
+    const out = [];
+    out.push(title);
+    out.push(sep);
+    out.push(padR('Category', 26) + padR('W-L', 10) + padR('W%', 10) + padR('P&L', 12) + padR('ROI', 12) + 'Bets');
+    rows.forEach(r => {
+      const s = r.stats;
+      out.push(padR(r.label, 26) + padR(fmtRec(s), 10) + padR(fmtWr(s.wr), 10) + padR(fmtPnl(s.pnl), 12) + padR(fmtRoi(s.roi), 12) + s.total);
+    });
+    out.push('');
+    return out;
+  }
+
+  // ---- BY MARKET ----
+  const markets = [...new Set(props.map(p => p.market))].sort();
+  const mktRows = markets.map(m => ({
+    label: (MARKET_MAP[m] && MARKET_MAP[m].label) || m,
+    stats: calcStats(props.filter(p => p.market === m))
+  })).filter(r => r.stats.total > 0);
+  if (mktRows.length) lines.push(...tableBlock('BY MARKET', mktRows));
+
+  // ---- BY DIRECTION ----
+  const dirRows = [];
+  const oS = calcStats(props.filter(p => p.side === 'O'));
+  const uS = calcStats(props.filter(p => p.side === 'U'));
+  if (oS.total) dirRows.push({ label: 'Over', stats: oS });
+  if (uS.total) dirRows.push({ label: 'Under', stats: uS });
+  if (dirRows.length) lines.push(...tableBlock('BY DIRECTION', dirRows));
+
+  // ---- BY EV TIER ----
+  const bucket = ev => ev >= 25 ? 'Elite (25%+)' : ev >= 15 ? 'Strong (15-24%)' : 'Value (5-14%)';
+  const tiers = ['Elite (25%+)', 'Strong (15-24%)', 'Value (5-14%)'];
+  const evRows = tiers.map(t => ({
+    label: t,
+    stats: calcStats(props.filter(p => bucket(p.ev || 0) === t))
+  })).filter(r => r.stats.total > 0);
+  if (evRows.length) lines.push(...tableBlock('BY EV TIER', evRows));
+
+  // ---- OVER vs UNDER BY MARKET ----
+  if (markets.length) {
+    lines.push('OVER VS UNDER BY MARKET');
+    lines.push(sep);
+    lines.push(padR('Market', 12) + padR('Side', 8) + padR('W-L', 10) + padR('W%', 10) + padR('P&L', 12) + padR('ROI', 12) + 'Bets');
+    markets.forEach(m => {
+      const mInfo = MARKET_MAP[m] || { label: m };
+      const o = calcStats(props.filter(p => p.market === m && p.side === 'O'));
+      const u = calcStats(props.filter(p => p.market === m && p.side === 'U'));
+      if (o.total) lines.push(padR(mInfo.label, 12) + padR('Over', 8) + padR(fmtRec(o), 10) + padR(fmtWr(o.wr), 10) + padR(fmtPnl(o.pnl), 12) + padR(fmtRoi(o.roi), 12) + o.total);
+      if (u.total) lines.push(padR(mInfo.label, 12) + padR('Under', 8) + padR(fmtRec(u), 10) + padR(fmtWr(u.wr), 10) + padR(fmtPnl(u.pnl), 12) + padR(fmtRoi(u.roi), 12) + u.total);
+    });
+    lines.push('');
+  }
+
+  // ---- OVER vs UNDER BY EV TIER ----
+  if (evRows.length) {
+    lines.push('OVER VS UNDER BY EV TIER');
+    lines.push(sep);
+    lines.push(padR('Tier', 18) + padR('Side', 8) + padR('W-L', 10) + padR('W%', 10) + padR('P&L', 12) + padR('ROI', 12) + 'Bets');
+    tiers.forEach(t => {
+      const o = calcStats(props.filter(p => bucket(p.ev || 0) === t && p.side === 'O'));
+      const u = calcStats(props.filter(p => bucket(p.ev || 0) === t && p.side === 'U'));
+      if (o.total) lines.push(padR(t, 18) + padR('Over', 8) + padR(fmtRec(o), 10) + padR(fmtWr(o.wr), 10) + padR(fmtPnl(o.pnl), 12) + padR(fmtRoi(o.roi), 12) + o.total);
+      if (u.total) lines.push(padR(t, 18) + padR('Under', 8) + padR(fmtRec(u), 10) + padR(fmtWr(u.wr), 10) + padR(fmtPnl(u.pnl), 12) + padR(fmtRoi(u.roi), 12) + u.total);
+    });
+    lines.push('');
+  }
+
+  // ---- MARKET x TIER x SIDE (sorted by ROI desc) ----
+  const combos = [];
+  markets.forEach(m => {
+    tiers.forEach(t => {
+      ['O', 'U'].forEach(side => {
+        const subset = props.filter(p => p.market === m && bucket(p.ev || 0) === t && p.side === side);
+        if (!subset.length) return;
+        const cs = calcStats(subset);
+        if (cs.total === 0) return;
+        const mInfo = MARKET_MAP[m] || { label: m };
+        const tierShort = t.split(' ')[0];
+        combos.push({ market: mInfo.label, tier: tierShort, side: side === 'O' ? 'Over' : 'Under', stats: cs });
+      });
+    });
+  });
+  combos.sort((a, b) => {
+    const ra = a.stats.roi, rb = b.stats.roi;
+    if (ra === null && rb === null) return b.stats.pnl - a.stats.pnl;
+    if (ra === null) return 1;
+    if (rb === null) return -1;
+    if (ra !== rb) return rb - ra;
+    return b.stats.pnl - a.stats.pnl;
+  });
+  if (combos.length) {
+    lines.push('MARKET x TIER x SIDE (sorted by ROI)');
+    lines.push(sep);
+    lines.push(padR('Market', 10) + padR('Tier', 10) + padR('Side', 8) + padR('W-L', 10) + padR('W%', 10) + padR('P&L', 12) + padR('ROI', 12) + 'Bets');
+    combos.forEach(c => {
+      lines.push(padR(c.market, 10) + padR(c.tier, 10) + padR(c.side, 8) + padR(fmtRec(c.stats), 10) + padR(fmtWr(c.stats.wr), 10) + padR(fmtPnl(c.stats.pnl), 12) + padR(fmtRoi(c.stats.roi), 12) + c.stats.total);
+    });
+    lines.push('');
+  }
+
+  // ---- DAILY ----
+  const byDate = {};
+  props.forEach(p => { const d = p.date || 'Unknown'; if (!byDate[d]) byDate[d] = []; byDate[d].push(p); });
+  const sortedDates = Object.keys(byDate).sort().reverse();
+  if (sortedDates.length) {
+    lines.push('DAILY');
+    lines.push(sep);
+    lines.push(padR('Date', 14) + padR('W-L', 10) + padR('W%', 10) + padR('P&L', 12) + padR('ROI', 12) + 'Bets');
+    sortedDates.forEach(d => {
+      const s = calcStats(byDate[d]);
+      lines.push(padR(d, 14) + padR(fmtRec(s), 10) + padR(fmtWr(s.wr), 10) + padR(fmtPnl(s.pnl), 12) + padR(fmtRoi(s.roi), 12) + s.total);
+    });
+    lines.push('');
+  }
+
+  // ---- WEEKLY ----
+  const byWeek = {};
+  props.forEach(p => { const w = isoWeek(p.date || getTodayStr()); if (!byWeek[w]) byWeek[w] = []; byWeek[w].push(p); });
+  const sortedWeeks = Object.keys(byWeek).sort().reverse();
+  if (sortedWeeks.length) {
+    lines.push('WEEKLY');
+    lines.push(sep);
+    lines.push(padR('Week', 12) + padR('Range', 18) + padR('W-L', 10) + padR('W%', 10) + padR('P&L', 12) + padR('ROI', 12) + 'Bets');
+    sortedWeeks.forEach(w => {
+      const s = calcStats(byWeek[w]);
+      const wr = weekRange(w);
+      const labelAscii = wr.label.replace(/–/g, '-').replace(/—/g, '-');
+      lines.push(padR(w, 12) + padR(labelAscii, 18) + padR(fmtRec(s), 10) + padR(fmtWr(s.wr), 10) + padR(fmtPnl(s.pnl), 12) + padR(fmtRoi(s.roi), 12) + s.total);
+    });
+    lines.push('');
+  }
+
+  lines.push(dsep);
+  lines.push('End of report');
+
+  const text = lines.join('\n');
+
+  // Copy to clipboard with fallback
+  const showOk = () => {
+    const btn = document.getElementById('copyStatsBtn');
+    if (btn) {
+      const orig = btn.textContent;
+      btn.textContent = 'Copied!';
+      btn.style.color = 'var(--teal)';
+      setTimeout(() => { btn.textContent = orig; btn.style.color = ''; }, 1500);
+    }
+  };
+
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(showOk).catch(() => fallbackCopy(text, showOk));
+  } else {
+    fallbackCopy(text, showOk);
+  }
+}
+
+function fallbackCopy(text, onSuccess) {
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.left = '-9999px';
+  document.body.appendChild(ta);
+  ta.select();
+  try {
+    document.execCommand('copy');
+    onSuccess();
+  } catch (e) {
+    // Final fallback: show in a modal so user can manually copy
+    showCopyModal(text);
+  }
+  document.body.removeChild(ta);
+}
+
+function showCopyModal(text) {
+  const modal = document.createElement('div');
+  modal.className = 'modal-ov open';
+  modal.style.zIndex = 9999;
+  modal.innerHTML = '<div class="modal" style="width:720px;max-width:95vw"><div class="modal-title">Copy Stats</div><div class="modal-sub">Auto-copy failed. Select all and copy manually.</div><textarea readonly style="width:100%;height:50vh;background:var(--bg);border:1px solid var(--border2);border-radius:6px;color:var(--text);font-family:var(--mono);font-size:11px;padding:10px;resize:none">' + text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</textarea><div class="modal-actions"><button class="btn primary" onclick="this.closest(\'.modal-ov\').remove()">Close</button></div></div>';
+  document.body.appendChild(modal);
+  setTimeout(() => {
+    const ta = modal.querySelector('textarea');
+    if (ta) ta.select();
+  }, 50);
+  modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
 }
 
 // ===== EXCEL EXPORT =====
