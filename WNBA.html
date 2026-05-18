@@ -162,6 +162,7 @@ table colgroup col.avg-col{width:16%;}
   <button class="tab-btn" onclick="switchTab('totals')">TOTALS</button>
   <button class="tab-btn" onclick="switchTab('tracker')">TRACKER</button>
   <button class="tab-btn" onclick="switchTab('autograde')">AUTO GRADE</button>
+  <button class="tab-btn" onclick="switchTab('pace')">PACE</button>
 </div>
 
 <div id="main">
@@ -182,6 +183,8 @@ table colgroup col.avg-col{width:16%;}
   <div id="tracker-tab" style="display:none;"></div>
 
   <div id="autograde-tab" style="display:none;"></div>
+
+  <div id="pace-tab" style="display:none;"></div>
 
   <div id="totals-tab" style="display:none;"></div>
 
@@ -497,6 +500,7 @@ function independentTotal(awayAbbr, homeAbbr, season) {
     total: ptsA + ptsB,
     ptsA, ptsB,
     paceAB,
+    projPoss: actualPoss,   // per-40 projected possessions (the pace backbone)
     leagueAvg: leagueOrtg,
     usedFallback,
     aSource: aEff.source,
@@ -787,9 +791,11 @@ function switchTab(tab) {
   document.getElementById("totals-tab").style.display = tab==="totals"?"block":"none";
   document.getElementById("tracker-tab").style.display = tab==="tracker"?"block":"none";
   document.getElementById("autograde-tab").style.display = tab==="autograde"?"block":"none";
+  document.getElementById("pace-tab").style.display = tab==="pace"?"block":"none";
   if (tab==="tracker") renderTracker();
   if (tab==="autograde") renderAutoGrade();
   if (tab==="totals") renderTotals();
+  if (tab==="pace") renderPace();
 }
 
 function toggleConOnly() {
@@ -1304,9 +1310,9 @@ function trackRow(i) {
 function trackTotal(payload, ...legacyArgs) {
   // New API: trackTotal({awayAbbr, homeAbbr, side, line, odds, book, projTotal, projSource, snapshots})
   // Legacy API: trackTotal(awayAbbr, homeAbbr, side, line, odds, book, projTotal, projSource)
-  let awayAbbr, homeAbbr, side, line, odds, book, projTotal, projSource, snapshots = null;
+  let awayAbbr, homeAbbr, side, line, odds, book, projTotal, projSource, snapshots = null, projPoss = null, paceEffProj = null;
   if (typeof payload === "object" && payload !== null && payload.awayAbbr) {
-    ({ awayAbbr, homeAbbr, side, line, odds, book, projTotal, projSource, snapshots } = payload);
+    ({ awayAbbr, homeAbbr, side, line, odds, book, projTotal, projSource, snapshots, projPoss, paceEffProj } = payload);
   } else {
     awayAbbr = payload;
     [homeAbbr, side, line, odds, book, projTotal, projSource] = legacyArgs;
@@ -1317,9 +1323,11 @@ function trackTotal(payload, ...legacyArgs) {
   let presetDate = null;
   try { presetDate = localStorage.getItem("wnba_last_total_date") || null; } catch(e) {}
   openTrackModal(label, "TOT", "GAME_TOTAL", projTotal, `${awayAbbr}/${homeAbbr}`, presetDate);
-  // Stash which projection model produced this bet + the all-models snapshot
+  // Stash which projection model produced this bet + the all-models snapshot + pace data
   window._modalProjSource = projSource || null;
   window._modalProjSnapshots = snapshots || null;
+  window._modalProjPoss = projPoss != null ? projPoss : null;
+  window._modalPaceEffProj = paceEffProj != null ? paceEffProj : null;
   setTimeout(() => {
     const shorthand = document.getElementById("modal-shorthand");
     const bookEl = document.getElementById("modal-book");
@@ -1361,6 +1369,8 @@ function openTrackModal(player, pos, stat, proj, team, presetDate) {
   window._modalEvTyped = null;
   window._modalProjSource = null;
   window._modalProjSnapshots = null;
+  window._modalProjPoss = null;
+  window._modalPaceEffProj = null;
   clearAltBooks();
   const dateEl = document.getElementById("modal-date"); if(dateEl) dateEl.value = window._modalPresetDate || new Date().toISOString().split("T")[0];
   document.getElementById("modal-stat").value = stat || "PTS";
@@ -1876,6 +1886,8 @@ function saveBet() {
   if (stat === "GAME_TOTAL") {
     if (window._modalProjSource) bet.projSource = window._modalProjSource;
     if (window._modalProjSnapshots) bet.projSnapshots = window._modalProjSnapshots;
+    if (window._modalProjPoss != null) bet.projPoss = window._modalProjPoss;
+    if (window._modalPaceEffProj != null) bet.paceEffProj = window._modalPaceEffProj;
   }
   bets.unshift(bet);
   // Remember the date used for totals so the next total prefills it (slate is days out)
@@ -2417,6 +2429,228 @@ async function gradeAllPending(mode) {
   if (skipped) toastBits.push(`${skipped} not final`);
   if (failed) toastBits.push(`${failed} failed`);
   showToast(toastBits.join(" • "));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PACE ANALYSIS — realized possessions vs projected, per settled GAME_TOTAL bet
+// ═══════════════════════════════════════════════════════════════════════════
+let paceRows = [];          // computed analysis rows
+let paceAnalyzing = false;
+let _paceTeamCache = {};     // eventId → { away:{poss}, home:{poss}, total }
+
+// Pull a number out of ESPN's team statistics array by trying several label keys.
+function _espnTeamStat(statsArr, keys) {
+  for (const s of statsArr) {
+    const nm = (s.name || s.label || s.abbreviation || "").toString().toLowerCase();
+    if (keys.some(k => nm === k)) {
+      const v = parseFloat(s.displayValue != null ? s.displayValue : s.value);
+      if (!isNaN(v)) return v;
+    }
+  }
+  // Some feeds nest made/attempted as "12-24" — handle FGA/FTA pulled from a combined cell
+  return null;
+}
+
+// Compute possessions for one team's box totals.
+// Poss ≈ FGA + 0.44*FTA − OREB + TOV
+function _possFromTeamTotals(t) {
+  if (t.fga == null || t.tov == null) return null;
+  const fta = t.fta != null ? t.fta : 0;
+  const oreb = t.oreb != null ? t.oreb : 0;
+  return t.fga + 0.44 * fta - oreb + t.tov;
+}
+
+async function _fetchTeamPossForEvent(eventId) {
+  if (_paceTeamCache[eventId]) return _paceTeamCache[eventId];
+  let summary;
+  try {
+    const r = await fetch(`https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/summary?event=${eventId}`);
+    if (!r.ok) return null;
+    summary = await r.json();
+  } catch { return null; }
+  const teams = summary.boxscore?.teams || [];
+  if (teams.length < 2) return null;
+  const parseTeam = (teamObj) => {
+    const statsArr = teamObj.statistics || [];
+    // ESPN often gives "fieldGoalsAttempted", "freeThrowsAttempted", "offensiveRebounds", "turnovers"
+    const fga = _espnTeamStat(statsArr, ["fieldgoalsattempted","fga"]);
+    const fta = _espnTeamStat(statsArr, ["freethrowsattempted","fta"]);
+    const oreb = _espnTeamStat(statsArr, ["offensiverebounds","oreb","offreb"]);
+    const tov = _espnTeamStat(statsArr, ["turnovers","totalturnovers","to"]);
+    return { fga, fta, oreb, tov, abbr: normTeamAbbr(teamObj.team?.abbreviation) };
+  };
+  const tA = parseTeam(teams[0]);
+  const tB = parseTeam(teams[1]);
+  const possA = _possFromTeamTotals(tA);
+  const possB = _possFromTeamTotals(tB);
+  if (possA == null || possB == null) {
+    _paceTeamCache[eventId] = { incomplete: true };
+    return _paceTeamCache[eventId];
+  }
+  // Game pace = average of the two teams' possession estimates (standard convention)
+  const gamePoss = (possA + possB) / 2;
+  const out = { possA, possB, gamePoss, teamA: tA, teamB: tB };
+  _paceTeamCache[eventId] = out;
+  return out;
+}
+
+async function analyzePace() {
+  if (paceAnalyzing) return;
+  // Only settled GAME_TOTAL bets that have a projected possessions value
+  const totals = bets.filter(b =>
+    (b.stat||"").toUpperCase() === "GAME_TOTAL" &&
+    b.result && b.result !== "pending"
+  );
+  if (!totals.length) {
+    showToast("No settled totals to analyze");
+    return;
+  }
+  paceAnalyzing = true;
+  renderPace();
+  paceRows = [];
+  // Dedupe by game (same matchup+date) so we don't double-count both sides of a total
+  const seen = new Set();
+  for (const b of totals) {
+    const iso = getBetISODate(b);
+    if (!iso) continue;
+    const gameKey = `${b.team}|${iso}`;
+    if (seen.has(gameKey)) continue;
+    seen.add(gameKey);
+
+    let awayAbbr = null, homeAbbr = null;
+    if (b.team && b.team.includes("/")) [awayAbbr, homeAbbr] = b.team.split("/").map(s => normTeamAbbr(s.trim()));
+
+    // Find the ESPN event for this game
+    let meta;
+    try { ({ meta } = await fetchESPNStatsForDate(iso)); } catch { meta = null; }
+    const game = meta && meta.games ? meta.games.find(g =>
+      normTeamAbbr(g.awayAbbr) === awayAbbr && normTeamAbbr(g.homeAbbr) === homeAbbr) : null;
+
+    const row = {
+      matchup: `${awayAbbr} @ ${homeAbbr}`,
+      date: iso,
+      line: b.line,
+      side: b.ou,
+      result: b.result,
+      projTotal: b.paceEffProj != null ? b.paceEffProj : (b.proj != null ? b.proj : null),
+      projPoss: b.projPoss != null ? b.projPoss : null,
+      projPossApprox: b.projPoss == null,
+      actualTotal: null,
+      realizedPoss: null,
+      paceDelta: null,
+      verdict: "no data"
+    };
+
+    if (!game) { row.verdict = "game not found"; paceRows.push(row); renderPace(); continue; }
+    if (!game.completed) { row.verdict = "not final"; paceRows.push(row); renderPace(); continue; }
+    row.actualTotal = (game.awayScore != null && game.homeScore != null) ? game.awayScore + game.homeScore : null;
+
+    const tp = await _fetchTeamPossForEvent(game.eventId);
+    if (!tp || tp.incomplete) {
+      row.verdict = "box totals unavailable";
+      paceRows.push(row); renderPace(); continue;
+    }
+    row.realizedPoss = Math.round(tp.gamePoss * 10) / 10;
+
+    // Back-derive projected possessions if not stored: projTotal / leagueEff-ish.
+    // Better: if we have projTotal and projPoss missing, approximate poss from projTotal
+    // assuming ~ the realized efficiency — but that's circular. Instead, if projPoss is
+    // missing we mark it approx and skip the delta (can't trust it).
+    if (row.projPoss != null) {
+      row.paceDelta = Math.round((row.realizedPoss - row.projPoss) * 10) / 10;
+      const absD = Math.abs(row.paceDelta);
+      row.verdict = absD <= 3 ? "PACE OK" : absD <= 6 ? "PACE SOFT" : "PACE MISS";
+    } else {
+      row.verdict = "no proj poss";
+    }
+    paceRows.push(row);
+    renderPace();
+  }
+  paceAnalyzing = false;
+  renderPace();
+  showToast(`Analyzed ${paceRows.length} game(s)`);
+}
+
+function renderPace() {
+  const el = document.getElementById("pace-tab");
+  if (!el) return;
+  const totalsCount = bets.filter(b => (b.stat||"").toUpperCase()==="GAME_TOTAL" && b.result && b.result!=="pending").length;
+  const btnDisabled = paceAnalyzing || totalsCount === 0;
+  const btnLabel = paceAnalyzing ? "Analyzing..." : `Analyze Pace (${totalsCount})`;
+
+  // Summary stats from rows that have a real pace delta
+  const scored = paceRows.filter(r => r.paceDelta != null);
+  let summaryHtml = "";
+  if (scored.length) {
+    const avgAbsErr = scored.reduce((s,r)=>s+Math.abs(r.paceDelta),0)/scored.length;
+    const paceRight = scored.filter(r => Math.abs(r.paceDelta) <= 3);
+    const paceWrong = scored.filter(r => Math.abs(r.paceDelta) > 3);
+    const wr = arr => {
+      const settled = arr.filter(r => r.result === "hit" || r.result === "miss");
+      if (!settled.length) return "—";
+      const w = settled.filter(r => r.result === "hit").length;
+      return `${w}-${settled.length-w} (${Math.round(w/settled.length*100)}%)`;
+    };
+    summaryHtml = `
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:20px;">
+        <div style="background:#0d1117;border:1px solid #1f2733;border-radius:8px;padding:14px;">
+          <div style="font-size:10px;color:#a8b0bb;letter-spacing:0.6px;text-transform:uppercase;font-weight:700;">Avg Pace Error</div>
+          <div style="font-size:24px;font-weight:800;color:#FDB927;margin-top:4px;">${avgAbsErr.toFixed(1)}<span style="font-size:12px;color:#7a8390;"> poss</span></div>
+        </div>
+        <div style="background:#0d1117;border:1px solid #1f2733;border-radius:8px;padding:14px;">
+          <div style="font-size:10px;color:#a8b0bb;letter-spacing:0.6px;text-transform:uppercase;font-weight:700;">Pace Right (≤3)</div>
+          <div style="font-size:24px;font-weight:800;color:#22c55e;margin-top:4px;">${paceRight.length}<span style="font-size:12px;color:#7a8390;">/${scored.length}</span></div>
+          <div style="font-size:11px;color:#8b93a0;margin-top:2px;">record ${wr(paceRight)}</div>
+        </div>
+        <div style="background:#0d1117;border:1px solid #1f2733;border-radius:8px;padding:14px;">
+          <div style="font-size:10px;color:#a8b0bb;letter-spacing:0.6px;text-transform:uppercase;font-weight:700;">Pace Wrong (>3)</div>
+          <div style="font-size:24px;font-weight:800;color:#f87171;margin-top:4px;">${paceWrong.length}<span style="font-size:12px;color:#7a8390;">/${scored.length}</span></div>
+          <div style="font-size:11px;color:#8b93a0;margin-top:2px;">record ${wr(paceWrong)}</div>
+        </div>
+      </div>`;
+  }
+
+  const verdictColor = v =>
+    v === "PACE OK" ? "#22c55e" :
+    v === "PACE SOFT" ? "#FDB927" :
+    v === "PACE MISS" ? "#f87171" : "#7a8390";
+
+  const rowsHtml = paceRows.length === 0
+    ? `<div style="color:#525a64;font-size:13px;padding:24px;text-align:center;">Hit Analyze Pace to compute realized possessions for your settled totals.</div>`
+    : `<div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;font-size:12px;white-space:nowrap;">
+        <thead><tr style="border-bottom:1px solid #252525;color:#8b93a0;text-align:left;">
+          <th style="padding:8px 10px;">GAME</th><th style="padding:8px 10px;">DATE</th>
+          <th style="padding:8px 10px;text-align:right;">PROJ POSS</th>
+          <th style="padding:8px 10px;text-align:right;">REAL POSS</th>
+          <th style="padding:8px 10px;text-align:right;">Δ PACE</th>
+          <th style="padding:8px 10px;text-align:right;">PROJ TOT</th>
+          <th style="padding:8px 10px;text-align:right;">ACTUAL</th>
+          <th style="padding:8px 10px;">VERDICT</th>
+        </tr></thead><tbody>
+        ${paceRows.map(r => `
+          <tr style="border-bottom:1px solid #161b22;">
+            <td style="padding:8px 10px;color:#fff;font-weight:600;">${r.matchup}</td>
+            <td style="padding:8px 10px;color:#7a8390;">${r.date}</td>
+            <td style="padding:8px 10px;text-align:right;color:${r.projPoss!=null?'#d4dae3':'#525a64'};">${r.projPoss!=null?r.projPoss.toFixed(1):'—'}</td>
+            <td style="padding:8px 10px;text-align:right;color:#FDB927;font-weight:700;">${r.realizedPoss!=null?r.realizedPoss.toFixed(1):'—'}</td>
+            <td style="padding:8px 10px;text-align:right;font-weight:700;color:${r.paceDelta==null?'#525a64':Math.abs(r.paceDelta)<=3?'#22c55e':Math.abs(r.paceDelta)<=6?'#FDB927':'#f87171'};">${r.paceDelta!=null?(r.paceDelta>0?'+':'')+r.paceDelta.toFixed(1):'—'}</td>
+            <td style="padding:8px 10px;text-align:right;color:#8b93a0;">${r.projTotal!=null?r.projTotal.toFixed(1):'—'}</td>
+            <td style="padding:8px 10px;text-align:right;color:#d4dae3;">${r.actualTotal!=null?r.actualTotal:'—'}</td>
+            <td style="padding:8px 10px;"><span style="color:${verdictColor(r.verdict)};font-weight:700;font-size:11px;">${r.verdict}</span></td>
+          </tr>`).join("")}
+        </tbody></table></div>`;
+
+  el.innerHTML = `
+    <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:20px;flex-wrap:wrap;gap:16px;">
+      <div>
+        <div style="font-size:22px;font-weight:800;color:#fff;margin-bottom:4px;">Pace Analysis</div>
+        <div style="font-size:13px;color:#d4dae3;max-width:560px;line-height:1.5;">Realized possessions (FGA + 0.44·FTA − OREB + TOV, averaged) vs your projected pace. If pace was right and you still lost, that's variance. If pace was wrong, that's a model problem.</div>
+      </div>
+      <button onclick="analyzePace()" ${btnDisabled?"disabled":""} style="background:${btnDisabled?'#1f2733':'#552583'};border:none;color:${btnDisabled?'#d4dae3':'#0d1117'};border-radius:8px;padding:14px 24px;font-size:14px;font-weight:800;cursor:${btnDisabled?'not-allowed':'pointer'};font-family:'Inter',sans-serif;letter-spacing:0.3px;">${btnLabel}</button>
+    </div>
+    ${summaryHtml}
+    <div style="background:#0a0e13;border:1px solid #1f2733;border-radius:8px;min-height:200px;">${rowsHtml}</div>
+    <div style="font-size:10px;color:#525a64;margin-top:10px;line-height:1.5;">Δ Pace = realized − projected possessions. Green ≤3 (pace right), amber ≤6 (soft), red >6 (pace miss). Bets tracked before this feature won't have stored projected possessions and show "no proj poss" — only new totals get the exact comparison.</div>`;
 }
 
 function renderAutoGrade() {
@@ -3524,6 +3758,8 @@ function renderTotals() {
                 book: bookSafe.replace(/\\'/g, "'"),
                 projTotal,
                 projSource,
+                projPoss: indepInfo && indepInfo.projPoss != null ? Math.round(indepInfo.projPoss * 10) / 10 : null,
+                paceEffProj: paceEffTotal != null ? Math.round(paceEffTotal * 10) / 10 : null,
                 snapshots: {
                   blended: blendedTotal != null && probsFor(blendedTotal) ? { total: blendedTotal, winProb: b.side === "over" ? probsFor(blendedTotal).pOver : probsFor(blendedTotal).pUnder } : null,
                   paceeff: paceEffTotal != null && probsFor(paceEffTotal) ? { total: paceEffTotal, winProb: b.side === "over" ? probsFor(paceEffTotal).pOver : probsFor(paceEffTotal).pUnder } : null,
