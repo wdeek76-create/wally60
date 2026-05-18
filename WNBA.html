@@ -1312,7 +1312,11 @@ function trackTotal(payload, ...legacyArgs) {
     [homeAbbr, side, line, odds, book, projTotal, projSource] = legacyArgs;
   }
   const label = `${awayAbbr} @ ${homeAbbr}`;
-  openTrackModal(label, "TOT", "GAME_TOTAL", projTotal, `${awayAbbr}/${homeAbbr}`);
+  // Totals are often tracked days ahead. Reuse the last date used for a total
+  // (persisted) so you set it once per slate instead of every single bet.
+  let presetDate = null;
+  try { presetDate = localStorage.getItem("wnba_last_total_date") || null; } catch(e) {}
+  openTrackModal(label, "TOT", "GAME_TOTAL", projTotal, `${awayAbbr}/${homeAbbr}`, presetDate);
   // Stash which projection model produced this bet + the all-models snapshot
   window._modalProjSource = projSource || null;
   window._modalProjSnapshots = snapshots || null;
@@ -1334,12 +1338,13 @@ function trackTotal(payload, ...legacyArgs) {
   }, 60);
 }
 
-function openTrackModal(player, pos, stat, proj, team) {
+function openTrackModal(player, pos, stat, proj, team, presetDate) {
   modalPlayer = player;
   modalPos = pos;
   document.getElementById("modal-player-name").textContent = player;
   document.getElementById("modal-player-sub").textContent = (pos||"") + " · Add a bet";
   // Reset shorthand and hidden fields
+  window._modalPresetDate = presetDate || null;
   const shorthand = document.getElementById("modal-shorthand");
   if (shorthand) { shorthand.value = ""; shorthand.style.borderColor = "#1f2733"; }
   const sp = document.getElementById("shorthand-preview");
@@ -1357,7 +1362,7 @@ function openTrackModal(player, pos, stat, proj, team) {
   window._modalProjSource = null;
   window._modalProjSnapshots = null;
   clearAltBooks();
-  const dateEl = document.getElementById("modal-date"); if(dateEl) dateEl.value = new Date().toISOString().split("T")[0];
+  const dateEl = document.getElementById("modal-date"); if(dateEl) dateEl.value = window._modalPresetDate || new Date().toISOString().split("T")[0];
   document.getElementById("modal-stat").value = stat || "PTS";
   // Update locked stat badge
   const statDisp = document.getElementById("modal-stat-display");
@@ -1873,6 +1878,10 @@ function saveBet() {
     if (window._modalProjSnapshots) bet.projSnapshots = window._modalProjSnapshots;
   }
   bets.unshift(bet);
+  // Remember the date used for totals so the next total prefills it (slate is days out)
+  if ((stat||"").toUpperCase() === "GAME_TOTAL" && isoDate) {
+    try { localStorage.setItem("wnba_last_total_date", isoDate); } catch(e) {}
+  }
   saveBets();
   closeTrackModal();
   if (currentTab === "tracker") renderTracker();
@@ -2317,6 +2326,13 @@ async function gradeBet(b) {
   const matches = rows.filter(r => r.playerNorm === playerNorm);
   if (!matches.length) return { ok: false, reason: `${b.player} not in ESPN box scores for ${iso} (DNP?)` };
 
+  // DNP guard: if the player is listed but logged 0 minutes, treat as a DNP and VOID the bet.
+  // Without this, a benched player's 0 stats grade unders as wins (the Boston bug).
+  const totalMin = matches.reduce((sum, m) => sum + ((m.stats && m.stats.min) || 0), 0);
+  if (totalMin === 0) {
+    return { ok: true, result: "void", total: 0, dnp: true };
+  }
+
   // Sum across all matches (rare: multi-game days)
   let total = 0;
   matches.forEach(m => { total += getStatValueForESPN(m, b.stat); });
@@ -2336,32 +2352,45 @@ function logGrade(msg, kind) {
   if (currentTab === "autograde") renderAutoGrade();
 }
 
-async function gradeAllPending() {
+async function gradeAllPending(mode) {
+  // mode: undefined/"pending" → grade pending only (default)
+  //       "regrade"          → re-run grader on already-settled bets (fixes DNP/postponed errors)
   if (gradingInProgress) return;
-  const pendingBets = bets.filter(b => b.result === "pending");
-  if (!pendingBets.length) {
-    logGrade("No pending bets to grade", "info");
-    showToast("No pending bets to grade");
+  const isRegrade = mode === "regrade";
+  const targetBets = isRegrade
+    ? bets.filter(b => b.result && b.result !== "pending")
+    : bets.filter(b => b.result === "pending");
+  if (!targetBets.length) {
+    const msg = isRegrade ? "No settled bets to re-grade" : "No pending bets to grade";
+    logGrade(msg, "info");
+    showToast(msg);
+    return;
+  }
+  if (isRegrade && !confirm(`Re-grade ${targetBets.length} already-settled bet(s)? This re-runs the grader and will correct DNP/postponed mistakes (results may change).`)) {
     return;
   }
   gradingInProgress = true;
   if (currentTab === "autograde") renderAutoGrade();
   gradeLog.length = 0;
-  logGrade(`Starting grading for ${pendingBets.length} pending bets...`, "info");
-  let graded = 0, failed = 0, skipped = 0, hit = 0, miss = 0, voided = 0;
-  for (const b of pendingBets) {
+  logGrade(`${isRegrade ? "Re-grading" : "Starting grading for"} ${targetBets.length} ${isRegrade ? "settled" : "pending"} bets...`, "info");
+  let graded = 0, failed = 0, skipped = 0, hit = 0, miss = 0, voided = 0, changed = 0;
+  for (const b of targetBets) {
+    const prevResult = b.result;
     const r = await gradeBet(b);
     const lineStr = `${b.ou.toUpperCase()} ${b.line}`;
     if (r.ok) {
       const target = bets.find(x => x.id === b.id);
       if (target) {
+        const didChange = isRegrade && target.result !== r.result;
         target.result = r.result;
         target.actual = r.total;
         graded++;
+        if (didChange) changed++;
         if (r.result === "hit") hit++;
         else if (r.result === "miss") miss++;
         else if (r.result === "void") voided++;
-        logGrade(`${b.player} ${lineStr} ${b.stat}: actual ${r.total} → ${r.result.toUpperCase()}`, r.result);
+        const changeTag = didChange ? ` (was ${prevResult.toUpperCase()})` : "";
+        logGrade(`${b.player} ${lineStr} ${b.stat}: ${r.dnp ? "DNP (0 min) → VOID" : `actual ${r.total} → ${r.result.toUpperCase()}`}${changeTag}`, r.result);
       }
     } else {
       const isNotFinal = /not final|ingesting|in progress|not started/i.test(r.reason);
@@ -2377,12 +2406,14 @@ async function gradeAllPending() {
   saveBets();
   gradingInProgress = false;
   const summaryParts = [`${graded} graded (${hit}W ${miss}L ${voided}V)`];
+  if (isRegrade) summaryParts.push(`${changed} changed`);
   if (skipped) summaryParts.push(`${skipped} not final`);
   if (failed) summaryParts.push(`${failed} failed`);
   logGrade(`Done. ${summaryParts.join(", ")}.`, "info");
   if (currentTab === "autograde") renderAutoGrade();
   if (currentTab === "tracker") renderTracker();
-  const toastBits = [`Graded ${graded} of ${pendingBets.length}`];
+  const toastBits = [`${isRegrade ? "Re-graded" : "Graded"} ${graded} of ${targetBets.length}`];
+  if (isRegrade && changed) toastBits.push(`${changed} changed`);
   if (skipped) toastBits.push(`${skipped} not final`);
   if (failed) toastBits.push(`${failed} failed`);
   showToast(toastBits.join(" • "));
@@ -2393,6 +2424,8 @@ function renderAutoGrade() {
   const pendingCount = bets.filter(b => b.result === "pending").length;
   const btnDisabled = gradingInProgress || pendingCount === 0;
   const btnLabel = gradingInProgress ? "Grading..." : "Grade All Pending";
+  const settledCount = bets.filter(b => b.result && b.result !== "pending").length;
+  const regradeDisabled = gradingInProgress || settledCount === 0;
 
   const logHtml = gradeLog.length === 0
     ? `<div style="color:#525a64;font-size:13px;padding:24px;font-family:'JetBrains Mono','Menlo',monospace;">Grade log will appear here...</div>`
@@ -2407,7 +2440,10 @@ function renderAutoGrade() {
         <div style="font-size:22px;font-weight:800;color:#fff;margin-bottom:4px;">Auto Grade</div>
         <div style="font-size:13px;color:#d4dae3;">${pendingCount} pending bet${pendingCount===1?"":"s"} · grades directly to your tracker</div>
       </div>
-      <button onclick="gradeAllPending()" ${btnDisabled?"disabled":""} style="background:${btnDisabled?'#1f2733':'#552583'};border:none;color:${btnDisabled?'#d4dae3':'#0d1117'};border-radius:8px;padding:14px 28px;font-size:14px;font-weight:800;cursor:${btnDisabled?'not-allowed':'pointer'};font-family:'Inter',sans-serif;letter-spacing:0.3px;">${btnLabel}</button>
+      <div style="display:flex;gap:10px;align-items:center;">
+        <button onclick="gradeAllPending('regrade')" ${regradeDisabled?"disabled":""} title="Re-run the grader on settled bets — fixes DNP/postponed mistakes" style="background:transparent;border:1px solid ${regradeDisabled?'#1f2733':'#552583'};color:${regradeDisabled?'#525a64':'#FDB927'};border-radius:8px;padding:14px 20px;font-size:13px;font-weight:800;cursor:${regradeDisabled?'not-allowed':'pointer'};font-family:'Inter',sans-serif;letter-spacing:0.3px;">RE-GRADE SETTLED${settledCount?` (${settledCount})`:''}</button>
+        <button onclick="gradeAllPending()" ${btnDisabled?"disabled":""} style="background:${btnDisabled?'#1f2733':'#552583'};border:none;color:${btnDisabled?'#d4dae3':'#0d1117'};border-radius:8px;padding:14px 28px;font-size:14px;font-weight:800;cursor:${btnDisabled?'not-allowed':'pointer'};font-family:'Inter',sans-serif;letter-spacing:0.3px;">${btnLabel}</button>
+      </div>
     </div>
     <div style="background:#0a0e13;border:1px solid #1f2733;border-radius:8px;padding:8px 0;min-height:240px;max-height:520px;overflow-y:auto;">
       ${logHtml}
