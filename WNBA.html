@@ -1756,12 +1756,12 @@ function clearAltBooks() {
 
 // Map shorthand and common variants to canonical book names
 const BOOK_SHORTHAND = {
-  "fd":"FanDuel","fanduel":"FanDuel",
+  "fd":"FanDuel","fanduel":"FanDuel","f":"FanDuel",
   
   "pb":"Prop Builder","pp":"Prop Builder","propbuilder":"Prop Builder","prop builder":"Prop Builder",
   "onyx":"DK (Courtside/Onyx)","courtside":"DK (Courtside/Onyx)","courtsideonyx":"DK (Courtside/Onyx)","dk":"DK (Courtside/Onyx)","draftkings":"DK (Courtside/Onyx)",
   "fliff":"Fliff","fl":"Fliff",
-  "novig":"Novig","nv":"Novig",
+  "novig":"Novig","nv":"Novig","n":"Novig",
   "prophetx":"ProphetX","prophet":"ProphetX","px":"ProphetX",
   "bookmaker":"Bookmaker","bm":"Bookmaker",
   "pin":"Pinnacle","pinny":"Pinnacle","pinnacle":"Pinnacle",
@@ -2087,21 +2087,27 @@ function copySingleBet(id) {
       if (!byLine[k]) byLine[k] = { line: p.line, fair: p.fair, items: [] };
       byLine[k].items.push(p);
     });
-    const groupStrs = Object.values(byLine).filter(g => g.items.length > 0).map(g => {
+    // Build a string per line-group. Same-line group (== bestLine) renders bare;
+    // different-line groups are true alt lines and get the side-letter hint.
+    const sameLineParts = [];
+    const altLineParts = [];
+    Object.values(byLine).filter(g => g.items.length > 0).forEach(g => {
+      const isSameLine = (g.line == null) || (g.line === bestLine);
       const items = g.items.map(p => {
         const o = p.odds > 0 ? `+${p.odds}` : `${p.odds}`;
-        // When line differs from main, prepend side letter so it's unambiguous (u4.5, o9.5)
-        const lineHint = (p.line != null && p.line !== bestLine) ? `${ouLower[0]}${p.line} ` : "";
+        const lineHint = (!isSameLine && p.line != null) ? `${ouLower[0]}${p.line} ` : "";
         return `${p.book} ${lineHint}${o}`;
       }).join("  ");
       const altPlayTo = g.fair != null ? playToOdds(g.fair, 5) : null;
       const altPlayToStr = altPlayTo != null ? `  play to ${altPlayTo > 0 ? "+" + altPlayTo : altPlayTo}` : "";
-      return `${items}${altPlayToStr}`;
+      const groupStr = `${items}${altPlayToStr}`;
+      if (isSameLine) sameLineParts.push(groupStr);
+      else altLineParts.push(groupStr);
     });
-    // Only prefix "alts:" if any of the alt prices are at a DIFFERENT line than the main bet
-    const hasAltLine = remaining.some(p => p.line != null && p.line !== bestLine);
-    const prefix = hasAltLine ? "alts: " : "";
-    line += `\n${prefix}${groupStrs.join("  ")}`;
+    // Same-line alts go directly under the main bet (no prefix).
+    if (sameLineParts.length) line += `\n${sameLineParts.join("  ")}`;
+    // Each different-line group gets its own line, prefixed "alts:".
+    altLineParts.forEach(p => { line += `\nalts: ${p}`; });
   }
 
   // Bulletproof copy
@@ -2232,6 +2238,15 @@ async function fetchESPNStatsForDate(isoDate) {
           if (!fullName) continue;
           const stRow = a.stats || [];
           const parseInt0 = (s) => { const n = parseInt(s); return isNaN(n) ? 0 : n; };
+
+          // DNP detection: ESPN flags didNotPlay, OR the stats row is empty / all dashes,
+          // OR minutes cell is a dash/blank. These players appeared on the roster but
+          // logged no minutes — their bets must VOID, not grade off zeros.
+          const minRaw = idx.min >= 0 ? String(stRow[idx.min] ?? "").trim() : "";
+          const isDash = v => v === "" || v === "-" || v === "--" || v === "0:00" || v === "DNP";
+          const allDash = stRow.length === 0 || stRow.every(v => isDash(String(v ?? "").trim()));
+          const dnp = a.didNotPlay === true || a.active === false || allDash || (idx.min >= 0 && isDash(minRaw));
+
           let fg3m = 0;
           if (idx.tpt >= 0 && stRow[idx.tpt]) {
             const m = String(stRow[idx.tpt]).match(/^(\d+)/);
@@ -2240,8 +2255,9 @@ async function fetchESPNStatsForDate(isoDate) {
           allRows.push({
             playerNorm: norm(fullName),
             displayName: fullName,
+            dnp,
             stats: {
-              min: idx.min >= 0 ? parseInt0(stRow[idx.min]) : 0,
+              min: dnp ? 0 : (idx.min >= 0 ? parseInt0(stRow[idx.min]) : 0),
               pts: idx.pts >= 0 ? parseInt0(stRow[idx.pts]) : 0,
               reb: idx.reb >= 0 ? parseInt0(stRow[idx.reb]) : 0,
               ast: idx.ast >= 0 ? parseInt0(stRow[idx.ast]) : 0,
@@ -2336,18 +2352,31 @@ async function gradeBet(b) {
 
   const playerNorm = norm(b.player);
   const matches = rows.filter(r => r.playerNorm === playerNorm);
-  if (!matches.length) return { ok: false, reason: `${b.player} not in ESPN box scores for ${iso} (DNP?)` };
 
-  // DNP guard: if the player is listed but logged 0 minutes, treat as a DNP and VOID the bet.
+  if (!matches.length) {
+    // Player not in box score at all. If the game(s) for this date are final,
+    // that means a DNP (didn't dress / inactive) → VOID. Only error if games
+    // aren't final yet (then we genuinely can't grade).
+    if (meta && meta.completed > 0 && meta.completed === meta.total) {
+      return { ok: true, result: "void", total: 0, dnp: true };
+    }
+    if (meta && meta.completed > 0) {
+      // Some games final, some not — the player's game may not be done. Be safe: skip.
+      return { ok: false, reason: `${b.player}: game may not be final yet` };
+    }
+    return { ok: false, reason: `${b.player} not in ESPN box scores for ${iso} (DNP?)` };
+  }
+
+  // DNP guard: player listed but flagged DNP or logged 0 minutes → VOID.
   // Without this, a benched player's 0 stats grade unders as wins (the Boston bug).
-  const totalMin = matches.reduce((sum, m) => sum + ((m.stats && m.stats.min) || 0), 0);
-  if (totalMin === 0) {
+  const anyPlayed = matches.some(m => !m.dnp && (m.stats && m.stats.min > 0));
+  if (!anyPlayed) {
     return { ok: true, result: "void", total: 0, dnp: true };
   }
 
-  // Sum across all matches (rare: multi-game days)
+  // Sum across all matches that actually played (rare: multi-game days)
   let total = 0;
-  matches.forEach(m => { total += getStatValueForESPN(m, b.stat); });
+  matches.filter(m => !m.dnp).forEach(m => { total += getStatValueForESPN(m, b.stat); });
 
   const line = b.line, ou = b.ou;
   let result;
@@ -2661,12 +2690,54 @@ function renderAutoGrade() {
   const settledCount = bets.filter(b => b.result && b.result !== "pending").length;
   const regradeDisabled = gradingInProgress || settledCount === 0;
 
-  const logHtml = gradeLog.length === 0
-    ? `<div style="color:#525a64;font-size:13px;padding:24px;font-family:'JetBrains Mono','Menlo',monospace;">Grade log will appear here...</div>`
-    : gradeLog.map(entry => {
-        const colorMap = {hit:"#22c55e", miss:"#f87171", void:"#f59e0b", error:"#f87171", info:"#d4dae3"};
-        return `<div style="font-size:12px;padding:4px 12px;font-family:'JetBrains Mono','Menlo',monospace;color:${colorMap[entry.kind]||'#d4dae3'};">[${entry.ts}] ${entry.msg.replace(/</g,"&lt;")}</div>`;
+  // Group consecutive grade lines by player so a player's multiple bets cluster together.
+  // Info/summary lines (no player) act as separators and pass through in place.
+  const colorMap = {hit:"#22c55e", miss:"#f87171", void:"#f59e0b", error:"#f87171", info:"#d4dae3"};
+  const extractPlayer = msg => {
+    // grade lines look like "Player Name OVER 1.5 STAT: ..." — player is text before the first " OVER "/" UNDER "
+    const m = msg.match(/^(.*?)\s+(OVER|UNDER)\s/i);
+    return m ? m[1].trim() : null;
+  };
+  let logHtml;
+  if (gradeLog.length === 0) {
+    logHtml = `<div style="color:#525a64;font-size:13px;padding:24px;font-family:'JetBrains Mono','Menlo',monospace;">Grade log will appear here...</div>`;
+  } else {
+    // Build ordered clusters: walk the log, batch runs of player-lines grouped by player,
+    // emit info lines as their own block in position.
+    const blocks = [];
+    let current = null; // {type:'players', byPlayer: Map}
+    for (const entry of gradeLog) {
+      const player = entry.kind === "info" ? null : extractPlayer(entry.msg);
+      if (player == null) {
+        // flush player cluster, emit info line
+        if (current) { blocks.push(current); current = null; }
+        blocks.push({ type:"info", entry });
+      } else {
+        if (!current) current = { type:"players", order:[], byPlayer:new Map() };
+        if (!current.byPlayer.has(player)) { current.byPlayer.set(player, []); current.order.push(player); }
+        current.byPlayer.get(player).push(entry);
+      }
+    }
+    if (current) blocks.push(current);
+
+    logHtml = blocks.map(blk => {
+      if (blk.type === "info") {
+        const e = blk.entry;
+        return `<div style="font-size:12px;padding:5px 12px;font-family:'JetBrains Mono','Menlo',monospace;color:${colorMap[e.kind]||'#d4dae3'};font-weight:600;">[${e.ts}] ${e.msg.replace(/</g,"&lt;")}</div>`;
+      }
+      // player clusters
+      return blk.order.map(pl => {
+        const entries = blk.byPlayer.get(pl);
+        const header = entries.length > 1
+          ? `<div style="font-size:11px;padding:6px 12px 2px;font-family:'JetBrains Mono','Menlo',monospace;color:#8b93a0;font-weight:700;letter-spacing:0.3px;">${pl.replace(/</g,"&lt;")} · ${entries.length} bets</div>`
+          : "";
+        const lines = entries.map(e =>
+          `<div style="font-size:12px;padding:3px 12px 3px ${entries.length>1?'22px':'12px'};font-family:'JetBrains Mono','Menlo',monospace;color:${colorMap[e.kind]||'#d4dae3'};">[${e.ts}] ${e.msg.replace(/</g,"&lt;")}</div>`
+        ).join("");
+        return header + lines;
       }).join("");
+    }).join("");
+  }
 
   el.innerHTML = `
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:24px;flex-wrap:wrap;gap:16px;">
@@ -2905,22 +2976,25 @@ function _copyOpenFiltered(kind) {
         if (!byLine[k]) byLine[k] = { line: p.line, fair: p.fair, items: [] };
         byLine[k].items.push(p);
       });
-      // Only render groups that have items
-      const groupStrs = Object.values(byLine).filter(g => g.items.length > 0).map(g => {
+      // Same-line alts render bare under the main bet; different-line groups
+      // each get their own "alts:" line with the side-letter hint.
+      const sameLineParts = [];
+      const altLineParts = [];
+      Object.values(byLine).filter(g => g.items.length > 0).forEach(g => {
+        const isSameLine = (g.line == null) || (g.line === bestLine);
         const items = g.items.map(p => {
           const o = p.odds > 0 ? `+${p.odds}` : `${p.odds}`;
-          // When line differs from main, prepend side letter so it's unambiguous (u4.5, o9.5)
-          const lineHint = (p.line != null && p.line !== bestLine) ? `${ouLower[0]}${p.line} ` : "";
+          const lineHint = (!isSameLine && p.line != null) ? `${ouLower[0]}${p.line} ` : "";
           return `${p.book} ${lineHint}${o}`;
         }).join("  ");
         const playTo = g.fair != null ? playToOdds(g.fair, 5) : null;
         const playToStr = playTo != null ? `  play to ${playTo > 0 ? "+" + playTo : playTo}` : "";
-        return `${items}${playToStr}`;
+        const groupStr = `${items}${playToStr}`;
+        if (isSameLine) sameLineParts.push(groupStr);
+        else altLineParts.push(groupStr);
       });
-      // Only prefix "alts:" if any alt prices are at a DIFFERENT line than the main bet
-      const hasAltLine = remaining.some(p => p.line != null && p.line !== bestLine);
-      const prefix = hasAltLine ? "alts: " : "";
-      lines.push(`${prefix}${groupStrs.join("  ")}`);
+      if (sameLineParts.length) lines.push(sameLineParts.join("  "));
+      altLineParts.forEach(p => lines.push(`alts: ${p}`));
     }
     if (idx < enriched.length - 1) lines.push("");
   });
@@ -3400,11 +3474,11 @@ function teamLineToAbbr(line) {
 
 const BOOK_ALIASES = {
   
-  "fd":"FanDuel","fanduel":"FanDuel",
+  "fd":"FanDuel","fanduel":"FanDuel","f":"FanDuel",
   "pb":"Prop Builder","propbuilder":"Prop Builder",
   "pin":"Pinnacle","pinnacle":"Pinnacle",
   "bet105":"Bet105","105":"Bet105",
-  "novig":"Novig","nv":"Novig",
+  "novig":"Novig","nv":"Novig","n":"Novig",
   "prophetx":"ProphetX","prophet":"ProphetX","px":"ProphetX",
   "bookmaker":"Bookmaker","bm":"Bookmaker",
   "fliff":"Fliff",
