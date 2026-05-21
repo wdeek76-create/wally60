@@ -2886,6 +2886,55 @@ const STAT_FULL_NAME = {
   "PRA":"PRA", "MIN":"minutes", "PR":"PR", "PA":"PA", "RA":"RA"
 };
 
+// Stat label for UA-style list: title-cased "Points", "Rebounds", "PRA" etc.
+const STAT_UA_LABEL = {
+  "PTS":"Points", "REB":"Rebounds", "AST":"Assists", "3PM":"Threes",
+  "PRA":"PRA", "MIN":"Minutes", "PR":"PR", "PA":"PA", "RA":"RA"
+};
+
+// UA-style copy: clean grouped list, no books/odds/fair/play-to. Just sides+lines+stats
+// under each player, so you can scan what you already have on each player before adding more.
+// Only includes open (pending) props — totals excluded since this is for prop overlap-check.
+function copyUA() {
+  const open = bets.filter(b => b.result === "pending" && (b.stat||"").toUpperCase() !== "GAME_TOTAL");
+  if (!open.length) { showToast("No open props to copy"); return; }
+
+  // Group by player. Preserve insertion order of players (first-tracked first within each group).
+  const byPlayer = new Map();
+  open.forEach(b => {
+    if (!byPlayer.has(b.player)) byPlayer.set(b.player, []);
+    byPlayer.get(b.player).push(b);
+  });
+
+  // Within each player, sort by stat then line for readability
+  const lines = [];
+  byPlayer.forEach((playerBets, name) => {
+    lines.push(name);
+    // Sort: by stat (alphabetical), then line ascending
+    playerBets.sort((a, b) => {
+      const stA = (a.stat||""), stB = (b.stat||"");
+      if (stA !== stB) return stA.localeCompare(stB);
+      return (a.line||0) - (b.line||0);
+    });
+    playerBets.forEach(b => {
+      const side = b.ou === "over" ? "Over" : "Under";
+      const stat = STAT_UA_LABEL[b.stat] || b.stat;
+      // Fair odds — back-derived from the EV% you typed at track time, stored as b.fair
+      const fairStr = (b.fair != null && !isNaN(b.fair))
+        ? ` (fair ${b.fair > 0 ? "+" + b.fair : b.fair})`
+        : "";
+      lines.push(`  ${side} ${b.line} ${stat}${fairStr}`);
+    });
+    lines.push(""); // blank line between players
+  });
+  // Drop trailing blank
+  while (lines[lines.length-1] === "") lines.pop();
+
+  const text = lines.join("\n");
+  copyVal(text);
+  showToast(`Copied ${open.length} props · ${byPlayer.size} players`);
+}
+
 function _copyOpenFiltered(kind) {
   const open = bets.filter(b => b.result === "pending");
   if (!open.length) { showToast("No open plays to copy"); return; }
@@ -2926,8 +2975,28 @@ function _copyOpenFiltered(kind) {
 
   if (!enriched.length) { showToast(`No open ${kind}`); return; }
 
-  // Sort by EV descending — best plays first
-  enriched.sort((a,b) => b.best.ev - a.best.ev);
+  // For PROPS: group by player so all of one player's bets cluster together. Order
+  // players by their best bet's EV (so the strongest player goes first), then within
+  // each player sort by EV descending. For TOTALS: flat sort by EV (no player grouping).
+  if (kind === "props") {
+    const playerOrder = [];
+    const playerBestEv = new Map();
+    enriched.forEach(e => {
+      const p = e.bet.player;
+      if (!playerBestEv.has(p)) { playerOrder.push(p); playerBestEv.set(p, e.best.ev); }
+      else if (e.best.ev > playerBestEv.get(p)) playerBestEv.set(p, e.best.ev);
+    });
+    playerOrder.sort((a,b) => playerBestEv.get(b) - playerBestEv.get(a));
+    enriched.sort((a,b) => {
+      const ai = playerOrder.indexOf(a.bet.player);
+      const bi = playerOrder.indexOf(b.bet.player);
+      if (ai !== bi) return ai - bi;
+      return b.best.ev - a.best.ev;
+    });
+  } else {
+    // Totals — flat EV sort
+    enriched.sort((a,b) => b.best.ev - a.best.ev);
+  }
 
   const headerLabel = kind === "totals" ? "totals" : "props";
   const lines = [`WNBA early ${headerLabel}: (${enriched.length})`, ""];
@@ -3008,7 +3077,15 @@ function _copyOpenFiltered(kind) {
       if (sameLineParts.length) lines.push(sameLineParts.join("  "));
       altLineParts.forEach(p => lines.push(`alts: ${p}`));
     }
-    if (idx < enriched.length - 1) lines.push("");
+    // Blank line between bets only when:
+    //   - props mode AND the NEXT bet belongs to a different player, OR
+    //   - totals mode (each bet stands alone, blank line between them)
+    if (idx < enriched.length - 1) {
+      const nextBet = enriched[idx + 1].bet;
+      if (kind === "totals" || nextBet.player !== bet.player) {
+        lines.push("");
+      }
+    }
   });
 
   const text = lines.join("\n").trimEnd();
@@ -3155,9 +3232,9 @@ function renderTracker() {
     </div>`;
   };
 
-  const search = (document.getElementById("bet-search")?.value || "").toLowerCase();
+  const search = trackerSearch.toLowerCase();
   let filtered = openOnly ? scopedBets.filter(b => b.result === "pending") : scopedBets;
-  if (search) filtered = filtered.filter(b => b.player.toLowerCase().includes(search) || b.stat.toLowerCase().includes(search) || b.book.toLowerCase().includes(search));
+  if (search) filtered = filtered.filter(b => b.player.toLowerCase().includes(search) || b.stat.toLowerCase().includes(search) || (b.book||"").toLowerCase().includes(search));
 
   const betRows = filtered.map(b => {
     const plVal = b.result==="hit" ? `+${b.toWin.toFixed(2)}u` : b.result==="miss" ? `-${b.stake.toFixed(2)}u` : b.result==="void" ? "VOID" : "—";
@@ -3283,6 +3360,7 @@ function renderTracker() {
         <button onclick="openQuickGrade()" style="background:#552583;border:none;color:#0d1117;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:700;cursor:pointer;font-family:'Inter',sans-serif;">Quick Grade</button>
         <button onclick="copyOpenPlays()" style="background:#161b22;border:1px solid #552583;color:#FDB927;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:600;cursor:pointer;font-family:'Inter',sans-serif;">Copy Props</button>
         <button onclick="copyOpenTotals()" style="background:#161b22;border:1px solid #552583;color:#FDB927;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:600;cursor:pointer;font-family:'Inter',sans-serif;">Copy Totals</button>
+        <button onclick="copyUA()" title="Quick grouped-by-player list — for cross-checking before adding more bets" style="background:#161b22;border:1px solid #FDB927;color:#FDB927;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:700;cursor:pointer;font-family:'Inter',sans-serif;letter-spacing:0.3px;">UA</button>
         <button onclick="copyDailyRecapProps()" style="background:#161b22;border:1px solid #552583;color:#FDB927;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:600;cursor:pointer;font-family:'Inter',sans-serif;">Props Recap</button>
         <button onclick="copyDailyRecapTotals()" style="background:#161b22;border:1px solid #552583;color:#FDB927;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:600;cursor:pointer;font-family:'Inter',sans-serif;">Totals Recap</button>
         <button onclick="exportBets()" style="background:#161b22;border:1px solid #1f2733;color:#FDB927;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:600;cursor:pointer;font-family:'Inter',sans-serif;">Backup</button>
@@ -3317,8 +3395,11 @@ function renderTracker() {
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;padding-bottom:6px;border-bottom:1px solid #1f2733;flex-wrap:wrap;gap:8px;">
         <h4 style="margin:0;padding:0;border:none;">${openOnly ? `Open ${betKindFilter==='all'?'Bets':betKindFilter==='props'?'Props':'Totals'} (${pending.length})` : `${betKindFilter==='all'?'Bet History':betKindFilter==='props'?'Props History':'Totals History'}`}</h4>
         <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
-          <input type="text" id="bet-search" placeholder="${openOnly ? 'Search open...' : 'Search all bets...'}" value="${search.replace(/"/g,'&quot;')}" oninput="filterBetRows(this.value)" autocomplete="off" spellcheck="false"
-            style="background:#161b22;border:1px solid #1f2733;border-radius:6px;padding:6px 12px;font-size:12px;color:#e2e8f0;outline:none;width:160px;font-family:'Inter',sans-serif;"/>
+          <div style="position:relative;display:inline-block;">
+            <input type="text" id="bet-search" placeholder="${openOnly ? 'Search open...' : 'Search all bets...'}" value="${search.replace(/"/g,'&quot;')}" oninput="filterBetRows(this.value)" autocomplete="off" spellcheck="false"
+              style="background:#161b22;border:1px solid #1f2733;border-radius:6px;padding:6px ${search?'28px':'12px'} 6px 12px;font-size:12px;color:#e2e8f0;outline:none;width:160px;font-family:'Inter',sans-serif;"/>
+            ${search ? `<button onclick="filterBetRows('')" tabindex="-1" title="Clear" style="position:absolute;right:4px;top:50%;transform:translateY(-50%);background:transparent;border:none;color:#7a8390;font-size:14px;cursor:pointer;padding:0 6px;line-height:1;">✕</button>` : ''}
+          </div>
           <div style="display:inline-flex;background:#161b22;border:1px solid #1f2733;border-radius:6px;padding:2px;gap:2px;">
             ${["all","props","totals"].map(k => {
               const active = betKindFilter === k;
@@ -3371,9 +3452,19 @@ function renderTracker() {
 }
 
 function filterBetRows(val) {
-  const s = val.toLowerCase();
-  document.querySelectorAll('#bet-table-body > .bet-card').forEach(row => {
-    row.style.display = (!s || row.textContent.toLowerCase().includes(s)) ? '' : 'none';
+  // Search is now a real state variable read on render, instead of DOM-hiding hacks
+  // that broke when render fired (causing bets to disappear until tab switch).
+  trackerSearch = (val || "");
+  renderTracker();
+  // Restore focus to the search box since renderTracker re-creates it
+  requestAnimationFrame(() => {
+    const el = document.getElementById("bet-search");
+    if (el) {
+      el.focus();
+      // Put cursor at end of text
+      const len = el.value.length;
+      el.setSelectionRange(len, len);
+    }
   });
 }
 
@@ -3381,6 +3472,7 @@ function filterBetRows(val) {
 let qgQueue = [];
 let qgIdx = 0;
 let openOnly = false;
+let trackerSearch = "";  // search input state, persists across renders
 // Bet kind filter for Tracker: 'all' | 'props' | 'totals'
 let betKindFilter = "all";
 let gradeLog = [];
