@@ -538,6 +538,7 @@ select.sel:focus { border-color: var(--teal); }
     <button class="btn primary" onclick="openPasteModal()">+ Paste PropShop</button>
     <button class="btn" onclick="openGradeModal()" title="Auto-grade from MLB API">⟳ Grade</button>
     <button class="btn ghost" id="copyStatsBtn" onclick="copyAllStats()" title="Copy a plain-text breakdown of all stats">⧉ Copy Stats</button>
+    <button class="btn ghost" id="copyPlaysBtn" onclick="copyPlays()" title="Copy pending pitcher UNDER plays as a play sheet">⧉ Copy Plays</button>
     <button class="btn ghost" onclick="exportExcel()">↓ Excel</button>
     <button class="btn ghost" onclick="openManageModal()">⋯ Manage</button>
   </div>
@@ -742,7 +743,41 @@ function findBestEV(tokens, minEV) {
   return { ev: -999, odds: null, line: null, side: 'O' };
 }
 
-function parsePropShopText(raw, minEV, marketOverride) {
+// Returns full ordered cell list (skips Consensus + Best Line at start)
+// Each cell: { side: 'O'|'U', line: number|null, odds: string|null, ev: number|null }
+// Inline EV markers attach to the cell immediately preceding them.
+function findAllCells(tokens) {
+  // First pass: parse ALL cells from the start, attaching inline EV and skipping book names
+  const SCAN_LIMIT = 50;
+  const allCells = [];
+  let i = 0;
+  while (i < Math.min(tokens.length, SCAN_LIMIT)) {
+    const tok = tokens[i];
+    if (isEVStr(tok)) {
+      if (allCells.length > 0) {
+        const last = allCells[allCells.length - 1];
+        if (last && last.odds !== null && last.ev === null) last.ev = parseEVStr(tok);
+      }
+      i++; continue;
+    }
+    if (BOOK_LABELS.has(tok.toLowerCase())) { i++; continue; }
+    if (tok === '—') {
+      const side = allCells.length % 2 === 0 ? 'O' : 'U';
+      allCells.push({ side, line: null, odds: null, ev: null });
+      i++; continue;
+    }
+    if (isLineStr(tok) && i + 1 < tokens.length && isOddsStr(tokens[i + 1])) {
+      const side = allCells.length % 2 === 0 ? 'O' : 'U';
+      allCells.push({ side, line: parseFloat(tok), odds: tokens[i + 1], ev: null });
+      i += 2; continue;
+    }
+    i++;
+  }
+  // Now strip first 4 cells (Consensus O/U + Best Line O/U) so we just have the per-book cells
+  return allCells.slice(4);
+}
+
+function parsePropShopText(raw, minEV, marketOverride, bookOrder) {
   const lines = raw.split('\n').map(l => l.trim()).filter(Boolean);
   const results = [];
   let i = 0;
@@ -803,11 +838,26 @@ function parsePropShopText(raw, minEV, marketOverride) {
     const { ev, odds, line: bestLine, side } = findBestEV(tokens, minEV);
 
     if (odds && ev >= minEV) {
+      // Compute worst odds among cells on SAME side + SAME line + EV still >= 5%
+      // "play to" = the floor price where the bet still has positive edge
+      let worstOdds = odds;
+      let worstNum = parseInt(odds);
+      try {
+        const cells = findAllCells(tokens);
+        cells.forEach(c => {
+          if (!c.odds || c.line !== bestLine || c.side !== side) return;
+          if (c.ev === null || c.ev < 5) return; // only count cells still at >= 5% EV
+          const n = parseInt(c.odds);
+          if (n < worstNum) { worstNum = n; worstOdds = c.odds; }
+        });
+      } catch(e) { /* swallow - worstOdds defaults to best */ }
+
       results.push({
         id: Date.now() + Math.random(),
         player: line, market, game: gameStr, gameTime,
         line: bestLine, side, odds, book: '', ev,
         kProj, ipProj,
+        worstOdds,
         date: (() => {
           if (gameTime) {
             const m = gameTime.match(/([A-Za-z]+)-(\d+)/);
@@ -2312,6 +2362,129 @@ function copyAllStats() {
 
   const showOk = () => {
     const btn = document.getElementById('copyStatsBtn');
+    if (btn) {
+      const orig = btn.textContent;
+      btn.textContent = 'Copied!';
+      btn.style.color = 'var(--teal)';
+      setTimeout(() => { btn.textContent = orig; btn.style.color = ''; }, 1500);
+    }
+  };
+
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(showOk).catch(() => fallbackCopy(text, showOk));
+  } else {
+    fallbackCopy(text, showOk);
+  }
+}
+
+// ===== COPY PLAYS (pitcher prop play sheet) =====
+function copyPlays() {
+  if (!props.length) { alert('No props loaded.'); return; }
+
+  // Pending pitcher UNDER props with edge >= 5%
+  const PITCHER_MARKETS = new Set(['K','IP','OUTS','HA','ER','BB']);
+  const plays = props.filter(p =>
+    (!p.result || p.result === '') &&
+    PITCHER_MARKETS.has(p.market) &&
+    p.side === 'U' &&
+    (p.ev || 0) >= 5
+  );
+
+  if (plays.length === 0) {
+    alert('No pending pitcher UNDER plays with edge >= 5%.');
+    return;
+  }
+
+  // ---- helpers ----
+  const fmtDate = d => {
+    if (!d) return '';
+    const dt = new Date(d + 'T12:00:00');
+    const mNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    return mNames[dt.getMonth()] + ' ' + dt.getDate();
+  };
+  const sideWord = s => s === 'O' ? 'OVER' : 'UNDER';
+
+  // Team name → 3-letter abbreviation
+  const TEAM_ABBR = {
+    'angels':'LAA','astros':'HOU','athletics':'OAK','blue jays':'TOR','jays':'TOR',
+    'braves':'ATL','brewers':'MIL','cardinals':'STL','cubs':'CHC','diamondbacks':'ARI',
+    'dbacks':'ARI','dodgers':'LAD','giants':'SF','guardians':'CLE','mariners':'SEA',
+    'marlins':'MIA','mets':'NYM','nationals':'WSH','orioles':'BAL','padres':'SD',
+    'phillies':'PHI','pirates':'PIT','rangers':'TEX','rays':'TB','red sox':'BOS',
+    'reds':'CIN','rockies':'COL','royals':'KC','tigers':'DET','twins':'MIN',
+    'white sox':'CWS','sox':'CWS','yankees':'NYY'
+  };
+  // Convert "Dodgers @ Brewers" -> "LAD@MIL"
+  const abbrGame = gameStr => {
+    if (!gameStr || !gameStr.includes('@')) return '';
+    const parts = gameStr.split('@').map(s => s.trim().toLowerCase());
+    if (parts.length !== 2) return '';
+    const away = TEAM_ABBR[parts[0]] || parts[0].toUpperCase().slice(0,3);
+    const home = TEAM_ABBR[parts[1]] || parts[1].toUpperCase().slice(0,3);
+    return away + '@' + home;
+  };
+
+  // Group by date (in case props span multiple dates)
+  const byDate = {};
+  plays.forEach(p => {
+    const d = p.date || 'Unknown';
+    if (!byDate[d]) byDate[d] = [];
+    byDate[d].push(p);
+  });
+  const sortedDates = Object.keys(byDate).sort();
+
+  // Group by market for headers (K = Strikeouts, IP = Innings, etc.)
+  const MARKET_HEADER = {
+    K: 'Pitcher Strikeouts',
+    IP: 'Innings Pitched',
+    OUTS: 'Pitcher Outs',
+    HA: 'Hits Allowed',
+    ER: 'Earned Runs',
+    BB: 'Walks Allowed'
+  };
+
+  const out = [];
+
+  sortedDates.forEach((dateKey, dIdx) => {
+    if (dIdx > 0) out.push('');
+    out.push('Pitcher Props - ' + fmtDate(dateKey));
+    out.push('');
+
+    const dateProps = byDate[dateKey];
+
+    // ---- PLAYS BY MARKET ----
+    const markets = [...new Set(dateProps.map(p => p.market))];
+    // Order: K first, then IP, then others
+    const marketOrder = ['K','IP','OUTS','HA','ER','BB'];
+    markets.sort((a,b) => marketOrder.indexOf(a) - marketOrder.indexOf(b));
+
+    markets.forEach(m => {
+      const mProps = dateProps.filter(p => p.market === m).sort((a,b) => (b.ev||0) - (a.ev||0));
+      if (mProps.length === 0) return;
+      out.push((MARKET_HEADER[m] || m) + ':');
+      mProps.forEach(p => {
+        // Projection: kProj for non-IP markets, ipProj for IP
+        const proj = m === 'IP' ? (p.ipProj || '') : (p.kProj || '');
+        const projPart = proj ? ' (proj ' + proj + ')' : '';
+        const sideLower = sideWord(p.side).toLowerCase();
+        // Add "play to" if we have a worst odds different from best
+        const playTo = (p.worstOdds && p.worstOdds !== p.odds) ? '  play to ' + p.worstOdds : '';
+        // Build game abbreviation like (LAD@MIL) from "Dodgers @ Brewers"
+        const gameAbbr = abbrGame(p.game);
+        const gamePart = gameAbbr ? ' (' + gameAbbr + ')' : '';
+        out.push('  ' + p.player + gamePart + projPart + '  ' + sideLower + ' ' + p.line + ' ' + p.odds + playTo);
+      });
+      out.push('');
+    });
+  });
+
+  // Trim trailing blank lines
+  while (out.length && out[out.length - 1] === '') out.pop();
+
+  const text = out.join('\n');
+
+  const showOk = () => {
+    const btn = document.getElementById('copyPlaysBtn');
     if (btn) {
       const orig = btn.textContent;
       btn.textContent = 'Copied!';
