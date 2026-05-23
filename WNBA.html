@@ -4688,14 +4688,52 @@ document.addEventListener("DOMContentLoaded", () => {
       });
     });
 
-    // Replace the entire roster with the CSV contents. This makes the stored
-    // localStorage roster reflect exactly what's in the currently-loaded CSVs,
-    // which is what the user actually wants for cap tool searching.
-    const fresh = Object.values(fromCsv).map(p => ({ name: p.name, team: p.team, pos: p.pos }));
-    fresh.sort((a, b) => a.name.localeCompare(b.name));
-    capPlayers = fresh;
+    // Merge into existing roster — never delete players:
+    //   - Existing player (matched by normalized name + alias): update team/pos if changed
+    //   - Player only in CSVs (not in roster yet): ADD
+    //   - Player only in roster (off-slate, injured, retired-but-saved): KEEP untouched
+    const existingByNorm = {};
+    capPlayers.forEach((p, idx) => {
+      const k = resolveNorm(p.name);
+      existingByNorm[k] = { idx, p };
+    });
+
+    let added = 0, traded = 0, unchanged = 0;
+    const tradeLog = [];
+    Object.entries(fromCsv).forEach(([key, info]) => {
+      const match = existingByNorm[key];
+      if (match) {
+        const prev = match.p;
+        let changed = false;
+        if (info.team && info.team !== prev.team) {
+          tradeLog.push(`${prev.name}: ${prev.team || "?"} → ${info.team}`);
+          prev.team = info.team;
+          traded++;
+          changed = true;
+        }
+        if (info.pos && info.pos !== prev.pos) {
+          prev.pos = info.pos;
+          changed = true;
+        }
+        if (!changed) unchanged++;
+      } else {
+        capPlayers.push({ name: info.name, team: info.team, pos: info.pos });
+        added++;
+      }
+    });
+
+    capPlayers.sort((a, b) => a.name.localeCompare(b.name));
     saveCapPlayers(capPlayers);
-    showToast(`Roster synced — ${fresh.length} players from loaded CSVs`);
+
+    const bits = [];
+    if (added) bits.push(`+${added} new`);
+    if (traded) bits.push(`${traded} traded`);
+    if (!bits.length) bits.push(`${unchanged} matched, no changes`);
+    showToast("Roster synced — " + bits.join(", ") + ` (${capPlayers.length} total)`);
+
+    if (tradeLog.length) {
+      console.log("[CAP TOOL] Trades detected during sync:\n  " + tradeLog.join("\n  "));
+    }
   }
   let capPlayers = loadCapPlayers();
 
@@ -5216,7 +5254,7 @@ document.addEventListener("DOMContentLoaded", () => {
           <div class="cap-date-row">
             <span class="cap-date-label">DATE</span>
             <input class="cap-date-input" type="date" id="cap-plays-date"/>
-            <button class="cap-clear-btn" style="margin-left:auto;font-size:10px;padding:6px 10px;" onclick="window._capRefreshTemplate()" title="Replace the stored player list with what's in the currently-loaded blender CSVs. Saved to localStorage so you can use the cap tool without re-uploading CSVs.">↻ SYNC PLAYERS</button>
+            <button class="cap-clear-btn" style="margin-left:auto;font-size:10px;padding:6px 10px;" onclick="window._capRefreshTemplate()" title="Merge loaded CSVs into the stored roster — adds new players, updates teams for trades, keeps existing players who aren't in this slate's CSVs.">↻ SYNC PLAYERS</button>
           </div>
           <div class="cap-tracker-bar">
             <div class="cap-tracker-cell">
