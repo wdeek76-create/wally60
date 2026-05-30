@@ -748,6 +748,62 @@ body::before {
 .lab-status.err { color: var(--loss); }
 .lab-status.ok { color: var(--profit); }
 
+/* Manual grade list */
+.manual-grade-list {
+  display: flex; flex-direction: column; gap: 6px;
+  max-height: 480px; overflow-y: auto;
+  margin-top: 8px;
+}
+.mg-row {
+  display: grid;
+  grid-template-columns: 84px 1fr auto;
+  gap: 14px;
+  align-items: center;
+  padding: 10px 12px;
+  background: var(--bg-1);
+  border-radius: 6px;
+  border-left: 2px solid transparent;
+  transition: border-color 0.15s ease;
+}
+.mg-row.is-win  { border-left-color: var(--profit); }
+.mg-row.is-loss { border-left-color: var(--loss); }
+.mg-row.is-push { border-left-color: var(--ink-3); }
+.mg-date {
+  font-family: 'JetBrains Mono', monospace; font-size: 11px;
+  color: var(--ink-3); font-feature-settings: 'tnum';
+}
+.mg-meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.mg-player {
+  font-size: 13px; font-weight: 600; color: var(--ink-0);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.mg-prop {
+  font-family: 'JetBrains Mono', monospace; font-size: 11px;
+  color: var(--green);
+}
+.mg-actions { display: flex; gap: 4px; }
+.mg-btn {
+  font-family: inherit; font-size: 10px; font-weight: 700;
+  letter-spacing: 0.05em; padding: 5px 9px;
+  border-radius: 4px; cursor: pointer;
+  background: var(--bg-3); border: 1px solid var(--hairline-strong);
+  color: var(--ink-2);
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.mg-btn:hover { color: var(--ink-0); }
+.mg-btn.win.active {
+  background: var(--green-soft); color: var(--green); border-color: var(--green);
+}
+.mg-btn.loss.active {
+  background: var(--loss-soft); color: var(--loss); border-color: var(--loss);
+}
+.mg-btn.push.active {
+  background: rgba(255,255,255,0.06); color: var(--ink-1); border-color: var(--ink-3);
+}
+.mg-empty {
+  text-align: center; padding: 20px; color: var(--ink-3); font-size: 12px;
+}
+
 .lab-results { display: flex; flex-direction: column; gap: 6px; }
 .lab-event {
   background: var(--bg-2); border-radius: 8px; padding: 12px 14px;
@@ -2037,6 +2093,22 @@ body::before {
         <div class="lab-results" id="gradeResults"></div>
       </div>
     </div>
+
+    <!-- MANUAL GRADE — every pick listed with W/L/Push buttons -->
+    <div class="odds-lab open" id="manualGradeLab" style="margin-top:14px;">
+      <button class="lab-toggle" onclick="document.getElementById('manualGradeLab').classList.toggle('open')">
+        <span class="lab-toggle-left">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M7 12l4-4 4 4 6-6"/></svg>
+          Manual Grade
+          <span class="lab-tag">OVERRIDE</span>
+        </span>
+        <span class="lab-chev">▾</span>
+      </button>
+      <div class="lab-body">
+        <div class="lab-status">Use this for picks the auto-grader can't handle (MLB, NHL, UFC, Tennis, DNPs, name mismatches) or to override an automated result. Click a button to set the result; click again to clear.</div>
+        <div class="manual-grade-list" id="manualGradeList"></div>
+      </div>
+    </div>
   </section>
 
 </div>
@@ -2227,7 +2299,9 @@ function renderPicks() {
   const tomorrow = new Date(today); tomorrow.setDate(tomorrow.getDate() + 1);
 
   // today's picks (reveal_at within last 24h or upcoming today)
+  // Graded picks (win/loss/push) are pulled off the board — they live in Historical instead.
   const filtered = PICKS.filter(p => {
+    if (p.result === 'win' || p.result === 'loss' || p.result === 'push') return false;
     if (activeSport !== 'ALL' && p.sport !== activeSport) return false;
     const r = new Date(p.reveal_at);
     return r >= new Date(today.getTime() - 24*3600*1000) && r < tomorrow;
@@ -3341,6 +3415,7 @@ async function gradeAllPending() {
   renderPicks();
   renderHistoricalBreakdown();
   renderRecentPicks();
+  renderManualGradeList();
 }
 
 async function regradeSettled() {
@@ -3351,35 +3426,81 @@ async function regradeSettled() {
   await gradeAllPending();
 }
 
+// ============ MANUAL GRADE ============
+// Lists every pick with W/L/Push buttons. Click sets the result, click again clears.
+function renderManualGradeList() {
+  const wrap = document.getElementById('manualGradeList');
+  if (!wrap) return;
+  if (!PICKS.length) {
+    wrap.innerHTML = '<div class="mg-empty">No picks loaded. Publish picks from Load Picks first.</div>';
+    return;
+  }
+  // sort by gameDate desc (most recent slates float up), then by reveal_at
+  const sorted = [...PICKS].sort((a, b) => {
+    const da = a.gameDate || '';
+    const db = b.gameDate || '';
+    if (db !== da) return db.localeCompare(da);
+    return (b.reveal_at || '').localeCompare(a.reveal_at || '');
+  });
+  wrap.innerHTML = sorted.map(p => {
+    const dateFmt = p.gameDate
+      ? new Date(p.gameDate + 'T12:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric'})
+      : '—';
+    const sideAbbr = (p.side||'').toLowerCase().startsWith('o') ? 'O' : 'U';
+    const propTxt = `${p.stat || p.market} ${sideAbbr} ${p.line ?? ''}`.trim();
+    const r = p.result || '';
+    const rowClass = r ? `is-${r}` : '';
+    return `
+      <div class="mg-row ${rowClass}" data-pick-id="${p.id}">
+        <span class="mg-date">${dateFmt}</span>
+        <div class="mg-meta">
+          <span class="mg-player">${p.player || p.selection}</span>
+          <span class="mg-prop">${propTxt}</span>
+        </div>
+        <div class="mg-actions">
+          <button class="mg-btn win  ${r==='win' ?'active':''}" onclick="setManualGrade('${p.id}','win')">WIN</button>
+          <button class="mg-btn loss ${r==='loss'?'active':''}" onclick="setManualGrade('${p.id}','loss')">LOSS</button>
+          <button class="mg-btn push ${r==='push'?'active':''}" onclick="setManualGrade('${p.id}','push')">PUSH</button>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+function setManualGrade(id, result) {
+  const p = PICKS.find(x => x.id === id);
+  if (!p) return;
+  // Toggle: clicking the same result clears it
+  if (p.result === result) {
+    p.result = null;
+    p.actual = null;
+  } else {
+    p.result = result;
+  }
+  renderManualGradeList();
+  renderPicks();
+  renderHistoricalBreakdown();
+  renderRecentPicks();
+}
+
 function publishParsed(){
   if(!parsedPicks.length) return;
   PICKS = parsedPicks;
   renderPicks();
   renderHistoricalBreakdown();
   renderRecentPicks();
+  renderManualGradeList();
   document.getElementById('pasteLab').classList.remove('open');
   document.getElementById('pasteStatus').textContent='Published.';
 }
 
 // ============ INIT ============
 
-// Admin gate — Admin tab + view only show when previewing locally.
-// On the live site, the tab button AND the view section are removed from the DOM entirely.
-(function adminGate(){
-  const h = location.hostname;
-  const isLocal = h === 'localhost' || h === '127.0.0.1' || h === '' || location.protocol === 'file:';
-  if (!isLocal) {
-    document.querySelectorAll('.admin-tab').forEach(el => el.remove());
-    const v = document.getElementById('view-admin');
-    if (v) v.remove();
-  }
-})();
-
 loadPlays();
 renderPicks();
 renderPlays();
 renderHistoricalBreakdown();
 renderRecentPicks();
+renderManualGradeList();
 buildSparkline();
 tick();
 setInterval(tick, 1000);
