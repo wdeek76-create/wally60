@@ -249,6 +249,7 @@ table colgroup col.avg-col{width:16%;}
   <button class="tab-btn" onclick="switchTab('results')">RESULTS</button>
   <button class="tab-btn" onclick="switchTab('totals')">TOTALS</button>
   <button class="tab-btn" onclick="switchTab('tracker')">TRACKER</button>
+  <button class="tab-btn" onclick="switchTab('srcanalytics')">SOURCE ANALYTICS</button>
   <button class="tab-btn" onclick="switchTab('autograde')" style="display:none;">AUTO GRADE</button>
   <button class="tab-btn" onclick="switchTab('captool')">CAP TOOL</button>
   <button class="tab-btn" onclick="switchTab('pace')" style="display:none;">PACE</button>
@@ -270,6 +271,8 @@ table colgroup col.avg-col{width:16%;}
   </div>
 
   <div id="tracker-tab" style="display:none;"></div>
+
+  <div id="srcanalytics-tab" style="display:none;"></div>
 
   <div id="autograde-tab" style="display:none;"></div>
 
@@ -925,7 +928,7 @@ function runMerge(switchToResults) {
 
 function switchTab(tab) {
   currentTab = tab;
-  const TAB_ORDER = ["upload","results","totals","tracker","autograde","captool","pace"];
+  const TAB_ORDER = ["upload","results","totals","tracker","srcanalytics","autograde","captool","pace"];
   document.querySelectorAll(".tab-btn").forEach((b,i)=>{
     b.classList.toggle("active", TAB_ORDER[i]===tab);
   });
@@ -933,10 +936,12 @@ function switchTab(tab) {
   document.getElementById("results-tab").style.display = tab==="results"?"block":"none";
   document.getElementById("totals-tab").style.display = tab==="totals"?"block":"none";
   document.getElementById("tracker-tab").style.display = tab==="tracker"?"block":"none";
+  document.getElementById("srcanalytics-tab").style.display = tab==="srcanalytics"?"block":"none";
   document.getElementById("autograde-tab").style.display = tab==="autograde"?"block":"none";
   document.getElementById("cap-tool-tab").style.display = tab==="captool"?"block":"none";
   document.getElementById("pace-tab").style.display = tab==="pace"?"block":"none";
   if (tab==="tracker") renderTracker();
+  if (tab==="srcanalytics") renderSrcAnalytics();
   if (tab==="autograde") renderAutoGrade();
   if (tab==="totals") renderTotals();
   if (tab==="pace") renderPace();
@@ -1191,7 +1196,8 @@ function doExport() {
     ].map(v=>`"${v}"`).join(",");
   });
   const csv = [header,...dataRows].join("\n");
-  const blob = new Blob([csv],{type:"text/csv"});
+  // UTF-8 BOM so importers correctly decode accented characters (Salaün, Jocytė, etc.).
+  const blob = new Blob(["\uFEFF" + csv],{type:"text/csv;charset=utf-8"});
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href=url; a.download="WNBAblenderProjections.csv"; a.style.display="none";
@@ -1247,7 +1253,8 @@ function writeConsensusCsv(allowedKeys, filename, label) {
     ].map(v=>`"${v}"`).join(",");
   }).filter(Boolean);
   const csv = [header,...dataRows].join("\n");
-  const blob = new Blob([csv],{type:"text/csv"});
+  // UTF-8 BOM so importers correctly decode accented characters (Salaün, Jocytė, etc.).
+  const blob = new Blob(["\uFEFF" + csv],{type:"text/csv;charset=utf-8"});
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href=url; a.download=filename; a.style.display="none";
@@ -1407,6 +1414,7 @@ function setOU(val) {
     preview.style.color = val === "over" ? "#22c55e" : "#f87171";
   }
   recomputeFairFromProj();
+  if (typeof updateSourceAgreement === "function") updateSourceAgreement();
 }
 
 function getOU() { return window._modalOU || "under"; }
@@ -1592,6 +1600,131 @@ function trackTotal(payload, ...legacyArgs) {
   }, 60);
 }
 
+// ── PER-SOURCE AGREEMENT PANEL (track-bet modal) ──────────────────────────
+// Shows one pill per loaded source (RG/RW/SABER/DIMERS) under the Blended Proj
+// line. Each pill is green when the source's projection agrees with the typed
+// over/under line, red when it disagrees. A "N/M Agree" badge to the right of
+// Blended Proj summarizes the count at a glance — green if all agree, gold for
+// a split, red if zero agree.
+function computeSrcValsForModal(player, stat) {
+  // GAME_TOTAL isn't a per-player stat — no source breakdown applies.
+  if (!player || !stat || stat === "GAME_TOTAL") return {};
+  // Map stat code (PTS/REB/AST/3PM/PRA) to the source CSV key. PRA is computed.
+  const statKey = stat === "3PM" ? "threepm"
+                : stat === "PTS" ? "pts"
+                : stat === "REB" ? "reb"
+                : stat === "AST" ? "ast"
+                : stat === "PRA" ? "pra"
+                : stat.toLowerCase();
+  const out = {};
+  const n = norm(player);
+  const lookups = (typeof getSlotLookups === "function") ? getSlotLookups() : [];
+  SOURCES.forEach((s, i) => {
+    const lk = lookups[i];
+    if (!lk) { out[s.key] = null; return; }
+    const m = lk[n];
+    if (!m) { out[s.key] = null; return; }
+    let v = m[statKey];
+    if (statKey === "pra" && v == null) {
+      // PRA derived if a source only stored individual stats
+      const p = m.pts, r = m.reb, a = m.ast;
+      if (p != null && r != null && a != null) v = p + r + a;
+    }
+    out[s.key] = (v != null && v > 0) ? v : null;
+  });
+  return out;
+}
+
+function populateSourceAgreement() {
+  const panel = document.getElementById("modal-src-agreement");
+  const pillsEl = document.getElementById("modal-src-pills");
+  if (!panel || !pillsEl) return;
+  const vals = window._modalSrcVals || {};
+  const sourcesWithData = SOURCES.filter(s => vals[s.key] != null);
+  if (sourcesWithData.length === 0) { panel.style.display = "none"; return; }
+  panel.style.display = "block";
+  // Render pills in display order, neutral by default — colors get applied by
+  // updateSourceAgreement() once the user has typed a line + side.
+  pillsEl.innerHTML = sourcesWithData.map(s => {
+    const v = vals[s.key];
+    const label = s.key === "rotowire" ? "RW" : s.key === "roto" ? "RG" : s.key === "saber" ? "SAB" : s.key === "dimers" ? "DIM" : s.label;
+    return `<span class="modal-src-pill" data-src="${s.key}" style="display:inline-flex;align-items:center;gap:4px;background:#161b22;border:1px solid #1f2733;border-radius:5px;padding:2px 7px;font-size:10px;">
+      <span class="src-label" style="color:#8b93a0;font-weight:500;font-size:9px;letter-spacing:0.3px;">${label}</span>
+      <span class="src-val" style="color:#d4dae3;font-weight:500;font-family:'JetBrains Mono','Menlo',monospace;">${v.toFixed(2)}</span>
+      <span class="src-check" style="font-size:9px;opacity:0.9;"></span>
+    </span>`;
+  }).join("");
+  document.getElementById("modal-src-badge").textContent = "";
+  document.getElementById("modal-src-badge").style.cssText = "font-size:9px;font-weight:500;padding:2px 7px;border-radius:4px;letter-spacing:0.5px;text-transform:uppercase;display:none;";
+}
+
+function updateSourceAgreement() {
+  const panel = document.getElementById("modal-src-agreement");
+  if (!panel || panel.style.display === "none") return;
+  const vals = window._modalSrcVals || {};
+  const line = window._modalLine;
+  const side = window._modalOU;
+  const pills = panel.querySelectorAll(".modal-src-pill");
+  const badge = document.getElementById("modal-src-badge");
+
+  // No line typed yet → neutral pills, no badge.
+  if (line == null || !side) {
+    pills.forEach(p => {
+      p.style.background = "#161b22";
+      p.style.borderColor = "#1f2733";
+      p.querySelector(".src-label").style.color = "#8b93a0";
+      p.querySelector(".src-val").style.color = "#d4dae3";
+      p.querySelector(".src-check").textContent = "";
+    });
+    badge.style.display = "none";
+    return;
+  }
+
+  // For each loaded source, decide: does its projection agree with the user's
+  // side at the typed line? Push (proj == line) treated as agreement-of-sorts —
+  // not a clean win but we color neutral, not red.
+  let agree = 0, total = 0;
+  pills.forEach(p => {
+    const key = p.dataset.src;
+    const v = vals[key];
+    if (v == null) return;
+    total++;
+    let state;
+    if (Math.abs(v - line) < 1e-9) state = "push";
+    else if (side === "over") state = v > line ? "agree" : "disagree";
+    else state = v < line ? "agree" : "disagree";
+    if (state === "agree") agree++;
+    const isAgree = state === "agree";
+    const isPush = state === "push";
+    const tint = isAgree ? { bg: "rgba(34,197,94,0.10)", border: "rgba(34,197,94,0.4)", val: "#4ade80", label: "#4ade80", check: "✓" }
+                : isPush ? { bg: "rgba(253,185,39,0.10)", border: "rgba(253,185,39,0.4)", val: "#FDB927", label: "#FDB927", check: "=" }
+                         : { bg: "rgba(248,113,113,0.10)", border: "rgba(248,113,113,0.4)", val: "#f87171", label: "#f87171", check: "✗" };
+    p.style.background = tint.bg;
+    p.style.borderColor = tint.border;
+    p.querySelector(".src-label").style.color = tint.label;
+    p.querySelector(".src-label").style.opacity = "0.7";
+    p.querySelector(".src-val").style.color = tint.val;
+    p.querySelector(".src-check").textContent = tint.check;
+  });
+  if (total === 0) { badge.style.display = "none"; return; }
+  badge.textContent = `${agree}/${total} Agree`;
+  badge.style.display = "inline-block";
+  // Badge color follows the same green/gold/red scheme as the pills.
+  if (agree === total) {
+    badge.style.background = "rgba(34,197,94,0.12)";
+    badge.style.color = "#4ade80";
+    badge.style.border = "1px solid rgba(34,197,94,0.3)";
+  } else if (agree === 0) {
+    badge.style.background = "rgba(248,113,113,0.12)";
+    badge.style.color = "#f87171";
+    badge.style.border = "1px solid rgba(248,113,113,0.3)";
+  } else {
+    badge.style.background = "rgba(253,185,39,0.12)";
+    badge.style.color = "#FDB927";
+    badge.style.border = "1px solid rgba(253,185,39,0.3)";
+  }
+}
+
 function openTrackModal(player, pos, stat, proj, team, presetDate) {
   modalPlayer = player;
   modalPos = pos;
@@ -1599,6 +1732,11 @@ function openTrackModal(player, pos, stat, proj, team, presetDate) {
   document.getElementById("modal-player-sub").textContent = (pos||"") + " · Add a bet";
   // Reset shorthand and hidden fields
   window._modalPresetDate = presetDate || null;
+  // Cache per-source projections for THIS player+stat so the agreement panel
+  // (rendered under Blended Proj) can compare them against whatever line the
+  // user types. Key: source label (RG/RW/SABER/DIM). Value: number or null.
+  window._modalSrcVals = computeSrcValsForModal(player, stat);
+  populateSourceAgreement();
   const shorthand = document.getElementById("modal-shorthand");
   if (shorthand) { shorthand.value = ""; shorthand.style.borderColor = "#1f2733"; }
   const sp = document.getElementById("shorthand-preview");
@@ -1781,6 +1919,7 @@ function parseShorthand(el) {
     preview.innerHTML = txt;
   }
   updateEvPreview();
+  if (typeof updateSourceAgreement === "function") updateSourceAgreement();
 }
 
 function updateEvPreview() {
@@ -2134,6 +2273,15 @@ function saveBet() {
     if (window._modalProjSnapshots) bet.projSnapshots = window._modalProjSnapshots;
     if (window._modalProjPoss != null) bet.projPoss = window._modalProjPoss;
     if (window._modalPaceEffProj != null) bet.paceEffProj = window._modalPaceEffProj;
+  } else {
+    // For PROP bets, save the per-source projection snapshot so SOURCE ANALYTICS
+    // can later figure out which sources "agreed" with the pick at the line. We
+    // store raw values rather than agree/disagree booleans because the line might
+    // change between alts, and we want to be able to compare retroactively against
+    // whichever line actually settled. Empty/missing sources stay null.
+    if (window._modalSrcVals && Object.keys(window._modalSrcVals).length) {
+      bet.srcProjs = { ...window._modalSrcVals };
+    }
   }
   bets.unshift(bet);
   // Remember the date used for totals so the next total prefills it (slate is days out)
@@ -3533,6 +3681,216 @@ function _copyOpenFiltered(kind) {
   }
 }
 
+// ── SOURCE ANALYTICS ──────────────────────────────────────────────────────
+// Analyzes settled prop bets (props only — totals are tracked separately) to
+// surface which projection sources (RG, RW, DIMERS) have been profitable when
+// they agreed with the bet's side at its line. Tracks:
+//   - SOLO: each source's record on bets where THAT source agreed
+//   - COMBOS: each combination of sources that all agreed simultaneously
+//   - BY STAT: same analysis sliced by stat (PTS/REB/AST/PRA/3PM)
+// Only bets with a stored `srcProjs` snapshot (saved at track-time) are eligible.
+// Bets tracked before this feature shipped won't have snapshots — they're skipped
+// with a note about sample size.
+function renderSrcAnalytics() {
+  const root = document.getElementById("srcanalytics-tab");
+  if (!root) return;
+
+  // Pull settled prop bets only. Skip totals (they have projSnapshots, not srcProjs)
+  // and skip bets without a per-source snapshot (older tracked bets).
+  const settled = bets.filter(b =>
+    (b.result === "win" || b.result === "loss" || b.result === "push") &&
+    (b.stat || "").toUpperCase() !== "GAME_TOTAL" &&
+    b.srcProjs &&
+    typeof b.srcProjs === "object"
+  );
+
+  // The 3 sources we care about. Keys match what _modalSrcVals stores.
+  const SRC_KEYS = ["roto", "rotowire", "dimers"];
+  const SRC_LABELS = { roto: "RG", rotowire: "RW", dimers: "DIMERS" };
+
+  // For each bet + each source: did that source's projection agree with the
+  // bet's side at the bet's line? Returns null if no projection from that source.
+  function srcAgreed(bet, key) {
+    const v = bet.srcProjs?.[key];
+    if (v == null) return null;
+    const line = bet.line;
+    if (line == null) return null;
+    if (Math.abs(v - line) < 1e-9) return null;          // push at line — exclude
+    return bet.ou === "over" ? v > line : v < line;
+  }
+
+  // Accumulator helpers
+  function emptyStats() { return { total: 0, hits: 0, pushes: 0, staked: 0, pl: 0 }; }
+  function accum(b, target) {
+    if (b.result === "push") { target.pushes++; return; }
+    target.total++;
+    const stake = b.stake != null ? Number(b.stake) : 1;
+    target.staked += stake;
+    if (b.result === "win") {
+      target.hits++;
+      // Profit = stake × decimal-odds payout. American → decimal.
+      const odds = Number(b.odds || 0);
+      const payout = odds > 0 ? odds / 100 : 100 / Math.abs(odds);
+      target.pl += stake * payout;
+    } else {
+      target.pl -= stake;
+    }
+  }
+
+  // ── Solo breakdown: each source standalone ──
+  const solo = {};
+  SRC_KEYS.forEach(k => { solo[k] = emptyStats(); });
+  settled.forEach(b => {
+    SRC_KEYS.forEach(k => {
+      if (srcAgreed(b, k) === true) accum(b, solo[k]);
+    });
+  });
+
+  // ── Combo breakdown: every non-empty subset of sources, where ALL agreed ──
+  // Subsets: {RG}, {RW}, {DIM}, {RG,RW}, {RG,DIM}, {RW,DIM}, {RG,RW,DIM}.
+  // For each settled bet, build the set of sources that agreed; only attribute
+  // to the EXACT combo (e.g. if RG+RW agreed but DIM didn't, this bet counts
+  // toward "RG+RW" combo, not "RG+RW+DIM" and not solo RG or solo RW).
+  // This makes combos exclusive — easier to read than overlapping buckets.
+  const combos = {};
+  settled.forEach(b => {
+    const agreed = SRC_KEYS.filter(k => srcAgreed(b, k) === true);
+    if (agreed.length === 0) return;
+    const key = agreed.join("+");
+    if (!combos[key]) combos[key] = { sources: agreed, stats: emptyStats() };
+    accum(b, combos[key].stats);
+  });
+
+  // ── By Stat: same solo analysis but bucketed by stat ──
+  const byStat = {};
+  settled.forEach(b => {
+    const stat = (b.stat || "").toUpperCase();
+    if (!stat) return;
+    if (!byStat[stat]) {
+      byStat[stat] = {};
+      SRC_KEYS.forEach(k => { byStat[stat][k] = emptyStats(); });
+    }
+    SRC_KEYS.forEach(k => {
+      if (srcAgreed(b, k) === true) accum(b, byStat[stat][k]);
+    });
+  });
+
+  // ── Inverse: when source DISAGREED with my pick, did I still win? ──
+  // Tells you whether to trust a source when it warns you off.
+  const fade = {};
+  SRC_KEYS.forEach(k => { fade[k] = emptyStats(); });
+  settled.forEach(b => {
+    SRC_KEYS.forEach(k => {
+      if (srcAgreed(b, k) === false) accum(b, fade[k]);
+    });
+  });
+
+  // ── Sample-size note ──
+  const totalSettledProps = bets.filter(b =>
+    (b.result === "win" || b.result === "loss" || b.result === "push") &&
+    (b.stat || "").toUpperCase() !== "GAME_TOTAL"
+  ).length;
+  const eligible = settled.length;
+  const sampleNote = totalSettledProps > eligible
+    ? `${eligible} of ${totalSettledProps} settled props have source snapshots. Older bets (tracked before this feature) won't appear.`
+    : `${eligible} settled props analyzed.`;
+
+  // ── Render helpers ──
+  // Compact stat card: label + hit% + W-L + P/L + ROI
+  function statCard(label, s, opts) {
+    opts = opts || {};
+    if (s.total === 0) return "";
+    const hitPct = Math.round((s.hits / s.total) * 100);
+    const roi = s.staked > 0 ? ((s.pl / s.staked) * 100).toFixed(1) : "—";
+    const hitColor = hitPct >= 55 ? "#22c55e" : hitPct >= 45 ? "#d4dae3" : "#f87171";
+    const plColor = s.pl >= 0 ? "#22c55e" : "#f87171";
+    const roiNum = Number(roi);
+    const roiColor = roiNum >= 0 ? "#FDB927" : "#f87171";
+    return `<div style="background:#0d1117;border:1px solid ${opts.featured ? "#552583" : "#1f2733"};border-radius:6px;padding:10px 14px;min-width:200px;flex:1;">
+      <div style="font-size:10px;color:#a8b0bb;font-weight:600;letter-spacing:0.5px;text-transform:uppercase;margin-bottom:6px;">${label}</div>
+      <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;">
+        <span style="font-size:22px;font-weight:800;color:${hitColor};letter-spacing:-0.5px;">${hitPct}%</span>
+        <span style="font-size:11px;color:#d4dae3;">${s.hits}-${s.total - s.hits}${s.pushes ? `-${s.pushes}` : ""}</span>
+        <span style="font-size:11px;color:${plColor};font-weight:700;">${s.pl>=0?'+':''}${s.pl.toFixed(2)}u</span>
+        <span style="font-size:11px;color:${roiColor};font-weight:700;margin-left:auto;">ROI ${roi}${roi!=="—"?'%':''}</span>
+      </div>
+    </div>`;
+  }
+
+  function comboLabel(srcs) {
+    return srcs.map(k => SRC_LABELS[k]).join(" + ");
+  }
+
+  // Section: solo source performance
+  const soloCards = SRC_KEYS.map(k => statCard(SRC_LABELS[k], solo[k])).filter(Boolean).join("");
+
+  // Section: combos — sort by P/L desc so the winners surface
+  const sortedCombos = Object.entries(combos)
+    .sort((a, b) => b[1].stats.pl - a[1].stats.pl);
+  const comboCards = sortedCombos
+    .map(([k, v]) => statCard(comboLabel(v.sources), v.stats, { featured: v.sources.length === 3 }))
+    .filter(Boolean).join("");
+
+  // Section: fade — when source disagreed
+  const fadeCards = SRC_KEYS.map(k => statCard(`Fade ${SRC_LABELS[k]}`, fade[k])).filter(Boolean).join("");
+
+  // Section: by stat
+  const STATS_ORDER = ["PTS", "REB", "AST", "PRA", "3PM"];
+  const byStatHtml = STATS_ORDER
+    .filter(st => byStat[st])
+    .map(st => {
+      const cards = SRC_KEYS
+        .map(k => statCard(SRC_LABELS[k], byStat[st][k]))
+        .filter(Boolean).join("");
+      if (!cards) return "";
+      return `<div style="margin-top:14px;">
+        <div style="font-size:11px;color:#FDB927;font-weight:700;letter-spacing:1px;text-transform:uppercase;margin-bottom:8px;">${st}</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">${cards}</div>
+      </div>`;
+    }).filter(Boolean).join("");
+
+  // Empty state
+  if (eligible === 0) {
+    root.innerHTML = `<div style="padding:24px;">
+      <h3 style="margin:0 0 8px 0;font-size:16px;color:#fff;">Source Analytics</h3>
+      <p style="color:#a8b0bb;font-size:13px;line-height:1.5;max-width:600px;">
+        Track and grade some prop bets, then this tab will show how each projection source (RG / RW / DIMERS) performed when it agreed with your pick — solo and in combinations.
+      </p>
+      <p style="color:#525a64;font-size:11px;margin-top:12px;">${sampleNote}</p>
+    </div>`;
+    return;
+  }
+
+  root.innerHTML = `<div style="padding:0;">
+    <div style="margin-bottom:18px;">
+      <h3 style="margin:0;font-size:16px;color:#fff;">Source Analytics</h3>
+      <p style="font-size:11px;color:#a8b0bb;margin:4px 0 0 0;line-height:1.4;">${sampleNote} Records only count bets where the source agreed with your pick at its line.</p>
+    </div>
+
+    <div class="tracker-section">
+      <h4 style="font-size:11px;color:#d4dae3;letter-spacing:1px;text-transform:uppercase;font-weight:700;border:none;padding-bottom:0;margin-bottom:8px;">Solo · Each Source Standalone</h4>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">${soloCards || '<p style="color:#525a64;font-size:13px;">No qualifying bets yet</p>'}</div>
+    </div>
+
+    <div class="tracker-section">
+      <h4 style="font-size:11px;color:#d4dae3;letter-spacing:1px;text-transform:uppercase;font-weight:700;border:none;padding-bottom:0;margin-bottom:4px;">Combos · Exact Source Agreement</h4>
+      <p style="font-size:10px;color:#a8b0bb;margin:-2px 0 8px 0;line-height:1.4;">Sorted by P/L. Each bet counts only toward the EXACT combo of sources that agreed — e.g. a bet where RG+RW agreed but Dimers didn't appears under "RG + RW" only, not under solo RG or RW.</p>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">${comboCards || '<p style="color:#525a64;font-size:13px;">No qualifying bets yet</p>'}</div>
+    </div>
+
+    <div class="tracker-section">
+      <h4 style="font-size:11px;color:#d4dae3;letter-spacing:1px;text-transform:uppercase;font-weight:700;border:none;padding-bottom:0;margin-bottom:4px;">Fade · When Source DISAGREED With Pick</h4>
+      <p style="font-size:10px;color:#a8b0bb;margin:-2px 0 8px 0;line-height:1.4;">Hit% on bets where the source projected the opposite side. Low hit% means you should trust the source's warning; high hit% means it's been wrong to fade.</p>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">${fadeCards || '<p style="color:#525a64;font-size:13px;">No qualifying bets yet</p>'}</div>
+    </div>
+
+    <div class="tracker-section">
+      <h4 style="font-size:11px;color:#d4dae3;letter-spacing:1px;text-transform:uppercase;font-weight:700;border:none;padding-bottom:0;margin-bottom:8px;">By Market Type</h4>
+      ${byStatHtml || '<p style="color:#525a64;font-size:13px;">No qualifying bets yet</p>'}
+    </div>
+  </div>`;
+}
+
 function renderTracker() {
   const el = document.getElementById("tracker-tab");
   // Apply kind filter (all | props | totals) to every aggregation in this view
@@ -4534,6 +4892,122 @@ function clearEspnSchedule() {
   showToast("Schedule paste cleared");
 }
 
+// ── ESPN HIDDEN API FETCH (no paste) ───────────────────────────────────────
+// Hits ESPN's undocumented scoreboard endpoint for a 7-day window starting
+// today. Same target shape as parseEspnSchedule, just sourced from JSON instead
+// of pasted plain text. Endpoint sends CORS headers, so this works from the
+// browser without a proxy. If ESPN ever changes the response shape or pulls the
+// CORS header, the existing paste flow remains as a fallback.
+//
+// Mapping notes: ESPN uses short abbreviations on this endpoint (NY, LV, LA, GS, WSH)
+// that don't match our internal ones (NYL, LVA, LAS, GSV, WAS). We normalize via
+// ESPN_TEAM_ABBR_MAP before pushing into betstampGames.
+const ESPN_TEAM_ABBR_MAP = {
+  "NY":"NYL", "LV":"LVA", "LA":"LAS", "GS":"GSV", "WSH":"WAS",
+  // Already-matching abbreviations pass through untouched. Listed for clarity.
+  "ATL":"ATL","CHI":"CHI","CON":"CON","DAL":"DAL","IND":"IND",
+  "MIN":"MIN","PHX":"PHX","SEA":"SEA","TOR":"TOR","POR":"POR"
+};
+
+async function fetchEspnSchedule() {
+  const btn = document.getElementById("fetch-espn-btn");
+  const origBtnText = btn ? btn.textContent : null;
+  if (btn) { btn.textContent = "Fetching..."; btn.disabled = true; }
+  try {
+    // 7-day window: today + 6 days. ESPN expects YYYYMMDD dash YYYYMMDD.
+    // Use ET-anchored "today" since slate timing is in ET — avoids fetching
+    // tomorrow's slate when the user opens the tool at 11 PM Pacific.
+    const fmtYMD = d => `${d.getUTCFullYear()}${String(d.getUTCMonth()+1).padStart(2,'0')}${String(d.getUTCDate()).padStart(2,'0')}`;
+    const now = new Date();
+    const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+    const end = new Date(start.getTime() + 6 * 86400000);
+    const url = `https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/scoreboard?dates=${fmtYMD(start)}-${fmtYMD(end)}`;
+
+    const resp = await fetch(url, { method: "GET", mode: "cors" });
+    if (!resp.ok) throw new Error(`ESPN returned ${resp.status}`);
+    const json = await resp.json();
+    const events = (json && json.events) || [];
+
+    // Day-of-week labels for the time prefix. Anchored to ET because that's
+    // what ESPN's odds and the slate UI both use.
+    const dayAbbr = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+
+    const fetched = [];
+    events.forEach(ev => {
+      const comp = ev?.competitions?.[0];
+      if (!comp) return;
+      // Skip games that are already final — projection cards are for upcoming bets.
+      const completed = comp?.status?.type?.completed;
+      if (completed) return;
+      const home = comp.competitors?.find(c => c.homeAway === "home");
+      const away = comp.competitors?.find(c => c.homeAway === "away");
+      if (!home || !away) return;
+      const homeAbbrRaw = home?.team?.abbreviation || "";
+      const awayAbbrRaw = away?.team?.abbreviation || "";
+      const homeAbbr = ESPN_TEAM_ABBR_MAP[homeAbbrRaw] || homeAbbrRaw;
+      const awayAbbr = ESPN_TEAM_ABBR_MAP[awayAbbrRaw] || awayAbbrRaw;
+      if (!homeAbbr || !awayAbbr) return;
+      // Format the time in ET ("Sat 1:00 PM") so it matches the paste-based
+      // labels and behaves the same way in the rest of the UI.
+      let labeledTime = "TBD";
+      try {
+        const d = new Date(ev.date);
+        const etParts = new Intl.DateTimeFormat("en-US", {
+          timeZone: "America/New_York",
+          weekday: "short", hour: "numeric", minute: "2-digit", hour12: true
+        }).formatToParts(d);
+        const get = (t) => etParts.find(p => p.type === t)?.value || "";
+        const wk = get("weekday");
+        const hr = get("hour");
+        const mn = get("minute");
+        const dp = get("dayPeriod");
+        labeledTime = `${wk} ${hr}:${mn} ${dp}`;
+      } catch(e) { /* keep TBD */ }
+
+      // ESPN's odds payload sometimes includes a total; surface it if present.
+      // Format matches what parseEspnSchedule writes: an over+under DK entry per game.
+      const books = [];
+      let ouLine = null;
+      const odds = comp?.odds?.[0];
+      if (odds && odds.overUnder != null) ouLine = parseFloat(odds.overUnder);
+      if (ouLine != null && !Number.isNaN(ouLine)) {
+        books.push({ book: "DK", line: ouLine, overOdds: null, underOdds: null, side: "over" });
+        books.push({ book: "DK", line: ouLine, overOdds: null, underOdds: null, side: "under" });
+      }
+
+      fetched.push({
+        awayAbbr, homeAbbr,
+        awayName: away?.team?.location || away?.team?.displayName || awayAbbr,
+        homeName: home?.team?.location || home?.team?.displayName || homeAbbr,
+        time: labeledTime,
+        books,
+        defaultSeason: ouLine == null ? "2026" : undefined
+      });
+    });
+
+    if (!fetched.length) { showToast("No upcoming games in the next 7 days"); return; }
+
+    // Merge with existing games: existing-wins on (away/home) conflict (Betstamp
+    // or earlier ESPN paste keeps its richer book data).
+    const existing = new Set(betstampGames.map(g => `${g.awayAbbr}/${g.homeAbbr}`));
+    const newGames = fetched.filter(g => !existing.has(`${g.awayAbbr}/${g.homeAbbr}`));
+    betstampGames = betstampGames.concat(newGames);
+    const projOnly = newGames.filter(g => g.books.length === 0).length;
+    showToast(`ESPN fetched: ${newGames.length} added (${projOnly} projection-only) · ${fetched.length - newGames.length} already loaded`);
+    renderTotals();
+  } catch (err) {
+    // Most common failure modes:
+    //   - Browser CORS rejected the request (ESPN flipped the header)
+    //   - Network offline
+    //   - ESPN endpoint moved/changed shape
+    // Surface a clear message and tell the user the paste fallback still works.
+    console.warn("ESPN fetch failed:", err);
+    showToast(`ESPN fetch failed (${err.message || "network"}) — use PARSE as fallback`);
+  } finally {
+    if (btn && origBtnText) { btn.textContent = origBtnText; btn.disabled = false; }
+  }
+}
+
 // EV using normal approx around projected total
 function americanEvRough(odds, projTotal, line, side) {
   const stdev = totalsSigma();
@@ -5079,16 +5553,17 @@ function renderTotals() {
     <div style="background:#161b22;border:1px solid #1f2733;border-radius:8px;padding:14px;margin-bottom:18px;">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px;">
         <div>
-          <div style="font-size:13px;font-weight:700;color:#d4dae3;letter-spacing:1px;text-transform:uppercase;">ESPN Schedule Paste — Multi-Day Slate</div>
-          <div style="font-size:10px;color:#a8b0bb;margin-top:2px;">Paste from espn.com/wnba/schedule. Games without posted O/U fall back to 2026 Pace × Eff projection. Use with the odds paste above for full coverage.</div>
+          <div style="font-size:13px;font-weight:700;color:#d4dae3;letter-spacing:1px;text-transform:uppercase;">ESPN Schedule — Multi-Day Slate</div>
+          <div style="font-size:10px;color:#a8b0bb;margin-top:2px;">Click FETCH ESPN to auto-load the next 7 days (no paste needed). Or paste from espn.com/wnba/schedule as a fallback. Games without O/U fall back to 2026 Pace × Eff.</div>
         </div>
-        <div style="display:flex;gap:8px;">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <button onclick="fetchEspnSchedule()" id="fetch-espn-btn" style="background:#22c55e;border:none;color:#0d1117;border-radius:6px;padding:7px 16px;font-size:12px;font-weight:700;cursor:pointer;font-family:'Inter',sans-serif;">⚡ FETCH ESPN</button>
           <button onclick="pasteEspnSchedule()" style="background:#FDB927;border:none;color:#0d1117;border-radius:6px;padding:7px 16px;font-size:12px;font-weight:700;cursor:pointer;font-family:'Inter',sans-serif;">PARSE</button>
           <button onclick="clearEspnSchedule()" style="background:#161b22;border:1px solid #1f2733;color:#d4dae3;border-radius:6px;padding:7px 16px;font-size:12px;font-weight:600;cursor:pointer;font-family:'Inter',sans-serif;">CLEAR</button>
         </div>
       </div>
-      <textarea id="espn-schedule-paste" placeholder="Copy the espn.com/wnba/schedule page and paste here..." spellcheck="false"
-        style="width:100%;min-height:80px;background:#0d1117;border:1px solid #1f2733;border-radius:6px;padding:10px 12px;color:#e2e8f0;font-family:'JetBrains Mono','Menlo',monospace;font-size:12px;outline:none;resize:vertical;"></textarea>
+      <textarea id="espn-schedule-paste" placeholder="Optional paste fallback: copy the espn.com/wnba/schedule page here, then click PARSE..." spellcheck="false"
+        style="width:100%;min-height:60px;background:#0d1117;border:1px solid #1f2733;border-radius:6px;padding:10px 12px;color:#e2e8f0;font-family:'JetBrains Mono','Menlo',monospace;font-size:12px;outline:none;resize:vertical;"></textarea>
     </div>
 
     <div style="background:#161b22;border:1px solid #1f2733;border-radius:8px;padding:14px;margin-bottom:18px;">
@@ -6174,6 +6649,17 @@ or one per line — book shorthand + odds (+ optional line + ev%)" spellcheck="f
     </datalist>
 
     <div id="modal-proj-display" style="margin-top:14px;"></div>
+    <!-- Per-source agreement strip: one pill per loaded source showing its
+         projection, color-coded by whether it agrees with the currently typed
+         line. Plus a "N/M Agree" badge next to Blended Proj. Populated by
+         openTrackModal() once; updated on each keystroke via updateSourceAgreement(). -->
+    <div id="modal-src-agreement" style="margin-top:6px;display:none;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+        <div style="font-size:10px;color:#8b93a0;letter-spacing:0.5px;text-transform:uppercase;">Source projections</div>
+        <span id="modal-src-badge" style="font-size:9px;font-weight:500;padding:2px 7px;border-radius:4px;letter-spacing:0.5px;text-transform:uppercase;"></span>
+      </div>
+      <div id="modal-src-pills" style="display:flex;gap:6px;flex-wrap:wrap;"></div>
+    </div>
     <div id="modal-stake-preview"></div>
     <div id="modal-ev-preview" style="margin-top:6px;font-size:13px;font-weight:700;"></div>
 
