@@ -5006,6 +5006,57 @@ function toggleInjuryShowAll() {
   if (typeof renderTable === "function" && merged) renderTable();
 }
 
+// Detects ongoing/multi-day absences (vs single-game today notes). Useful
+// signal because a player who's "yet to make her season debut" is OUT today
+// AND probably tomorrow AND the day after — fundamentally different from
+// "will sit out Sunday's contest" (a one-day note that may not apply Monday).
+// Triggered by season-debut/long-absence phrases or surgery/season-ending wording.
+function _injuryIsOngoing(rec) {
+  if (!rec) return false;
+  const text = `${rec.comment || ""} ${rec.longComment || ""}`.toLowerCase();
+  if (!text.trim()) return false;
+  const ONGOING_PATTERNS = [
+    /\byet to (make|play|appear|debut|suit)/,           // "yet to make her season debut"
+    /\bseason debut\b/,                                  // "her season debut"
+    /\bmiss(es|ed|ing)?\b.*\b(start of the season|rest of the season|remainder|indefinitely|extended period|multiple games|several games)/,
+    /\bout (for the season|indefinitely|long[- ]term|until further|for an extended)/,
+    /\bseason[- ]ending\b/,
+    /\bout for the year\b/,
+    /\b(surgery|underwent surgery|tore|torn|ruptured) (her|his)?\s*(left|right)?\s*(acl|mcl|achilles|meniscus|labrum|rotator)/,
+    /\b(will|expected to) miss (the start of|the beginning of|opening|the first \d+|several|multiple)/,
+    /\bcontinue to (be brought along|miss|rehab)/,
+    /\bno return timetable\b/,
+    /\bdoubtful for future\b/,
+    /\bwill be re-evaluated in\b/                        // "re-evaluated in two weeks" → multi-day
+  ];
+  return ONGOING_PATTERNS.some(re => re.test(text));
+}
+
+
+// references today (via 'today'/'tonight' OR today's day-of-week as the first
+// day mentioned). Records with no day mention pass _injuryIsForToday (treated as
+// ongoing) but NOT this — used to render a "TODAY" badge separating fresh
+// today-specific reports from generic DTD/multi-day notes.
+function _injuryExplicitlyToday(rec) {
+  if (!rec) return false;
+  const todayDay = _DAY_NAMES[new Date().getDay()];
+  const text = `${rec.comment || ""} ${rec.longComment || ""}`.toLowerCase();
+  if (!text.trim()) return false;
+  if (/\b(today|tonight)\b/.test(text)) return true;
+  // First day-of-week mentioned must match today's day
+  let firstDay = null;
+  let firstIdx = Infinity;
+  for (const day of _DAY_NAMES) {
+    const re = new RegExp(`\\b${day}\\b`);
+    const m = text.match(re);
+    if (m && m.index < firstIdx) {
+      firstIdx = m.index;
+      firstDay = day;
+    }
+  }
+  return firstDay === todayDay;
+}
+
 // User-facing refresh — bypasses TTL, shows feedback toast.
 async function refreshInjuries() {
   const summaryEl = document.getElementById("injury-panel-summary");
@@ -5237,10 +5288,15 @@ function updateInjuryPanel() {
   // ── Team sort: blender roster teams first ──
   // Pull team list from current `merged` (loaded RG/RW/Dimers/etc. players).
   // Teams with any loaded projection float to the top; other teams sort alphabetically below.
+  // Require BOTH found>0 (player actually appeared in a loaded CSV) AND a real
+  // projection value (con.pts != null) — prevents false-positive matches when a
+  // CSV has a player listed but with no usable projection numbers.
   const blenderTeams = new Set();
   if (typeof merged !== "undefined" && merged && merged.length) {
     merged.forEach(r => {
-      if (r.team && r.found > 0) blenderTeams.add(normTeamAbbr(r.team) || r.team.toUpperCase());
+      if (r.team && r.found > 0 && r.con && r.con.pts != null) {
+        blenderTeams.add(normTeamAbbr(r.team) || r.team.toUpperCase());
+      }
     });
   }
   const sortedTeams = [...injuriesByTeam.keys()].sort((a, b) => {
@@ -5336,7 +5392,13 @@ function updateInjuryPanel() {
     const list = injuriesByTeam.get(team)
       .slice()
       .filter(recordPassesFilter)
-      .sort((a, b) => statusRank(a.status) - statusRank(b.status));
+      .sort((a, b) => {
+        // Today-explicit entries first (more actionable for today's slate)
+        const aToday = _injuryExplicitlyToday(a) ? 0 : 1;
+        const bToday = _injuryExplicitlyToday(b) ? 0 : 1;
+        if (aToday !== bToday) return aToday - bToday;
+        return statusRank(a.status) - statusRank(b.status);
+      });
     if (list.length === 0) return "";
     const isBlender = blenderTeams.has(team);
     const rows = list.map(rec => {
@@ -5344,6 +5406,19 @@ function updateInjuryPanel() {
       const color = _injuryStatusColor(rec.status);
       const eta = rec.returnDate ? ` <span style="color:#525a64;">· ETA ${rec.returnDate}</span>` : "";
       const detail = rec.type ? ` <span style="color:#a8b0bb;">${rec.type}${rec.detail ? ` (${rec.detail})` : ""}</span>` : "";
+      // TODAY badge: signals this is a fresh today-specific report (headline
+      // explicitly says 'today'/'tonight' or today's day-of-week). Generic
+      // DTD/multi-day notes don't get the badge, so the bettor can scan for
+      // game-day-relevant updates faster.
+      const todayBadge = _injuryExplicitlyToday(rec)
+        ? ` <span style="background:#FDB927;color:#0d1117;font-size:8px;font-weight:800;letter-spacing:0.5px;border-radius:3px;padding:1px 5px;box-shadow:0 0 8px #FDB92766;">TODAY</span>`
+        : "";
+      // ONGOING badge: signals a multi-day absence (season debut not yet made,
+      // surgery recovery, "miss rest of the season", etc.). Pairs with TODAY
+      // when both apply — e.g. Dana Evans is OUT today AND ongoing.
+      const ongoingBadge = _injuryIsOngoing(rec)
+        ? ` <span style="background:#a78bfa;color:#0d1117;font-size:8px;font-weight:800;letter-spacing:0.5px;border-radius:3px;padding:1px 5px;box-shadow:0 0 8px #a78bfa66;">ONGOING</span>`
+        : "";
       const headline = rec.comment ? `<div style="font-size:11px;color:#d4dae3;margin-top:3px;margin-left:54px;line-height:1.4;">${decorateHeadline(rec.comment)}</div>` : "";
       const analysis = rec.longComment && rec.longComment !== rec.comment
         ? `<div style="font-size:10px;color:#8b93a0;margin-top:4px;margin-left:54px;line-height:1.5;padding:6px 8px;background:#0d1117;border-left:2px solid #55258377;border-radius:0 4px 4px 0;"><span style="color:#FDB927;font-weight:700;letter-spacing:0.4px;font-size:9px;">ANALYSIS</span> ${decorateAnalysis(rec.longComment)}</div>`
@@ -5352,7 +5427,7 @@ function updateInjuryPanel() {
         <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
           <span style="background:${color}1a;border:1px solid ${color}55;color:${color};font-size:9px;font-weight:800;letter-spacing:0.4px;border-radius:4px;padding:1px 6px;min-width:30px;text-align:center;">${label}</span>
           <span style="font-size:13px;font-weight:700;color:#fff;">${rec.name}</span>
-          ${detail}${eta}
+          ${detail}${eta}${todayBadge}${ongoingBadge}
         </div>
         ${headline}
         ${analysis}
