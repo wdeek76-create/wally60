@@ -227,7 +227,7 @@ table colgroup col.avg-col{width:16%;}
 #cap-tool-tab .cap-input-row textarea::placeholder { color: #2a3140; }
 #cap-tool-tab .cap-add-btn { background: #1e40af; color: #fff; border: none; border-radius: 8px; padding: 0 16px; font-size: 20px; font-weight: 700; cursor: pointer; font-family: 'Inter', sans-serif; align-self: stretch; flex: 0 0 auto; }
 #cap-tool-tab .cap-add-btn:hover { background: #6f3aab; }
-#cap-tool-tab .cap-good-to-btn { background: #1a1d22; color: #7dd3fc; border: none; border-radius: 8px; padding: 0 10px; font-size: 10px; font-weight: 700; letter-spacing: 0.4px; cursor: pointer; font-family: 'Inter', sans-serif; align-self: stretch; flex: 0 0 auto; white-space: nowrap; }
+#cap-tool-tab .cap-good-to-btn { background: #1a1d22; color: #7dd3fc; border: none; border-radius: 8px; padding: 4px 12px; font-size: 10px; font-weight: 700; letter-spacing: 0.4px; cursor: pointer; font-family: 'Inter', sans-serif; align-self: stretch; flex: 0 0 auto; white-space: nowrap; flex-direction: column; align-items: center; justify-content: center; gap: 2px; min-width: 80px; }
 #cap-tool-tab .cap-good-to-btn:hover { background: #2a3140; }
 #cap-tool-tab .cap-date-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
 #cap-tool-tab .cap-date-label { font-size: 10px; letter-spacing: 1.5px; color: #6b7280; font-weight: 700; }
@@ -290,11 +290,26 @@ table colgroup col.avg-col{width:16%;}
 <!-- WNBA scoreboard ticker — sportsbook-style horizontal strip. Auto-scrolls
      left-to-right via CSS animation. Pauses on hover/touch. Refreshes every 30s
      from ESPN's scoreboard endpoint. Hidden by default until games are fetched. -->
-<div id="scoreboard-ticker" style="display:none;position:relative;background:linear-gradient(180deg,#0a0a0e 0%,#050507 100%);border-bottom:1px solid #1a1d22;overflow:hidden;">
-  <div id="scoreboard-ticker-inner" style="display:flex;gap:24px;padding:10px 16px;white-space:nowrap;animation:ticker-scroll 60s linear infinite;will-change:transform;"></div>
+<div id="scoreboard-ticker" style="display:none;position:relative;background:linear-gradient(180deg,#0a0a0e 0%,#050507 100%);border-bottom:1px solid #1a1d22;overflow:hidden;cursor:pointer;" onclick="openScheduleModal()" title="Tap for full schedule">
+  <div id="scoreboard-ticker-inner" style="display:flex;gap:24px;padding:10px 16px;white-space:nowrap;animation:ticker-scroll 25s linear infinite;will-change:transform;"></div>
   <!-- Edge fades to suggest off-screen content -->
   <div style="position:absolute;top:0;left:0;bottom:0;width:32px;background:linear-gradient(90deg,#050507 0%,rgba(5,5,7,0) 100%);pointer-events:none;z-index:2;"></div>
   <div style="position:absolute;top:0;right:0;bottom:0;width:32px;background:linear-gradient(90deg,rgba(5,5,7,0) 0%,#050507 100%);pointer-events:none;z-index:2;"></div>
+</div>
+
+<!-- Schedule modal — opens when ticker is tapped/clicked. Shows full list of
+     today's and tomorrow's games with details: scores, times, records, status. -->
+<div id="schedule-modal" style="display:none;position:fixed;inset:0;z-index:9000;background:rgba(0,0,0,0.7);backdrop-filter:blur(4px);align-items:flex-start;justify-content:center;padding:20px 16px;" onclick="if(event.target===this) closeScheduleModal()">
+  <div style="background:#0c0d10;border:1px solid rgba(125,211,252,0.18);border-radius:16px;width:100%;max-width:520px;max-height:calc(100vh - 40px);overflow:hidden;box-shadow:0 24px 64px rgba(0,0,0,0.6),0 0 0 1px rgba(125,211,252,0.05);display:flex;flex-direction:column;margin-top:60px;">
+    <div style="padding:18px 20px 14px 20px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid rgba(125,211,252,0.08);">
+      <div>
+        <div style="font-size:11px;color:#7dd3fc;letter-spacing:1.4px;font-weight:700;text-transform:uppercase;">Schedule</div>
+        <div id="schedule-modal-date" style="font-size:14px;color:#fff;font-weight:600;margin-top:2px;"></div>
+      </div>
+      <button onclick="closeScheduleModal()" style="background:transparent;border:1px solid #1a1d22;color:#a8b0bb;border-radius:8px;width:32px;height:32px;font-size:18px;cursor:pointer;font-family:'Inter',sans-serif;line-height:1;">×</button>
+    </div>
+    <div id="schedule-modal-body" style="overflow-y:auto;padding:8px 0 16px 0;flex:1;"></div>
+  </div>
 </div>
 
 <div id="tabs-wrap">
@@ -7530,6 +7545,11 @@ fetchInjuries().then(res => {
 // ═══════════════════════════════════════════════════════════════════════════════
 let _tickerLastFetch = 0;
 let _tickerTimer = null;
+// Latest fetched events, exposed so the schedule modal can render from them
+let _tickerCachedEvents = [];
+// Map: norm(playerName) → { stats:{pts,reb,ast,fg3m}, teamAbbr, gameState }
+// Refreshed every ticker tick. Used to compute live progress for tracked bets.
+let _tickerPlayerStats = new Map();
 async function fetchAndRenderScoreboard() {
   try {
     const fmt = d => `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`;
@@ -7551,12 +7571,78 @@ async function fetchAndRenderScoreboard() {
       tomorrowEvents = (d?.events || []).map(ev => ({ ...ev, _ticker_day: "tomorrow" }));
     }
     const events = [...todayEvents, ...tomorrowEvents];
+    _tickerCachedEvents = events;
+    // Pull box score stats for live + completed games (today only) so the
+    // ticker can show progress on tracked bets and top scorers.
+    await fetchTickerPlayerStats(todayEvents);
     renderScoreboardTicker(events);
     _tickerLastFetch = Date.now();
   } catch (e) {
     // Network errors / CORS / etc. — silently hide ticker, user isn't blocked
     console.log("[TICKER] fetch failed:", e?.message || e);
   }
+}
+
+async function fetchTickerPlayerStats(events) {
+  const fetchable = events.filter(ev => {
+    const state = ev?.competitions?.[0]?.status?.type?.state;
+    return state === "in" || state === "post";
+  });
+  if (fetchable.length === 0) { _tickerPlayerStats = new Map(); return; }
+  const newMap = new Map();
+  const results = await Promise.all(fetchable.map(async ev => {
+    try {
+      const r = await fetch(`https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/summary?event=${ev.id}`, { mode: "cors" });
+      if (!r.ok) return null;
+      const summary = await r.json();
+      return { ev, summary };
+    } catch { return null; }
+  }));
+  for (const item of results) {
+    if (!item) continue;
+    const { ev, summary } = item;
+    const gameState = ev?.competitions?.[0]?.status?.type?.state;
+    const teamPlayerGroups = summary?.boxscore?.players || [];
+    for (const teamGroup of teamPlayerGroups) {
+      const teamAbbr = (teamGroup.team?.abbreviation || "").toUpperCase();
+      const stats = teamGroup.statistics || [];
+      for (const statGroup of stats) {
+        const labels = (statGroup.labels || statGroup.keys || []).map(s => s.toString().toLowerCase());
+        const idx = {
+          pts: labels.findIndex(l => l === "pts"),
+          reb: labels.findIndex(l => l === "reb"),
+          ast: labels.findIndex(l => l === "ast"),
+          tpt: labels.findIndex(l => l === "3pt" || l === "fg3" || l === "3p")
+        };
+        const athletes = statGroup.athletes || [];
+        for (const a of athletes) {
+          const player = a.athlete || {};
+          const fullName = player.displayName || `${player.firstName||""} ${player.lastName||""}`.trim();
+          if (!fullName) continue;
+          const stRow = a.stats || [];
+          const parseInt0 = (s) => { const n = parseInt(s); return isNaN(n) ? 0 : n; };
+          let fg3m = 0;
+          if (idx.tpt >= 0 && stRow[idx.tpt]) {
+            const mm = String(stRow[idx.tpt]).match(/^(\d+)/);
+            if (mm) fg3m = parseInt(mm[1]);
+          }
+          const key = (typeof norm === "function") ? norm(fullName) : fullName.toLowerCase();
+          newMap.set(key, {
+            displayName: fullName,
+            teamAbbr,
+            gameState,
+            stats: {
+              pts: idx.pts >= 0 ? parseInt0(stRow[idx.pts]) : 0,
+              reb: idx.reb >= 0 ? parseInt0(stRow[idx.reb]) : 0,
+              ast: idx.ast >= 0 ? parseInt0(stRow[idx.ast]) : 0,
+              fg3m,
+            }
+          });
+        }
+      }
+    }
+  }
+  _tickerPlayerStats = newMap;
 }
 function renderScoreboardTicker(events) {
   const ticker = document.getElementById("scoreboard-ticker");
@@ -7586,7 +7672,18 @@ function renderScoreboardTicker(events) {
     return 3;
   };
   const sortedEvents = [...events].sort((a, b) => sortRank(a) - sortRank(b));
-  const cards = [dateCard, ...sortedEvents.map(ev => buildTickerCard(ev)).filter(Boolean)];
+  const gameCards = sortedEvents.map(ev => buildTickerCard(ev)).filter(Boolean);
+  // ── Tracked-bet progress cards (today's slate only) ──
+  const betCards = buildTickerBetCards();
+  // ── Top scorers across today's live + completed games ──
+  const topScorerCards = buildTickerTopScorerCards();
+  // Compose: date · games · |separator| · bets · |separator| · top scorers
+  const sep = (label) => `<div class="tk-game" style="background:transparent;border-color:transparent;padding:6px 4px;opacity:0.6;">
+    <span style="font-size:9px;font-weight:700;letter-spacing:1.4px;color:#7dd3fc;text-transform:uppercase;">${label}</span>
+  </div>`;
+  const cards = [dateCard, ...gameCards];
+  if (betCards.length) cards.push(sep("Your Bets"), ...betCards);
+  if (topScorerCards.length) cards.push(sep("Top Scorers"), ...topScorerCards);
   if (cards.length <= 1) {
     // Only the date card → show a friendly "no games" instead of nothing
     const noGames = `<div class="tk-game" style="opacity:0.6;">
@@ -7594,7 +7691,7 @@ function renderScoreboardTicker(events) {
     </div>`;
     inner.innerHTML = (cards[0] + noGames).repeat(2);
     ticker.style.display = "block";
-    inner.style.animationDuration = "40s";
+    inner.style.animationDuration = "20s";
     return;
   }
   // Duplicate cards so the animation can loop seamlessly (-50% transform = exactly
@@ -7602,7 +7699,7 @@ function renderScoreboardTicker(events) {
   inner.innerHTML = cards.join("") + cards.join("");
   ticker.style.display = "block";
   // Tune animation speed to content length so short slates don't whip past
-  const duration = Math.max(30, cards.length * 12);  // ~12s per card, 30s minimum
+  const duration = Math.max(18, cards.length * 4);  // ~4s per card, 18s minimum
   inner.style.animationDuration = `${duration}s`;
 }
 function buildTickerCard(ev) {
@@ -7674,6 +7771,234 @@ function buildTickerCard(ev) {
 function escapeHtmlBasic(s) {
   return (s == null ? "" : String(s)).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
+
+// Get the current stat value from box-score for a tracked bet. Returns null if
+// player not yet in stats (pre-game) or stat unknown.
+function tickerGetStatFor(playerName, stat) {
+  if (!playerName || !_tickerPlayerStats || _tickerPlayerStats.size === 0) return null;
+  const key = (typeof norm === "function") ? norm(playerName) : playerName.toLowerCase();
+  const rec = _tickerPlayerStats.get(key);
+  if (!rec) return null;
+  const s = rec.stats;
+  const statKey = (stat || "").toUpperCase();
+  switch (statKey) {
+    case "PTS": return { value: s.pts, gameState: rec.gameState };
+    case "REB": return { value: s.reb, gameState: rec.gameState };
+    case "AST": return { value: s.ast, gameState: rec.gameState };
+    case "3PM": return { value: s.fg3m, gameState: rec.gameState };
+    case "PRA": return { value: s.pts + s.reb + s.ast, gameState: rec.gameState };
+    case "PR":  return { value: s.pts + s.reb, gameState: rec.gameState };
+    case "PA":  return { value: s.pts + s.ast, gameState: rec.gameState };
+    case "RA":  return { value: s.reb + s.ast, gameState: rec.gameState };
+    default:    return null;
+  }
+}
+
+// Build ticker cards for tracked bets on today's slate. Shows player, line,
+// stat, current value, and a status dot (green=hit, red=busted, gray=pending).
+function buildTickerBetCards() {
+  if (typeof bets === "undefined" || !Array.isArray(bets) || bets.length === 0) return [];
+  // Today's bets only (gameDate or saved date matching today's ISO)
+  const todayISO = new Date().toISOString().slice(0, 10);
+  const todayBets = bets.filter(b => {
+    if (!b || b.stat === "GAME_TOTAL") return false;  // skip totals — ticker is player-focused
+    const d = b.gameDate || b.date || "";
+    // gameDate is ISO; date is locale-string fallback. Try ISO match first.
+    if (d === todayISO) return true;
+    // Fall back: parse locale date and compare
+    try { return new Date(d).toISOString().slice(0, 10) === todayISO; } catch { return false; }
+  });
+  if (todayBets.length === 0) return [];
+  return todayBets.map(b => {
+    const statInfo = tickerGetStatFor(b.player, b.stat);
+    const line = Number(b.line);
+    const ouLabel = (b.ou === "over" ? "o" : "u") + (Number.isInteger(line) ? line : line.toFixed(1));
+    let valueStr = "—";
+    let dotColor = "#525a64";
+    let dotShadow = "none";
+    let bgTint = "rgba(125,211,252,0.04)";
+    let borderTint = "rgba(125,211,252,0.18)";
+    if (statInfo && statInfo.value != null) {
+      const v = statInfo.value;
+      valueStr = String(v);
+      const hit = b.ou === "over" ? v > line : v < line;
+      const exact = Math.abs(v - line) < 1e-9;
+      if (statInfo.gameState === "post") {
+        // Game done → definitive
+        if (exact) { dotColor = "#f59e0b"; bgTint = "rgba(245,158,11,0.06)"; borderTint = "rgba(245,158,11,0.3)"; }
+        else if (hit) { dotColor = "#4ade80"; dotShadow = "0 0 6px rgba(74,222,128,0.7)"; bgTint = "rgba(34,197,94,0.06)"; borderTint = "rgba(34,197,94,0.32)"; }
+        else { dotColor = "#f87171"; bgTint = "rgba(248,113,113,0.06)"; borderTint = "rgba(248,113,113,0.32)"; }
+      } else if (statInfo.gameState === "in") {
+        // Live → "on pace" indicator
+        if (b.ou === "over" && v >= line) { dotColor = "#4ade80"; dotShadow = "0 0 6px rgba(74,222,128,0.7)"; bgTint = "rgba(34,197,94,0.06)"; borderTint = "rgba(34,197,94,0.32)"; }
+        else if (b.ou === "under" && v > line) { dotColor = "#f87171"; bgTint = "rgba(248,113,113,0.06)"; borderTint = "rgba(248,113,113,0.32)"; }
+        else { dotColor = "#7dd3fc"; dotShadow = "0 0 5px rgba(125,211,252,0.6)"; }
+      }
+    }
+    const lastName = (b.player || "").split(/\s+/).slice(-1)[0] || b.player || "?";
+    const teamTag = b.team ? `<span style="font-size:9px;color:#7dd3fc;font-weight:700;letter-spacing:0.3px;">${escapeHtmlBasic(b.team)}</span>` : "";
+    return `<div class="tk-game" style="background:${bgTint};border-color:${borderTint};">
+      <span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${dotColor};box-shadow:${dotShadow};"></span>
+      <span style="font-weight:700;color:#fff;">${escapeHtmlBasic(lastName)}</span>
+      ${teamTag}
+      <span style="color:#a8b0bb;font-size:10px;font-weight:600;letter-spacing:0.3px;">${ouLabel} ${b.stat}</span>
+      <span class="tk-at">·</span>
+      <span class="tk-score" style="color:${dotColor === "#525a64" ? "#a8b0bb" : "#fff"};">${valueStr}</span>
+    </div>`;
+  });
+}
+
+// Build top-scorer cards across all today's live + completed games. Takes top 5.
+function buildTickerTopScorerCards() {
+  if (!_tickerPlayerStats || _tickerPlayerStats.size === 0) return [];
+  const players = [];
+  _tickerPlayerStats.forEach((rec, key) => {
+    if (rec.stats.pts > 0) players.push({ ...rec, key });
+  });
+  if (players.length === 0) return [];
+  players.sort((a, b) => b.stats.pts - a.stats.pts);
+  const top = players.slice(0, 5);
+  return top.map((p, i) => {
+    const lastName = (p.displayName || "").split(/\s+/).slice(-1)[0] || p.displayName || "?";
+    const rankTint = i === 0 ? "rgba(74,222,128,0.10)" : "rgba(125,211,252,0.04)";
+    const rankBorder = i === 0 ? "rgba(74,222,128,0.32)" : "rgba(125,211,252,0.15)";
+    const rankColor = i === 0 ? "#4ade80" : "#7dd3fc";
+    return `<div class="tk-game" style="background:${rankTint};border-color:${rankBorder};">
+      <span style="font-size:9px;font-weight:800;color:${rankColor};letter-spacing:0.6px;">#${i+1}</span>
+      <span style="font-weight:700;color:#fff;">${escapeHtmlBasic(lastName)}</span>
+      <span style="font-size:9px;color:#7dd3fc;font-weight:700;">${escapeHtmlBasic(p.teamAbbr || "")}</span>
+      <span class="tk-score">${p.stats.pts}</span>
+      <span style="color:#8b93a0;font-size:10px;font-weight:600;letter-spacing:0.3px;">pts</span>
+      ${p.stats.reb ? `<span style="color:#a8b0bb;font-size:10px;">${p.stats.reb}r</span>` : ""}
+      ${p.stats.ast ? `<span style="color:#a8b0bb;font-size:10px;">${p.stats.ast}a</span>` : ""}
+    </div>`;
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SCHEDULE MODAL — tap-the-ticker full schedule view
+// Renders today's + tomorrow's games as a vertical list with score, time, status.
+// Reuses _tickerCachedEvents (populated by fetchAndRenderScoreboard).
+// ═══════════════════════════════════════════════════════════════════════════════
+function openScheduleModal() {
+  const modal = document.getElementById("schedule-modal");
+  if (!modal) return;
+  modal.style.display = "flex";
+  // Refresh content with latest cached events — covers case where ticker hadn't
+  // loaded yet when modal markup was rendered.
+  renderScheduleModalBody();
+  // Lock body scroll while open
+  document.body.style.overflow = "hidden";
+}
+function closeScheduleModal() {
+  const modal = document.getElementById("schedule-modal");
+  if (!modal) return;
+  modal.style.display = "none";
+  document.body.style.overflow = "";
+}
+function renderScheduleModalBody() {
+  const dateLabel = document.getElementById("schedule-modal-date");
+  const body = document.getElementById("schedule-modal-body");
+  if (!dateLabel || !body) return;
+  const now = new Date();
+  dateLabel.textContent = now.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" });
+  const events = _tickerCachedEvents || [];
+  if (events.length === 0) {
+    body.innerHTML = `<div style="padding:24px;text-align:center;color:#8b93a0;font-size:13px;">No games scheduled.</div>`;
+    return;
+  }
+  const todayEvents = events.filter(e => e._ticker_day === "today");
+  const tomorrowEvents = events.filter(e => e._ticker_day === "tomorrow");
+  let html = "";
+  if (todayEvents.length) html += renderScheduleSection("Today", todayEvents);
+  if (tomorrowEvents.length) html += renderScheduleSection("Tomorrow", tomorrowEvents);
+  body.innerHTML = html;
+}
+function renderScheduleSection(label, events) {
+  const rows = events.map(ev => renderScheduleRow(ev)).filter(Boolean).join("");
+  if (!rows) return "";
+  return `
+    <div style="padding:12px 20px 6px 20px;font-size:10px;color:#7dd3fc;letter-spacing:1.4px;font-weight:700;text-transform:uppercase;">${label}</div>
+    ${rows}`;
+}
+function renderScheduleRow(ev) {
+  try {
+    const comp = ev?.competitions?.[0];
+    if (!comp) return "";
+    const away = (comp.competitors || []).find(c => c.homeAway === "away");
+    const home = (comp.competitors || []).find(c => c.homeAway === "home");
+    if (!away || !home) return "";
+    const status = comp.status?.type || ev.status?.type || {};
+    const state = status.state;
+    const completed = status.completed === true;
+    const awayAbbr = (away.team?.abbreviation || "").toUpperCase();
+    const homeAbbr = (home.team?.abbreviation || "").toUpperCase();
+    const awayName = away.team?.shortDisplayName || away.team?.displayName || awayAbbr;
+    const homeName = home.team?.shortDisplayName || home.team?.displayName || homeAbbr;
+    const awayRec = (away.records || []).find(r => r.type === "total")?.summary || "";
+    const homeRec = (home.records || []).find(r => r.type === "total")?.summary || "";
+    const awayScore = parseInt(away.score) || 0;
+    const homeScore = parseInt(home.score) || 0;
+    let rightCol = "";
+    let leftAccent = "transparent";
+    if (state === "in") {
+      leftAccent = "#22c55e";
+      const detail = status.shortDetail || status.detail || "LIVE";
+      const awayWin = awayScore > homeScore;
+      rightCol = `
+        <div style="display:flex;align-items:center;gap:10px;justify-content:flex-end;">
+          <div style="text-align:right;">
+            <div style="font-family:'JetBrains Mono',monospace;font-weight:800;font-size:16px;color:${awayWin?'#fff':'#8b93a0'};line-height:1;">${awayScore}</div>
+            <div style="font-family:'JetBrains Mono',monospace;font-weight:800;font-size:16px;color:${!awayWin?'#fff':'#8b93a0'};line-height:1;margin-top:4px;">${homeScore}</div>
+          </div>
+          <div style="display:flex;flex-direction:column;align-items:flex-end;gap:2px;">
+            <span style="font-size:9px;font-weight:700;letter-spacing:0.8px;color:#4ade80;display:inline-flex;align-items:center;gap:4px;"><span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:#4ade80;box-shadow:0 0 6px rgba(74,222,128,0.8);"></span>LIVE</span>
+            <span style="font-size:10px;color:#a8b0bb;font-weight:600;">${escapeHtmlBasic(detail)}</span>
+          </div>
+        </div>`;
+    } else if (state === "post" || completed) {
+      leftAccent = "#525a64";
+      const awayWin = awayScore > homeScore;
+      rightCol = `
+        <div style="display:flex;align-items:center;gap:10px;justify-content:flex-end;">
+          <div style="text-align:right;">
+            <div style="font-family:'JetBrains Mono',monospace;font-weight:800;font-size:16px;color:${awayWin?'#fff':'#8b93a0'};line-height:1;">${awayScore}</div>
+            <div style="font-family:'JetBrains Mono',monospace;font-weight:800;font-size:16px;color:${!awayWin?'#fff':'#8b93a0'};line-height:1;margin-top:4px;">${homeScore}</div>
+          </div>
+          <span style="font-size:9px;font-weight:700;letter-spacing:0.8px;color:#a8b0bb;background:rgba(139,147,160,0.12);padding:3px 7px;border-radius:4px;">FINAL</span>
+        </div>`;
+    } else {
+      leftAccent = "#1e40af";
+      const gameTime = ev.date ? new Date(ev.date) : null;
+      const timeStr = gameTime
+        ? gameTime.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })
+        : (status.shortDetail || "Scheduled");
+      rightCol = `
+        <div style="text-align:right;">
+          <div style="font-size:13px;font-weight:700;color:#fff;letter-spacing:0.2px;">${escapeHtmlBasic(timeStr)}</div>
+          <div style="font-size:10px;color:#7dd3fc;letter-spacing:0.6px;margin-top:2px;font-weight:600;">Tip-off</div>
+        </div>`;
+    }
+    return `
+      <div style="display:flex;align-items:center;gap:12px;padding:12px 18px 12px 16px;border-left:3px solid ${leftAccent};border-bottom:1px solid rgba(255,255,255,0.03);">
+        <div style="flex:1;min-width:0;">
+          <div style="display:flex;align-items:center;gap:8px;">
+            <span style="font-size:14px;font-weight:700;color:#fff;">${escapeHtmlBasic(awayName)}</span>
+            <span style="font-size:10px;color:#525a64;font-weight:500;">${escapeHtmlBasic(awayRec)}</span>
+          </div>
+          <div style="font-size:9px;color:#525a64;letter-spacing:0.6px;font-weight:600;margin:3px 0;">@</div>
+          <div style="display:flex;align-items:center;gap:8px;">
+            <span style="font-size:14px;font-weight:700;color:#fff;">${escapeHtmlBasic(homeName)}</span>
+            <span style="font-size:10px;color:#525a64;font-weight:500;">${escapeHtmlBasic(homeRec)}</span>
+          </div>
+        </div>
+        ${rightCol}
+      </div>`;
+  } catch (e) {
+    return "";
+  }
+}
+
 function startScoreboardTicker() {
   fetchAndRenderScoreboard();
   if (_tickerTimer) clearInterval(_tickerTimer);
@@ -7859,7 +8184,11 @@ document.addEventListener("DOMContentLoaded", () => {
     const worstAmerican = toAmericanFloor(worstD);
     const worstActualEV = (prob * (toDecimal(worstAmerican) - 1) - (1 - prob)) * 100;
     capLastWorstPrice = fmtOdds(worstAmerican);
-    document.getElementById("cap-good-to-btn").style.display = "block";
+    const goodToBtn = document.getElementById("cap-good-to-btn");
+    if (goodToBtn) {
+      goodToBtn.style.display = "flex";
+      goodToBtn.innerHTML = `<span style="font-size:9px;opacity:0.7;letter-spacing:0.4px;">good to</span><span style="font-size:13px;font-weight:800;color:#7dd3fc;letter-spacing:0.2px;">${capLastWorstPrice}</span>`;
+    }
 
     rows.forEach(({ ev, label, badgeClass, useFloor }) => {
       if (ev === 4.9 && worstActualEV > 5.005) return;
@@ -7903,6 +8232,11 @@ document.addEventListener("DOMContentLoaded", () => {
     capLastWorstPrice = null;
   }
 
+  // Track whether FAIR was auto-derived from MARKET+EV. If true, changing
+  // MARKET or EV recomputes FAIR fresh. If false (user typed FAIR manually),
+  // EV changes respect the user's FAIR value.
+  let capFairWasAutoFilled = false;
+
   function capCalculate() {
     capHideError(); capResetOutputs();
     const marketRaw = document.getElementById("cap-market-input").value.trim();
@@ -7912,18 +8246,21 @@ document.addEventListener("DOMContentLoaded", () => {
     const fair = parseOdds(fairRaw);
     const ev = evRaw !== "" ? parseFloat(evRaw) : null;
 
-    // MODE 1: market + EV → derive fair, render table
-    if (market !== null && ev !== null && fairRaw === "") {
+    // MODE 1: market + EV → derive fair, render table.
+    // Trigger this when (a) FAIR is empty, OR (b) FAIR was previously
+    // auto-derived (so we recompute when MARKET or EV changes).
+    if (market !== null && ev !== null && (fairRaw === "" || capFairWasAutoFilled)) {
       if (isNaN(ev) || ev < 0) return capShowError("EV% must be positive");
       const d_market = toDecimal(market);
       const fairProb = (ev/100 + 1) / d_market;
       if (fairProb <= 0 || fairProb >= 1) return capShowError("Invalid combination");
       const fairOdds = toAmerican(1/fairProb);
       document.getElementById("cap-fair-input").value = fmtOdds(fairOdds);
+      capFairWasAutoFilled = true;
       renderCapTable(fairProb);
       return;
     }
-    // MODE 2: fair + EV
+    // MODE 2: fair + EV (user typed FAIR manually)
     if (fair !== null && ev !== null) {
       if (isNaN(ev) || ev < 0) return capShowError("EV% must be positive");
       renderCapTable(impliedProb(fair));
@@ -7941,6 +8278,7 @@ document.addEventListener("DOMContentLoaded", () => {
     ["cap-market-input","cap-ev-input","cap-fair-input"].forEach(id => {
       const el = document.getElementById(id); if (el) el.value = "";
     });
+    capFairWasAutoFilled = false;
     capResetOutputs(); capHideError();
   }
 
@@ -8192,6 +8530,7 @@ document.addEventListener("DOMContentLoaded", () => {
     ta.value = "";
     renderCapNotes();
     renderCapSummary();
+    autoFillMarketFromPlays();
   }
   function deleteCapNote(i) {
     const grades = loadCapGrades();
@@ -8202,12 +8541,68 @@ document.addEventListener("DOMContentLoaded", () => {
     renderCapNotes();
     updateCapTracker();
     renderCapSummary();
+    autoFillMarketFromPlays();
   }
   function clearAllCapNotes() {
     if (!confirm("Clear all plays? Grades will be wiped too.")) return;
     capPlays = []; saveCapPlays();
     localStorage.setItem("captool_grades", "{}");
     renderCapNotes(); updateCapTracker(); renderCapSummary();
+    autoFillMarketFromPlays();
+  }
+
+  // Extract the odds from a single play line. Looks for ±NNN at any position;
+  // returns the last one found (typically the price comes at the end of the line
+  // like "...over 24.5 points fd -110").
+  function extractOddsFromPlay(text) {
+    if (!text) return null;
+    // Match isolated +/-NNN — must have word boundary or whitespace around it
+    const matches = text.match(/(?:^|[\s,])([+-]\d{2,4})(?=\s|$|,)/g);
+    if (!matches || !matches.length) return null;
+    // Take the last odds in the line — that's where the price typically lives.
+    const last = matches[matches.length - 1].trim();
+    const n = parseInt(last, 10);
+    if (isNaN(n) || n === 0) return null;
+    return n;
+  }
+
+  // Compare two American odds — return positive if a is "worse" (more expensive)
+  // than b. For the cap tool, worse = bigger negative for favorites, smaller
+  // positive for dogs (i.e. lower implied prob payout, requiring stronger fair).
+  function oddsIsWorseThan(a, b) {
+    // Convert to implied probability — higher implied = worse for the bettor
+    const ip = (n) => n > 0 ? 100 / (n + 100) : Math.abs(n) / (Math.abs(n) + 100);
+    return ip(a) > ip(b);
+  }
+
+  // Scan all current capPlays PLUS the current textarea draft, parse odds,
+  // find the WORST (most expensive) and stick it in the MARKET input so the
+  // cap calc uses the binding price. Doesn't overwrite if user is mid-edit
+  // (input is focused).
+  function autoFillMarketFromPlays() {
+    const marketInput = document.getElementById("cap-market-input");
+    if (!marketInput) return;
+    if (document.activeElement === marketInput) return; // don't fight the user
+    // Include what's being typed RIGHT NOW in the textarea draft —
+    // user wants MARKET to fill in live before they hit the + button.
+    const draftEl = document.getElementById("cap-note-input");
+    const draft = draftEl ? draftEl.value.trim() : "";
+    const sources = [...capPlays];
+    if (draft) sources.push(draft);
+    const allOdds = sources
+      .map(p => extractOddsFromPlay(p))
+      .filter(o => o !== null);
+    if (allOdds.length === 0) {
+      // Nothing to auto-fill from — clear it so we don't leave stale data
+      marketInput.value = "";
+      return;
+    }
+    const worst = allOdds.reduce((acc, o) => (acc === null || oddsIsWorseThan(o, acc)) ? o : acc, null);
+    if (worst === null) return;
+    const formatted = worst > 0 ? `+${worst}` : String(worst);
+    marketInput.value = formatted;
+    // Recompute fair/EV if the user has EV% typed
+    if (typeof capCalculate === "function") capCalculate();
   }
   function appendWorst() {
     if (!capLastWorstPrice) return;
@@ -8481,6 +8876,15 @@ document.addEventListener("DOMContentLoaded", () => {
       const el = document.getElementById(id);
       if (el) el.addEventListener("input", capAutoCalc);
     });
+    // If user types directly in FAIR, that's a manual override — flag it
+    // so MODE 2 path is used (respect their value when EV changes).
+    const fairEl = document.getElementById("cap-fair-input");
+    if (fairEl) {
+      fairEl.addEventListener("input", () => { capFairWasAutoFilled = false; });
+    }
+    // When user clears all, reset flag too
+    const clearBtn = document.getElementById("cap-clear-btn");
+    if (clearBtn) clearBtn.addEventListener("click", () => { capFairWasAutoFilled = false; });
     const search = document.getElementById("cap-player-search");
     if (search) {
       search.addEventListener("input", searchCapPlayers);
@@ -8506,6 +8910,8 @@ document.addEventListener("DOMContentLoaded", () => {
             ta.selectionStart = ta.selectionEnd = pos + diff;
           }
         }
+        // Live auto-fill: as user types odds in the play, populate MARKET up top
+        autoFillMarketFromPlays();
       });
     }
 
@@ -8537,6 +8943,7 @@ document.addEventListener("DOMContentLoaded", () => {
     renderCapNotes();
     updateCapTracker();
     renderCapSummary();
+    autoFillMarketFromPlays();
   };
 
   // ─── Inline handlers (the HTML uses window._cap* to avoid global pollution) ──
