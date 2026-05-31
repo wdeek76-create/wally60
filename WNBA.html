@@ -1562,20 +1562,26 @@ function _isTrackedProp(player, stat) {
 }
 
 function trackTotal(payload, ...legacyArgs) {
-  // New API: trackTotal({awayAbbr, homeAbbr, side, line, odds, book, projTotal, projSource, snapshots})
+  // New API: trackTotal({awayAbbr, homeAbbr, side, line, odds, book, projTotal, projSource, snapshots, gameDate})
   // Legacy API: trackTotal(awayAbbr, homeAbbr, side, line, odds, book, projTotal, projSource)
-  let awayAbbr, homeAbbr, side, line, odds, book, projTotal, projSource, snapshots = null, projPoss = null, paceEffProj = null;
+  let awayAbbr, homeAbbr, side, line, odds, book, projTotal, projSource, snapshots = null, projPoss = null, paceEffProj = null, gameDate = null;
   if (typeof payload === "object" && payload !== null && payload.awayAbbr) {
-    ({ awayAbbr, homeAbbr, side, line, odds, book, projTotal, projSource, snapshots, projPoss, paceEffProj } = payload);
+    ({ awayAbbr, homeAbbr, side, line, odds, book, projTotal, projSource, snapshots, projPoss, paceEffProj, gameDate } = payload);
   } else {
     awayAbbr = payload;
     [homeAbbr, side, line, odds, book, projTotal, projSource] = legacyArgs;
   }
   const label = `${awayAbbr} @ ${homeAbbr}`;
-  // Totals are often tracked days ahead. Reuse the last date used for a total
-  // (persisted) so you set it once per slate instead of every single bet.
+  // Prefer the game's actual date (from the ESPN parse) over the localStorage
+  // fallback. If the game was parsed from ESPN with a real date, use it directly —
+  // no need to manually adjust the date in the modal. Falls back to "last used"
+  // date for games without a parsed date.
   let presetDate = null;
-  try { presetDate = localStorage.getItem("wnba_last_total_date") || null; } catch(e) {}
+  if (gameDate) {
+    presetDate = gameDate;
+  } else {
+    try { presetDate = localStorage.getItem("wnba_last_total_date") || null; } catch(e) {}
+  }
   openTrackModal(label, "TOT", "GAME_TOTAL", projTotal, `${awayAbbr}/${homeAbbr}`, presetDate);
   // Stash which projection model produced this bet + the all-models snapshot + pace data
   window._modalProjSource = projSource || null;
@@ -2523,7 +2529,20 @@ function formatBetCopyLine(b) {
 
   let line;
   if (isTotal) {
-    line = `${b.player}  ${ouLower} ${bestLine} ${oddsStr} ${best.book}${playToStr}`;
+    // Brief format for totals: "6/1 MIN @ PHX  under 168.5  (p166.84)"
+    const dateStr = (() => {
+      const iso = b.date || (b.timestamp || "").split(" ")[0] || "";
+      const m = iso.match(/^(\d{4})-(\d{2})-(\d{2})/);
+      if (!m) return "";
+      return `${parseInt(m[2])}/${parseInt(m[3])} `;
+    })();
+    const matchup = b.team && b.team.includes("/")
+      ? b.team.split("/").join(" @ ")
+      : (b.team || b.player);
+    const projStr = b.proj != null ? `  (p${b.proj.toFixed(2)})` : "";
+    line = `${dateStr}${matchup}  ${ouLower} ${bestLine}${projStr}`;
+    // Brief format has no book/odds — return early; alt rows aren't appended.
+    return line;
   } else {
     const teamStr = b.team ? ` (${b.team})` : "";
     const statName = STAT_FULL_NAME[b.stat] || b.stat;
@@ -3672,7 +3691,22 @@ function _copyOpenFiltered(kind) {
 
     let row;
     if (kind === "totals") {
-      row = `${bet.player}  ${ouLower} ${bestLine} ${oddsStr} ${best.book}${headlinePlayToStr}`;
+      // Brief totals format: "6/1 MIN @ PHX  under 168.5  (p166.84)"
+      // Parses the date and team string into a clean summary line. The full
+      // book/odds noise is dropped — for totals, the share format is for
+      // quick read, not for placing the bet.
+      const dateStr = (() => {
+        const iso = bet.date || (bet.timestamp || "").split(" ")[0] || "";
+        const m = iso.match(/^(\d{4})-(\d{2})-(\d{2})/);
+        if (!m) return "";
+        return `${parseInt(m[2])}/${parseInt(m[3])} `;
+      })();
+      // bet.team is stored as "AWAY/HOME" for totals
+      const matchup = bet.team && bet.team.includes("/")
+        ? bet.team.split("/").join(" @ ")
+        : (bet.team || bet.player);
+      const projStr = bet.proj != null ? `  (p${bet.proj.toFixed(2)})` : "";
+      row = `${dateStr}${matchup}  ${ouLower} ${bestLine}${projStr}`;
     } else if (isMultiProp) {
       // Multi-prop: numbered item with no repeated player/team header
       const statName = STAT_FULL_NAME[bet.stat] || bet.stat;
@@ -3687,7 +3721,8 @@ function _copyOpenFiltered(kind) {
 
     // Alts row — group by line, one play-to per group.
     // For the group at the headline's line, prepend the headline's price so its play-to covers everyone at that line.
-    if (remaining.length) {
+    // Totals use the brief format with no book/odds, so they skip this whole block.
+    if (kind !== "totals" && remaining.length) {
       const byLine = {};
       // Seed groups with the headline at its own line so alts at same line get the play-to including it
       if (altsAtBestLine) {
@@ -4215,7 +4250,7 @@ function renderTracker() {
               })()}
               <span onclick="editBet(${b.id})" style="cursor:pointer;border-bottom:1px dashed #55258377;" title="Click to edit">${b.player}</span> <span style="color:#FDB927;font-weight:600;">${b.ou} ${b.line} ${statLbl}</span>
             </div>
-            <div style="font-size:10px;color:#a8b0bb;">${b.timestamp || b.date}${b.team?` · ${b.team}`:''}${b.stat==="GAME_TOTAL" && b.projSource ? ` · <span style="color:#FDB927;font-weight:700;letter-spacing:0.5px;">${b.projSource === "blended" ? "ROTOWIRE" : b.projSource.toUpperCase()}</span>` : ''}</div>
+            <div style="font-size:10px;color:#a8b0bb;">${b.timestamp || b.date}${b.team?` · ${b.team}`:''}${b.stat==="GAME_TOTAL" && b.projSource ? ` · <span style="color:#FDB927;font-weight:700;letter-spacing:0.5px;">${b.projSource === "blended" ? "PLAYER" : b.projSource.toUpperCase()}</span>` : ''}</div>
           </div>
         </div>
         <div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap;">
@@ -4981,6 +5016,7 @@ function parseEspnSchedule(text) {
   // We rely on positional structure: each game block is two consecutive teams separated by "@".
 
   let currentDay = null;
+  let currentDate = null;  // ISO YYYY-MM-DD for the current date header
   let i = 0;
   while (i < lines.length) {
     const ln = lines[i];
@@ -4988,6 +5024,17 @@ function parseEspnSchedule(text) {
     if (dateHeaderRe.test(ln)) {
       const dayName = ln.match(/^(\w+),/)[1];
       currentDay = dayAbbr[dayName] || dayName.slice(0,3);
+      // Also capture the full date as YYYY-MM-DD so games can carry it
+      // through to the modal preset. Header looks like "Friday, May 29, 2026".
+      try {
+        const parsed = new Date(ln);
+        if (!isNaN(parsed.getTime())) {
+          const y = parsed.getFullYear();
+          const mo = String(parsed.getMonth() + 1).padStart(2, "0");
+          const dy = String(parsed.getDate()).padStart(2, "0");
+          currentDate = `${y}-${mo}-${dy}`;
+        }
+      } catch(e) { currentDate = null; }
       i++; continue;
     }
     if (tablesHeaderRe.test(ln)) { i++; continue; }
@@ -5060,6 +5107,7 @@ function parseEspnSchedule(text) {
       awayName: Object.keys(SCHEDULE_CITY_TO_ABBR).find(k => SCHEDULE_CITY_TO_ABBR[k] === awayAbbr) || awayAbbr,
       homeName: Object.keys(SCHEDULE_CITY_TO_ABBR).find(k => SCHEDULE_CITY_TO_ABBR[k] === homeAbbr) || homeAbbr,
       time: labeledTime,
+      gameDate: currentDate,
       books,
       // Hint to the cards that this game should default to 2026 P×E when no line is posted
       defaultSeason: ouLine == null ? "2026" : undefined
@@ -5149,12 +5197,16 @@ async function fetchEspnSchedule() {
       if (!homeAbbr || !awayAbbr) return;
       // Format the time in ET ("Sat 1:00 PM") so it matches the paste-based
       // labels and behaves the same way in the rest of the UI.
+      // Also extract the ET-anchored date as YYYY-MM-DD so the track-bet modal
+      // can preset it (instead of falling back to localStorage or today).
       let labeledTime = "TBD";
+      let gameDate = null;
       try {
         const d = new Date(ev.date);
         const etParts = new Intl.DateTimeFormat("en-US", {
           timeZone: "America/New_York",
-          weekday: "short", hour: "numeric", minute: "2-digit", hour12: true
+          weekday: "short", hour: "numeric", minute: "2-digit", hour12: true,
+          year: "numeric", month: "2-digit", day: "2-digit"
         }).formatToParts(d);
         const get = (t) => etParts.find(p => p.type === t)?.value || "";
         const wk = get("weekday");
@@ -5162,6 +5214,10 @@ async function fetchEspnSchedule() {
         const mn = get("minute");
         const dp = get("dayPeriod");
         labeledTime = `${wk} ${hr}:${mn} ${dp}`;
+        const y = get("year");
+        const mo = get("month");
+        const dy = get("day");
+        if (y && mo && dy) gameDate = `${y}-${mo}-${dy}`;
       } catch(e) { /* keep TBD */ }
 
       // ESPN's odds payload sometimes includes a total; surface it if present.
@@ -5180,6 +5236,7 @@ async function fetchEspnSchedule() {
         awayName: away?.team?.location || away?.team?.displayName || awayAbbr,
         homeName: home?.team?.location || home?.team?.displayName || homeAbbr,
         time: labeledTime,
+        gameDate,
         books,
         defaultSeason: ouLine == null ? "2026" : undefined
       });
@@ -5225,6 +5282,96 @@ function erf(x) {
   const t = 1.0 / (1.0 + p * x);
   const y = 1.0 - (((((a5*t+a4)*t)+a3)*t+a2)*t+a1)*t*Math.exp(-x*x);
   return sign * y;
+}
+
+// ── COPY HELPERS FOR THE TOTALS TAB ────────────────────────────────────────
+// Emits brief-format lines suitable for sharing/cross-checking projections
+// before placing bets. Format mirrors the tracker's totals copy:
+//   "6/1 MIN @ PHX  under 168.5  (p166.84)"
+// For games without a parsed line, emits projection-only:
+//   "6/1 MIN @ PHX  proj 166.84"
+// Side is the model's lean (over if projTotal > line, under if <), and is
+// omitted when there's no line to compare against.
+function _briefLineForGame(g) {
+  if (!g) return null;
+  // Resolve the date: prefer the explicit gameDate, else infer from g.time's
+  // day-of-week prefix (e.g. "Mon 8:00 PM" → next Monday).
+  let isoDate = g.gameDate || null;
+  if (!isoDate && typeof g.time === "string") {
+    const dayMatch = g.time.match(/^(Sun|Mon|Tue|Wed|Thu|Fri|Sat)/);
+    if (dayMatch) {
+      const targetDay = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"].indexOf(dayMatch[1]);
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      // Walk forward up to 6 days to find the next day-of-week that matches.
+      // If today is the target day, that wins (slate is today).
+      for (let off = 0; off < 7; off++) {
+        const probe = new Date(today.getTime() + off * 86400000);
+        if (probe.getDay() === targetDay) {
+          const y = probe.getFullYear();
+          const mo = String(probe.getMonth() + 1).padStart(2, "0");
+          const dy = String(probe.getDate()).padStart(2, "0");
+          isoDate = `${y}-${mo}-${dy}`;
+          break;
+        }
+      }
+    }
+  }
+  const dateStr = (() => {
+    if (!isoDate) return "";
+    const m = isoDate.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (!m) return "";
+    return `${parseInt(m[2])}/${parseInt(m[3])} `;
+  })();
+  const matchup = `${g.awayAbbr} @ ${g.homeAbbr}`;
+  const indep = independentTotal(g.awayAbbr, g.homeAbbr, window._cardSeason?.[`${g.awayAbbr}/${g.homeAbbr}`]);
+  const projTotal = indep?.total;
+  // Find a line among the parsed books. Prefer the lowest-vig pair (book with both sides),
+  // but we just need the consensus line for the brief output. Any book line works.
+  let line = null;
+  if (Array.isArray(g.books) && g.books.length) {
+    const lines = g.books.map(b => b.line).filter(l => l != null);
+    if (lines.length) {
+      // Most-common line wins (mode), so even if one book is off, we pick the consensus.
+      const freq = {};
+      lines.forEach(l => { freq[l] = (freq[l] || 0) + 1; });
+      line = Object.keys(freq).map(parseFloat).sort((a, b) => freq[b] - freq[a])[0];
+    }
+  }
+  if (line != null && projTotal != null) {
+    const side = projTotal > line ? "over" : projTotal < line ? "under" : "push";
+    const projStr = `  (p${projTotal.toFixed(2)})`;
+    return `${dateStr}${matchup}  ${side} ${line}${projStr}`;
+  }
+  if (projTotal != null) {
+    // No posted line — just emit the projection in the same paren format
+    return `${dateStr}${matchup}  (p${projTotal.toFixed(2)})`;
+  }
+  // No projection either — skip entirely
+  return null;
+}
+
+function copyAllTotalsProjections() {
+  const games = betstampGames || [];
+  if (!games.length) { showToast("No games loaded"); return; }
+  const lines = games.map(_briefLineForGame).filter(Boolean);
+  if (!lines.length) { showToast("No projections available"); return; }
+  const text = `WNBA totals (${lines.length}):\n\n` + lines.join("\n");
+  copyTextToClipboard(text,
+    () => showToast(`Copied ${lines.length} total${lines.length===1?"":"s"}`),
+    () => showToast("Copy blocked — text in console")
+  );
+}
+
+function copyOneTotalProjection(awayAbbr, homeAbbr) {
+  const g = (betstampGames || []).find(x => x.awayAbbr === awayAbbr && x.homeAbbr === homeAbbr);
+  if (!g) { showToast("Game not found"); return; }
+  const line = _briefLineForGame(g);
+  if (!line) { showToast("No projection available"); return; }
+  copyTextToClipboard(line,
+    () => showToast(`Copied ${awayAbbr} @ ${homeAbbr}`),
+    () => showToast("Copy blocked — text in console")
+  );
 }
 
 function renderTotals() {
@@ -5398,6 +5545,7 @@ function renderTotals() {
                 book: bookSafe.replace(/\\'/g, "'"),
                 projTotal,
                 projSource,
+                gameDate: g.gameDate || null,
                 projPoss: indepInfo && indepInfo.projPoss != null ? Math.round(indepInfo.projPoss * 10) / 10 : null,
                 paceEffProj: paceEffTotal != null ? Math.round(paceEffTotal * 10) / 10 : null,
                 snapshots: {
@@ -5602,7 +5750,7 @@ function renderTotals() {
         const activeMarker = isActive
           ? `<circle cx="${x + barW/2}" cy="${padT + 6}" r="3" fill="#FDB927"/>`
           : "";
-        const label = m.key === "blended" ? "ROTOWIRE" : m.key === "paceeff" ? "PACE×EFF" : "COMBINED";
+        const label = m.key === "blended" ? "PLAYER" : m.key === "paceeff" ? "PACE×EFF" : "COMBINED";
         const labelColor = isActive ? "#FDB927" : "#a8b0bb";
         return `
           <g style="cursor:${m.total!=null?'pointer':'default'};" onclick="setCardProjSource('${cardKey}','${m.key}')">
@@ -5627,7 +5775,7 @@ function renderTotals() {
         ${projTotal != null
           ? `<div style="text-align:right;margin-bottom:8px;">
               <span style="font-size:28px;font-weight:800;color:#FDB927;text-shadow:0 0 16px rgba(253,185,39,0.6);">${projTotal.toFixed(1)}</span>
-              <span style="font-size:10px;color:#d4dae3;margin-left:6px;letter-spacing:0.8px;">ACTIVE · ${projSource === "blended" ? "ROTOWIRE" : projSource.toUpperCase()}</span>
+              <span style="font-size:10px;color:#d4dae3;margin-left:6px;letter-spacing:0.8px;">ACTIVE · ${projSource === "blended" ? "PLAYER" : projSource.toUpperCase()}</span>
               ${agreementBadge}
               ${dominantLine != null ? `<div style="font-size:9px;color:#a8b0bb;margin-top:2px;">Click a bar to switch active model${sourceYearBadge ? ' · P×E: '+sourceYearBadge.replace(/<[^>]+>/g,'').trim() : ''}${fallbackBadge ? ' '+fallbackBadge.replace(/<[^>]+>/g,'').trim() : ''}</div>` : ""}
             </div>`
@@ -5660,9 +5808,12 @@ function renderTotals() {
     return `
       <div style="background:#161b22;border:1px solid #1f2733;border-radius:10px;padding:18px 20px;margin-bottom:14px;">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;flex-wrap:wrap;gap:12px;">
-          <div>
-            <div style="font-size:16px;font-weight:800;color:#fff;">${g.awayAbbr} <span style="color:#d4dae3;font-weight:500">@</span> ${g.homeAbbr}</div>
-            <div style="font-size:12px;color:#d4dae3;margin-top:2px">${g.awayName} at ${g.homeName} · ${g.time}</div>
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+            <div>
+              <div style="font-size:16px;font-weight:800;color:#fff;">${g.awayAbbr} <span style="color:#d4dae3;font-weight:500">@</span> ${g.homeAbbr}</div>
+              <div style="font-size:12px;color:#d4dae3;margin-top:2px">${g.awayName} at ${g.homeName} · ${g.time}</div>
+            </div>
+            <button onclick="copyOneTotalProjection('${g.awayAbbr}','${g.homeAbbr}')" title="Copy this game's brief projection" style="background:#55258330;border:1px solid #55258377;color:#FDB927;border-radius:4px;padding:4px 9px;font-size:10px;font-weight:700;cursor:pointer;font-family:'Inter',sans-serif;letter-spacing:0.3px;">📋 COPY</button>
           </div>
           ${rightPanel}
         </div>
@@ -5692,7 +5843,17 @@ function renderTotals() {
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;flex-wrap:wrap;gap:12px;">
       <div>
         <div style="font-size:22px;font-weight:800;color:#fff;margin-bottom:4px;">Totals Model</div>
-        <div style="font-size:13px;color:#d4dae3;">Per-card pick: RotoWire or Pace × Eff · σ=14</div>
+        <div style="font-size:13px;color:#d4dae3;">Per-card pick: Player or Pace × Eff · σ=14</div>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+        <!-- Quick RotoWire upload — same pipeline as the Upload tab's RW slot.
+             Saves a trip to Upload tab when slate dates change daily. -->
+        <label style="background:#a78bfa1a;border:1px solid #a78bfa55;color:#a78bfa;border-radius:6px;padding:8px 14px;font-size:12px;font-weight:700;cursor:pointer;font-family:'Inter',sans-serif;letter-spacing:0.3px;display:inline-flex;align-items:center;gap:6px;">
+          ⬆ RW CSV
+          <input type="file" accept=".csv" style="display:none;" onchange="loadFile(2,this); renderTotals();"/>
+          ${slots[2] ? `<span style="background:#22c55e;color:#0d1117;font-size:9px;font-weight:800;padding:1px 5px;border-radius:3px;letter-spacing:0.3px;">${slots[2].players.length}</span>` : ''}
+        </label>
+        <button onclick="copyAllTotalsProjections()" title="Copy a brief summary of every game's projection (with or without a line)" style="background:#161b22;border:1px solid #552583;color:#FDB927;border-radius:6px;padding:8px 14px;font-size:12px;font-weight:700;cursor:pointer;font-family:'Inter',sans-serif;letter-spacing:0.3px;">📋 COPY PROJECTIONS</button>
       </div>
     </div>
 
