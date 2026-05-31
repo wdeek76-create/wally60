@@ -285,6 +285,22 @@ table colgroup col.avg-col{width:16%;}
   <div id="results-tab" style="display:none;">
     <div id="empty-results">Upload sources and run blend first.</div>
     <div id="results-content" style="display:none;">
+      <!-- Injury Report panel — collapsible, shows summary in header + full list when open.
+           Powered by ESPN's RotoWire-sourced injury endpoint. Auto-refreshes every 15min;
+           manual refresh button bypasses the cache. -->
+      <details id="injury-panel" style="background:#161b22;border:1px solid #1f2733;border-radius:8px;margin-bottom:14px;">
+        <summary style="cursor:pointer;list-style:none;padding:10px 14px;display:flex;align-items:center;justify-content:space-between;gap:8px;user-select:none;">
+          <span style="display:flex;align-items:center;gap:10px;">
+            <span style="font-size:12px;font-weight:800;color:#f87171;letter-spacing:0.5px;text-transform:uppercase;">🏥 Injury Report</span>
+            <span id="injury-panel-summary" style="font-size:11px;color:#a8b0bb;font-weight:500;">Loading…</span>
+          </span>
+          <span style="display:flex;align-items:center;gap:8px;">
+            <button onclick="event.stopPropagation();event.preventDefault();refreshInjuries();" title="Refresh from ESPN" style="background:transparent;border:1px solid #1f2733;color:#d4dae3;border-radius:5px;padding:3px 10px;font-size:10px;font-weight:600;cursor:pointer;font-family:'Inter',sans-serif;letter-spacing:0.4px;">↻ REFRESH</button>
+            <span style="color:#525a64;font-size:10px;">click to expand</span>
+          </span>
+        </summary>
+        <div id="injury-panel-body" style="padding:0 14px 14px 14px;font-size:12px;color:#d4dae3;">Loading…</div>
+      </details>
       <div id="controls">
         <div style="position:relative;display:inline-block;">
           <input type="text" id="search-box" placeholder="Search player..." oninput="renderTable()" onkeydown="searchEnterCopy(event)" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" style="padding-right:28px;"/>
@@ -944,6 +960,7 @@ function switchTab(tab) {
   if (tab==="srcanalytics") renderSrcAnalytics();
   if (tab==="autograde") renderAutoGrade();
   if (tab==="totals") renderTotals();
+  if (tab==="results" && typeof updateInjuryPanel === "function") updateInjuryPanel();
   if (tab==="pace") renderPace();
   if (tab==="captool") renderCapTool();
 }
@@ -1119,7 +1136,14 @@ function renderTable() {
         <div style="display:flex;align-items:center;gap:8px;">
           <button onclick="event.stopPropagation();trackRow(${i})" title="Track bet" style="background:#55258330;border:1px solid #55258377;color:#FDB927;border-radius:5px;padding:0 11px;font-size:18px;font-weight:700;cursor:pointer;font-family:'Inter',sans-serif;line-height:26px;height:26px;flex:0 0 auto;">+</button>
           <span style="font-size:14px;font-weight:700;color:${tc};white-space:nowrap;">${r.rawName}</span>
-          <span style="display:inline-flex;align-items:center;gap:4px;flex:0 0 auto;">${r.team ? `${teamLogoImg(r.team, 16)}<span style="background:#FDB9271a;border:1px solid #FDB92755;color:#FDB927;font-size:9px;font-weight:800;letter-spacing:0.4px;border-radius:4px;padding:1px 6px;">${r.team}</span>` : ''}${r.pos ? `<span style="background:#a78bfa1a;border:1px solid #a78bfa55;color:#a78bfa;font-size:9px;font-weight:800;letter-spacing:0.4px;border-radius:4px;padding:1px 6px;">${r.pos}</span>` : ''}${trackedPill}</span>
+          <span style="display:inline-flex;align-items:center;gap:4px;flex:0 0 auto;">${r.team ? `${teamLogoImg(r.team, 16)}<span style="background:#FDB9271a;border:1px solid #FDB92755;color:#FDB927;font-size:9px;font-weight:800;letter-spacing:0.4px;border-radius:4px;padding:1px 6px;">${r.team}</span>` : ''}${r.pos ? `<span style="background:#a78bfa1a;border:1px solid #a78bfa55;color:#a78bfa;font-size:9px;font-weight:800;letter-spacing:0.4px;border-radius:4px;padding:1px 6px;">${r.pos}</span>` : ''}${(() => {
+            const inj = getInjuryForPlayer(r.rawName);
+            if (!inj) return "";
+            const label = _injuryStatusLabel(inj.status);
+            const color = _injuryStatusColor(inj.status);
+            const tip = `${inj.status}${inj.type?' · '+inj.type:''}${inj.detail?' ('+inj.detail+')':''}${inj.returnDate?' · ETA '+inj.returnDate:''}${inj.comment?' — '+inj.comment.replace(/"/g,"'"):''}`;
+            return `<span title="${tip}" style="background:${color}1a;border:1px solid ${color}55;color:${color};font-size:9px;font-weight:800;letter-spacing:0.4px;border-radius:4px;padding:1px 6px;">${label}</span>`;
+          })()}${trackedPill}</span>
           ${minChip}
         </div>
         <div style="font-size:12px;color:#dde2e9;font-weight:500;margin-top:4px;margin-left:30px;display:flex;align-items:center;flex-wrap:wrap;gap:2px;">${srcInline || '<span style="color:#525a64">no projections</span>'}</div>
@@ -4582,6 +4606,234 @@ document.addEventListener("keydown", e => {
 
 let betstampGames = []; // ordered: [{awayAbbr, homeAbbr, awayName, homeName, time, books:[...]}]
 
+// ── INJURY REPORT (ESPN, powered by RotoWire) ─────────────────────────────
+// ESPN's WNBA injury endpoint at site.api.espn.com is RotoWire-sourced, so
+// fetching from here gives us the same data RotoWire publishes — without
+// scraping rotowire.com directly (which would hit CORS issues anyway).
+//
+// Shape: { athlete: { displayName, team: {abbreviation} }, status, details: { type, detail, returnDate }, shortComment, date }
+// Status values: "Out", "Day-To-Day", "Questionable", "Probable", "Game Time Decision"
+//
+// Cached to localStorage with a timestamp so subsequent page loads use the cache
+// for up to 15 minutes (avoids hammering ESPN). Manual refresh button bypasses.
+let injuriesCache = null;     // Map<normalizedPlayerName, injuryRecord>
+let injuriesByTeam = null;    // Map<internalTeamAbbr, [injuryRecord, ...]>
+let injuriesLastFetched = 0;
+const INJURIES_TTL_MS = 15 * 60 * 1000;
+
+// Reverse map ESPN short abbrs to our internal abbrs. Adds entries for teams
+// where ESPN and our abbrev are identical (passthrough).
+function _normalizeEspnTeamForInjuries(espnAbbr) {
+  if (!espnAbbr) return null;
+  const up = espnAbbr.toUpperCase();
+  return ESPN_TEAM_ABBR_MAP[up] || up;
+}
+
+// Compact status label for inline badges
+function _injuryStatusLabel(status) {
+  if (!status) return "";
+  const s = status.toLowerCase();
+  if (s === "out") return "OUT";
+  if (s.includes("day")) return "DTD";          // Day-To-Day
+  if (s.includes("questionable")) return "Q";
+  if (s.includes("probable")) return "P";
+  if (s.includes("game time")) return "GTD";    // Game Time Decision
+  return status.toUpperCase();
+}
+function _injuryStatusColor(status) {
+  if (!status) return "#525a64";
+  const s = status.toLowerCase();
+  if (s === "out") return "#f87171";              // red
+  if (s.includes("day") || s.includes("question") || s.includes("game time")) return "#f59e0b"; // amber
+  if (s.includes("probable")) return "#22c55e";   // green
+  return "#a8b0bb";
+}
+
+async function fetchInjuries(force) {
+  // Use cache if fresh and caller didn't force refresh
+  if (!force && injuriesCache && (Date.now() - injuriesLastFetched) < INJURIES_TTL_MS) {
+    return { cached: true, count: injuriesCache.size };
+  }
+  // Try to seed from localStorage on first call (so reloads keep recent data)
+  if (!injuriesCache && !force) {
+    try {
+      const raw = localStorage.getItem("wnba_injuries_cache");
+      if (raw) {
+        const data = JSON.parse(raw);
+        if (data && data.records && (Date.now() - (data.fetchedAt || 0)) < INJURIES_TTL_MS) {
+          _ingestInjuryRecords(data.records);
+          injuriesLastFetched = data.fetchedAt;
+          return { cached: true, count: injuriesCache.size };
+        }
+      }
+    } catch(e) {}
+  }
+  try {
+    const resp = await fetch("https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/injuries", { method: "GET", mode: "cors" });
+    if (!resp.ok) throw new Error(`ESPN injuries returned ${resp.status}`);
+    const json = await resp.json();
+    // ESPN groups injuries by team in `json.injuries[]`. Each team has an `injuries[]` array.
+    // Some responses return a flat list under `injuries[]`; handle both shapes.
+    const records = [];
+    if (Array.isArray(json.injuries)) {
+      json.injuries.forEach(group => {
+        if (Array.isArray(group.injuries)) {
+          // Grouped by team: { team: {abbreviation}, injuries: [ {athlete, status, details, ...} ] }
+          const teamAbbr = group.team?.abbreviation || group.abbreviation;
+          group.injuries.forEach(rec => records.push({ ...rec, _teamAbbr: teamAbbr }));
+        } else if (group.athlete) {
+          // Flat list: each entry already has athlete + team nested
+          records.push(group);
+        }
+      });
+    }
+    _ingestInjuryRecords(records);
+    injuriesLastFetched = Date.now();
+    try {
+      localStorage.setItem("wnba_injuries_cache", JSON.stringify({ records, fetchedAt: injuriesLastFetched }));
+    } catch(e) { /* localStorage full or disabled — fine, in-memory still works */ }
+    return { cached: false, count: injuriesCache.size };
+  } catch (err) {
+    console.warn("Injury fetch failed:", err);
+    return { error: err.message || "network", cached: false, count: 0 };
+  }
+}
+
+function _ingestInjuryRecords(records) {
+  injuriesCache = new Map();
+  injuriesByTeam = new Map();
+  records.forEach(rec => {
+    const athlete = rec.athlete || {};
+    const name = athlete.displayName || (athlete.firstName && athlete.lastName ? `${athlete.firstName} ${athlete.lastName}` : null);
+    if (!name) return;
+    const espnTeam = athlete.team?.abbreviation || rec._teamAbbr;
+    const team = _normalizeEspnTeamForInjuries(espnTeam);
+    const entry = {
+      name,
+      team,
+      status: rec.status || rec.type?.description || "",
+      type: rec.details?.type || "",
+      detail: rec.details?.detail || "",
+      returnDate: rec.details?.returnDate || "",
+      comment: rec.shortComment || "",
+      longComment: rec.longComment || "",
+      date: rec.date || ""
+    };
+    // Index by normalized name (handles diacritics) so lookup from Results works.
+    injuriesCache.set(norm(name), entry);
+    if (team) {
+      if (!injuriesByTeam.has(team)) injuriesByTeam.set(team, []);
+      injuriesByTeam.get(team).push(entry);
+    }
+  });
+}
+
+// Lookup helper for the Results table — given a player's raw name, return their
+// injury record if any. Falls back to a last-name match if the full name isn't
+// found (in case of "C. Leite" vs "Carla Leite" type mismatches).
+function getInjuryForPlayer(rawName) {
+  if (!injuriesCache || !rawName) return null;
+  const n = norm(rawName);
+  if (injuriesCache.has(n)) return injuriesCache.get(n);
+  // Last-name unambiguous match fallback
+  const parts = rawName.trim().split(/\s+/);
+  const lastName = parts[parts.length - 1].toLowerCase();
+  const lastNorm = norm(lastName);
+  const matches = [];
+  injuriesCache.forEach((v, k) => { if (k.endsWith(lastNorm)) matches.push(v); });
+  return matches.length === 1 ? matches[0] : null;
+}
+
+// User-facing refresh — bypasses TTL, shows feedback toast.
+async function refreshInjuries() {
+  const summaryEl = document.getElementById("injury-panel-summary");
+  if (summaryEl) summaryEl.textContent = "Refreshing…";
+  const res = await fetchInjuries(true);
+  if (res && res.error) {
+    showToast(`Injury fetch failed: ${res.error}`);
+  } else if (res) {
+    showToast(`Injuries refreshed · ${res.count} listed`);
+  }
+  updateInjuryPanel();
+  if (typeof renderTable === "function" && merged) renderTable();
+}
+
+// Renders the injury panel summary + body. Called after fetch and on demand.
+function updateInjuryPanel() {
+  const summary = document.getElementById("injury-panel-summary");
+  const body = document.getElementById("injury-panel-body");
+  if (!summary || !body) return;
+  if (!injuriesCache || injuriesCache.size === 0) {
+    summary.textContent = "No data";
+    body.innerHTML = '<div style="color:#525a64;padding:10px 0;">No injuries loaded. Try the REFRESH button.</div>';
+    return;
+  }
+  // Header: count + freshness
+  const mins = Math.round((Date.now() - injuriesLastFetched) / 60000);
+  const fresh = mins < 1 ? "just now" : mins === 1 ? "1m ago" : `${mins}m ago`;
+  // Bucket by status priority for the summary count
+  const counts = { OUT: 0, DTD: 0, Q: 0, P: 0, GTD: 0, other: 0 };
+  injuriesCache.forEach(rec => {
+    const lbl = _injuryStatusLabel(rec.status);
+    if (counts[lbl] != null) counts[lbl]++;
+    else counts.other++;
+  });
+  const parts = [];
+  if (counts.OUT) parts.push(`<span style="color:#f87171;font-weight:700;">${counts.OUT} OUT</span>`);
+  if (counts.DTD) parts.push(`<span style="color:#f59e0b;font-weight:700;">${counts.DTD} DTD</span>`);
+  if (counts.Q)   parts.push(`<span style="color:#f59e0b;font-weight:700;">${counts.Q} Q</span>`);
+  if (counts.GTD) parts.push(`<span style="color:#f59e0b;font-weight:700;">${counts.GTD} GTD</span>`);
+  if (counts.P)   parts.push(`<span style="color:#22c55e;font-weight:700;">${counts.P} P</span>`);
+  summary.innerHTML = `${injuriesCache.size} listed · ${parts.join(" · ")} · <span style="color:#525a64;">refreshed ${fresh}</span>`;
+
+  // Body: grouped by team. Status pill first, then injury type, then return date, then comment.
+  if (!injuriesByTeam || injuriesByTeam.size === 0) {
+    body.innerHTML = '<div style="color:#525a64;padding:10px 0;">No team groupings available.</div>';
+    return;
+  }
+  const sortedTeams = [...injuriesByTeam.keys()].sort();
+  // Status-order: Out → DTD → Q/GTD → P, so the most impactful injuries float to the top within a team
+  const statusOrder = { "out":0, "day":1, "question":2, "game time":2, "probable":3 };
+  const statusRank = (s) => {
+    const k = (s || "").toLowerCase();
+    for (const key in statusOrder) if (k.includes(key)) return statusOrder[key];
+    return 4;
+  };
+  body.innerHTML = sortedTeams.map(team => {
+    const list = injuriesByTeam.get(team).slice().sort((a,b) => statusRank(a.status) - statusRank(b.status));
+    const rows = list.map(rec => {
+      const label = _injuryStatusLabel(rec.status);
+      const color = _injuryStatusColor(rec.status);
+      const eta = rec.returnDate ? ` <span style="color:#525a64;">· ETA ${rec.returnDate}</span>` : "";
+      const detail = rec.type ? ` <span style="color:#a8b0bb;">${rec.type}${rec.detail ? ` (${rec.detail})` : ""}</span>` : "";
+      // Headline blurb (RotoWire's "report" line) + analysis blurb (longer context).
+      // Both are escaped to prevent HTML injection from blurb content.
+      const escape = (s) => (s || "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+      const headline = rec.comment ? `<div style="font-size:11px;color:#d4dae3;margin-top:3px;margin-left:54px;line-height:1.4;">${escape(rec.comment)}</div>` : "";
+      const analysis = rec.longComment && rec.longComment !== rec.comment
+        ? `<div style="font-size:10px;color:#8b93a0;margin-top:4px;margin-left:54px;line-height:1.5;padding:6px 8px;background:#0d1117;border-left:2px solid #55258377;border-radius:0 4px 4px 0;"><span style="color:#FDB927;font-weight:700;letter-spacing:0.4px;font-size:9px;">ANALYSIS</span> ${escape(rec.longComment)}</div>`
+        : "";
+      return `<div style="display:flex;flex-direction:column;padding:8px 0;border-bottom:1px dashed #1f2733;">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+          <span style="background:${color}1a;border:1px solid ${color}55;color:${color};font-size:9px;font-weight:800;letter-spacing:0.4px;border-radius:4px;padding:1px 6px;min-width:30px;text-align:center;">${label}</span>
+          <span style="font-size:13px;font-weight:700;color:#fff;">${rec.name}</span>
+          ${detail}${eta}
+        </div>
+        ${headline}
+        ${analysis}
+      </div>`;
+    }).join("");
+    return `<div style="margin-top:12px;">
+      <div style="display:flex;align-items:center;gap:6px;padding-bottom:4px;border-bottom:1px solid #552583;margin-bottom:4px;">
+        ${teamLogoImg(team, 18)}
+        <span style="font-size:13px;font-weight:800;color:#FDB927;letter-spacing:0.5px;">${team}</span>
+        <span style="font-size:10px;color:#525a64;">${list.length} listed</span>
+      </div>
+      ${rows}
+    </div>`;
+  }).join("");
+}
+
 // Map source team abbrs to canonical (Roto/Saber/RotoWire vs Betstamp use slight variants)
 const ESPN_TO_PROJ = {
   "ATL":"ATL","CHI":"CHI","CON":"CON","DAL":"DAL",
@@ -6047,6 +6299,14 @@ function renderTotals() {
 buildSlots();
 updateBadges();
 loadBets();
+// Kick off injury fetch on load (non-blocking). Once it returns, re-render
+// Results so the badges appear without requiring user interaction.
+fetchInjuries().then(res => {
+  if (res && (res.count > 0 || res.cached)) {
+    if (typeof renderTable === "function" && merged) renderTable();
+    if (typeof updateInjuryPanel === "function") updateInjuryPanel();
+  }
+});
 document.addEventListener("DOMContentLoaded", () => {
   const oddsEl = document.getElementById("modal-odds");
   if (oddsEl) oddsEl.addEventListener("input", () => { updateStakePreview(); updateEvPreview(); });
