@@ -35,10 +35,8 @@ input{font-family:'Inter',sans-serif;font-size:15px;}
 /* ── WNBA scoreboard ticker ── */
 @keyframes ticker-scroll {
   0%   { transform: translateX(0); }
-  100% { transform: translateX(-50%); }  /* content duplicated → -50% gives seamless loop */
+  100% { transform: translateX(-50%); }  /* Legacy keyframes — animation now JS-driven via rAF for cross-browser reliability */
 }
-#scoreboard-ticker:hover #scoreboard-ticker-inner,
-#scoreboard-ticker:active #scoreboard-ticker-inner { animation-play-state: paused; }
 .schedule-game-row:hover,
 .schedule-game-row:active { background:rgba(125,211,252,0.04); }
 .schedule-game-row:active .schedule-expand-caret { color:#7dd3fc; }
@@ -4131,6 +4129,16 @@ function _copyOpenFiltered(kind) {
 // Only bets with a stored `srcProjs` snapshot (saved at track-time) are eligible.
 // Bets tracked before this feature shipped won't have snapshots — they're skipped
 // with a note about sample size.
+// Source Analytics agreement mode — controls how `srcAgreed` decides whether a
+// source agreed with the user's pick. "ev" (default) checks if the source's
+// projection produces positive expected value at the bet's price. "directional"
+// only checks which side of the line the projection sits on.
+let _srcAnalyticsMode = "ev";
+function setSrcAnalyticsMode(mode) {
+  _srcAnalyticsMode = mode;
+  renderSrcAnalytics();
+}
+
 function renderSrcAnalytics() {
   const root = document.getElementById("srcanalytics-tab");
   if (!root) return;
@@ -4149,14 +4157,28 @@ function renderSrcAnalytics() {
   const SRC_LABELS = { roto: "RG", rotowire: "RW", dimers: "DIMERS" };
 
   // For each bet + each source: did that source's projection agree with the
-  // bet's side at the bet's line? Returns null if no projection from that source.
+  // bet's side at the bet's line+price? Honors the global _srcAnalyticsMode toggle:
+  //   "directional" → simple side check (v > line for over, v < line for under)
+  //   "ev"          → positive expected value at the price paid (more accurate;
+  //                   matches the live modal)
   function srcAgreed(bet, key) {
     const v = bet.srcProjs?.[key];
     if (v == null) return null;
     const line = bet.line;
     if (line == null) return null;
     if (Math.abs(v - line) < 1e-9) return null;          // push at line — exclude
-    return bet.ou === "over" ? v > line : v < line;
+    if (_srcAnalyticsMode === "directional") {
+      return bet.ou === "over" ? v > line : v < line;
+    }
+    // EV-based (default)
+    const odds = Number(bet.odds);
+    if (!odds || typeof modelWinProb !== "function") {
+      return bet.ou === "over" ? v > line : v < line;  // fall back if odds missing
+    }
+    const dec = odds > 0 ? odds / 100 + 1 : 100 / Math.abs(odds) + 1;
+    const pw = modelWinProb(v, line, bet.ou, bet.stat);
+    if (pw == null) return bet.ou === "over" ? v > line : v < line;
+    return (pw * dec - 1) >= 0;
   }
 
   // Accumulator helpers
@@ -4364,10 +4386,24 @@ function renderSrcAnalytics() {
     return;
   }
 
+  const modeIsEV = _srcAnalyticsMode === "ev";
+  const modePillStyle = (active) => `background:${active ? "rgba(125,211,252,0.18)" : "transparent"};color:${active ? "#7dd3fc" : "#8b93a0"};border:1px solid ${active ? "rgba(125,211,252,0.4)" : "#1a1d22"};padding:5px 12px;font-size:10px;font-weight:700;letter-spacing:0.8px;text-transform:uppercase;border-radius:4px;cursor:pointer;font-family:'Inter',sans-serif;`;
+
   root.innerHTML = `<div style="padding:0;">
-    <div style="margin-bottom:18px;">
+    <div style="margin-bottom:14px;">
       <h3 style="margin:0;font-size:16px;color:#fff;">Source Analytics</h3>
       <p style="font-size:11px;color:#a8b0bb;margin:4px 0 0 0;line-height:1.4;">${sampleNote} Records only count bets where the source agreed with your pick at its line.</p>
+    </div>
+
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:18px;padding:10px 12px;background:rgba(125,211,252,0.04);border:1px solid rgba(125,211,252,0.12);border-radius:6px;">
+      <span style="font-size:9px;color:#a8b0bb;letter-spacing:1.2px;text-transform:uppercase;font-weight:700;">Agreement</span>
+      <div style="display:flex;gap:4px;">
+        <button onclick="setSrcAnalyticsMode('directional')" style="${modePillStyle(!modeIsEV)}">Directional</button>
+        <button onclick="setSrcAnalyticsMode('ev')" style="${modePillStyle(modeIsEV)}">+EV</button>
+      </div>
+      <span style="font-size:10px;color:#525a64;margin-left:auto;flex:1;text-align:right;line-height:1.3;">${modeIsEV
+        ? "Source agrees if its projection produces +EV at the price paid."
+        : "Source agrees if its projection sits on the same side of the line as your pick."}</span>
     </div>
 
     <div class="tracker-section">
@@ -4576,6 +4612,10 @@ function renderTracker() {
       const SRC_LABELS = { roto: "RG", rotowire: "RW", dimers: "DIM" };
       const pills = [];
       const vals = [];
+      // EV-based agreement: a source agrees if its individual projection produces
+      // +EV at the bet's price. Matches the live modal logic and the source
+      // analytics rollup, so all three views stay consistent.
+      const decOdds = b.odds ? (Number(b.odds) > 0 ? Number(b.odds) / 100 + 1 : 100 / Math.abs(Number(b.odds)) + 1) : null;
       Object.keys(SRC_LABELS).forEach(key => {
         const v = b.srcProjs[key];
         if (v == null) return;
@@ -4584,7 +4624,13 @@ function renderTracker() {
         if (Math.abs(v - b.line) < 1e-9) {
           color = "#7dd3fc"; bg = "rgba(125,211,252,0.10)"; border = "rgba(125,211,252,0.35)";
         } else {
-          const agreed = b.ou === "over" ? v > b.line : v < b.line;
+          let agreed;
+          if (decOdds && typeof modelWinProb === "function") {
+            const pw = modelWinProb(v, b.line, b.ou, b.stat);
+            agreed = (pw != null) ? ((pw * decOdds - 1) >= 0) : (b.ou === "over" ? v > b.line : v < b.line);
+          } else {
+            agreed = b.ou === "over" ? v > b.line : v < b.line;
+          }
           if (agreed) { color = "#4ade80"; bg = "rgba(34,197,94,0.10)"; border = "rgba(34,197,94,0.35)"; }
           else { color = "#f87171"; bg = "rgba(248,113,113,0.10)"; border = "rgba(248,113,113,0.35)"; }
         }
@@ -7737,8 +7783,8 @@ function renderScoreboardTicker(events) {
     inner.innerHTML = (cards[0] + noGames).repeat(2);
     ticker.style.display = "block";
     inner.style.animation = "none";
-    void inner.offsetWidth;
-    inner.style.animation = "ticker-scroll 12s linear infinite";
+    inner.dataset.lastSig = "no-games";
+    startTickerScroller();
     return;
   }
   // Duplicate cards so the animation can loop seamlessly (-50% transform = exactly
@@ -7787,19 +7833,80 @@ function renderScoreboardTicker(events) {
   inner.dataset.lastSig = newSig;
   inner.innerHTML = newHTML;
   ticker.style.display = "block";
-  // Measure actual content width and set duration for a constant scroll speed.
-  // 220px/sec — fast like a real sportsbook ticker. setTimeout(50ms) instead of
-  // rAF since layout sometimes isn't complete on the very next frame for complex
-  // content like the bet/scorer cards.
-  setTimeout(() => {
-    const halfWidth = inner.scrollWidth / 2;
-    if (halfWidth <= 0) return;
-    const PX_PER_SEC = 320;
-    const duration = Math.max(8, halfWidth / PX_PER_SEC);
-    inner.style.animation = "none";
-    void inner.offsetWidth;  // force reflow
-    inner.style.animation = `ticker-scroll ${duration}s linear infinite`;
-  }, 60);
+  // Disable any leftover CSS animation — we now drive scrolling via rAF below
+  inner.style.animation = "none";
+  // Boot or update the JS-driven scroller. Keeps current position across content
+  // updates, doesn't restart from zero, and works consistently on iOS/Android.
+  startTickerScroller();
+}
+
+// JS-driven ticker scroller. Replaces the previous CSS @keyframes animation.
+// Pros vs. CSS: smooth across mobile browsers (iOS Safari especially), preserves
+// scroll position when content swaps, pauses cleanly on touch, no GPU quirks.
+let _tickerScrollPos = 0;          // current translateX in pixels (negative)
+let _tickerScrollHalfWidth = 0;    // updated when content changes
+let _tickerScrollPaused = false;   // toggled by hover/touch handlers
+let _tickerScrollLastTs = 0;       // previous rAF timestamp
+let _tickerScrollRAF = null;       // current rAF id
+const TICKER_PX_PER_SEC = 90;      // scroll speed — readable but moving
+
+function startTickerScroller() {
+  const inner = document.getElementById("scoreboard-ticker-inner");
+  if (!inner) return;
+  // Measure new content width AFTER the browser lays it out. We use rAF rather
+  // than setTimeout so we lock to the next paint frame.
+  requestAnimationFrame(() => {
+    _tickerScrollHalfWidth = inner.scrollWidth / 2;
+    // Wrap any out-of-range position from a prior content set into the new bounds
+    if (_tickerScrollHalfWidth > 0) {
+      _tickerScrollPos = ((_tickerScrollPos % _tickerScrollHalfWidth) - _tickerScrollHalfWidth) % _tickerScrollHalfWidth;
+    } else {
+      _tickerScrollPos = 0;
+    }
+    inner.style.transform = `translate3d(${_tickerScrollPos}px,0,0)`;
+    // Only start the rAF loop once. Subsequent calls just reposition.
+    if (_tickerScrollRAF == null) {
+      _tickerScrollLastTs = performance.now();
+      _tickerScrollRAF = requestAnimationFrame(tickerScrollStep);
+    }
+  });
+}
+
+function tickerScrollStep(ts) {
+  const inner = document.getElementById("scoreboard-ticker-inner");
+  if (!inner) {
+    _tickerScrollRAF = null;
+    return;
+  }
+  const dt = ts - _tickerScrollLastTs;
+  _tickerScrollLastTs = ts;
+  // Clamp dt — tab switches or device sleep can produce huge gaps that would
+  // teleport the scroll. 100ms cap keeps motion smooth without jumps.
+  const safeDt = Math.min(dt, 100);
+  if (!_tickerScrollPaused && _tickerScrollHalfWidth > 0) {
+    _tickerScrollPos -= (TICKER_PX_PER_SEC * safeDt) / 1000;
+    if (_tickerScrollPos <= -_tickerScrollHalfWidth) {
+      // Wrap to 0 — content is duplicated so this is seamless
+      _tickerScrollPos += _tickerScrollHalfWidth;
+    }
+    inner.style.transform = `translate3d(${_tickerScrollPos}px,0,0)`;
+  }
+  _tickerScrollRAF = requestAnimationFrame(tickerScrollStep);
+}
+
+// Set up pause-on-touch/hover once at boot. CSS pseudo-classes don't reliably
+// drive a JS variable, so we wire pointer events here.
+function initTickerPauseHandlers() {
+  const ticker = document.getElementById("scoreboard-ticker");
+  if (!ticker || ticker.dataset.pauseWired) return;
+  ticker.dataset.pauseWired = "1";
+  const pause = () => { _tickerScrollPaused = true; };
+  const resume = () => { _tickerScrollPaused = false; };
+  ticker.addEventListener("mouseenter", pause);
+  ticker.addEventListener("mouseleave", resume);
+  ticker.addEventListener("touchstart", pause, { passive: true });
+  ticker.addEventListener("touchend", resume, { passive: true });
+  ticker.addEventListener("touchcancel", resume, { passive: true });
 }
 function buildTickerCard(ev) {
   try {
@@ -8341,6 +8448,7 @@ function renderScheduleExpandContent(summary) {
 }
 
 function startScoreboardTicker() {
+  initTickerPauseHandlers();
   fetchAndRenderScoreboard().then(scheduleNextTickerRefresh);
 }
 
