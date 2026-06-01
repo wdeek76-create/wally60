@@ -7739,7 +7739,16 @@ function renderScoreboardTicker(events) {
   }
   // Duplicate cards so the animation can loop seamlessly (-50% transform = exactly
   // one full set scrolled past, then second set is in view → start again at 0%)
-  inner.innerHTML = cards.join("") + cards.join("");
+  const newHTML = cards.join("") + cards.join("");
+  // Skip the DOM write + animation restart if content hasn't changed. This is
+  // the single biggest factor in the "jumpy refresh" feeling — without this guard,
+  // every poll resets the scroll position even when nothing's different.
+  if (inner.dataset.lastContent === newHTML) {
+    ticker.style.display = "block";
+    return;
+  }
+  inner.dataset.lastContent = newHTML;
+  inner.innerHTML = newHTML;
   ticker.style.display = "block";
   // Measure actual content width and set duration for a constant scroll speed.
   // 220px/sec — fast like a real sportsbook ticker. setTimeout(50ms) instead of
@@ -8126,10 +8135,21 @@ function renderScheduleRow(ev) {
 }
 
 function startScoreboardTicker() {
-  fetchAndRenderScoreboard();
-  if (_tickerTimer) clearInterval(_tickerTimer);
-  // Refresh every 30s — fast enough for live score updates, gentle on ESPN
-  _tickerTimer = setInterval(fetchAndRenderScoreboard, 30 * 1000);
+  fetchAndRenderScoreboard().then(scheduleNextTickerRefresh);
+}
+
+function scheduleNextTickerRefresh() {
+  if (_tickerTimer) { clearTimeout(_tickerTimer); _tickerTimer = null; }
+  // Adaptive cadence: poll fast only when games are actively live (so the bet
+  // progress + scores stay current). Idle slate gets a much longer interval.
+  const hasLive = (_tickerCachedEvents || []).some(ev => {
+    const s = ev?.competitions?.[0]?.status?.type?.state;
+    return s === "in";
+  });
+  const delay = hasLive ? 45 * 1000 : 5 * 60 * 1000;  // 45s live, 5min idle
+  _tickerTimer = setTimeout(() => {
+    fetchAndRenderScoreboard().then(scheduleNextTickerRefresh);
+  }, delay);
 }
 
 document.addEventListener("DOMContentLoaded", () => {
