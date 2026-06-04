@@ -628,10 +628,41 @@ function effectiveTeamStats(abbr, season) {
 function parseTeamStatsPaste(text) {
   const lines = text.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
   const parsed = {};
+  // Helper: pull at most `n` numeric values starting at index i. Returns the
+  // collected numbers and the index AFTER the last one consumed.
+  function collectNumericRun(startIdx, maxCount) {
+    const nums = [];
+    let i = startIdx;
+    while (i < lines.length && nums.length < maxCount) {
+      const raw = lines[i].replace(/[^\d.\-]/g, "");
+      // Stop on anything that isn't a clean number (handles trailing junk lines too)
+      if (raw === "" || isNaN(parseFloat(raw))) break;
+      nums.push(parseFloat(raw));
+      i++;
+    }
+    return { nums, endIdx: i };
+  }
   for (let i = 0; i < lines.length; i++) {
     const abbr = teamLineToAbbr(lines[i]);
     if (!abbr) continue;
-    const dataLine = lines[i+1];
+    // Format A — wnba.com style: each stat on its own line below the team name.
+    // The advanced page emits 19 numbers: GP W L MIN OFFRTG DEFRTG NETRTG AST% AST/TO
+    // AST_RATIO OREB% DREB% REB% TOV% EFG% TS% PACE PACE/40 PIE.
+    // Index map: 0=GP, 4=OFFRTG, 5=DEFRTG, 16=PACE.
+    const runA = collectNumericRun(i + 1, 19);
+    if (runA.nums.length >= 17) {
+      const gp = runA.nums[0];
+      const ortg = runA.nums[4];
+      const drtg = runA.nums[5];
+      const pace = runA.nums[16];
+      if (!isNaN(ortg) && !isNaN(drtg) && !isNaN(pace)) {
+        parsed[abbr] = { gp, ortg, drtg, pace };
+        i = runA.endIdx - 1;  // -1 because the for-loop will increment
+        continue;
+      }
+    }
+    // Format B — legacy: team name then all stats space-separated on the next line.
+    const dataLine = lines[i + 1];
     if (!dataLine) continue;
     const parts = dataLine.split(/\s+/).map(s => s.replace(/[^\d.\-]/g, "")).filter(s => s !== "");
     if (parts.length < 17) continue;
@@ -6134,7 +6165,13 @@ const TEAM_NAME_ALIASES = {
 };
 function teamLineToAbbr(line) {
   if (!line) return null;
-  const cleaned = line.toLowerCase().replace(/^@\s*/,"").replace(/[^a-z\s]/g,"").trim();
+  // Strip parenthetical content first (handles WNBA.com format like
+  // "MINNESOTA LYNX (https://stats.wnba.com/team/...)" — the URL would
+  // otherwise dilute the cleaned string and miss the alias match).
+  const cleaned = line.toLowerCase()
+    .replace(/^@\s*/,"")
+    .replace(/\([^)]*\)/g, "")
+    .replace(/[^a-z\s]/g,"").trim();
   if (TEAM_NAME_ALIASES[cleaned]) return TEAM_NAME_ALIASES[cleaned];
   for (const k of Object.keys(TEAM_NAME_ALIASES)) {
     if (cleaned.includes(k)) return TEAM_NAME_ALIASES[k];
