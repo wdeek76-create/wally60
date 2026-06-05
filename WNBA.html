@@ -6219,141 +6219,244 @@ function getBeneficiaryForPlayer(rawName) {
 }
 
 // ── DAILY BRIEF ────────────────────────────────────────────────────────────
-// Pulls together a today-focused summary from the injury data: which teams
-// play today, who's OUT (most impactful), GTD/Q/probable (uncertain — track
-// pregame), and beneficiaries (who gets the role boost and why).
+// Game-by-game digest of today's slate: who's affecting each matchup, who
+// benefits, and what to watch. Not a copy of the injury list — a synthesis
+// that ties absences to specific games and lineup implications.
 function openDailyBrief() {
   const modal = document.getElementById("brief-modal");
   const body = document.getElementById("brief-modal-body");
   const subtitle = document.getElementById("brief-modal-subtitle");
   if (!modal || !body) return;
-  // Compute today (local) — match games where date falls on today
-  const now = new Date();
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-  const tomorrow = today + 86400000;
-  // Pull today's games from betstampGames (filtered to today's date)
-  const todaysGames = (betstampGames || []).filter(g => {
-    const ds = g.gameDate || g.dateISO || g.date;
-    if (!ds) return false;
-    const dt = new Date(ds);
-    if (isNaN(dt.getTime())) return false;
-    const t = dt.getTime();
-    return t >= today && t < tomorrow;
-  });
+
+  // Pull today's games from ticker scoreboard (always fresh — refreshed by
+  // the ticker every 2-5 min). Falls back to betstampGames if ticker hasn't
+  // loaded yet.
+  const todayEvents = (window._tickerCachedEvents || []).filter(e => e._ticker_day === "today");
+  let todaysGames = [];
+  if (todayEvents.length > 0) {
+    todaysGames = todayEvents.map(ev => {
+      const comp = ev.competitions?.[0];
+      const competitors = comp?.competitors || [];
+      const away = competitors.find(c => c.homeAway === "away");
+      const home = competitors.find(c => c.homeAway === "home");
+      const awayAbbr = _normalizeEspnTeamForInjuries(away?.team?.abbreviation);
+      const homeAbbr = _normalizeEspnTeamForInjuries(home?.team?.abbreviation);
+      const dt = ev.date ? new Date(ev.date) : null;
+      const timeStr = dt ? dt.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "";
+      return { awayAbbr, homeAbbr, time: timeStr };
+    }).filter(g => g.awayAbbr && g.homeAbbr);
+  }
+  // Fallback to betstampGames if ticker hasn't loaded
+  if (todaysGames.length === 0) {
+    const now = new Date();
+    const today0 = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    const tomorrow0 = today0 + 86400000;
+    todaysGames = (betstampGames || []).filter(g => {
+      const ds = g.gameDate || g.dateISO || g.date;
+      if (!ds) return false;
+      const t = new Date(ds).getTime();
+      return !isNaN(t) && t >= today0 && t < tomorrow0;
+    }).map(g => ({ awayAbbr: g.awayAbbr, homeAbbr: g.homeAbbr, time: "" }));
+  }
   const todaysTeams = new Set();
-  todaysGames.forEach(g => {
-    if (g.awayAbbr) todaysTeams.add(g.awayAbbr);
-    if (g.homeAbbr) todaysTeams.add(g.homeAbbr);
-  });
-  // Date label
+  todaysGames.forEach(g => { todaysTeams.add(g.awayAbbr); todaysTeams.add(g.homeAbbr); });
+
+  const now = new Date();
   const monthNames = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
   const dateLabel = `${["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][now.getDay()]} ${monthNames[now.getMonth()]} ${now.getDate()}`;
-  if (subtitle) {
-    subtitle.textContent = `${dateLabel} · ${todaysGames.length} game${todaysGames.length===1?"":"s"}${todaysTeams.size ? ` · ${todaysTeams.size} teams` : ""}`;
-  }
-  // No data yet
+  if (subtitle) subtitle.textContent = `${dateLabel} · ${todaysGames.length} game${todaysGames.length===1?"":"s"}`;
+
+  // Bail early if no data at all
   if (!injuriesByTeam || injuriesByTeam.size === 0) {
-    body.innerHTML = `<div style="padding:24px 0;text-align:center;color:#8b93a0;font-size:13px;">No injury data loaded. Click ↻ Refresh on the Injury Report panel first.</div>`;
+    body.innerHTML = `<div style="padding:24px 0;text-align:center;color:#8b93a0;font-size:13px;">No injury data loaded yet. Hit ↻ Refresh on the Injury Report panel.</div>`;
     modal.style.display = "flex";
     return;
   }
-  // Build category buckets, scoped to teams playing today (or all if no games loaded)
-  const teamFilter = todaysTeams.size > 0 ? (t) => todaysTeams.has(t) : () => true;
-  const outList = [], gtdList = [], questionableList = [], probableList = [], otherList = [];
-  injuriesByTeam.forEach((arr, team) => {
-    if (!teamFilter(team)) return;
-    arr.forEach(inj => {
-      const status = (inj.status || "").toLowerCase();
-      const lbl = _injuryStatusLabel(inj.status);
-      if (status === "out" || lbl === "OUT") outList.push(inj);
-      else if (lbl === "GTD") gtdList.push(inj);
-      else if (lbl === "Q") questionableList.push(inj);
-      else if (lbl === "P") probableList.push(inj);
-      else otherList.push(inj);
+
+  // Helper: is a player "notable"? Use merged projection if available;
+  // otherwise default to notable (better to over-include than miss someone).
+  function isNotable(playerName) {
+    if (!merged) return true;
+    const rec = merged.find(r => r.norm === norm(playerName));
+    if (!rec) return false;  // not in projections → likely deep bench or two-way
+    const pts = rec.con?.pts || 0;
+    const min = rec.con?.min || 0;
+    return pts >= 8 || min >= 15;
+  }
+  function statusBucket(inj) {
+    const lbl = _injuryStatusLabel(inj.status);
+    if (lbl === "OUT") return "out";
+    if (lbl === "GTD") return "gtd";
+    if (lbl === "Q") return "questionable";
+    if (lbl === "P") return "probable";
+    return "other";
+  }
+  function statusBadge(inj) {
+    const lbl = _injuryStatusLabel(inj.status);
+    const c = lbl === "OUT" ? "#f87171" : (lbl === "GTD" || lbl === "Q") ? "#fbbf24" : "#22c55e";
+    return `<span style="background:${c}22;border:1px solid ${c}66;color:${c};font-size:9px;font-weight:800;letter-spacing:0.5px;padding:1px 6px;border-radius:3px;">${lbl}</span>`;
+  }
+  function shortReason(inj) {
+    const parts = [];
+    if (inj.detail) parts.push(inj.detail.toLowerCase());
+    else if (inj.type) parts.push(inj.type.toLowerCase());
+    return parts.join(" ");
+  }
+
+  // Categorize injuries by team
+  function getTeamInjuries(team) {
+    const arr = (injuriesByTeam.get(team) || []).slice();
+    // Sort by impact: OUT/GTD/Q first, then by notability
+    const order = { out: 0, gtd: 1, questionable: 2, probable: 3, other: 4 };
+    return arr.sort((a, b) => {
+      const oa = order[statusBucket(a)] ?? 5;
+      const ob = order[statusBucket(b)] ?? 5;
+      if (oa !== ob) return oa - ob;
+      return (isNotable(b.name) ? 1 : 0) - (isNotable(a.name) ? 1 : 0);
+    });
+  }
+  // For headline: find the most impactful situations
+  // Definition: notable players who are OUT/GTD/Q on teams playing today
+  const headlineWatches = [];
+  todaysTeams.forEach(team => {
+    getTeamInjuries(team).forEach(inj => {
+      const b = statusBucket(inj);
+      if ((b === "out" || b === "gtd" || b === "questionable") && isNotable(inj.name)) {
+        headlineWatches.push({ ...inj, bucket: b });
+      }
     });
   });
-  // Build beneficiaries list — scope to today's teams via beneficiariesCache
-  const todaysBeneficiaries = [];
+  headlineWatches.sort((a, b) => {
+    // Prioritize Q over OUT (Q creates uncertainty = more important to watch)
+    const order = { questionable: 0, gtd: 1, out: 2, probable: 3, other: 4 };
+    return (order[a.bucket] ?? 5) - (order[b.bucket] ?? 5);
+  });
+
+  // Build beneficiary lookup keyed by causing player's normalized name
+  const beneficiariesByCause = new Map();
   if (beneficiariesCache && merged) {
-    const seen = new Set();
     beneficiariesCache.forEach((bens, normName) => {
       bens.forEach(ben => {
-        // Find the player record by normalized name
         const playerRec = merged.find(r => r.norm === normName);
         if (!playerRec) return;
-        // Scope to teams playing today
         if (todaysTeams.size > 0 && !todaysTeams.has(normTeamAbbr(playerRec.team))) return;
-        const key = `${normName}|${ben.causedBy}`;
-        if (seen.has(key)) return;
-        seen.add(key);
-        todaysBeneficiaries.push({
-          player: playerRec.rawName,
-          team: playerRec.team,
-          causedBy: ben.causedBy,
-          causedByStatus: ben.causedByStatus,
-          reason: ben.reason,
-        });
+        const k = norm(ben.causedBy);
+        if (!beneficiariesByCause.has(k)) beneficiariesByCause.set(k, []);
+        beneficiariesByCause.get(k).push({ player: playerRec.rawName, team: playerRec.team, ...ben });
       });
     });
   }
-  // Build HTML sections
-  const sectionHeader = (label, count, color) => `
-    <div style="display:flex;align-items:center;gap:8px;margin:14px 0 8px 0;">
-      <div style="font-size:10px;color:${color};font-weight:800;letter-spacing:1.2px;text-transform:uppercase;">${label}</div>
-      <div style="flex:1;height:1px;background:#1a1d22;"></div>
-      <div style="font-size:10px;color:#525a64;font-weight:600;">${count}</div>
+
+  // ── HEADLINE SECTION ──
+  let headlineHtml = "";
+  if (todaysGames.length === 0) {
+    headlineHtml = `<div style="background:#050507;border:1px solid #1a1d22;border-radius:8px;padding:14px;margin-bottom:14px;font-size:12px;color:#8b93a0;line-height:1.5;">No games on today's slate. Showing teams' headline injuries for general awareness.</div>`;
+  } else {
+    const totalOut = headlineWatches.filter(w => w.bucket === "out").length;
+    const totalUncertain = headlineWatches.filter(w => w.bucket === "questionable" || w.bucket === "gtd").length;
+    const topWatch = headlineWatches[0];
+    let summarySentence;
+    if (headlineWatches.length === 0) {
+      summarySentence = `Clean slate — no notable injuries reported for today's matchups.`;
+    } else if (totalUncertain > 0 && topWatch) {
+      summarySentence = `<strong style="color:#fbbf24;">Watch:</strong> ${topWatch.name} ${statusBadge(topWatch)} ${shortReason(topWatch) ? `(${shortReason(topWatch)})` : ""}${totalOut > 0 ? ` · ${totalOut} confirmed out` : ""}${totalUncertain > 1 ? ` · ${totalUncertain - 1} other key watch${totalUncertain - 1 === 1 ? "" : "es"}` : ""}.`;
+    } else {
+      summarySentence = `${totalOut} notable absence${totalOut === 1 ? "" : "s"} confirmed for today.`;
+    }
+    headlineHtml = `<div style="background:rgba(125,211,252,0.05);border:1px solid rgba(125,211,252,0.18);border-radius:8px;padding:12px 14px;margin-bottom:14px;">
+      <div style="font-size:10px;color:#7dd3fc;font-weight:800;letter-spacing:1.2px;text-transform:uppercase;margin-bottom:6px;">Headline</div>
+      <div style="font-size:13px;color:#d4dae3;line-height:1.5;">${summarySentence}</div>
     </div>`;
-  const injuryRow = (inj) => {
-    const lbl = _injuryStatusLabel(inj.status);
-    const badgeColor = lbl === "OUT" ? "#f87171" : lbl === "GTD" || lbl === "Q" ? "#fbbf24" : "#22c55e";
-    const detail = inj.detail || inj.type || "";
-    const comment = inj.comment || inj.longComment || "";
-    return `<div style="background:#050507;border:1px solid #1a1d22;border-radius:6px;padding:10px 12px;margin-bottom:6px;">
-      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:4px;">
-        <div>
-          <span style="color:#fff;font-weight:700;font-size:13px;">${inj.name}</span>
-          <span style="color:#8b93a0;font-size:11px;margin-left:6px;font-family:'JetBrains Mono','Menlo',monospace;">${inj.team || "—"}</span>
-        </div>
-        <span style="background:${badgeColor}22;border:1px solid ${badgeColor}66;color:${badgeColor};font-size:9px;font-weight:800;letter-spacing:0.5px;padding:2px 7px;border-radius:3px;flex-shrink:0;">${lbl}</span>
-      </div>
-      ${detail ? `<div style="color:#a8b0bb;font-size:11px;margin-top:2px;">${detail}</div>` : ""}
-      ${comment ? `<div style="color:#7a8390;font-size:11px;margin-top:4px;line-height:1.4;">${comment}</div>` : ""}
-    </div>`;
-  };
-  const beneficiaryRow = (ben) => {
-    return `<div style="background:rgba(34,197,94,0.04);border:1px solid rgba(34,197,94,0.18);border-radius:6px;padding:10px 12px;margin-bottom:6px;">
-      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:4px;">
-        <div>
-          <span style="color:#fff;font-weight:700;font-size:13px;">${ben.player}</span>
-          <span style="color:#8b93a0;font-size:11px;margin-left:6px;font-family:'JetBrains Mono','Menlo',monospace;">${ben.team || "—"}</span>
-        </div>
-        <span style="background:#22c55e22;border:1px solid #22c55e66;color:#22c55e;font-size:9px;font-weight:800;letter-spacing:0.5px;padding:2px 7px;border-radius:3px;flex-shrink:0;">CEILING ↑</span>
-      </div>
-      <div style="color:#a8b0bb;font-size:11px;margin-top:2px;">${ben.causedBy} ${ben.causedByStatus ? `(${ben.causedByStatus})` : ""} out — ${ben.player.split(" ")[0]} likely sees increased role.</div>
-      ${ben.reason ? `<div style="color:#7a8390;font-size:10.5px;margin-top:4px;font-style:italic;line-height:1.4;">"${ben.reason}"</div>` : ""}
-    </div>`;
-  };
-  // Top of brief — games strip
-  const gamesStripHtml = todaysGames.length > 0 ? `
-    <div style="background:rgba(125,211,252,0.05);border:1px solid rgba(125,211,252,0.18);border-radius:6px;padding:10px 12px;margin-bottom:6px;">
-      <div style="font-size:10px;color:#7dd3fc;font-weight:700;letter-spacing:0.8px;text-transform:uppercase;margin-bottom:6px;">Today's Slate</div>
-      <div style="display:flex;flex-wrap:wrap;gap:6px;">
-        ${todaysGames.map(g => `<div style="font-family:'JetBrains Mono','Menlo',monospace;font-size:11px;color:#fff;background:#0c0d10;border:1px solid #1a1d22;border-radius:4px;padding:3px 8px;">${g.awayAbbr} @ ${g.homeAbbr}</div>`).join("")}
-      </div>
-    </div>` : `<div style="background:rgba(248,113,113,0.04);border:1px solid rgba(248,113,113,0.18);border-radius:6px;padding:10px 12px;margin-bottom:6px;font-size:11px;color:#a8b0bb;">No games loaded for today — showing all teams' injuries.</div>`;
-  // Assemble
-  const sections = [];
-  if (outList.length > 0) sections.push(sectionHeader("Out", outList.length, "#f87171") + outList.map(injuryRow).join(""));
-  if (gtdList.length > 0) sections.push(sectionHeader("Game-Time Decision", gtdList.length, "#fbbf24") + gtdList.map(injuryRow).join(""));
-  if (questionableList.length > 0) sections.push(sectionHeader("Questionable", questionableList.length, "#fbbf24") + questionableList.map(injuryRow).join(""));
-  if (probableList.length > 0) sections.push(sectionHeader("Probable", probableList.length, "#22c55e") + probableList.map(injuryRow).join(""));
-  if (todaysBeneficiaries.length > 0) sections.push(sectionHeader("Beneficiaries · Ceiling Plays", todaysBeneficiaries.length, "#22c55e") + todaysBeneficiaries.map(beneficiaryRow).join(""));
-  if (otherList.length > 0) sections.push(sectionHeader("Other Status", otherList.length, "#8b93a0") + otherList.map(injuryRow).join(""));
-  const totalCount = outList.length + gtdList.length + questionableList.length + probableList.length + otherList.length;
-  if (totalCount === 0 && todaysBeneficiaries.length === 0) {
-    sections.push(`<div style="padding:24px 0;text-align:center;color:#8b93a0;font-size:13px;">No injury updates for today's teams. Clean slate!</div>`);
   }
-  body.innerHTML = gamesStripHtml + sections.join("");
+
+  // ── PER-GAME SECTIONS ──
+  function injuryLine(inj, indent) {
+    const reason = shortReason(inj);
+    const reasonStr = reason ? ` <span style="color:#7a8390;">(${reason})</span>` : "";
+    return `<div style="display:flex;align-items:center;gap:6px;font-size:12px;color:#d4dae3;line-height:1.5;${indent ? "padding-left:8px;" : ""}">
+      ${statusBadge(inj)}
+      <span style="font-weight:700;">${inj.name}</span>${reasonStr}
+    </div>`;
+  }
+  function beneficiaryLine(ben) {
+    return `<div style="display:flex;align-items:center;gap:6px;font-size:12px;color:#a8b0bb;line-height:1.5;padding-left:8px;margin-top:2px;">
+      <span style="color:#22c55e;font-weight:800;font-size:10px;letter-spacing:0.4px;">↑</span>
+      <span style="color:#22c55e;font-weight:700;">${ben.player}</span>
+      <span style="color:#7a8390;">— ceiling boost</span>
+    </div>`;
+  }
+
+  const gameSectionsHtml = todaysGames.map(g => {
+    const awayInj = getTeamInjuries(g.awayAbbr).filter(inj => {
+      const b = statusBucket(inj);
+      return b === "out" || b === "gtd" || b === "questionable" || (b === "probable" && isNotable(inj.name));
+    });
+    const homeInj = getTeamInjuries(g.homeAbbr).filter(inj => {
+      const b = statusBucket(inj);
+      return b === "out" || b === "gtd" || b === "questionable" || (b === "probable" && isNotable(inj.name));
+    });
+    // Collect beneficiaries triggered by either team's injuries
+    const allInj = [...awayInj, ...homeInj];
+    const benLines = [];
+    allInj.forEach(inj => {
+      const bens = beneficiariesByCause.get(norm(inj.name)) || [];
+      bens.forEach(ben => { if (todaysTeams.has(normTeamAbbr(ben.team))) benLines.push(ben); });
+    });
+    const teamBlock = (label, list) => {
+      if (list.length === 0) return `<div style="font-size:11px;color:#7a8390;font-style:italic;">${label} · clean</div>`;
+      return `<div>
+        <div style="font-size:10px;color:#8b93a0;font-weight:700;letter-spacing:0.6px;margin-bottom:4px;">${label}</div>
+        <div style="display:flex;flex-direction:column;gap:3px;">${list.map(i => injuryLine(i, true)).join("")}</div>
+      </div>`;
+    };
+    return `<div style="background:#050507;border:1px solid #1a1d22;border-radius:8px;padding:12px 14px;margin-bottom:8px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+        <div style="font-size:13px;color:#fff;font-weight:700;font-family:'JetBrains Mono','Menlo',monospace;">${g.awayAbbr} @ ${g.homeAbbr}</div>
+        ${g.time ? `<div style="font-size:10px;color:#8b93a0;font-family:'JetBrains Mono','Menlo',monospace;">${g.time}</div>` : ""}
+      </div>
+      <div style="display:flex;flex-direction:column;gap:10px;">
+        ${teamBlock(g.awayAbbr, awayInj)}
+        ${teamBlock(g.homeAbbr, homeInj)}
+      </div>
+      ${benLines.length > 0 ? `<div style="margin-top:10px;padding-top:8px;border-top:1px solid #1a1d22;">
+        <div style="font-size:10px;color:#22c55e;font-weight:700;letter-spacing:0.6px;margin-bottom:4px;">Beneficiaries</div>
+        ${benLines.map(beneficiaryLine).join("")}
+      </div>` : ""}
+    </div>`;
+  }).join("");
+
+  // ── WORTH TRACKING (notable injuries on teams NOT playing today) ──
+  const offSlateNotables = [];
+  if (todaysTeams.size > 0) {
+    injuriesByTeam.forEach((arr, team) => {
+      if (todaysTeams.has(team)) return;
+      arr.forEach(inj => {
+        const b = statusBucket(inj);
+        if ((b === "out" || b === "gtd" || b === "questionable") && isNotable(inj.name)) {
+          offSlateNotables.push({ ...inj, team });
+        }
+      });
+    });
+  }
+  let offSlateHtml = "";
+  if (offSlateNotables.length > 0 && offSlateNotables.length <= 15) {
+    offSlateHtml = `<div style="margin-top:16px;">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+        <div style="font-size:10px;color:#8b93a0;font-weight:800;letter-spacing:1.2px;text-transform:uppercase;">Worth Tracking</div>
+        <div style="flex:1;height:1px;background:#1a1d22;"></div>
+        <div style="font-size:10px;color:#525a64;font-weight:600;">${offSlateNotables.length}</div>
+      </div>
+      <div style="font-size:10px;color:#7a8390;margin-bottom:8px;">Notable status for teams not playing today.</div>
+      ${offSlateNotables.slice(0, 10).map(inj => `<div style="background:#050507;border:1px solid #1a1d22;border-radius:6px;padding:8px 10px;margin-bottom:4px;display:flex;align-items:center;gap:8px;font-size:12px;">
+        ${statusBadge(inj)}
+        <span style="color:#fff;font-weight:700;">${inj.name}</span>
+        <span style="color:#8b93a0;font-family:'JetBrains Mono','Menlo',monospace;font-size:11px;">${inj.team}</span>
+        ${shortReason(inj) ? `<span style="color:#7a8390;font-size:11px;">${shortReason(inj)}</span>` : ""}
+      </div>`).join("")}
+    </div>`;
+  }
+
+  body.innerHTML = headlineHtml + (todaysGames.length > 0 ? gameSectionsHtml : "") + offSlateHtml;
   modal.style.display = "flex";
 }
 
