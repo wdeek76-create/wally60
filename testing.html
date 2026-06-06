@@ -187,7 +187,13 @@
   </div>
 
   <div class="rpane active" id="rpane-breakdown">
-    <div class="breakdown-grid" id="breakdown-grid"></div>
+    <div style="display:flex;justify-content:flex-end;margin-bottom:14px;">
+      <select class="results-filter" id="breakdown-sport-filter" onchange="renderResults()">
+        <option value="">All Sports</option>
+        <option>WNBA</option><option>MLB</option><option>NBA</option>
+      </select>
+    </div>
+    <div id="breakdown-grid"></div>
   </div>
   <div class="rpane" id="rpane-log">
     <div class="section-header" style="margin-bottom:12px;">
@@ -721,71 +727,142 @@ function bkRow(label, wins, losses, pushes, pl) {
   </tr>`;
 }
 
+function tagLabel(b) {
+  if (b.tags?.includes('HIGH') && b.tags?.includes('SWEET')) return 'High+Sweet';
+  if (b.tags?.includes('HIGH'))  return 'High Edge';
+  if (b.tags?.includes('SWEET')) return 'Sweet Spot';
+  return 'No Tag';
+}
+
 function buildBreakdown(filtered) {
-  function groupBy(fn) {
-    const m = {};
-    filtered.forEach(b => {
-      const k = fn(b);
-      if (!m[k]) m[k] = [];
-      m[k].push(b);
-    });
-    return m;
-  }
   function stats(arr) {
     const w=arr.filter(b=>b.result==='win').length;
     const l=arr.filter(b=>b.result==='loss').length;
     const p=arr.filter(b=>b.result==='push').length;
-    const pl=arr.reduce((s,b)=>s+(calcPL(b)||0),0);
-    return {w,l,p,pl};
+    const pl=parseFloat(arr.reduce((s,b)=>s+(calcPL(b)||0),0).toFixed(2));
+    const winPct = (w+l) > 0 ? Math.round(w/(w+l)*100)+'%' : '—';
+    return {w,l,p,pl,winPct};
   }
-  function tableHTML(title, groups, sortByPL=false) {
-    let keys = Object.keys(groups);
-    if (sortByPL) keys.sort((a,b)=>{ const sa=stats(groups[a]),sb=stats(groups[b]); return sb.pl-sa.pl; });
-    else keys.sort();
-    const rows = keys.map(k=>{ const {w,l,p,pl}=stats(groups[k]); return bkRow(k,w,l,p,pl); }).join('');
-    return `<div class="bk-card">
-      <div class="bk-title">${title}</div>
-      <table class="bk-table">
-        <thead><tr><td></td><td style="text-align:center;color:var(--muted);font-size:10px;">W-L</td><td style="text-align:right;color:var(--muted);font-size:10px;">WIN%</td><td style="text-align:right;color:var(--muted);font-size:10px;">P&L</td></tr></thead>
-        <tbody>${rows}</tbody>
-      </table>
+  function plColor(pl) { return pl>0?'var(--accent)':pl<0?'var(--red)':'var(--muted)'; }
+  function plStr(pl)   { return pl===0?'±0':(pl>0?'+':'')+pl.toFixed(2)+'u'; }
+
+  const MARKETS = ['Over','Under','ML','Spread','Other'];
+  const TAGS = ['High Edge','Sweet Spot','High+Sweet','No Tag'];
+  const TAG_COLORS = {
+    'High Edge':  {bg:'rgba(39,192,113,0.1)',  color:'#27c071'},
+    'Sweet Spot': {bg:'rgba(74,158,255,0.1)',   color:'#4a9eff'},
+    'High+Sweet': {bg:'rgba(240,160,32,0.1)',   color:'#f0a020'},
+    'No Tag':     {bg:'rgba(122,131,145,0.1)',  color:'#7a8391'},
+  };
+
+  // Group bets by tag → market
+  const byTagMarket = {};
+  filtered.forEach(b => {
+    const tag = tagLabel(b);
+    const mkt = marketType(b.pick);
+    if (!byTagMarket[tag]) byTagMarket[tag] = {};
+    if (!byTagMarket[tag][mkt]) byTagMarket[tag][mkt] = [];
+    byTagMarket[tag][mkt].push(b);
+  });
+
+  // Build tag blocks
+  const tagBlocks = TAGS.map(tag => {
+    const mktData = byTagMarket[tag];
+    if (!mktData) return '';
+    const allBets = Object.values(mktData).flat();
+    const ts = stats(allBets);
+    const {bg, color} = TAG_COLORS[tag];
+    const mktRows = MARKETS.map(mkt => {
+      const arr = mktData[mkt];
+      if (!arr) return '';
+      const s = stats(arr);
+      return `<div style="display:grid;grid-template-columns:1fr 52px 44px 64px;gap:4px;padding:6px 12px;border-top:1px solid var(--border);font-size:11px;align-items:center;">
+        <span style="color:var(--muted);">${mkt}</span>
+        <span style="color:var(--text);">${s.w}–${s.l}${s.p?'–'+s.p:''}</span>
+        <span style="color:var(--text);">${s.winPct}</span>
+        <span style="text-align:right;font-weight:600;color:${plColor(s.pl)};">${plStr(s.pl)}</span>
+      </div>`;
+    }).join('');
+    return `<div style="border:1px solid var(--border);border-radius:var(--radius-lg);overflow:hidden;min-width:0;">
+      <div style="background:${bg};padding:9px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;">
+        <span style="font-size:11px;font-weight:600;color:${color};">${tag.toUpperCase()}</span>
+        <span style="font-size:11px;color:var(--muted);">${ts.w}–${ts.l} · ${ts.winPct} · <span style="color:${plColor(ts.pl)};font-weight:600;">${plStr(ts.pl)}</span></span>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 52px 44px 64px;gap:4px;padding:5px 12px;background:var(--surface2);">
+        <span style="font-size:9px;color:var(--muted);letter-spacing:.07em;">MARKET</span>
+        <span style="font-size:9px;color:var(--muted);letter-spacing:.07em;">W–L</span>
+        <span style="font-size:9px;color:var(--muted);letter-spacing:.07em;">WIN%</span>
+        <span style="font-size:9px;color:var(--muted);letter-spacing:.07em;text-align:right;">P&L</span>
+      </div>
+      ${mktRows}
+    </div>`;
+  }).join('');
+
+  // Sport strip
+  const bySport = {};
+  filtered.forEach(b => { if(!bySport[b.sport]) bySport[b.sport]=[]; bySport[b.sport].push(b); });
+  const sportStrip = Object.entries(bySport).map(([sp, arr]) => {
+    const s = stats(arr);
+    return `<div style="border:1px solid var(--border);border-radius:var(--radius);padding:9px 14px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
+      <span class="sport-badge sport-${sp.toLowerCase()}">${sp}</span>
+      <span style="font-size:12px;color:var(--text);">${s.w}–${s.l}${s.p?'–'+s.p:''}</span>
+      <span style="font-size:12px;color:var(--muted);">${s.winPct}</span>
+      <span style="font-size:12px;font-weight:600;color:${plColor(s.pl)};">${plStr(s.pl)}</span>
+    </div>`;
+  }).join('');
+
+  // Fav/Dog + Odds bucket compact
+  const byFavDog = {};
+  filtered.forEach(b => { const n=parseInt(b.odds); const k=isNaN(n)?'Unknown':n<0?'Favorite':'Underdog'; if(!byFavDog[k]) byFavDog[k]=[]; byFavDog[k].push(b); });
+  const byOdds = {};
+  filtered.forEach(b => { const k=oddsBucket(b.odds); if(!byOdds[k]) byOdds[k]=[]; byOdds[k].push(b); });
+
+  function miniTable(groups) {
+    return Object.entries(groups).sort((a,b)=>{
+      const pa=stats(a[1]).pl, pb=stats(b[1]).pl; return pb-pa;
+    }).map(([k,arr])=>{
+      const s=stats(arr);
+      return `<div style="display:grid;grid-template-columns:1fr 52px 44px 64px;gap:4px;padding:6px 12px;border-top:1px solid var(--border);font-size:11px;">
+        <span style="color:var(--muted);">${k}</span>
+        <span>${s.w}–${s.l}${s.p?'–'+s.p:''}</span>
+        <span>${s.winPct}</span>
+        <span style="text-align:right;font-weight:600;color:${plColor(s.pl)};">${plStr(s.pl)}</span>
+      </div>`;
+    }).join('');
+  }
+  function miniCard(title, groups) {
+    return `<div style="border:1px solid var(--border);border-radius:var(--radius-lg);overflow:hidden;">
+      <div style="padding:8px 12px;border-bottom:1px solid var(--border);font-size:10px;color:var(--muted);letter-spacing:.08em;text-transform:uppercase;background:var(--surface2);">${title}</div>
+      <div style="display:grid;grid-template-columns:1fr 52px 44px 64px;gap:4px;padding:5px 12px;background:var(--surface2);">
+        <span style="font-size:9px;color:var(--muted);letter-spacing:.07em;"></span>
+        <span style="font-size:9px;color:var(--muted);letter-spacing:.07em;">W–L</span>
+        <span style="font-size:9px;color:var(--muted);letter-spacing:.07em;">WIN%</span>
+        <span style="font-size:9px;color:var(--muted);letter-spacing:.07em;text-align:right;">P&L</span>
+      </div>
+      ${miniTable(groups)}
     </div>`;
   }
 
-  const byMarket = groupBy(b => marketType(b.pick));
-  const bySport  = groupBy(b => b.sport);
-  const byTag    = groupBy(b => {
-    if (b.tags?.includes('HIGH') && b.tags?.includes('SWEET')) return 'High Edge + Sweet Spot';
-    if (b.tags?.includes('HIGH'))  return 'High Edge';
-    if (b.tags?.includes('SWEET')) return 'Sweet Spot';
-    return 'No Tag';
-  });
-
-  // Tag × Market cross: e.g. "High Edge Over", "Sweet Spot Under", "Sweet Spot ML"
-  const byTagMarket = groupBy(b => {
-    const tag = b.tags?.includes('HIGH') && b.tags?.includes('SWEET') ? 'High+Sweet'
-              : b.tags?.includes('HIGH')  ? 'High Edge'
-              : b.tags?.includes('SWEET') ? 'Sweet Spot'
-              : 'No Tag';
-    return tag + ' ' + marketType(b.pick);
-  });
-  const byOdds   = groupBy(b => oddsBucket(b.odds));
-  const byFavDog = groupBy(b => {
-    const n=parseInt(b.odds); if(isNaN(n)) return 'Unknown';
-    return n < 0 ? 'Favorite' : 'Underdog';
-  });
-
-  return tableHTML('Market Type', byMarket) +
-         tableHTML('Sport', bySport) +
-         tableHTML('Tag', byTag) +
-         tableHTML('Tag × Market', byTagMarket, true) +
-         tableHTML('Fav vs Dog', byFavDog) +
-         tableHTML('Odds Bucket', byOdds, true);
+  return `
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin-bottom:16px;">
+      ${tagBlocks}
+    </div>
+    <div style="font-size:10px;color:var(--muted);letter-spacing:.08em;text-transform:uppercase;margin-bottom:8px;">By Sport</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px;margin-bottom:16px;">
+      ${sportStrip}
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px;">
+      ${miniCard('Fav vs Dog', byFavDog)}
+      ${miniCard('Odds Bucket', byOdds)}
+    </div>`;
 }
 
 function renderResults() {
-  const sf = document.getElementById('results-sport-filter').value;
-  const filtered = bets.filter(b => b.result && b.result!=='pending' && (!sf||b.sport===sf));
+  const bsf = (document.getElementById('breakdown-sport-filter')||{}).value || '';
+  const sf  = (document.getElementById('results-sport-filter')||{}).value  || '';
+  const allGraded = bets.filter(b => b.result && b.result!=='pending');
+  const filtered  = allGraded.filter(b => !bsf || b.sport===bsf);
+  const tableFiltered = allGraded.filter(b => !sf || b.sport===sf);
   const wins=filtered.filter(b=>b.result==='win').length;
   const losses=filtered.filter(b=>b.result==='loss').length;
   const pushes=filtered.filter(b=>b.result==='push').length;
@@ -814,11 +891,11 @@ function renderResults() {
   }
 
   // Bet log table
-  if (!filtered.length) {
+  if (!tableFiltered.length) {
     document.getElementById('results-table-container').innerHTML = '<div class="empty-state"><div class="es-icon">◈</div><p>No graded bets yet.</p></div>';
     return;
   }
-  const sorted=[...filtered].sort((a,b)=>(b.gameDate||'').localeCompare(a.gameDate||''));
+  const sorted=[...tableFiltered].sort((a,b)=>(b.gameDate||'').localeCompare(a.gameDate||''));
   const rows=sorted.map(b=>{
     const pl=calcPL(b);
     const plStr=pl===null?'—':pl===0?'±0':(pl>0?'+':'')+pl+'u';
