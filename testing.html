@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Dimers Parser</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
   :root {
     --bg:#0d0f12;--surface:#161a1f;--surface2:#1e2329;
@@ -16,7 +17,7 @@
     --radius:8px;--radius-lg:12px;
   }
   *{box-sizing:border-box;margin:0;padding:0;}
-  body{background:var(--bg);color:var(--text);font-family:'SF Mono','Fira Code',monospace;font-size:13px;min-height:100vh;}
+  body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;font-size:13px;min-height:100vh;}
   header{padding:24px 28px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:16px;}
   .logo{width:36px;height:36px;background:var(--accent);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:700;color:#000;flex-shrink:0;}
   header h1{font-size:16px;font-weight:600;letter-spacing:.05em;}
@@ -701,6 +702,15 @@ function marketType(pick) {
   return 'Other';
 }
 
+function edgeBucket(edge) {
+  if (edge == null) return 'Unknown';
+  if (edge >= 10)  return '10%+';
+  if (edge >= 8)   return '8–10%';
+  if (edge >= 5)   return '5–8%';
+  if (edge >= 3)   return '3–5%';
+  return '<3%';
+}
+
 function oddsBucket(odds) {
   const n = parseInt(odds);
   if (isNaN(n)) return 'Unknown';
@@ -811,11 +821,18 @@ function buildBreakdown(filtered) {
     </div>`;
   }).join('');
 
-  // Fav/Dog + Odds bucket compact
+
+  // Fav/Dog + Odds bucket + Edge bucket
   const byFavDog = {};
   filtered.forEach(b => { const n=parseInt(b.odds); const k=isNaN(n)?'Unknown':n<0?'Favorite':'Underdog'; if(!byFavDog[k]) byFavDog[k]=[]; byFavDog[k].push(b); });
   const byOdds = {};
   filtered.forEach(b => { const k=oddsBucket(b.odds); if(!byOdds[k]) byOdds[k]=[]; byOdds[k].push(b); });
+  const byEdge = {};
+  filtered.forEach(b => {
+    const k = edgeBucket(b.edge);
+    if(!byEdge[k]) byEdge[k]=[];
+    byEdge[k].push(b);
+  });
 
   function miniTable(groups) {
     return Object.entries(groups).sort((a,b)=>{
@@ -843,6 +860,87 @@ function buildBreakdown(filtered) {
     </div>`;
   }
 
+  const EDGE_BUCKETS = ['10%+','8–10%','5–8%','3–5%','<3%'];
+  const SUB_DIMS = [
+    { label: 'By Market',   keys: ['Over','Under','ML','Spread'], fn: b => marketType(b.pick) },
+    { label: 'By Tag',      keys: ['High Edge','Sweet Spot','High+Sweet','No Tag'], fn: b => tagLabel(b) },
+    { label: 'Fav vs Dog',  keys: ['Favorite','Underdog'], fn: b => { const n=parseInt(b.odds); return isNaN(n)?'Unknown':n<0?'Favorite':'Underdog'; } },
+    { label: 'By Sport',    keys: ['WNBA','MLB','NBA'], fn: b => b.sport },
+  ];
+
+  function edgeColor(bkt) {
+    return bkt==='10%+'||bkt==='8–10%' ? 'var(--accent)' : bkt==='5–8%' ? 'var(--amber)' : 'var(--muted)';
+  }
+
+  // Header row shared
+  const HDR = `<div style="display:grid;grid-template-columns:1fr 58px 44px 68px;padding:5px 12px;background:var(--surface2);">
+    <span style="font-size:9px;color:var(--muted);letter-spacing:.07em;">BUCKET</span>
+    <span style="font-size:9px;color:var(--muted);letter-spacing:.07em;">W–L</span>
+    <span style="font-size:9px;color:var(--muted);letter-spacing:.07em;">WIN%</span>
+    <span style="font-size:9px;color:var(--muted);letter-spacing:.07em;text-align:right;">P&L</span>
+  </div>`;
+
+  // 1. Edge solo card (full width)
+  const edgeSoloRows = EDGE_BUCKETS.map(bkt => {
+    const arr = byEdge[bkt]; if (!arr) return '';
+    const s = stats(arr);
+    return `<div style="display:grid;grid-template-columns:1fr 58px 44px 68px;padding:7px 12px;border-top:1px solid var(--border);font-size:12px;align-items:center;">
+      <span style="font-weight:600;color:${edgeColor(bkt)};">${bkt}</span>
+      <span>${s.w}–${s.l}${s.p?'–'+s.p:''}</span>
+      <span>${s.winPct}</span>
+      <span style="text-align:right;font-weight:600;color:${plColor(s.pl)};">${plStr(s.pl)}</span>
+    </div>`;
+  }).join('');
+
+  const edgeSoloCard = `<div style="border:1px solid var(--border);border-radius:var(--radius-lg);overflow:hidden;">
+    <div style="padding:8px 12px;border-bottom:1px solid var(--border);font-size:10px;font-weight:600;color:var(--muted);letter-spacing:.08em;text-transform:uppercase;background:var(--surface2);">Edge — Overall</div>
+    ${HDR}${edgeSoloRows}
+  </div>`;
+
+  // 2. Edge × dimension cards (one per sub-dim, shown in a 2×2 grid)
+  // Each card: bucket rows, each with sub-dim breakdown indented
+  const edgeCrossCards = SUB_DIMS.map(dim => {
+    // pre-build lookup: bkt → subkey → bets
+    const map = {};
+    filtered.forEach(b => {
+      const bkt = edgeBucket(b.edge);
+      const sk  = dim.fn(b);
+      if (!map[bkt]) map[bkt] = {};
+      if (!map[bkt][sk]) map[bkt][sk] = [];
+      map[bkt][sk].push(b);
+    });
+
+    const rows = EDGE_BUCKETS.map(bkt => {
+      const subMap = map[bkt]; if (!subMap) return '';
+      const bktBets = byEdge[bkt];
+      const bs = stats(bktBets);
+      const subRows = dim.keys.map(sk => {
+        const arr = subMap[sk]; if (!arr) return '';
+        const s = stats(arr);
+        return `<div style="display:grid;grid-template-columns:1fr 58px 44px 68px;padding:4px 12px 4px 22px;border-top:1px solid var(--border);font-size:11px;align-items:center;">
+          <span style="color:var(--muted);">↳ ${sk}</span>
+          <span>${s.w}–${s.l}${s.p?'–'+s.p:''}</span>
+          <span>${s.winPct}</span>
+          <span style="text-align:right;font-weight:600;color:${plColor(s.pl)};">${plStr(s.pl)}</span>
+        </div>`;
+      }).join('');
+      return `<div style="border-top:1px solid var(--border);">
+        <div style="display:grid;grid-template-columns:1fr 58px 44px 68px;padding:7px 12px;font-size:12px;font-weight:600;color:${edgeColor(bkt)};background:var(--surface);">
+          <span>${bkt}</span>
+          <span style="font-size:11px;color:var(--text);font-weight:400;">${bs.w}–${bs.l}${bs.p?'–'+bs.p:''}</span>
+          <span style="font-size:11px;color:var(--text);font-weight:400;">${bs.winPct}</span>
+          <span style="font-size:11px;text-align:right;font-weight:600;color:${plColor(bs.pl)};">${plStr(bs.pl)}</span>
+        </div>
+        ${subRows}
+      </div>`;
+    }).join('');
+
+    return `<div style="border:1px solid var(--border);border-radius:var(--radius-lg);overflow:hidden;">
+      <div style="padding:8px 12px;border-bottom:1px solid var(--border);font-size:10px;font-weight:600;color:var(--muted);letter-spacing:.08em;text-transform:uppercase;background:var(--surface2);">Edge × ${dim.label}</div>
+      ${HDR}${rows}
+    </div>`;
+  }).join('');
+
   return `
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin-bottom:16px;">
       ${tagBlocks}
@@ -851,9 +949,14 @@ function buildBreakdown(filtered) {
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px;margin-bottom:16px;">
       ${sportStrip}
     </div>
-    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px;">
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px;margin-bottom:16px;">
       ${miniCard('Fav vs Dog', byFavDog)}
       ${miniCard('Odds Bucket', byOdds)}
+    </div>
+    <div style="font-size:10px;color:var(--muted);letter-spacing:.08em;text-transform:uppercase;margin-bottom:8px;">Edge Breakdown</div>
+    <div style="margin-bottom:12px;">${edgeSoloCard}</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:10px;">
+      ${edgeCrossCards}
     </div>`;
 }
 
