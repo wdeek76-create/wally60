@@ -3598,6 +3598,18 @@ function getPlayerSplits(playerName, statKey, opts = {}) {
     l5Games: l5.length,
     l10Games: l10.length,
   };
+  // Volatility metrics — stdev measures absolute spread, CV normalizes it
+  // against the mean so a 20-PPG scorer with σ=4 reads as more stable than
+  // a 10-PPG scorer with σ=4. The CV tier drives the green/orange/red bar.
+  if (vals.length >= 2) {
+    const m = avg(vals);
+    const variance = vals.reduce((a, v) => a + (v - m) ** 2, 0) / vals.length;
+    const stdev = Math.sqrt(variance);
+    result.seasonStdev = +stdev.toFixed(2);
+    result.seasonCV = m > 0 ? +(stdev / m).toFixed(3) : 0;
+    result.seasonMin = Math.min(...vals);
+    result.seasonMax = Math.max(...vals);
+  }
   if (opts.line != null && opts.ou) {
     const line = parseFloat(opts.line);
     const dir = String(opts.ou).toLowerCase();
@@ -3680,7 +3692,34 @@ function updateSplitsInModal() {
     }
   }).join("");
 
-  grid.innerHTML = `<div style="display:flex;flex-direction:column;gap:4px;">${html}</div>`;
+  // Volatility row — always shown when we have enough sample. Uses CV
+  // (stdev/mean) so different stats scale fairly. Bar fill scales 0–60% CV
+  // mapped to 0–100% width. Color tier:
+  //   CV < 0.25 → stable (green) — line-of-best-fit predictions reliable
+  //   CV 0.25–0.40 → iffy (orange) — hit rate has wide margin of error
+  //   CV ≥ 0.40 → volatile (red) — single-game outcomes essentially noise
+  let volRow = "";
+  if (splits.seasonStdev != null) {
+    const cv = splits.seasonCV || 0;
+    let volTier, volColor;
+    if (cv < 0.25)      { volTier = "stable";   volColor = "#4ade80"; }
+    else if (cv < 0.40) { volTier = "iffy";     volColor = "#fbbf24"; }
+    else                { volTier = "volatile"; volColor = "#f87171"; }
+    const volBarPct = Math.min(100, Math.round((cv / 0.6) * 100));
+    const cvPct = Math.round(cv * 100);
+    // Tier word lives only in the tooltip — color does the visual work.
+    const tipText = `σ ${splits.seasonStdev.toFixed(2)} · CV ${cvPct}% · range ${splits.seasonMin}–${splits.seasonMax} · ${volTier}`;
+    volRow = `<div title="${tipText}" style="display:grid;grid-template-columns:50px 72px 1fr 60px;gap:8px;align-items:center;font-family:'JetBrains Mono','Menlo',monospace;font-size:10px;line-height:1;background:rgba(255,255,255,0.025);border:1px solid rgba(255,255,255,0.06);border-radius:3px;padding:4px 5px;cursor:help;">
+      <span style="color:#fff;font-weight:700;letter-spacing:0.3px;">VOL</span>
+      <span style="color:#525a64;font-weight:600;font-size:9.5px;letter-spacing:0.3px;">${splits.seasonMin}–${splits.seasonMax}</span>
+      <div style="height:5px;background:#1a1d22;border-radius:3px;overflow:hidden;">
+        <div style="height:100%;width:${volBarPct}%;background:${volColor};border-radius:3px;"></div>
+      </div>
+      <span style="text-align:right;color:#a8b0bb;">σ ${splits.seasonStdev.toFixed(1)}</span>
+    </div>`;
+  }
+
+  grid.innerHTML = `<div style="display:flex;flex-direction:column;gap:4px;">${html}${volRow}</div>`;
   if (summary) summary.textContent = `${splits.games} GP`;
   container.style.display = "block";
 }
