@@ -3314,6 +3314,235 @@ function getBetISODate(b) {
   return `${y}-${String(m).padStart(2,"0")}-${String(d).padStart(2,"0")}`;
 }
 
+// ── SEASON LOG FETCHER (SLICE 1) ───────────────────────────────────────────
+// Pulls historical WNBA box scores from ESPN for the current season and stores
+// them locally. The existing fetchESPNStatsForDate strips team context (it
+// only needs player+stat for grading), so this is a parallel fetcher that
+// keeps team/opponent/home info per row. That unlocks: custom-line trend
+// queries, opponent splits, home/away splits, rest-day analysis, and ground
+// truth backtests of trend-disagreement strategies.
+
+const SEASON_LOG_STORAGE_KEY = "wnba_season_logs_v1";
+const SEASON_START_DATE = "2026-05-01";  // safe early-season buffer
+
+function getSeasonLogs() {
+  try {
+    const raw = localStorage.getItem(SEASON_LOG_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) {
+    console.warn("Failed to read season logs:", e);
+    return null;
+  }
+}
+
+function saveSeasonLogs(payload) {
+  try {
+    localStorage.setItem(SEASON_LOG_STORAGE_KEY, JSON.stringify(payload));
+    return true;
+  } catch (e) {
+    console.warn("Failed to save season logs:", e);
+    if (typeof showToast === "function") showToast("Storage full — couldn't save logs");
+    return false;
+  }
+}
+
+// Fetch one date's game-rows WITH team/opponent context. Returns [] on
+// network/parse errors so the outer loop keeps going.
+async function _fetchSeasonGameDay(isoDate) {
+  const yyyymmdd = isoDate.replace(/-/g, "");
+  const sbUrl = `https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/scoreboard?dates=${yyyymmdd}`;
+  let scoreboard;
+  try {
+    const res = await fetch(sbUrl);
+    if (!res.ok) return [];
+    scoreboard = await res.json();
+  } catch { return []; }
+
+  const events = scoreboard.events || [];
+  const rows = [];
+  for (const ev of events) {
+    if (!ev.status?.type?.completed) continue;
+    const comp = ev.competitions?.[0];
+    const home = comp?.competitors?.find(c => c.homeAway === "home");
+    const away = comp?.competitors?.find(c => c.homeAway === "away");
+    const homeAbbr = home?.team?.abbreviation;
+    const awayAbbr = away?.team?.abbreviation;
+    if (!homeAbbr || !awayAbbr) continue;
+
+    let summary;
+    try {
+      const r = await fetch(`https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/summary?event=${ev.id}`);
+      if (!r.ok) continue;
+      summary = await r.json();
+    } catch { continue; }
+
+    const teamPlayerGroups = summary.boxscore?.players || [];
+    for (const teamGroup of teamPlayerGroups) {
+      const teamAbbr = teamGroup.team?.abbreviation;
+      if (!teamAbbr) continue;
+      const isHome = teamAbbr === homeAbbr;
+      const opp = isHome ? awayAbbr : homeAbbr;
+
+      const stats = teamGroup.statistics || [];
+      for (const statGroup of stats) {
+        const labels = (statGroup.labels || statGroup.keys || []).map(s => s.toString().toLowerCase());
+        const idx = {
+          min: labels.findIndex(l => l === "min"),
+          pts: labels.findIndex(l => l === "pts"),
+          reb: labels.findIndex(l => l === "reb"),
+          ast: labels.findIndex(l => l === "ast"),
+          stl: labels.findIndex(l => l === "stl"),
+          blk: labels.findIndex(l => l === "blk"),
+          to:  labels.findIndex(l => l === "to" || l === "tov"),
+          tpt: labels.findIndex(l => l === "3pt" || l === "fg3" || l === "3p"),
+          fg:  labels.findIndex(l => l === "fg"),
+          ft:  labels.findIndex(l => l === "ft"),
+        };
+        const athletes = statGroup.athletes || [];
+        for (const a of athletes) {
+          const player = a.athlete || {};
+          const fullName = player.displayName || `${player.firstName||""} ${player.lastName||""}`.trim();
+          if (!fullName) continue;
+          if (a.didNotPlay === true) continue;  // skip DNPs from the log
+
+          const stRow = a.stats || [];
+          const parseInt0 = (s) => { const n = parseInt(s); return isNaN(n) ? 0 : n; };
+          const parseMA = (s) => {
+            const m = String(s||"").match(/^(\d+)-(\d+)/);
+            return m ? [parseInt(m[1]), parseInt(m[2])] : [0, 0];
+          };
+
+          let minVal = 0;
+          if (idx.min >= 0) {
+            const raw = String(stRow[idx.min] ?? "").trim();
+            if (raw && raw !== "-" && raw !== "--" && raw !== "DNP") {
+              const colon = raw.split(":");
+              minVal = parseInt(colon[0]) || 0;
+            }
+          }
+          const [tpm, tpa] = idx.tpt >= 0 ? parseMA(stRow[idx.tpt]) : [0, 0];
+          const [fgm, fga] = idx.fg  >= 0 ? parseMA(stRow[idx.fg])  : [0, 0];
+          const [ftm, fta] = idx.ft  >= 0 ? parseMA(stRow[idx.ft])  : [0, 0];
+
+          rows.push({
+            d: isoDate,
+            p: fullName,
+            pid: player.id || null,
+            t: teamAbbr,
+            o: opp,
+            h: isHome ? 1 : 0,
+            min: minVal,
+            pts: idx.pts >= 0 ? parseInt0(stRow[idx.pts]) : 0,
+            reb: idx.reb >= 0 ? parseInt0(stRow[idx.reb]) : 0,
+            ast: idx.ast >= 0 ? parseInt0(stRow[idx.ast]) : 0,
+            stl: idx.stl >= 0 ? parseInt0(stRow[idx.stl]) : 0,
+            blk: idx.blk >= 0 ? parseInt0(stRow[idx.blk]) : 0,
+            to:  idx.to  >= 0 ? parseInt0(stRow[idx.to])  : 0,
+            tpm, tpa, fgm, fga, ftm, fta,
+          });
+        }
+      }
+    }
+  }
+  return rows;
+}
+
+// Main sync — incremental by default. Pass force=true to wipe and re-fetch.
+async function syncSeasonLogs({ force = false, onProgress = null } = {}) {
+  const today = new Date().toISOString().slice(0, 10);
+  let startDate = SEASON_START_DATE;
+  let existingRows = [];
+
+  const existing = getSeasonLogs();
+  if (existing && !force) {
+    existingRows = existing.rows || [];
+    const dates = [...new Set(existingRows.map(r => r.d))].sort();
+    if (dates.length) {
+      // Re-fetch the latest stored date too (in case yesterday's games hadn't
+      // finished when we last synced) — that means dropping its existing rows
+      // and starting from there.
+      const latest = dates[dates.length - 1];
+      existingRows = existingRows.filter(r => r.d < latest);
+      startDate = latest;
+    }
+  }
+
+  const dates = [];
+  const cur = new Date(startDate);
+  const end = new Date(today);
+  while (cur <= end) {
+    dates.push(cur.toISOString().slice(0, 10));
+    cur.setDate(cur.getDate() + 1);
+  }
+  if (!dates.length) {
+    if (onProgress) onProgress({ done: 0, total: 0, status: "Already up to date" });
+    return existing || { rows: [], updated: Date.now() };
+  }
+
+  const newRows = [];
+  for (let i = 0; i < dates.length; i++) {
+    if (onProgress) onProgress({ done: i, total: dates.length, status: dates[i] });
+    try {
+      const dayRows = await _fetchSeasonGameDay(dates[i]);
+      newRows.push(...dayRows);
+    } catch (e) {
+      console.warn(`Failed to fetch ${dates[i]}:`, e);
+    }
+    // Gentle throttle every 5 dates so we don't hammer ESPN
+    if (i % 5 === 4) await new Promise(r => setTimeout(r, 80));
+  }
+
+  const allRows = [...existingRows, ...newRows];
+  const payload = { updated: Date.now(), season: 2026, rows: allRows };
+  saveSeasonLogs(payload);
+  if (onProgress) onProgress({ done: dates.length, total: dates.length, status: "Done" });
+  return payload;
+}
+
+// UI handlers — keep the DOM update logic separate from the data fetch so
+// the data layer can be reused later (e.g. headless query helpers in Slice 3).
+async function handleSyncSeasonLogs(force = false) {
+  const btn = document.getElementById("seasonLogsSyncBtn");
+  const status = document.getElementById("seasonLogsStatus");
+  if (btn) { btn.disabled = true; btn.style.opacity = "0.5"; }
+  try {
+    const payload = await syncSeasonLogs({
+      force,
+      onProgress: ({ done, total, status: msg }) => {
+        if (!status) return;
+        if (total > 0) status.textContent = `${msg} · ${done}/${total}`;
+        else status.textContent = msg;
+      }
+    });
+    renderSeasonLogsStatus();
+  } catch (e) {
+    console.error("Season log sync failed:", e);
+    if (status) status.textContent = "Sync failed — see console";
+  } finally {
+    if (btn) { btn.disabled = false; btn.style.opacity = "1"; }
+  }
+}
+
+function renderSeasonLogsStatus() {
+  const status = document.getElementById("seasonLogsStatus");
+  if (!status) return;
+  const data = getSeasonLogs();
+  if (!data || !data.rows?.length) {
+    status.textContent = "never synced";
+    return;
+  }
+  const rowCount = data.rows.length;
+  const playerCount = new Set(data.rows.map(r => r.p)).size;
+  const dateCount = new Set(data.rows.map(r => r.d)).size;
+  const ago = Math.round((Date.now() - data.updated) / 60000);
+  let agoStr;
+  if (ago < 1) agoStr = "just now";
+  else if (ago < 60) agoStr = `${ago}m ago`;
+  else if (ago < 1440) agoStr = `${Math.round(ago/60)}h ago`;
+  else agoStr = `${Math.round(ago/1440)}d ago`;
+  status.textContent = `${rowCount.toLocaleString()} rows · ${playerCount} players · ${dateCount} days · ${agoStr}`;
+}
+
 async function gradeBet(b) {
   const iso = getBetISODate(b);
   if (!iso) return { ok: false, reason: "No date on bet" };
@@ -6343,6 +6572,16 @@ function renderTracker() {
       </span>
     </div>
 
+    <!-- Slice 1: Season Log sync. Stores per-player game-by-game stats so we
+         can later run custom-line trends, opponent splits, ground-truth
+         backtests. Incremental — only fetches new dates after the last sync. -->
+    <div style="display:flex;align-items:center;gap:10px;padding:8px 12px;margin:8px 0 12px 0;background:#0a0b0d;border:1px solid #1a1d22;border-radius:6px;font-family:'Inter',sans-serif;flex-wrap:wrap;">
+      <span style="font-size:10px;color:#525a64;letter-spacing:1px;text-transform:uppercase;font-weight:700;">Season Logs</span>
+      <button id="seasonLogsSyncBtn" onclick="handleSyncSeasonLogs(false)" title="Pull new game logs from ESPN" style="background:#0c0d10;border:1px solid #1e40af;color:#7dd3fc;border-radius:5px;padding:5px 11px;font-size:11px;font-weight:600;cursor:pointer;font-family:'Inter',sans-serif;">🔄 Sync</button>
+      <button onclick="if(confirm('Re-fetch the entire season? Existing logs will be replaced.')) handleSyncSeasonLogs(true);" title="Wipe and re-fetch the entire season" style="background:transparent;border:1px solid #1a1d22;color:#525a64;border-radius:5px;padding:5px 9px;font-size:10px;font-weight:600;cursor:pointer;font-family:'Inter',sans-serif;">Force Re-sync</button>
+      <span id="seasonLogsStatus" style="font-size:11px;color:#8b93a0;font-family:'JetBrains Mono','Menlo',monospace;">never synced</span>
+    </div>
+
     <details id="autograde-details" ${agOpen ? "open" : ""} style="background:#0c0d10;border:1px solid #1a1d22;border-radius:8px;margin-bottom:14px;">
       <summary style="cursor:pointer;list-style:none;padding:10px 14px;display:flex;align-items:center;justify-content:space-between;gap:8px;user-select:none;">
         <span style="display:flex;align-items:center;gap:10px;">
@@ -6455,6 +6694,10 @@ function renderTracker() {
   // Wire hover handlers on the perf chart now that the SVG is in the DOM
   if (typeof _attachTrackerChartHover === "function") {
     try { _attachTrackerChartHover(); } catch (e) { /* hover is non-critical */ }
+  }
+  // Populate Season Logs status from localStorage (the DOM was just created)
+  if (typeof renderSeasonLogsStatus === "function") {
+    try { renderSeasonLogsStatus(); } catch (e) { /* non-critical */ }
   }
 }
 
