@@ -485,7 +485,7 @@ function parseBets() {
 
     const dateMatch = line.match(/^(\d+\/\d+):\s*(.*)/);
     if (dateMatch) {
-      currentDate = dateMatch[1] + '/2025';
+      currentDate = dateMatch[1] + '/2026';
       line = dateMatch[2].trim();
       if (!line) continue;
     }
@@ -769,7 +769,7 @@ function renderTable() {
       ? `<span class="api-conflict">api:${b.apiResult.toUpperCase()}</span>` : '';
 
     html += `<tr class="${b.conflict?'conflict':''}">
-      <td style="color:var(--sub);font-size:12px;">${b.date||'—'}</td>
+      <td style="color:var(--sub);font-size:12px;">${(b.date||'—').replace('/2026','/26')}</td>
       <td class="team-cell">${b.team}${b.isF5?' <span class="f5-tag">F5</span>':''}${conflictIcon}</td>
       <td>${oddsStr}</td>
       <td>${b.risk!==null?b.risk+'u':'—'}</td>
@@ -937,7 +937,7 @@ async function copyTable() {
     const resStr = (r ? r.toUpperCase() : '?').padEnd(8);
     const pnlStr = (pnl===null ? '—' : pnl===0 ? 'PUSH' : (pnl>0?'+':'')+pnl.toFixed(2)+'u').padEnd(10);
     const runStr = (copyRunning>=0?'+':'')+copyRunning.toFixed(2)+'u';
-    const dt = b.date.replace('/2025','').padEnd(7);
+    const dt = b.date.replace('/2026','').padEnd(7);
     lines.push(`${dt}  ${teamStr}${oddsStr}${riskStr}${twStr}${resStr}${pnlStr}→ ${runStr}`);
   });
 
@@ -991,7 +991,7 @@ async function fetchSchedule(dateStr) {
   const [m,d,y] = dateStr.split('/');
   const apiDate = `${y}-${m.padStart(2,'0')}-${d.padStart(2,'0')}`;
   try {
-    const r = await fetch(`https://statsapi.mlb.com/api/v1/schedule?sportId=1&date=${apiDate}&hydrate=team`);
+    const r = await fetch(`https://statsapi.mlb.com/api/v1/schedule?sportId=1&date=${apiDate}&season=2026&hydrate=team`);
     const data = await r.json();
     const games = [];
     for (const dd of (data.dates||[])) for (const g of (dd.games||[])) games.push(g);
@@ -1009,15 +1009,30 @@ async function fetchLinescore(gamePk) {
 }
 
 // Grade a full-game bet from schedule data
-function gradeFullGame(bet, games) {
+function findGame(bet, games) {
   const teamId = getTeamId(bet.team);
   if (!teamId) return null;
-  const game = games.find(g => g.teams?.home?.team?.id===teamId || g.teams?.away?.team?.id===teamId);
+  // detect doubleheader game number from raw (g2 = game 2)
+  const dhMatch = bet.raw && bet.raw.match(/\bg(\d)\b/i);
+  const gameNum = dhMatch ? parseInt(dhMatch[1]) : null;
+  const candidates = games.filter(g =>
+    (g.teams?.home?.team?.id===teamId || g.teams?.away?.team?.id===teamId) &&
+    g.status?.abstractGameState === 'Final'
+  );
+  if (!candidates.length) return null;
+  if (gameNum && candidates.length > 1) {
+    return candidates.find(g => g.gameNumber === gameNum) || candidates[gameNum-1] || candidates[0];
+  }
+  return candidates[0];
+}
+
+function gradeFullGame(bet, games) {
+  const game = findGame(bet, games);
   if (!game) return null;
-  if (game.status?.abstractGameState !== 'Final') return null;
   const homeScore = game.teams?.home?.score;
   const awayScore = game.teams?.away?.score;
   if (homeScore == null || awayScore == null) return null;
+  const teamId = getTeamId(bet.team);
   const isHome = game.teams?.home?.team?.id === teamId;
   const myScore = isHome ? homeScore : awayScore;
   const oppScore = isHome ? awayScore : homeScore;
@@ -1027,18 +1042,16 @@ function gradeFullGame(bet, games) {
 }
 
 // Grade an F5 bet from linescore innings array
-function gradeF5(bet, games, innings) {
-  const teamId = getTeamId(bet.team);
-  if (!teamId) return null;
-  const game = games.find(g => g.teams?.home?.team?.id===teamId || g.teams?.away?.team?.id===teamId);
+function gradeF5(bet, games, linescoreCache) {
+  const game = findGame(bet, games);
   if (!game) return null;
-  if (game.status?.abstractGameState !== 'Final') return null;
+  const innings = linescoreCache[game.gamePk] || [];
   if (!innings || innings.length < 5) return null;
-  const f5 = innings.slice(0, 5);
+  const teamId = getTeamId(bet.team);
   const isHome = game.teams?.home?.team?.id === teamId;
+  const f5 = innings.slice(0, 5);
   let myRuns = 0, oppRuns = 0;
   f5.forEach(inn => {
-    // runs can be null if home team didn't bat in bottom of inning
     const homeRuns = inn.home?.runs ?? 0;
     const awayRuns = inn.away?.runs ?? 0;
     myRuns  += isHome ? homeRuns : awayRuns;
@@ -1067,23 +1080,13 @@ async function gradeAll() {
     const games = await fetchSchedule(dateStr);
     const dateBets = bets.filter(b => b.date === dateStr);
 
-    // collect unique gamePks needed for F5 bets on this date
+    // collect gamePks needed for F5 bets using findGame (handles doubleheaders)
     const f5Bets = dateBets.filter(b => b.isF5);
-    const gamePkMap = {}; // teamId → gamePk
-    games.forEach(g => {
-      if (g.status?.abstractGameState !== 'Final') return;
-      const homeId = g.teams?.home?.team?.id;
-      const awayId = g.teams?.away?.team?.id;
-      if (homeId) gamePkMap[homeId] = g.gamePk;
-      if (awayId) gamePkMap[awayId] = g.gamePk;
-    });
-
-    // fetch linescores only for games that have F5 bets
     const linescoreCache = {};
     const pkSet = new Set();
     f5Bets.forEach(b => {
-      const tid = getTeamId(b.team);
-      if (tid && gamePkMap[tid]) pkSet.add(gamePkMap[tid]);
+      const game = findGame(b, games);
+      if (game) pkSet.add(game.gamePk);
     });
     for (const pk of pkSet) {
       document.getElementById('status-bar').textContent = `Fetching linescore ${pk} (${dateStr})...`;
@@ -1094,10 +1097,7 @@ async function gradeAll() {
     dateBets.forEach(b => {
       let grade = null;
       if (b.isF5) {
-        const tid = getTeamId(b.team);
-        const pk = tid ? gamePkMap[tid] : null;
-        const innings = pk ? linescoreCache[pk] : null;
-        grade = gradeF5(b, games, innings);
+        grade = gradeF5(b, games, linescoreCache);
       } else {
         grade = gradeFullGame(b, games);
       }
