@@ -175,6 +175,7 @@
 <div class="tab-nav">
   <button class="tab-btn active" onclick="switchTab('bets',this)">📋 Bets</button>
   <button class="tab-btn" onclick="switchTab('chart',this)">📈 Chart</button>
+  <button class="tab-btn" onclick="switchTab('preseason',this)">🔍 Pre-Season Grader</button>
   <button class="tab-btn" onclick="switchTab('add',this)">➕ Add Bets</button>
 </div>
 
@@ -273,6 +274,34 @@
     <div class="chart-side-card">
       <h3>💀 Worst Opponents — Teams We Lose To Most</h3>
       <div id="worstTeams"></div>
+    </div>
+  </div>
+</div>
+
+<!-- PRE-SEASON GRADER TAB -->
+<div class="tab-panel" id="tab-preseason">
+  <div style="padding:16px 20px;display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+    <div class="add-panel">
+      <h3>🔍 Pre-Season Bet Parser</h3>
+      <div style="font-size:11px;color:var(--sub);margin-bottom:10px;">Paste your 75 bets below in any format. Results will be graded independently against the API and shown on the right.</div>
+      <div style="display:flex;gap:8px;margin-bottom:10px;align-items:center;">
+        <span style="font-size:11px;color:var(--sub);">Season:</span>
+        <input id="psYear" type="text" value="2026" style="width:60px;background:var(--card);border:1px solid var(--border);color:var(--text);padding:4px 8px;font-family:'Inter',sans-serif;font-size:11px;border-radius:4px;">
+      </div>
+      <textarea id="psPaste" style="width:100%;height:320px;background:var(--card);border:1px solid var(--border);color:var(--text);font-family:'Inter',sans-serif;font-size:11px;padding:10px;resize:vertical;outline:none;border-radius:4px;" placeholder="3/26: Pirates f5 -113 BOL (1.02u risk)&#10;Nationals/Cubs u8 -102 BM (1.01u risk)&#10;Phillies -147 PX (1.21u risk)&#10;..."></textarea>
+      <div style="display:flex;gap:8px;margin-top:10px;">
+        <button class="parse-btn" onclick="psParseAndGrade()">▶ PARSE + GRADE ALL</button>
+        <button class="parse-btn" style="background:var(--card);color:var(--text);border:1px solid var(--border);" onclick="psClear()">✕ CLEAR</button>
+      </div>
+      <div id="psStatus" style="margin-top:8px;font-size:11px;color:var(--accent);"></div>
+    </div>
+    <div class="add-panel">
+      <h3>📊 Pre-Season Results</h3>
+      <div id="psSummary" style="margin-bottom:12px;"></div>
+      <div id="psResults" style="max-height:500px;overflow-y:auto;"></div>
+      <div style="margin-top:10px;display:flex;gap:8px;">
+        <button class="parse-btn" id="psApplyBtn" onclick="psApplyToMain()" style="display:none;">✅ APPLY TO MAIN LOG</button>
+      </div>
     </div>
   </div>
 </div>
@@ -2285,7 +2314,197 @@ function addAllParsed() {
   document.getElementById('gradeDateInput').value = document.getElementById('addDate').value;
 }
 
-// ─── INIT ────────────────────────────────────────────────────────────────────
+// ─── PRE-SEASON GRADER ────────────────────────────────────────────────────────
+let psBets = [];
+
+function psParseRaw(raw, year) {
+  const lines = raw.trim().split('\n');
+  let currentDate = null;
+  const result = [];
+
+  for (let line of lines) {
+    line = line.trim();
+    if (!line) continue;
+
+    const dateMatch = line.match(/^(\d+\/\d+):\s*(.*)/);
+    if (dateMatch) {
+      currentDate = dateMatch[1] + '/' + year;
+      line = dateMatch[2].trim();
+      if (!line) continue;
+    }
+
+    // strip result if present
+    let loggedResult = null;
+    for (const [suf, res] of [[' win','win'],[' loss','loss'],[' push','push'],[' pending','pending'],[' ?','pending']]) {
+      if (line.toLowerCase().endsWith(suf)) { loggedResult = res; line = line.slice(0,-suf.length).trim(); break; }
+    }
+
+    // total detection
+    const totalMatch = line.match(/^([A-Za-z\s]+)\/([A-Za-z\s]+?)\s+(?:f5\s+)?u([0-9.]+)/i);
+    let isTotal = false, totalLine = null, team = null;
+    if (totalMatch) {
+      isTotal = true;
+      team = totalMatch[1].trim();
+      totalLine = parseFloat(totalMatch[3]);
+    }
+
+    const oddsM = line.match(/(?:ML)?([+-]\d{2,3})/);
+    if (!oddsM) continue;
+    const odds = parseInt(oddsM[1]);
+
+    const twM = line.match(/\(to win\s+([0-9.]+)u\)/);
+    const riskM = line.match(/\(([0-9.]+)u(?:\s*risk)?\)/);
+    let risk = null;
+    if (twM) {
+      const tw = parseFloat(twM[1]);
+      risk = odds < 0 ? +(tw * Math.abs(odds)/100).toFixed(2) : +(tw/(odds/100)).toFixed(2);
+    } else if (riskM) {
+      risk = parseFloat(riskM[1]);
+    }
+    if (!risk) continue;
+
+    const isF5 = /\bf5\b/i.test(line);
+    if (!isTotal) {
+      const tm = line.match(/^([A-Za-z\s]+?)(?:\s+(?:f5|g\d))?\s+[+-]\d+/i);
+      team = tm ? tm[1].trim() : line.split(/\s+/)[0];
+    }
+
+    const toWin = odds > 0 ? +(risk*odds/100).toFixed(2) : +(risk*100/Math.abs(odds)).toFixed(2);
+
+    result.push({ date: currentDate, team, isF5, isTotal, totalLine, odds, risk, toWin,
+      loggedResult, apiResult: null, score: null, opponent: null, raw: line, id: result.length });
+  }
+  return result;
+}
+
+async function psParseAndGrade() {
+  const raw = document.getElementById('psPaste').value.trim();
+  const year = document.getElementById('psYear').value.trim() || '2026';
+  if (!raw) { document.getElementById('psStatus').textContent = 'Paste bets first'; return; }
+
+  document.getElementById('psStatus').textContent = 'Parsing...';
+  psBets = psParseRaw(raw, year);
+  document.getElementById('psStatus').textContent = `${psBets.length} bets parsed — grading...`;
+  psRenderResults();
+
+  // grade each date
+  const dates = [...new Set(psBets.map(b=>b.date))].sort((a,b)=>new Date(a)-new Date(b));
+  let graded = 0;
+
+  for (let i=0; i<dates.length; i++) {
+    const dateStr = dates[i];
+    document.getElementById('psStatus').textContent = `Grading ${dateStr} (${i+1}/${dates.length})...`;
+    const games = await fetchSchedule(dateStr);
+    const dateBets = psBets.filter(b=>b.date===dateStr);
+
+    const f5Bets = dateBets.filter(b=>b.isF5);
+    const linescoreCache = {};
+    const pkSet = new Set();
+    f5Bets.forEach(b=>{ const g=findGame(b,games); if(g) pkSet.add(g.gamePk); });
+    for (const pk of pkSet) linescoreCache[pk] = await fetchLinescore(pk);
+
+    dateBets.forEach(b => {
+      const grade = b.isF5 ? gradeF5(b, games, linescoreCache) : gradeFullGame(b, games);
+      if (grade) { b.apiResult = grade; graded++; }
+    });
+
+    psRenderResults();
+  }
+
+  document.getElementById('psStatus').textContent = `✅ Done — ${graded}/${psBets.length} graded`;
+  document.getElementById('psApplyBtn').style.display = 'block';
+}
+
+function psRenderResults() {
+  let w=0,l=0,p=0,pnl=0;
+  psBets.forEach(b => {
+    const r = b.manualResult || b.apiResult || b.loggedResult;
+    const pl = r==='win' ? b.toWin : r==='loss' ? -b.risk : 0;
+    if(r==='win')w++; else if(r==='loss')l++; else if(r==='push')p++;
+    if(r&&r!=='pending') pnl+=pl;
+  });
+
+  const sumEl = document.getElementById('psSummary');
+  const pnlColor = pnl>=0?'var(--win)':'var(--loss)';
+  sumEl.innerHTML = `
+    <div style="display:flex;gap:16px;flex-wrap:wrap;">
+      <div><div style="font-size:9px;color:var(--sub);font-weight:700;letter-spacing:1px;text-transform:uppercase;">Record</div><div style="font-size:20px;font-weight:800;color:var(--accent);">${w}-${l}${p?' ('+p+'p)':''}</div></div>
+      <div><div style="font-size:9px;color:var(--sub);font-weight:700;letter-spacing:1px;text-transform:uppercase;">P&L</div><div style="font-size:20px;font-weight:800;color:${pnlColor};">${pnl>=0?'+':''}${pnl.toFixed(2)}u</div></div>
+      <div><div style="font-size:9px;color:var(--sub);font-weight:700;letter-spacing:1px;text-transform:uppercase;">Graded</div><div style="font-size:20px;font-weight:800;color:var(--text);">${psBets.filter(b=>b.apiResult).length}/${psBets.length}</div></div>
+    </div>`;
+
+  let html = '<table style="width:100%;border-collapse:collapse;">';
+  html += `<tr style="font-size:9px;font-weight:700;color:var(--sub);letter-spacing:1px;text-transform:uppercase;">
+    <td style="padding:5px 8px;">Date</td><td>Team</td><td>Odds</td><td>Risk</td><td>Result</td><td>P&L</td><td>Override</td></tr>`;
+
+  psBets.forEach(b => {
+    const r = b.manualResult || b.apiResult;
+    const pl = r==='win' ? b.toWin : r==='loss' ? -b.risk : 0;
+    const rc = r==='win'?'var(--win)':r==='loss'?'var(--loss)':r==='push'?'var(--push)':'var(--sub)';
+    const pnlStr = r&&r!=='pending' ? `<span style="color:${pl>=0?'var(--win)':'var(--loss)'};font-weight:700;">${pl>=0?'+':''}${pl.toFixed(2)}u</span>` : '—';
+    const mw = b.manualResult==='win'?' active-w':'';
+    const ml = b.manualResult==='loss'?' active-l':'';
+    const mp = b.manualResult==='push'?' active-p':'';
+    const scoreStr = b.score ? `<span style="font-size:10px;color:var(--sub);margin-left:4px;">${b.score}</span>` : '';
+    html += `<tr style="border-bottom:1px solid var(--border);">
+      <td style="padding:5px 8px;font-size:11px;color:var(--sub);">${b.date.replace('/'+document.getElementById('psYear').value,'/'+document.getElementById('psYear').value.slice(-2))}</td>
+      <td style="font-weight:600;">${teamLogo(b.team,14)}${b.team}${b.isF5?' <span class="f5-tag">F5</span>':''}${b.isTotal?` <span class="f5-tag" style="background:rgba(255,165,0,.1);color:var(--push);border-color:rgba(255,165,0,.3);">u${b.totalLine}</span>`:''}</td>
+      <td style="color:${b.odds>0?'var(--accent)':'var(--text)'};">${b.odds>0?'+':''}${b.odds}</td>
+      <td style="color:var(--sub);">${b.risk}u</td>
+      <td><span style="color:${rc};font-weight:700;">${r?r.toUpperCase():'?'}</span>${scoreStr}</td>
+      <td>${pnlStr}</td>
+      <td><div style="display:flex;gap:3px;">
+        <button class="rb${mw}" onclick="psOverride(${b.id},'win')">W</button>
+        <button class="rb${ml}" onclick="psOverride(${b.id},'loss')">L</button>
+        <button class="rb${mp}" onclick="psOverride(${b.id},'push')">P</button>
+        <button class="rb" onclick="psOverride(${b.id},null)">✕</button>
+      </div></td>
+    </tr>`;
+  });
+  html += '</table>';
+  document.getElementById('psResults').innerHTML = html;
+}
+
+function psOverride(id, result) {
+  psBets[id].manualResult = result;
+  psRenderResults();
+}
+
+function psApplyToMain() {
+  // update the matching bets in the main bets array by date+team+isF5
+  let applied = 0;
+  psBets.forEach(ps => {
+    const r = ps.manualResult || ps.apiResult;
+    if (!r || r==='pending') return;
+    const match = bets.find(b =>
+      b.date === ps.date &&
+      b.team.toLowerCase() === ps.team.toLowerCase() &&
+      b.isF5 === ps.isF5 &&
+      (!b.loggedResult || b.loggedResult === 'pending')
+    );
+    if (match) {
+      match.loggedResult = r;
+      match.apiResult = ps.apiResult;
+      match.score = ps.score;
+      match.opponent = ps.opponent;
+      applied++;
+    }
+  });
+  saveGradeData();
+  updateConflicts();
+  updateStats();
+  renderTable();
+  document.getElementById('psStatus').textContent = `✅ Applied ${applied} results to main log`;
+}
+
+function psClear() {
+  psBets = [];
+  document.getElementById('psPaste').value = '';
+  document.getElementById('psResults').innerHTML = '';
+  document.getElementById('psSummary').innerHTML = '';
+  document.getElementById('psStatus').textContent = '';
+  document.getElementById('psApplyBtn').style.display = 'none';
+}
 restoreAddedBets();
 applyOverrides();
 applyOddsOverrides();
