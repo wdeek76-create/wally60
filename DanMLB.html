@@ -709,6 +709,9 @@ function parseBets() {
     else if (line.endsWith(' ?')) { loggedResult = 'pending'; line = line.slice(0,-2).trim(); }
     else if (line.endsWith(' pending')) { loggedResult = 'pending'; line = line.slice(0,-8).trim(); }
 
+    // strip ML prefix from odds (e.g. ML-113 → -113)
+    line = line.replace(/\bML(-\d+)/gi, '$1');
+
     // detect total bet: "Team1/Team2 uX" or "Team1/Team2 f5 uX"
     const totalMatch = line.match(/^([A-Za-z\s]+)\/([A-Za-z\s]+?)\s+(?:f5\s+)?u([0-9.]+)/i);
     let isTotal = false, totalLine = null, team1 = null;
@@ -2273,6 +2276,9 @@ function psParseRaw(raw, year) {
       totalLine = parseFloat(totalMatch[3]);
     }
 
+    // strip ML prefix from odds (e.g. ML-113 → -113)
+    line = line.replace(/\bML(-\d+)/gi, '$1');
+
     const oddsM = line.match(/(?:ML)?([+-]\d{2,3})/);
     if (!oddsM) continue;
     const odds = parseInt(oddsM[1]);
@@ -2398,30 +2404,46 @@ function psOverride(id, result) {
 }
 
 function psApplyToMain() {
-  // update the matching bets in the main bets array by date+team+isF5
-  let applied = 0;
-  psBets.forEach(ps => {
-    const r = ps.manualResult || ps.apiResult;
-    if (!r || r==='pending') return;
-    const match = bets.find(b =>
-      b.date === ps.date &&
-      b.team.toLowerCase() === ps.team.toLowerCase() &&
-      b.isF5 === ps.isF5 &&
-      (!b.loggedResult || b.loggedResult === 'pending')
-    );
-    if (match) {
-      match.loggedResult = r;
-      match.apiResult = ps.apiResult;
-      match.score = ps.score;
-      match.opponent = ps.opponent;
-      applied++;
-    }
+  // Remove any existing pre-season bets from main log (date < 4/13/2026)
+  const cutoff = new Date('4/13/2026');
+  bets = bets.filter(b => new Date(b.date) >= cutoff);
+
+  // Add pre-season bets fresh with their graded results
+  psBets.forEach(b => {
+    const r = b.manualResult || b.apiResult;
+    const newBet = {
+      id: bets.length,
+      date: b.date,
+      team: b.team,
+      isF5: b.isF5,
+      isTotal: b.isTotal || false,
+      totalLine: b.totalLine || null,
+      odds: b.odds,
+      risk: b.risk,
+      toWin: b.toWin,
+      loggedResult: r || 'pending',
+      apiResult: b.apiResult,
+      manualResult: b.manualResult || null,
+      raw: b.raw,
+      score: b.score || null,
+      opponent: b.opponent || null,
+      apiChecked: !!b.apiResult,
+      conflict: false,
+      _added: true
+    };
+    bets.push(newBet);
   });
+
+  // re-index IDs
+  bets.forEach((b,i) => b.id = i);
+
+  saveAddedBets();
   saveGradeData();
   updateConflicts();
+  populateDateFilter();
   updateStats();
   renderTable();
-  document.getElementById('psStatus').textContent = `✅ Applied ${applied} results to main log`;
+  document.getElementById('psStatus').textContent = `✅ Applied ${psBets.length} pre-season bets to main log`;
 }
 
 async function psCopyResults() {
@@ -2484,6 +2506,14 @@ function psClear() {
   document.getElementById('psStatus').textContent = '';
   document.getElementById('psApplyBtn').style.display = 'none';
 }
+// Clear stale pre-season pending bets from localStorage
+try {
+  const _stored = JSON.parse(localStorage.getItem(ADDED_KEY) || '[]');
+  if (_stored.some(b => b.date && new Date(b.date) < new Date('4/13/2026') && (!b.loggedResult || b.loggedResult === 'pending'))) {
+    const _clean = _stored.filter(b => !(new Date(b.date) < new Date('4/13/2026') && (!b.loggedResult || b.loggedResult === 'pending')));
+    localStorage.setItem(ADDED_KEY, JSON.stringify(_clean));
+  }
+} catch(e) {}
 restoreAddedBets();
 applyOverrides();
 applyOddsOverrides();
