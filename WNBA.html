@@ -2187,6 +2187,7 @@ function openTrackModal(player, pos, stat, proj, team, presetDate) {
   updateTrendsInModal();
   if (typeof updateSplitsInModal === "function") updateSplitsInModal();
   if (typeof updateMatchupInModal === "function") updateMatchupInModal();
+  if (typeof updateTeammateRiskInModal === "function") updateTeammateRiskInModal();
   const shorthand = document.getElementById("modal-shorthand");
   if (shorthand) { shorthand.value = ""; shorthand.style.borderColor = "#1a1d22"; }
   const sp = document.getElementById("shorthand-preview");
@@ -2248,6 +2249,7 @@ function parseShorthand(el) {
   if (typeof updateTrendsInModal === "function") updateTrendsInModal();
   if (typeof updateSplitsInModal === "function") updateSplitsInModal();
   if (typeof updateMatchupInModal === "function") updateMatchupInModal();
+  if (typeof updateTeammateRiskInModal === "function") updateTeammateRiskInModal();
   if (!raw) {
     el.style.borderColor = "#1a1d22";
     if (preview) preview.textContent = "";
@@ -4169,6 +4171,76 @@ function updateSplitsInModal() {
 
   grid.innerHTML = `<div style="display:flex;flex-direction:column;gap:4px;">${html}${volRow}</div>`;
   if (summary) summary.textContent = `${splits.games} GP`;
+  container.style.display = "block";
+}
+
+// Render the teammate-risk warning. Fires ONLY for UNDER bets when a
+// teammate on the same team has status Q/DTD/GTD (questionable / day-to-day /
+// game-time-decision). The reasoning: if a teammate is limited or out, this
+// player likely absorbs minutes & usage, which is bad for UNDER bets — even
+// if upside isn't surfaced by trends/projections. Pulls from injuriesByTeam
+// (already loaded from ESPN feed). Skips OUT (binary, already priced in by
+// books) and PROBABLE (low impact). Excludes the bet's own player from the
+// teammate list via normalized-name comparison.
+function updateTeammateRiskInModal() {
+  const container = document.getElementById("modal-teammate-risk");
+  if (!container) return;
+  const player = (document.getElementById("modal-player-name") || {}).textContent || window._modalPlayer || "";
+  const team = window._modalTeam || "";
+  if (!player || !team) { container.style.display = "none"; return; }
+
+  // Detect direction from the shorthand input (matches Splits/Matchup parse)
+  let ou = "over";
+  const shorthandEl = document.getElementById("modal-shorthand");
+  if (shorthandEl && shorthandEl.value) {
+    const tok = shorthandEl.value.trim().toLowerCase().split(/\s+/)[0] || "";
+    if (tok.startsWith("u")) ou = "under";
+  }
+  // Only fires for UNDER bets — that's where teammate absences create the trap.
+  if (ou !== "under") { container.style.display = "none"; return; }
+
+  // Check teammate injury list
+  if (typeof injuriesByTeam === "undefined" || !injuriesByTeam || !injuriesByTeam.get) {
+    container.style.display = "none"; return;
+  }
+  // Try the bet's internal abbr and the ESPN-normalized variant
+  const espnTeam = (typeof INTERNAL_TO_ESPN_ABBR !== "undefined" && INTERNAL_TO_ESPN_ABBR[team]) || team;
+  let teamList = injuriesByTeam.get(team) || injuriesByTeam.get(espnTeam) || [];
+  if (!teamList.length) { container.style.display = "none"; return; }
+
+  // Filter to risky-status teammates only — excluding the player themselves
+  const playerNorm = (typeof norm === "function") ? norm(player) : player.toLowerCase();
+  const risky = teamList.filter(r => {
+    if (!r || !r.name) return false;
+    const rn = (typeof norm === "function") ? norm(r.name) : r.name.toLowerCase();
+    if (rn === playerNorm) return false;
+    const s = (r.status || "").toLowerCase();
+    return s.includes("question") || s.includes("day") || s.includes("game time");
+  });
+  if (!risky.length) { container.style.display = "none"; return; }
+
+  // Render the warning panel
+  const rows = risky.map(r => {
+    const label = _injuryStatusLabel(r.status);
+    const color = _injuryStatusColor(r.status);
+    const detail = (r.detail || r.type || "").trim();
+    return `<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:7px 10px;background:rgba(255,255,255,0.025);border:1px solid rgba(255,255,255,0.06);border-radius:6px;margin-top:6px;font-family:'JetBrains Mono','Menlo',monospace;">
+      <div style="display:flex;align-items:center;gap:8px;min-width:0;">
+        <span style="background:${color}22;border:1px solid ${color}66;color:${color};border-radius:4px;padding:3px 7px;font-size:9.5px;font-weight:800;letter-spacing:0.5px;">${label}</span>
+        <span style="color:#fff;font-weight:700;font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${r.name}</span>
+      </div>
+      ${detail ? `<span style="color:#fff;opacity:0.55;font-size:10px;text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:140px;">${detail}</span>` : ""}
+    </div>`;
+  }).join("");
+
+  container.innerHTML = `<div style="background:rgba(245,158,11,0.06);border:1px solid rgba(245,158,11,0.4);border-radius:8px;padding:11px 13px;">
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
+      <span style="font-size:14px;">⚠️</span>
+      <div style="font-size:11px;font-weight:800;color:#f59e0b;letter-spacing:0.7px;text-transform:uppercase;">Teammate Risk · UNDER</div>
+    </div>
+    <div style="font-size:11.5px;color:#fff;line-height:1.5;opacity:0.92;">If ${risky.length === 1 ? "this teammate sits" : "any of these teammates sit"} or ${risky.length === 1 ? "is" : "are"} limited, ${player.split(" ").slice(-1)[0]} likely absorbs minutes/usage — risky for an UNDER.</div>
+    ${rows}
+  </div>`;
   container.style.display = "block";
 }
 
@@ -7976,6 +8048,7 @@ function pasteTrends() {
   if (typeof updateTrendsInModal === "function") updateTrendsInModal();
   if (typeof updateSplitsInModal === "function") updateSplitsInModal();
   if (typeof updateMatchupInModal === "function") updateMatchupInModal();
+  if (typeof updateTeammateRiskInModal === "function") updateTeammateRiskInModal();
 }
 
 function clearTrendsAndRender() {
@@ -7987,6 +8060,7 @@ function clearTrendsAndRender() {
   if (typeof updateTrendsInModal === "function") updateTrendsInModal();
   if (typeof updateSplitsInModal === "function") updateSplitsInModal();
   if (typeof updateMatchupInModal === "function") updateMatchupInModal();
+  if (typeof updateTeammateRiskInModal === "function") updateTeammateRiskInModal();
 }
 
 // Load on boot so saved trends survive page reloads
@@ -12727,6 +12801,11 @@ or one per line — book shorthand + odds (+ optional line + ev%)" spellcheck="f
     <!-- Matchup adjustment — pulls from uploaded opp-avg CSV (Rotowire defensive
          averages) and shows how favorable tonight's opponent is for this stat.
          Same visual treatment as the Volatility bar in Splits. -->
+    <!-- Teammate risk warning — fires for UNDER bets when a teammate is
+         questionable / day-to-day / game-time-decision. Surfaces the risk
+         that this player absorbs minutes/usage if the teammate sits or
+         is limited, making UNDERs trap-prone. -->
+    <div id="modal-teammate-risk" style="margin-top:10px;display:none;"></div>
     <div id="modal-matchup" style="margin-top:10px;display:none;">
       <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px;">
         <div style="font-size:10px;color:#fff;font-weight:700;letter-spacing:0.5px;text-transform:uppercase;">Matchup</div>
