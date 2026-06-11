@@ -2198,7 +2198,6 @@ function openTrackModal(player, pos, stat, proj, team, presetDate) {
   if (typeof updateMatchupInModal === "function") updateMatchupInModal();
   if (typeof updateTeammateRiskInModal === "function") updateTeammateRiskInModal();
   if (typeof updateInjuryCtxInModal === "function") updateInjuryCtxInModal();
-  if (typeof updateTeamContextInModal === "function") updateTeamContextInModal();
   const shorthand = document.getElementById("modal-shorthand");
   if (shorthand) { shorthand.value = ""; shorthand.style.borderColor = "#1a1d22"; }
   const sp = document.getElementById("shorthand-preview");
@@ -2262,7 +2261,6 @@ function parseShorthand(el) {
   if (typeof updateMatchupInModal === "function") updateMatchupInModal();
   if (typeof updateTeammateRiskInModal === "function") updateTeammateRiskInModal();
   if (typeof updateInjuryCtxInModal === "function") updateInjuryCtxInModal();
-  if (typeof updateTeamContextInModal === "function") updateTeamContextInModal();
   if (!raw) {
     el.style.borderColor = "#1a1d22";
     if (preview) preview.textContent = "";
@@ -4199,89 +4197,6 @@ function updateSplitsInModal() {
 // (already loaded from ESPN feed). Skips OUT (binary, already priced in by
 // books) and PROBABLE (low impact). Excludes the bet's own player from the
 // teammate list via normalized-name comparison.
-// Render team-level pace × eff projection in the modal when player-based
-// projections aren't available. Specifically fires when RW (rotowire,
-// slots[2]) isn't loaded — that's the player-sum source we depend on most.
-// Pulls from independentTotal() which computes the team-level proj from
-// the loaded team advanced stats (pace × ortg × drtg).
-function updateTeamContextInModal() {
-  const container = document.getElementById("modal-team-context");
-  if (!container) return;
-  const team = window._modalTeam || "";
-  if (!team) { container.style.display = "none"; return; }
-
-  // Only show when RW player projections aren't loaded — otherwise the user
-  // already has player-sum context and team-level is just noise.
-  if (typeof slots !== "undefined" && slots[2] && slots[2].players && slots[2].players.length) {
-    container.style.display = "none"; return;
-  }
-
-  // Find opponent via _tickerCachedEvents (same lookup pattern as Matchup/Injury)
-  if (typeof _tickerCachedEvents === "undefined" || !Array.isArray(_tickerCachedEvents)) {
-    container.style.display = "none"; return;
-  }
-  const espnTeam = (typeof INTERNAL_TO_ESPN_ABBR !== "undefined" && INTERNAL_TO_ESPN_ABBR[team]) || team;
-  let oppTeam = null, isHome = false;
-  for (const ev of _tickerCachedEvents) {
-    const comp = ev.competitions?.[0];
-    if (!comp) continue;
-    const aw = comp.competitors?.find(c => c.homeAway === "away")?.team?.abbreviation;
-    const hm = comp.competitors?.find(c => c.homeAway === "home")?.team?.abbreviation;
-    if (aw === team || aw === espnTeam) { oppTeam = hm; isHome = false; break; }
-    if (hm === team || hm === espnTeam) { oppTeam = aw; isHome = true; break; }
-  }
-  if (!oppTeam) { container.style.display = "none"; return; }
-
-  // Compute pace × eff projection for the game
-  if (typeof independentTotal !== "function") { container.style.display = "none"; return; }
-  // Map ESPN abbrs back to internal abbrs for independentTotal (it uses internal team stats)
-  const espnToInternal = {};
-  if (typeof INTERNAL_TO_ESPN_ABBR !== "undefined") {
-    Object.keys(INTERNAL_TO_ESPN_ABBR).forEach(k => { espnToInternal[INTERNAL_TO_ESPN_ABBR[k]] = espnToInternal[INTERNAL_TO_ESPN_ABBR[k]] || k; });
-  }
-  // Try direct, fall back to internal mapping if needed
-  const awayAbbr = isHome ? oppTeam : team;
-  const homeAbbr = isHome ? team : oppTeam;
-  const tryAway = awayAbbr;
-  const tryHome = homeAbbr;
-  const indep = independentTotal(tryAway, tryHome, "blend")
-    || independentTotal(espnToInternal[tryAway] || tryAway, espnToInternal[tryHome] || tryHome, "blend");
-  if (!indep || indep.ptsA == null || indep.ptsB == null) { container.style.display = "none"; return; }
-
-  // Determine which projected number is the bet's team
-  const teamPts = isHome ? indep.ptsB : indep.ptsA;
-  const oppPts = isHome ? indep.ptsA : indep.ptsB;
-  const total = indep.total;
-  // Season-source badge
-  let srcBadge = "";
-  const a = indep.aSource || "", b = indep.bSource || "";
-  if (a === b && a) {
-    const c = a === "2025" ? "#8b5cf6" : a === "2026" ? "#7dd3fc" : a.startsWith("blend") ? "#f59e0b" : "#a8b0bb";
-    srcBadge = `<span style="font-size:9px;color:${c};font-weight:800;letter-spacing:0.5px;background:${c}1a;border:1px solid ${c}55;border-radius:3px;padding:1px 5px;margin-left:6px;">${a.toUpperCase()}</span>`;
-  }
-  // Display teamAbbr in user-friendly form (use the bet's stored abbr)
-  const teamDisp = team.toUpperCase();
-  const oppDisp = oppTeam.toUpperCase();
-
-  container.innerHTML = `<div style="background:rgba(167,139,250,0.06);border:1px solid rgba(167,139,250,0.3);border-radius:8px;padding:10px 13px;font-family:'Inter',sans-serif;">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;gap:8px;flex-wrap:wrap;">
-      <div style="display:flex;align-items:center;gap:6px;">
-        <span style="font-size:11px;font-weight:800;color:#a78bfa;letter-spacing:0.6px;text-transform:uppercase;">Team Proj · Pace × Eff</span>
-        ${srcBadge}
-      </div>
-      <span style="font-size:9.5px;color:#fff;opacity:0.55;letter-spacing:0.3px;">RW not loaded · using P×E</span>
-    </div>
-    <div style="display:flex;align-items:baseline;justify-content:space-between;gap:14px;font-family:'JetBrains Mono','Menlo',monospace;">
-      <div>
-        <span style="font-size:10px;color:#fff;opacity:0.7;letter-spacing:0.4px;">${teamDisp}</span>
-        <span style="font-size:20px;font-weight:800;color:#a78bfa;margin-left:6px;">${teamPts.toFixed(1)}</span>
-      </div>
-      <div style="font-size:10px;color:#fff;opacity:0.4;letter-spacing:0.4px;">vs ${oppDisp} ${oppPts.toFixed(1)} · total ${total.toFixed(1)}</div>
-    </div>
-  </div>`;
-  container.style.display = "block";
-}
-
 // Render the injury-context panel — surfaces TWO high-impact signals:
 //
 // 1. CEILING ↑ : This player benefits from a teammate's absence (OUT or
@@ -8265,7 +8180,6 @@ function pasteTrends() {
   if (typeof updateMatchupInModal === "function") updateMatchupInModal();
   if (typeof updateTeammateRiskInModal === "function") updateTeammateRiskInModal();
   if (typeof updateInjuryCtxInModal === "function") updateInjuryCtxInModal();
-  if (typeof updateTeamContextInModal === "function") updateTeamContextInModal();
 }
 
 function clearTrendsAndRender() {
@@ -8279,7 +8193,6 @@ function clearTrendsAndRender() {
   if (typeof updateMatchupInModal === "function") updateMatchupInModal();
   if (typeof updateTeammateRiskInModal === "function") updateTeammateRiskInModal();
   if (typeof updateInjuryCtxInModal === "function") updateInjuryCtxInModal();
-  if (typeof updateTeamContextInModal === "function") updateTeamContextInModal();
 }
 
 // Load on boot so saved trends survive page reloads
@@ -13035,11 +12948,6 @@ or one per line — book shorthand + odds (+ optional line + ev%)" spellcheck="f
       </div>
       <div id="modal-src-pills" style="display:flex;gap:6px;flex-wrap:wrap;"></div>
     </div>
-    <!-- Team pace × eff context — only shows when RW (rotowire) player
-         projections aren't loaded. Gives game-level baseline so you have at
-         least some projected-total context when betting player props on a
-         night with no player-sum data. Pulled from independentTotal(). -->
-    <div id="modal-team-context" style="margin-top:10px;display:none;"></div>
     <!-- Matchup adjustment — pulls from uploaded opp-avg CSV (Rotowire defensive
          averages) and shows how favorable tonight's opponent is for this stat.
          Same visual treatment as the Volatility bar in Splits. -->
