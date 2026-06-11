@@ -100,7 +100,30 @@
   .tab-panel { display: none; }
   .tab-panel.active { display: block; }
 
-  /* ── CHART TAB ── */
+  /* ── CALENDAR ── */
+  .cal-wrap { padding: 20px; max-width: 900px; margin: 0 auto; }
+  .cal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+  .cal-month { font-size: 22px; font-weight: 800; color: var(--text); }
+  .cal-total { font-size: 14px; font-weight: 700; }
+  .cal-nav { display: flex; gap: 8px; }
+  .cal-nav button { background: var(--card); border: 1px solid var(--border); color: var(--text); padding: 6px 14px; font-family: 'Inter', sans-serif; font-size: 13px; cursor: pointer; border-radius: 6px; }
+  .cal-nav button:hover { border-color: var(--accent); color: var(--accent); }
+  .cal-grid { display: grid; grid-template-columns: repeat(7,1fr); gap: 4px; }
+  .cal-dow { text-align: center; font-size: 11px; font-weight: 700; color: var(--sub); padding: 6px 0; letter-spacing: 1px; text-transform: uppercase; }
+  .cal-cell { min-height: 80px; background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 8px; cursor: pointer; transition: all .12s; position: relative; }
+  .cal-cell:hover { border-color: var(--accent); background: var(--panel); }
+  .cal-cell.empty { background: transparent; border-color: transparent; cursor: default; }
+  .cal-cell.today { border-color: var(--accent); border-width: 2px; }
+  .cal-cell.has-win { background: rgba(0,230,118,.08); border-color: rgba(0,230,118,.25); }
+  .cal-cell.has-loss { background: rgba(255,68,68,.08); border-color: rgba(255,68,68,.25); }
+  .cal-cell.has-push { background: rgba(255,165,0,.06); border-color: rgba(255,165,0,.2); }
+  .cal-cell.selected { border-color: var(--accent) !important; border-width: 2px !important; box-shadow: 0 0 0 1px var(--accent); }
+  .cal-day { font-size: 13px; font-weight: 700; color: var(--sub); margin-bottom: 4px; }
+  .cal-cell.has-win .cal-day, .cal-cell.has-loss .cal-day { color: var(--text); }
+  .cal-pnl { font-size: 16px; font-weight: 800; margin-bottom: 2px; }
+  .cal-rec { font-size: 10px; color: var(--sub); font-weight: 600; }
+  .cal-bets { font-size: 9px; color: var(--sub); margin-top: 2px; }
+  .cal-summary { margin-top: 16px; padding: 12px 16px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; display: flex; gap: 24px; flex-wrap: wrap; }
   .chart-wrap { padding: 20px; display: grid; grid-template-columns: 1fr 300px; gap: 16px; }
   .chart-main { background: var(--panel); border: 1px solid var(--border); padding: 20px; min-width: 0; }
   .chart-title { font-size: 11px; font-weight: 700; color: var(--sub); letter-spacing: 1px; text-transform: uppercase; margin-bottom: 4px; }
@@ -174,9 +197,29 @@
 <!-- TAB NAV -->
 <div class="tab-nav">
   <button class="tab-btn active" onclick="switchTab('bets',this)">📋 Bets</button>
+  <button class="tab-btn" onclick="switchTab('calendar',this)">📅 Calendar</button>
   <button class="tab-btn" onclick="switchTab('chart',this)">📈 Chart</button>
   <button class="tab-btn" onclick="switchTab('preseason',this)">🔍 Pre-Season Grader</button>
   <button class="tab-btn" onclick="switchTab('add',this)">➕ Add Bets</button>
+</div>
+
+<!-- CALENDAR TAB -->
+<div class="tab-panel" id="tab-calendar">
+  <div class="cal-wrap">
+    <div class="cal-header">
+      <div>
+        <div class="cal-month" id="calMonthLabel">—</div>
+        <div class="cal-total" id="calTotalLabel"></div>
+      </div>
+      <div class="cal-nav">
+        <button onclick="calNav(-1)">◀</button>
+        <button onclick="calGoToday()">Today</button>
+        <button onclick="calNav(1)">▶</button>
+      </div>
+    </div>
+    <div class="cal-grid" id="calGrid"></div>
+    <div class="cal-summary" id="calSummary" style="display:none;"></div>
+  </div>
 </div>
 
 <!-- BETS TAB -->
@@ -1557,14 +1600,134 @@ function exportSummary() {
   a.click();
 }
 
-// ─── TABS ─────────────────────────────────────────────────────────────────────
+// ─── CALENDAR ────────────────────────────────────────────────────────────────
+let calYear = new Date().getFullYear();
+let calMonth = new Date().getMonth(); // 0-indexed
+let calSelected = null;
+
 function switchTab(name, el) {
   document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
   document.querySelectorAll('.tab-panel').forEach(p=>p.classList.remove('active'));
   el.classList.add('active');
   document.getElementById('tab-'+name).classList.add('active');
   if (name==='chart') renderChart();
+  if (name==='calendar') renderCalendar();
 }
+
+function calNav(dir) {
+  calMonth += dir;
+  if (calMonth > 11) { calMonth = 0; calYear++; }
+  if (calMonth < 0) { calMonth = 11; calYear--; }
+  renderCalendar();
+}
+
+function calGoToday() {
+  calYear = new Date().getFullYear();
+  calMonth = new Date().getMonth();
+  renderCalendar();
+}
+
+function renderCalendar() {
+  const fmt = v => (v>=0?'+':'')+v.toFixed(2)+'u';
+  const monthNames = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+
+  // build day map from bets
+  const dayMap = {};
+  bets.forEach(b => {
+    if (!b.date) return;
+    const d = new Date(b.date);
+    if (d.getFullYear() !== calYear || d.getMonth() !== calMonth) return;
+    const key = d.getDate();
+    if (!dayMap[key]) dayMap[key] = {w:0,l:0,p:0,pnl:0,bets:[]};
+    const r = effectiveResult(b);
+    const pl = calcPnl(b);
+    if(r==='win')dayMap[key].w++;
+    else if(r==='loss')dayMap[key].l++;
+    else if(r==='push')dayMap[key].p++;
+    if(pl!==null)dayMap[key].pnl+=pl;
+    dayMap[key].bets.push(b);
+  });
+
+  // month total
+  let mw=0,ml=0,mp=0,mpnl=0;
+  Object.values(dayMap).forEach(d=>{mw+=d.w;ml+=d.l;mp+=d.p;mpnl+=d.pnl;});
+  document.getElementById('calMonthLabel').textContent = `${monthNames[calMonth]} ${calYear}`;
+  const tc = mpnl>=0?'var(--win)':'var(--loss)';
+  document.getElementById('calTotalLabel').innerHTML = `<span style="color:${tc};">${fmt(mpnl)}</span> &nbsp;·&nbsp; ${mw}W-${ml}L${mp?' '+mp+'P':''}`;
+
+  // grid
+  const firstDay = new Date(calYear, calMonth, 1).getDay();
+  const daysInMonth = new Date(calYear, calMonth+1, 0).getDate();
+  const today = new Date();
+  const todayKey = today.getFullYear()===calYear && today.getMonth()===calMonth ? today.getDate() : null;
+
+  const dows = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+  let html = dows.map(d=>`<div class="cal-dow">${d}</div>`).join('');
+
+  // empty cells before first day
+  for (let i=0;i<firstDay;i++) html += `<div class="cal-cell empty"></div>`;
+
+  for (let day=1; day<=daysInMonth; day++) {
+    const d = dayMap[day];
+    const isToday = day === todayKey;
+    const isSel = calSelected === day;
+    let cls = 'cal-cell';
+    if (!d) cls += '';
+    else if (d.pnl > 0) cls += ' has-win';
+    else if (d.pnl < 0) cls += ' has-loss';
+    else if (d.bets.length) cls += ' has-push';
+    if (isToday) cls += ' today';
+    if (isSel) cls += ' selected';
+
+    const pnlColor = !d ? '' : d.pnl>0?'var(--win)':d.pnl<0?'var(--loss)':'var(--push)';
+    const pnlHtml = d ? `<div class="cal-pnl" style="color:${pnlColor};">${fmt(d.pnl)}</div>
+      <div class="cal-rec">${d.w}W-${d.l}L${d.p?' '+d.p+'P':''}</div>
+      <div class="cal-bets">${d.bets.length} bet${d.bets.length!==1?'s':''}</div>` : '';
+
+    html += `<div class="${cls}" onclick="calSelectDay(${day})">
+      <div class="cal-day">${day}</div>
+      ${pnlHtml}
+    </div>`;
+  }
+
+  document.getElementById('calGrid').innerHTML = html;
+
+  // summary for selected day
+  if (calSelected && dayMap[calSelected]) {
+    const d = dayMap[calSelected];
+    const dateStr = `${calMonth+1}/${calSelected}/${calYear}`;
+    const pnlC = d.pnl>=0?'var(--win)':'var(--loss)';
+    let sumHtml = `<div style="font-size:12px;font-weight:700;color:var(--accent);">${dateStr} — ${d.w}W-${d.l}L${d.p?' '+d.p+'P':''} &nbsp; <span style="color:${pnlC};">${fmt(d.pnl)}</span></div>`;
+    d.bets.forEach(b => {
+      const r = effectiveResult(b);
+      const pl = calcPnl(b);
+      const rc = r==='win'?'var(--win)':r==='loss'?'var(--loss)':'var(--push)';
+      const plStr = pl!==null?(pl>=0?'+':'')+pl.toFixed(2)+'u':'—';
+      sumHtml += `<div style="font-size:11px;display:flex;gap:10px;padding:3px 0;border-bottom:1px solid var(--border);">
+        <span style="font-weight:600;">${teamLogo(b.team,13)}${b.team}${b.isF5?' <span class="f5-tag">F5</span>':''}</span>
+        <span style="color:${b.odds>0?'var(--accent)':'var(--text)'};">${b.odds>0?'+':''}${b.odds}</span>
+        <span style="color:var(--sub);">${b.risk}u</span>
+        <span style="color:${rc};font-weight:700;">${r?r.toUpperCase():'?'}</span>
+        <span style="color:${pl>=0?'var(--win)':'var(--loss)'};">${plStr}</span>
+        ${b.score?`<span style="color:var(--sub);font-size:10px;">${b.score}</span>`:''}
+      </div>`;
+    });
+    document.getElementById('calSummary').innerHTML = sumHtml;
+    document.getElementById('calSummary').style.display = 'flex';
+    document.getElementById('calSummary').style.flexDirection = 'column';
+    document.getElementById('calSummary').style.gap = '4px';
+  } else {
+    document.getElementById('calSummary').style.display = 'none';
+  }
+}
+
+function calSelectDay(day) {
+  calSelected = calSelected === day ? null : day;
+  renderCalendar();
+}
+
+// override the switchTab defined earlier (remove old one)
+
 
 // ─── INLINE ODDS EDIT ─────────────────────────────────────────────────────────
 function editOdds(id, el) {
