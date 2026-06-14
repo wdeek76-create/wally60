@@ -5141,28 +5141,70 @@ function _copyDailyRecapFiltered(kind) {
   const roi = totalStaked > 0 ? ((netPL/totalStaked)*100).toFixed(1) : null;
 
   const lines = [];
-  const headerKind = kind === "props" ? "PROPS RECAP" : kind === "totals" ? "TOTALS RECAP" : "RECAP";
-  lines.push(`WNBA ${headerKind} ${targetDate}`);
+  // Strip year from "m/d/yyyy" → "m/d" for the compact header. Falls back to
+  // raw targetDate if format is unexpected.
+  const shortDate = (() => {
+    const parts = (targetDate || "").split("/");
+    return parts.length >= 2 ? `${parts[0]}/${parts[1]}` : targetDate;
+  })();
+  const headerKind = kind === "props" ? "props" : kind === "totals" ? "totals" : "recap";
+  lines.push(`WNBA ${headerKind} ${shortDate}`);
   lines.push("");
-  lines.push(`${hits.length}W ${misses.length}L${voids.length?` ${voids.length}V`:""}    ${netPL>=0?"+":""}${netPL.toFixed(2)}u${roi!==null?`    ${roi}% ROI`:""}`);
+  // Stats line: hyphenated W-L, signed units & ROI
+  const roiStr = roi !== null
+    ? `    ${roi >= 0 ? "+" : ""}${roi}% ROI`
+    : "";
+  lines.push(`${hits.length}-${misses.length}${voids.length?` ${voids.length}V`:""}    ${netPL>=0?"+":""}${netPL.toFixed(2)}u${roiStr}`);
   lines.push("");
 
-  // Picks list, hits first then misses, void at bottom
+  // Picks list — hits first, then misses, voids at bottom.
+  // Within each section, bets are GROUPED BY PLAYER so multi-bet nights read
+  // as a single block (e.g. all Clark hits together, all Clark misses together).
+  // Player order within a section: highest total impact first.
+  function groupByPlayer(arr, scoreField) {
+    const groups = new Map();
+    arr.forEach(b => {
+      const k = b.player || "—";
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(b);
+    });
+    // Sort each player's bets by their scoreField descending (biggest first)
+    groups.forEach(list => list.sort((a, b) => b[scoreField] - a[scoreField]));
+    // Order players by total of scoreField across their bets (biggest impact first)
+    return Array.from(groups.values())
+      .sort((a, b) => {
+        const tot = list => list.reduce((s, x) => s + (x[scoreField] || 0), 0);
+        return tot(b) - tot(a);
+      })
+      .flat();
+  }
   const ordered = [
-    ...hits.sort((a,b)=>b.toWin-a.toWin),
-    ...misses.sort((a,b)=>b.stake-a.stake),
+    ...groupByPlayer(hits, "toWin"),
+    ...groupByPlayer(misses, "stake"),
     ...voids
   ];
+  // Title-case a stat code: "AST" → "Ast", "PTS" → "Pts", "TO" → "To"
+  const titleCaseStat = s => s ? s.charAt(0).toUpperCase() + s.slice(1).toLowerCase() : "";
   ordered.forEach(b => {
     const oddsStr = b.odds > 0 ? `+${b.odds}` : `${b.odds}`;
-    const lineStr = `${b.ou.toUpperCase()} ${b.line}`;
+    // Lowercase direction: o/u
+    const dirChar = (b.ou || "").toLowerCase().startsWith("u") ? "u" : "o";
+    // Stat label after the line (skipped for game totals)
+    const statLbl = isTotal(b) ? "" : ` ${titleCaseStat(b.stat)}`;
+    const lineStr = `${dirChar}${b.line}${statLbl}`;
     const teamStr = b.team ? ` (${b.team})` : "";
-    const statLbl = isTotal(b) ? "" : ` ${b.stat}`;
+    // Actual final stat — formatted as integer when whole, 1dp otherwise.
+    let actualStr = "";
+    if (b.actual != null && b.result !== "void") {
+      const a = b.actual;
+      actualStr = ` (${Number.isInteger(a) ? a : a.toFixed(1)})`;
+    }
+    // Result block: W/L/V + (actual) + units. Voids have no units to show.
     let resultStr;
-    if (b.result === "hit") resultStr = `WIN +${b.toWin.toFixed(2)}u`;
-    else if (b.result === "miss") resultStr = `LOSS ${b.stake.toFixed(2)}u`;
-    else resultStr = `VOID`;
-    lines.push(`${b.player}${teamStr}   ${lineStr}${statLbl}   ${oddsStr}   ${resultStr}`);
+    if (b.result === "hit") resultStr = `W${actualStr} +${b.toWin.toFixed(2)}u`;
+    else if (b.result === "miss") resultStr = `L${actualStr} -${b.stake.toFixed(2)}u`;
+    else resultStr = `V`;
+    lines.push(`${b.player}${teamStr}   ${lineStr}  ${oddsStr}  ${resultStr}`);
   });
 
   const text = lines.join("\n");
@@ -7365,6 +7407,119 @@ function _attachTrackerChartHover() {
   svg.addEventListener("touchend", onLeave);
 }
 
+// Stat code → full readable name for the copy-breakdown export
+const STAT_FULL_NAMES = {
+  "PTS": "Points",
+  "REB": "Rebounds",
+  "AST": "Assists",
+  "BLK": "Blocks",
+  "STL": "Steals",
+  "3PM": "Threes",
+  "THREES": "Threes",
+  "TO": "Turnovers",
+  "PRA": "Pts+Reb+Ast",
+  "PR": "Pts+Reb",
+  "PA": "Pts+Ast",
+  "RA": "Reb+Ast",
+  "DD": "Double-Double",
+  "TD": "Triple-Double",
+  "GAME_TOTAL": "Game Totals",
+};
+// Copy the By Stat breakdown in a compact readable format.
+//   Points
+//   65-129  -5.83u  ROI -4.0%
+//   Over  9-26 -9.13u
+//   Under 56-103 +3.30u
+// Uses the same scope/filter as the on-screen panel (kind filter respected).
+function copyStatBreakdown() {
+  // Recompute the same statBreak that renderTracker uses so we don't depend on
+  // anything cached on window.
+  const kind = window._trackerKind || "all";
+  const scopedBets = bets.filter(b => {
+    if (!b || !b.result || b.result === "pending") return false;
+    if (kind === "props")  return (b.stat || "").toUpperCase() !== "GAME_TOTAL";
+    if (kind === "totals") return (b.stat || "").toUpperCase() === "GAME_TOTAL";
+    return true;
+  });
+  const settled = scopedBets.filter(b => b.result === "hit" || b.result === "miss");
+  if (!settled.length) {
+    showToast("No settled bets to copy");
+    return;
+  }
+  const statBreak = {};
+  settled.forEach(b => {
+    const k = (b.stat || "—").toUpperCase();
+    if (!statBreak[k]) statBreak[k] = {
+      hits:0, total:0, staked:0, pl:0,
+      over:  { hits:0, total:0, staked:0, pl:0 },
+      under: { hits:0, total:0, staked:0, pl:0 },
+    };
+    const s = statBreak[k];
+    const side = (b.ou === "over") ? s.over : (b.ou === "under") ? s.under : null;
+    s.total++;
+    s.staked += b.stake;
+    if (b.result === "hit") { s.hits++; s.pl += b.toWin; }
+    else                    { s.pl -= b.stake; }
+    if (side) {
+      side.total++;
+      side.staked += b.stake;
+      if (b.result === "hit") { side.hits++; side.pl += b.toWin; }
+      else                    { side.pl -= b.stake; }
+    }
+  });
+  // Build lines for each stat — sorted by P&L descending (matches on-screen order)
+  const sortedStats = Object.entries(statBreak).sort((a, b) => b[1].pl - a[1].pl);
+  const lines = [];
+  sortedStats.forEach(([code, v]) => {
+    const name = STAT_FULL_NAMES[code] || code;
+    const losses = v.total - v.hits;
+    const roi = v.staked > 0 ? (v.pl / v.staked * 100) : null;
+    const plStr = `${v.pl >= 0 ? "+" : ""}${v.pl.toFixed(2)}u`;
+    const roiStr = roi != null
+      ? `  ROI ${roi >= 0 ? "+" : ""}${roi.toFixed(1)}%`
+      : "";
+    lines.push(name);
+    lines.push(`${v.hits}-${losses}  ${plStr}${roiStr}`);
+    if (v.over.total > 0) {
+      const oL = v.over.total - v.over.hits;
+      const oPl = `${v.over.pl >= 0 ? "+" : ""}${v.over.pl.toFixed(2)}u`;
+      lines.push(`Over  ${v.over.hits}-${oL} ${oPl}`);
+    }
+    if (v.under.total > 0) {
+      const uL = v.under.total - v.under.hits;
+      const uPl = `${v.under.pl >= 0 ? "+" : ""}${v.under.pl.toFixed(2)}u`;
+      lines.push(`Under ${v.under.hits}-${uL} ${uPl}`);
+    }
+    lines.push("");  // blank line between stats
+  });
+  // Drop trailing blank
+  while (lines.length && lines[lines.length - 1] === "") lines.pop();
+  const text = lines.join("\n");
+  // Same bulletproof copy approach as the props recap
+  const tryExec = (t) => {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = t; ta.style.position="fixed"; ta.style.opacity="0";
+      ta.setAttribute("readonly","");
+      document.body.appendChild(ta);
+      ta.focus(); ta.select(); ta.setSelectionRange(0, t.length);
+      const ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+      return ok;
+    } catch(e) { return false; }
+  };
+  if (tryExec(text)) {
+    showToast(`Copied ${sortedStats.length} stat breakdown${sortedStats.length>1?"s":""}`);
+  } else if (navigator.clipboard?.writeText) {
+    navigator.clipboard.writeText(text)
+      .then(() => showToast(`Copied ${sortedStats.length} stat breakdown${sortedStats.length>1?"s":""}`))
+      .catch(() => { showToast("Copy blocked — text in console"); console.log(text); });
+  } else {
+    showToast("Copy blocked — text in console");
+    console.log(text);
+  }
+}
+
 function renderTracker() {
   const el = document.getElementById("tracker-tab");
   // Apply kind filter (all | props | totals) to every aggregation in this view
@@ -7451,7 +7606,7 @@ function renderTracker() {
   const hasSourceHistory = sourceBreak.blended.total + sourceBreak.paceeff.total + sourceBreak.both.total > 0;
   const hasCfHistory = cfBreak.blended.total + cfBreak.paceeff.total + cfBreak.both.total > 0;
 
-  const pct = (h,t) => t>0 ? `${((h/t)*100).toFixed(0)}%` : "—";
+  const pct = (h,t) => t>0 ? `${((h/t)*100).toFixed(1)}%` : "—";
   const card = (label, v, opts={}) => {
     const r = v.staked > 0 ? ((v.pl/v.staked)*100).toFixed(1) : "—";
     const logo = opts.book ? logoFor(label) : null;
@@ -7463,7 +7618,7 @@ function renderTracker() {
     if (v.over && v.under && (v.over.total > 0 || v.under.total > 0)) {
       const fmt = (lbl, sub, color) => {
         if (sub.total === 0) return `<span style="color:#525a64;">${lbl} —</span>`;
-        const sr = sub.staked > 0 ? ((sub.pl/sub.staked)*100).toFixed(0) : "—";
+        const sr = sub.staked > 0 ? ((sub.pl/sub.staked)*100).toFixed(1) : "—";
         const plColor = sub.pl >= 0 ? '#22c55e' : '#f87171';
         return `<span style="color:${color};font-weight:700;">${lbl}</span> ${pct(sub.hits,sub.total)} <span style="color:#a8b0bb;">${sub.hits}/${sub.total}</span> <span style="color:${plColor};">${sub.pl>=0?'+':''}${sub.pl.toFixed(2)}u</span>`;
       };
@@ -7826,7 +7981,7 @@ function renderTracker() {
     </div>
 
     <div class="tracker-section">
-      <h4 style="font-size:11px;color:#d4dae3;letter-spacing:1px;text-transform:uppercase;font-weight:700;border:none;padding-bottom:0;margin-bottom:8px;">By Stat <span style="color:#a8b0bb;font-weight:500;text-transform:none;letter-spacing:0.5px;font-size:10px;margin-left:4px;">(most profitable first)</span></h4>
+      <h4 style="font-size:11px;color:#d4dae3;letter-spacing:1px;text-transform:uppercase;font-weight:700;border:none;padding-bottom:0;margin-bottom:8px;display:flex;align-items:center;gap:8px;">By Stat <span style="color:#a8b0bb;font-weight:500;text-transform:none;letter-spacing:0.5px;font-size:10px;">(most profitable first)</span><button onclick="copyStatBreakdown()" title="Copy breakdown as readable text" style="margin-left:auto;background:#1e40af30;border:1px solid #1e40af77;color:#7dd3fc;border-radius:4px;padding:4px 9px;font-size:10px;font-weight:700;cursor:pointer;font-family:'Inter',sans-serif;letter-spacing:0.3px;text-transform:uppercase;">📋 Copy</button></h4>
       ${Object.entries(statBreak).length === 0 ? '<p style="color:#525a64;font-size:13px;padding:8px 0;">No settled bets yet</p>' : `<div class="overview-strip" style="flex-wrap:wrap;">${Object.entries(statBreak).sort((a,b)=>b[1].pl-a[1].pl).map(([k,v])=>card(k,v)).join("")}</div>`}
     </div>
 
