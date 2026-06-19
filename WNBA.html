@@ -391,6 +391,25 @@ table colgroup col.avg-col{width:16%;}
       <div id="matchup-status" style="font-size:11px;color:#525a64;"></div>
     </div>
 
+    <!-- Daily Lineups (Rotowire) — paste the page text from
+         rotowire.com/wnba/lineups.php to populate STARTING/OUT/GTD flags on
+         the bet modal. Acts as a late-news security blanket: catches lineup
+         changes ESPN's injury feed might miss. -->
+    <div style="background:#0c0d10;border:1px solid #1a1d22;border-radius:8px;padding:14px;margin-top:18px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px;">
+        <div>
+          <div style="font-size:13px;font-weight:700;color:#d4dae3;letter-spacing:1px;text-transform:uppercase;">Daily Lineups</div>
+          <div style="font-size:10px;color:#a8b0bb;margin-top:2px;">Paste from <span style="color:#7dd3fc;font-family:'JetBrains Mono','Menlo',monospace;">rotowire.com/wnba/lineups.php</span> — adds STARTING / GTD / OUT confirmation in the bet modal.</div>
+        </div>
+        <button onclick="clearLineupsData()" style="background:#0c0d10;border:1px solid #1a1d22;color:#d4dae3;border-radius:6px;padding:7px 16px;font-size:12px;font-weight:600;cursor:pointer;font-family:'Inter',sans-serif;">CLEAR</button>
+      </div>
+      <textarea id="lineups-paste" placeholder="Paste rotowire lineups page text here…" rows="4" style="width:100%;background:#050507;border:1px solid #1a1d22;border-radius:6px;padding:8px 10px;color:#e2e8f0;font-family:'JetBrains Mono','Menlo',monospace;font-size:11px;outline:none;resize:vertical;box-sizing:border-box;"></textarea>
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:8px;flex-wrap:wrap;">
+        <div id="lineups-status" style="font-size:11px;color:#525a64;"></div>
+        <button onclick="handleLineupsParseUpload()" style="background:#22c55e;border:none;color:#050507;border-radius:6px;padding:7px 16px;font-size:12px;font-weight:700;cursor:pointer;font-family:'Inter',sans-serif;">PARSE</button>
+      </div>
+    </div>
+
     <div style="text-align:center;margin-top:24px;padding:12px 0;font-family:'Inter',sans-serif;font-size:13px;font-style:italic;font-weight:300;letter-spacing:2px;color:rgba(125,211,252,0.45);text-transform:lowercase;">ball is life</div>
   </div>
 
@@ -1406,6 +1425,38 @@ function renderTable() {
             };
             const tipAttr = encodeURIComponent(JSON.stringify(tipData));
             return `<span data-tip="${tipAttr}" style="background:${ceilingColor}22;border:1px solid ${ceilingColor}77;color:${ceilingColor};font-size:9px;font-weight:800;letter-spacing:0.4px;border-radius:4px;padding:1px 6px;cursor:help;">${ceilingLabel}</span>`;
+          })()}${(() => {
+            // TEAM-STATE pill — a binary pre-click triage:
+            //   CLEAR        — no relevant teammate or own-status concerns
+            //   CONDITIONAL  — team has at least one Q/GTD/DTD/OUT player that
+            //                  could shift usage or minutes for this matchup
+            //   SKIP         — the bet's player herself is listed OUT
+            // Overs into clean teams are usually fine to bet; injuries are the
+            // case that needs second-look judgment.
+            const ownInj2 = getInjuryForPlayer(r.rawName, r.team);
+            const ownStat2 = (ownInj2?.status || "").toLowerCase();
+            const lineupRow2 = (typeof getLineupStatusForPlayer === "function") ? getLineupStatusForPlayer(r.rawName) : null;
+            const isOut2 = (ownStat2 === "out") || (lineupRow2 && lineupRow2.status === "OUT");
+            if (isOut2) {
+              return `<span style="background:#f8717122;border:1px solid #f87171cc;color:#f87171;font-size:9px;font-weight:800;letter-spacing:0.5px;border-radius:4px;padding:1px 6px;">🚫 SKIP</span>`;
+            }
+            // Survey the team for any concerning statuses (Q/GTD/DTD/OUT)
+            // Pulls from injuriesByTeam (ESPN cache) and lineups data when present.
+            let teamHasConcerns = false;
+            try {
+              if (typeof injuriesByTeam !== "undefined" && injuriesByTeam?.get && r.team) {
+                const espn = (typeof INTERNAL_TO_ESPN_ABBR !== "undefined" && INTERNAL_TO_ESPN_ABBR[r.team]) || r.team;
+                const teamList = injuriesByTeam.get(r.team) || injuriesByTeam.get(espn) || [];
+                teamHasConcerns = teamList.some(rec => {
+                  const s = (rec?.status || "").toLowerCase();
+                  return s.includes("out") || s.includes("question") || s.includes("day") || s.includes("game time");
+                });
+              }
+            } catch(e) {}
+            if (!teamHasConcerns) {
+              return `<span style="background:#22c55e15;border:1px solid #22c55e55;color:#22c55e;font-size:9px;font-weight:800;letter-spacing:0.5px;border-radius:4px;padding:1px 6px;" title="No teammate injuries affecting this matchup">✓ CLEAR</span>`;
+            }
+            return `<span style="background:#fbbf2422;border:1px solid #fbbf2477;color:#fbbf24;font-size:9px;font-weight:800;letter-spacing:0.5px;border-radius:4px;padding:1px 6px;" title="Team has Q/GTD/OUT players — check usage assumptions">⚠ CONDITIONAL</span>`;
           })()}${trackedPill}</span>
           ${minChip}
         </div>
@@ -2699,6 +2750,155 @@ function renderMatchupStatus() {
   else if (ago < 1440) agoStr = `${Math.round(ago/60)}h ago`;
   else agoStr = `${Math.round(ago/1440)}d ago`;
   el.textContent = `${teamCount} teams loaded · ${agoStr}`;
+}
+
+// ── DAILY LINEUPS (Rotowire) ──────────────────────────────────────────────
+// User pastes the rendered text from rotowire.com/wnba/lineups.php. We parse
+// the "Expected Lineup" and "MAY NOT PLAY" sections per game and store who's
+// confirmed starting (security blanket for GTD bets) and who's MNP with status.
+const LINEUPS_STORAGE_KEY = "wnba_lineups_v1";
+
+function getLineupsData() {
+  try {
+    const raw = localStorage.getItem(LINEUPS_STORAGE_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch (e) { return null; }
+}
+function saveLineupsData(payload) {
+  try { localStorage.setItem(LINEUPS_STORAGE_KEY, JSON.stringify(payload)); } catch(e) {}
+}
+
+// Resolve a Rotowire player URL slug to a properly-capitalized name.
+// /wnba/player/stephanie-talbot-401 → "Stephanie Talbot"
+// Used as the canonical name so abbreviated displays like "S. Talbot" still
+// match full names in our bets/injury data via normalization.
+function _slugToName(url) {
+  if (!url) return null;
+  const m = /\/player\/(.+?)(?:-\d+)?(?:[\/?#]|$)/.exec(url);
+  if (!m) return null;
+  const slug = m[1];
+  return slug.split("-").map(p => p ? p[0].toUpperCase() + p.slice(1) : p).join(" ");
+}
+
+// Parse the pasted Rotowire lineups text. Returns:
+//   { fetchedAt, players: { [normName]: {name, status, starter, position} }, gameCount }
+// Status values: "STARTING" | "OUT" | "GTD" | "DTD" | "PROBABLE" | "QUESTIONABLE"
+function parseLineupsText(text) {
+  if (!text) return null;
+  const lines = text.split(/\r?\n/);
+  const players = {};
+  let gameCount = 0;
+  // We scan for "Expected Lineup" and "MAY NOT PLAY" markers, then capture
+  // the bullet-position + bracketed-player-link entries that follow.
+  let mode = null;  // "starting" | "mnp" | null
+  for (let i = 0; i < lines.length; i++) {
+    const ln = lines[i].trim();
+    if (/^\*\s*Expected Lineup\b/i.test(ln)) {
+      mode = "starting";
+      gameCount++;  // Each "Expected Lineup" marker = a team's lineup
+      continue;
+    }
+    if (/^\*\s*MAY NOT PLAY\b/i.test(ln)) {
+      mode = "mnp";
+      continue;
+    }
+    // Sections of the page outside lineups (e.g. promos, footer) won't have
+    // these markers nearby — reset mode if we hit a non-matching block of
+    // text long enough to be content (>2 plain text lines without a player).
+    if (!mode) continue;
+    // Player line: starts with `[Name](url)`, optionally followed by a status word
+    const playerMatch = /^\[([^\]]+)\]\(([^)]+)\)(?:\s+(\w+))?/.exec(ln);
+    if (!playerMatch) continue;
+    const displayedName = playerMatch[1].trim();
+    const url = playerMatch[2].trim();
+    const trailStatus = (playerMatch[3] || "").toUpperCase().trim();
+    // Resolve to full name from URL slug; falls back to displayed name
+    const fullName = _slugToName(url) || displayedName;
+    const norm = (typeof window.norm === "function") ? window.norm(fullName) : fullName.toLowerCase().trim();
+    let status;
+    if (mode === "starting") {
+      status = "STARTING";
+    } else {
+      // MNP: status is one of OUT / GTD / DTD / Q (Questionable) / Probable
+      // Normalize known values; default to whatever Rotowire prints
+      if (trailStatus === "OUT") status = "OUT";
+      else if (trailStatus === "GTD") status = "GTD";
+      else if (trailStatus === "DTD") status = "DTD";
+      else if (trailStatus === "Q" || trailStatus === "QUESTIONABLE") status = "QUESTIONABLE";
+      else if (trailStatus === "PROBABLE" || trailStatus === "P") status = "PROBABLE";
+      else status = trailStatus || "GTD";  // fallback assumption
+    }
+    // Latest entry per player wins (a player listed both in starting and MNP
+    // shouldn't happen, but if it does the second mention is more relevant)
+    players[norm] = { name: fullName, displayedName, status, url };
+  }
+  return {
+    fetchedAt: Date.now(),
+    players,
+    gameCount: Math.ceil(gameCount / 2),  // Each game has 2 teams = 2 markers
+  };
+}
+
+// Look up a player's lineup status. Returns null if no data or no match.
+function getLineupStatusForPlayer(playerName) {
+  if (!playerName) return null;
+  const data = getLineupsData();
+  if (!data || !data.players) return null;
+  const norm = (typeof window.norm === "function") ? window.norm(playerName) : playerName.toLowerCase().trim();
+  if (data.players[norm]) return data.players[norm];
+  // Fuzzy fallback — match by last name
+  const lastName = playerName.trim().split(/\s+/).slice(-1)[0].toLowerCase();
+  const lastNorm = (typeof window.norm === "function") ? window.norm(lastName) : lastName;
+  const candidates = Object.entries(data.players).filter(([k]) => k.endsWith(" " + lastNorm) || k === lastNorm);
+  if (candidates.length === 1) return candidates[0][1];
+  return null;
+}
+
+// File or paste handler — accepts the user's pasted lineups text.
+function handleLineupsParseUpload() {
+  const ta = document.getElementById("lineups-paste");
+  if (!ta) return;
+  const text = ta.value;
+  if (!text || !text.trim()) {
+    showToast("Paste lineups text first");
+    return;
+  }
+  const parsed = parseLineupsText(text);
+  if (!parsed || Object.keys(parsed.players).length === 0) {
+    showToast("Couldn't parse — try copying from rotowire lineups page again");
+    return;
+  }
+  saveLineupsData(parsed);
+  renderLineupsStatus();
+  ta.value = "";  // clear paste field after success
+  showToast(`Loaded ${Object.keys(parsed.players).length} players · ${parsed.gameCount} games`);
+}
+
+function clearLineupsData() {
+  if (!confirm("Clear daily lineups data?")) return;
+  try { localStorage.removeItem(LINEUPS_STORAGE_KEY); } catch(e) {}
+  renderLineupsStatus();
+}
+
+function renderLineupsStatus() {
+  const el = document.getElementById("lineups-status");
+  if (!el) return;
+  const data = getLineupsData();
+  if (!data || !data.players) { el.textContent = "no data loaded"; return; }
+  const total = Object.keys(data.players).length;
+  let starters = 0, mnp = 0;
+  Object.values(data.players).forEach(p => {
+    if (p.status === "STARTING") starters++;
+    else mnp++;
+  });
+  const ago = Math.round((Date.now() - data.fetchedAt) / 60000);
+  let agoStr;
+  if (ago < 1) agoStr = "just now";
+  else if (ago < 60) agoStr = `${ago}m ago`;
+  else if (ago < 1440) agoStr = `${Math.round(ago/60)}h ago`;
+  else agoStr = `${Math.round(ago/1440)}d ago`;
+  el.textContent = `${starters} starters · ${mnp} MNP · ${data.gameCount} games · ${agoStr}`;
 }
 
 // ── INFO POPOVER ───────────────────────────────────────────────────────────
@@ -4250,12 +4450,64 @@ function updateInjuryCtxInModal() {
       }
     }
   }
+  // Dedup against lineups data — lineups are the freshest source. If lineup
+  // status conflicts (player is STARTING per lineup but DTD per old ESPN cache),
+  // OR lineup says OUT (already covered by the Lineups section), suppress the
+  // FLOOR panel to avoid duplicate/conflicting status reads on the same player.
+  const lineupForDedup = (typeof getLineupStatusForPlayer === "function") ? getLineupStatusForPlayer(player) : null;
+  if (ownInjury && lineupForDedup) {
+    const ls = lineupForDedup.status;
+    if (ls === "STARTING") {
+      ownInjury = null;  // she's confirmed playing; cache's DTD/Q is stale
+    } else if (ls === "OUT") {
+      ownInjury = null;  // OUT already announced loud via Lineups section
+    } else if (ls === "GTD" || ls === "DTD") {
+      ownInjury = null;  // GTD/DTD already shown via Lineups section
+    }
+  }
 
-  if (!beneficiary && !ownInjury) { container.style.display = "none"; return; }
+  if (!beneficiary && !ownInjury) {
+    // Check lineups even when no beneficiary/own-injury — show STARTING / GTD / OUT
+    // confirmation as a security blanket. If we have neither injury context nor
+    // lineups, hide the panel entirely.
+    const lineupOnly = (typeof getLineupStatusForPlayer === "function") ? getLineupStatusForPlayer(player) : null;
+    if (!lineupOnly) { container.style.display = "none"; return; }
+  }
 
   // Build the panel — header banner color & label depend on which signals fire
   // and the bet direction. CEILING is favorable for OVERS, FLOOR for UNDERS.
   let sections = [];
+
+  // ── LINEUPS section (always first when we have data) ──
+  const lineupStatus = (typeof getLineupStatusForPlayer === "function") ? getLineupStatusForPlayer(player) : null;
+  if (lineupStatus) {
+    const s = lineupStatus.status;
+    let lcColor, lcEmoji, lcLabel, lcCopy;
+    if (s === "STARTING") {
+      lcColor = "#22c55e"; lcEmoji = "✓"; lcLabel = "Confirmed Starting";
+      lcCopy = `${player.split(" ").slice(-1)[0]} is in tonight's expected starting lineup.`;
+    } else if (s === "OUT") {
+      lcColor = "#f87171"; lcEmoji = "🚫"; lcLabel = "Listed OUT";
+      lcCopy = `${player.split(" ").slice(-1)[0]} is on the May Not Play list as OUT. Verify before tracking.`;
+    } else if (s === "GTD") {
+      lcColor = "#f59e0b"; lcEmoji = "⚠"; lcLabel = "Game-Time Decision";
+      lcCopy = `${player.split(" ").slice(-1)[0]} is a game-time decision per Rotowire's lineup page. Late-scratch risk is real.`;
+    } else {
+      // DTD / Questionable / Probable / fallback
+      lcColor = "#fbbf24"; lcEmoji = "⚠"; lcLabel = s;
+      lcCopy = `${player.split(" ").slice(-1)[0]} is listed as ${s} per Rotowire's lineup page.`;
+    }
+    sections.push(`
+      <div style="background:rgba(${s === "STARTING" ? "34,197,94" : s === "OUT" ? "248,113,113" : "245,158,11"},0.06);border:1px solid ${lcColor}66;border-radius:8px;padding:11px 13px;">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
+          <span style="font-size:14px;">${lcEmoji}</span>
+          <div style="font-size:11px;font-weight:800;color:${lcColor};letter-spacing:0.7px;text-transform:uppercase;">Lineups · ${lcLabel}</div>
+          <span style="margin-left:auto;font-size:9px;color:#fff;opacity:0.45;letter-spacing:0.3px;">rotowire</span>
+        </div>
+        <div style="font-size:11.5px;color:#fff;line-height:1.5;opacity:0.92;">${lcCopy}</div>
+      </div>
+    `);
+  }
 
   if (beneficiary) {
     const causingStatus = (beneficiary.causedByStatus || "").toLowerCase();
@@ -12073,6 +12325,8 @@ document.addEventListener("DOMContentLoaded", () => {
   if (typeof _refreshTrendsStatus === "function") _refreshTrendsStatus();
   // Refresh the matchup status line so uploaded opp-avg data shows team count on reload
   if (typeof renderMatchupStatus === "function") renderMatchupStatus();
+  // Refresh the daily-lineups status on reload so the saved data shows count + age
+  if (typeof renderLineupsStatus === "function") renderLineupsStatus();
   // Boot the WNBA scoreboard ticker — pulls today's games from ESPN and starts
   // auto-refreshing every 30s for live updates.
   startScoreboardTicker();
