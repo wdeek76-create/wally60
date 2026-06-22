@@ -495,6 +495,7 @@ table colgroup col.avg-col{width:16%;}
         <button id="export-btn" onclick="doExport()">EXPORT AVG</button>
         <button id="export-con-btn" onclick="doExportConsensus()" title="RG + RW only (core consensus, locked)">EXPORT CONSENSUS</button>
         <button id="export-extra-btn" onclick="doExportExtra()" title="RG + RW + any loaded optional sources (Saber, Dimers)">EXPORT EXTRA</button>
+        <button onclick="clearTrackedProps()" title="Clear all ✓ TRACKED pills from Results. Does NOT affect your actual tracked bets in the Tracker." style="background:#0c0d10;border:1px solid #1a1d22;color:#a8b0bb;border-radius:9px;padding:7px 14px;font-size:12px;font-weight:600;letter-spacing:0.3px;cursor:pointer;font-family:'Inter',sans-serif;transition:all 0.2s;">CLEAR TRACKED</button>
       </div>
       <div id="table-wrap">
         <table>
@@ -1365,9 +1366,12 @@ function renderTable() {
     let minChip = "";
     if (minsPresent.length > 0) {
       const avgMin = minsPresent.reduce((a,b)=>a+b,0)/minsPresent.length;
-      const tipAttr = `Expected Minutes: ${fmtM(avgMin)}`;
+      // Build the rich-tooltip payload — same data-tip mechanism as floor/ceiling/hazard pills
+      const sourceRows = minVals.map((v, si) => v != null ? { label: SOURCES[si].label, min: v } : null).filter(Boolean);
+      const expTip = { kind: "expmins", avg: avgMin, sources: sourceRows };
+      const expAttr = encodeURIComponent(JSON.stringify(expTip));
       minChip = `<span style="display:inline-flex;align-items:center;gap:3px;margin-left:6px;flex:0 0 auto;">
-        <span title="${tipAttr}" style="display:inline-flex;align-items:center;gap:3px;background:#ec48991a;border:1px solid #ec489966;border-radius:4px;padding:1px 7px;font-size:9px;white-space:nowrap;cursor:help;">
+        <span data-tip="${expAttr}" style="display:inline-flex;align-items:center;gap:3px;background:#ec48991a;border:1px solid #ec489966;border-radius:4px;padding:1px 7px;font-size:9px;white-space:nowrap;cursor:help;">
           <span style="color:#ec4899;font-weight:800;letter-spacing:0.3px;">EXM</span>
           <span style="color:#ec4899;font-weight:800;">${fmtM(avgMin)}</span>
         </span>
@@ -2004,17 +2008,44 @@ function trackRow(i) {
   openTrackModal(r.player, r.pos, r.stat, r.proj, r.team);
 }
 
-// Session-only map of "player|stat" → {ou, line} for bets tracked this
-// page-load. Used to badge Results rows as ✓ TRACKED u17.5 so you don't
-// re-track the same bet AND so you can see exactly what you tracked at a
-// glance. Clears on refresh.
-const sessionTrackedProps = new Map();
+// LocalStorage-persisted map of "player|stat" → {ou, line} for bets tracked.
+// Used to badge Results rows as ✓ TRACKED u17.5 so you don't re-track AND so
+// you can see exactly what you tracked at a glance. PERSISTS across refreshes
+// (so auto-grading doesn't wipe the pills) — user clears manually via the
+// CLEAR TRACKED button when starting a fresh slate.
+const TRACKED_PROPS_STORAGE_KEY = "wnba_session_tracked_props_v1";
+const sessionTrackedProps = (() => {
+  const m = new Map();
+  try {
+    const raw = localStorage.getItem(TRACKED_PROPS_STORAGE_KEY);
+    if (raw) {
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr)) arr.forEach(([k, v]) => m.set(k, v));
+    }
+  } catch(e) {}
+  return m;
+})();
+function _saveTrackedProps() {
+  try { localStorage.setItem(TRACKED_PROPS_STORAGE_KEY, JSON.stringify([...sessionTrackedProps])); } catch(e) {}
+}
 function _markTrackedProp(player, stat, ou, line) {
   if (!player || !stat) return;
   sessionTrackedProps.set(`${player}|${(stat||"").toUpperCase()}`, { ou: ou || null, line: line != null ? line : null });
+  _saveTrackedProps();
 }
 function _isTrackedProp(player, stat) {
   return sessionTrackedProps.get(`${player}|${(stat||"").toUpperCase()}`) || null;
+}
+// Manual clear — wired to a button at the top of the Results page so the user
+// can wipe the pills when starting a new slate.
+function clearTrackedProps() {
+  if (sessionTrackedProps.size === 0) { showToast("No tracked pills to clear"); return; }
+  if (!confirm(`Clear ${sessionTrackedProps.size} tracked pill${sessionTrackedProps.size === 1 ? "" : "s"}? This only affects the ✓ TRACKED indicators on Results — your actual tracked bets stay intact.`)) return;
+  const n = sessionTrackedProps.size;
+  sessionTrackedProps.clear();
+  _saveTrackedProps();
+  if (typeof renderTable === "function" && merged) renderTable();
+  showToast(`Cleared ${n} tracked pill${n === 1 ? "" : "s"}`);
 }
 
 function trackTotal(payload, ...legacyArgs) {
@@ -8088,6 +8119,59 @@ const STAT_FULL_NAMES = {
 //   Over  9-26 -9.13u
 //   Under 56-103 +3.30u
 // Uses the same scope/filter as the on-screen panel (kind filter respected).
+// Copy a compact WTD / MTD / YTD P&L summary respecting the active kind
+// filter. Useful for quick weekly check-ins / Discord posts.
+//   WNBA props
+//   WTD +31.2u
+//   MTD +22.2u
+//   YTD +67.22u
+function copyOverallSummary() {
+  const kind = (typeof betKindFilter !== "undefined") ? betKindFilter : "all";
+  const settled = bets.filter(b => {
+    if (!b || (b.result !== "hit" && b.result !== "miss")) return false;
+    const isTot = (b.stat || "").toUpperCase() === "GAME_TOTAL";
+    if (kind === "props") return !isTot;
+    if (kind === "totals") return isTot;
+    return true;
+  });
+  if (!settled.length) { showToast("No settled bets to summarize"); return; }
+
+  // Boundary helpers — all in LOCAL time so the week/month aligns with the
+  // user's calendar, not UTC.
+  const now = new Date();
+  const today0 = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  // Week start: Monday. JS getDay() returns 0=Sun..6=Sat; convert to Mon=0..Sun=6
+  const weekday = (today0.getDay() + 6) % 7;
+  const weekStart = new Date(today0.getTime() - weekday * 86400000);
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const yearStart = new Date(now.getFullYear(), 0, 1);
+
+  // P&L + W-L accumulator for each window
+  let wtdPl = 0, wtdW = 0, wtdL = 0;
+  let mtdPl = 0, mtdW = 0, mtdL = 0;
+  let ytdPl = 0, ytdW = 0, ytdL = 0;
+  settled.forEach(b => {
+    const d = b.gameDate ? _parseLocalDate(b.gameDate) : (b.date ? new Date(b.date) : null);
+    if (!d || isNaN(d)) return;
+    const hit = b.result === "hit";
+    const dayPl = hit ? b.toWin : -b.stake;
+    if (d >= yearStart)  { ytdPl += dayPl; if (hit) ytdW++; else ytdL++; }
+    if (d >= monthStart) { mtdPl += dayPl; if (hit) mtdW++; else mtdL++; }
+    if (d >= weekStart)  { wtdPl += dayPl; if (hit) wtdW++; else wtdL++; }
+  });
+
+  const fmt = (pl, w, l) => {
+    if (w === 0 && l === 0) return "0-0  0.00u";
+    return `${w}-${l}  ${pl >= 0 ? "+" : ""}${pl.toFixed(2)}u`;
+  };
+  const label = kind === "props" ? "props" : kind === "totals" ? "totals" : "all-time";
+  const text = `WNBA ${label}\nWTD ${fmt(wtdPl, wtdW, wtdL)}\nMTD ${fmt(mtdPl, mtdW, mtdL)}\nYTD ${fmt(ytdPl, ytdW, ytdL)}`;
+  copyTextToClipboard(text,
+    () => showToast(`Copied ${label} summary`),
+    () => showToast("Copy blocked — text in console")
+  );
+}
+
 function copyStatBreakdown() {
   // Recompute the same statBreak that renderTracker uses so we don't depend on
   // anything cached on window.
@@ -8746,6 +8830,7 @@ function renderTracker() {
             }).join("")}
           </div>
           <button onclick="toggleOpenOnly()" style="background:${openOnly?'#1e40af30':'#0c0d10'};border:1px solid ${openOnly?'#1e40af':'#1a1d22'};color:${openOnly?'#7dd3fc':'#d4dae3'};border-radius:6px;padding:6px 12px;font-size:11px;font-weight:700;letter-spacing:0.5px;cursor:pointer;font-family:'Inter',sans-serif;">${openOnly?'✓ OPEN ONLY':'OPEN ONLY'}</button>
+          <button onclick="copyOverallSummary()" title="Copy WTD / MTD / YTD totals" style="background:#0c0d10;border:1px solid #1e40af;color:#7dd3fc;border-radius:6px;padding:6px 12px;font-size:11px;font-weight:700;letter-spacing:0.5px;cursor:pointer;font-family:'Inter',sans-serif;">📋 OVR SMRY</button>
         </div>
       </div>
       ${filtered.length === 0 ? '<p style="color:#525a64;font-size:13px;padding:20px 0;text-align:center;">'+(search?"No bets match search.":openOnly?"No open bets.":"No bets yet. Hit TRACK on any player.")+'</p>' : `
@@ -12000,12 +12085,29 @@ loadBets();
     <div style="font-size:11px;color:#fff;line-height:1.5;margin-bottom:6px;">teammate${list.length === 1 ? "" : "s"} ${summary}</div>
     <div style="font-size:10px;color:#a8b0bb;line-height:1.4;padding-top:6px;border-top:1px solid rgba(255,255,255,0.06);">Mins/Usage could swing</div>`;
   }
+  // Expected Minutes tooltip — pink-themed to match the EXM pill. Lists each
+  // source's projected minutes alongside the average so you can see the spread.
+  function buildExpMinsHtml(d) {
+    const sources = Array.isArray(d.sources) ? d.sources : [];
+    const fmt = v => (v % 1 === 0 ? v.toFixed(0) : v.toFixed(1));
+    const rows = sources.length ? sources.map(s => `<div style="display:flex;justify-content:space-between;align-items:center;gap:14px;font-size:11px;padding:3px 0;">
+      <span style="color:#a8b0bb;font-weight:600;letter-spacing:0.3px;">${escapeHtml(s.label)}</span>
+      <span style="color:#fff;font-weight:700;font-family:'JetBrains Mono','Menlo',monospace;">${fmt(s.min)}</span>
+    </div>`).join("") : `<div style="font-size:11px;color:#a8b0bb;">No source breakdown</div>`;
+    const avgStr = d.avg != null ? fmt(d.avg) : "—";
+    return `<div style="font-size:11px;font-weight:800;color:#ec4899;letter-spacing:0.6px;text-transform:uppercase;margin-bottom:6px;">Expected Minutes</div>
+    <div style="margin-bottom:6px;">${rows}</div>
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:14px;padding-top:6px;border-top:1px solid rgba(255,255,255,0.06);">
+      <span style="font-size:11px;color:#ec4899;font-weight:800;letter-spacing:0.4px;">AVG</span>
+      <span style="font-size:13px;color:#ec4899;font-weight:800;font-family:'JetBrains Mono','Menlo',monospace;">${avgStr}</span>
+    </div>`;
+  }
   function show(el) {
     const raw = el.getAttribute("data-tip");
     if (!raw) return;
     let data;
     try { data = JSON.parse(decodeURIComponent(raw)); } catch (e) { return; }
-    tip.innerHTML = data.kind === "upside" ? buildUpsideHtml(data) : data.kind === "hazard" ? buildHazardHtml(data) : buildInjuryHtml(data);
+    tip.innerHTML = data.kind === "upside" ? buildUpsideHtml(data) : data.kind === "hazard" ? buildHazardHtml(data) : data.kind === "expmins" ? buildExpMinsHtml(data) : buildInjuryHtml(data);
     tip.style.display = "block";
     position(el);
   }
