@@ -3251,13 +3251,18 @@ function getAltBooks() {
     //   u19.5, o2.5            → alt line (with direction prefix)
     //   -110, +125, 100        → American odds
     //   11.7, 5.2              → EV% (decimal or small number, no sign)
-    let line = null, odds = null, evPct = null;
+    let line = null, odds = null, evPct = null, altOu = null;
     raw.split(/\s+/).forEach(t => {
       // Line: starts with o/u then number
       const lineM = t.match(/^([ou])([\d.]+)$/);
       if (lineM) {
         const ln = parseFloat(lineM[2]);
-        if (!isNaN(ln)) line = ln;
+        if (!isNaN(ln)) {
+          line = ln;
+          // Capture direction so we can fair-value the alt line correctly later
+          if (lineM[1] === "o") altOu = "over";
+          else if (lineM[1] === "u") altOu = "under";
+        }
         return;
       }
       // Odds: explicit sign or 3+ digit integer
@@ -3280,6 +3285,7 @@ function getAltBooks() {
     if (odds == null) return; // need at least odds to register
     const entry = { book: b, odds };
     if (line != null) entry.line = line;
+    if (altOu) entry.ou = altOu;
     if (evPct != null) {
       // Explicit EV% wins — back-solve fair from offered odds
       const dec = oddsToDecimal(odds);
@@ -3287,27 +3293,74 @@ function getAltBooks() {
         const fairProb = (1 + evPct/100) / dec;
         if (fairProb > 0 && fairProb < 1) {
           const fo = probToAmerican(fairProb);
-          if (fo != null) entry.fair = fo;
+          if (fo != null) {
+            entry.fair = fo;
+            // Track that this fair came from a typed EV% — used below to
+            // propagate it to other alts at the same line+direction.
+            entry.fairSource = "ev";
+          }
         }
       }
     } else if (line != null && window._modalProj != null) {
-      // For TOTALS only: when an alt has a different line and no typed EV%,
-      // auto-compute fair from the projection so play-to is line-aware.
-      // Props inherit main fair as before — no auto-recalc on props.
+      // When an alt has a different line and no typed EV%, auto-compute fair
+      // from the player's projection so the alt's play-to / EV is line-aware.
+      // Before this fix, props inherited the main line's fair value — which is
+      // wrong because a u19.5 line and an o2.5 line on the same stat have very
+      // different fair values. Now applies to all stats, not just GAME_TOTAL.
       const stat = document.getElementById("modal-stat")?.value;
-      if (stat === "GAME_TOTAL") {
-        const ou = window._modalOU || "under";
-        try {
-          const winProb = modelWinProb(window._modalProj, line, ou, stat);
-          if (winProb != null && winProb > 0 && winProb < 1) {
-            const fo = probToAmerican(winProb);
-            if (fo != null) entry.fair = fo;
+      // Use the alt's own direction when specified (e.g. "u19.5"), else the main bet's direction
+      const ou = altOu || window._modalOU || "over";
+      try {
+        const winProb = modelWinProb(window._modalProj, line, ou, stat);
+        if (winProb != null && winProb > 0 && winProb < 1) {
+          const fo = probToAmerican(winProb);
+          if (fo != null) {
+            entry.fair = fo;
+            entry.fairSource = "projection";
           }
-        } catch(e) { /* swallow — leave fair undefined to inherit main */ }
-      }
+        }
+      } catch(e) { /* swallow — leave fair undefined to inherit main */ }
     }
     result.push(entry);
   });
+
+  // Propagation pass: if any alt at a given line+direction has an explicit
+  // EV%-derived fair, that fair anchors ALL alts at the same line+direction.
+  // Same line + same direction has only one true fair value regardless of
+  // book. So a user typing EV on one alt sets the fair for that whole line.
+  //
+  // Bare-odds entries (no line specified by user) inherit the main bet's
+  // line + direction. So "-140" in an alt box stays connected to the main
+  // 19.5/over context and gets the same fair as any EV-anchored alts at the
+  // main line. The alt's fair only deviates from the main if the user
+  // explicitly types a different line (e.g. "u18.5 -110").
+  const mainLine = window._modalLine;
+  const mainOu = window._modalOU || "over";
+  const keyFor = (e) => {
+    const ln = e.line != null ? e.line : mainLine;
+    const ou = e.ou || mainOu;
+    if (ln == null) return null;  // can't key without a line
+    return `${ln}|${ou}`;
+  };
+  // Build line+ou → ev-derived fair map
+  const evAnchoredFairs = new Map();
+  result.forEach(e => {
+    if (e.fairSource === "ev" && e.fair != null) {
+      const key = keyFor(e);
+      if (key && !evAnchoredFairs.has(key)) evAnchoredFairs.set(key, e.fair);
+    }
+  });
+  // Apply to entries WITHOUT explicit EV at the same line+ou
+  result.forEach(e => {
+    if (e.fairSource === "ev") return; // already user-anchored
+    const key = keyFor(e);
+    if (!key) return;
+    if (evAnchoredFairs.has(key)) {
+      e.fair = evAnchoredFairs.get(key);
+      e.fairSource = "ev-inherited";
+    }
+  });
+
   return result;
 }
 
@@ -6513,7 +6566,7 @@ async function shareOpenPropsAsImageExclusive() {
       const altsAtBestLine = sameLine.length > 0;
       const fmtOdds = (o) => o > 0 ? `+${o}` : `−${Math.abs(o)}`;
       const booksRow = sameLine.map(p =>
-        `<span style="display:inline-flex;align-items:center;gap:5px;margin-right:10px;">${bookLogoHtml(p.book, 16)}<span style="font-family:'Thernaly',monospace;">${fmtOdds(p.odds)}</span></span>`
+        `<span style="display:inline-flex;align-items:center;gap:5px;margin-right:10px;">${bookLogoHtml(p.book, 16)}<span style="font-family:'JetBrains Mono','Menlo',monospace;">${fmtOdds(p.odds)}</span></span>`
       ).join("");
       const headlinePlayTo = altsAtBestLine ? null : playToOdds(best.fair, 5);
       let playToValue = headlinePlayTo;
@@ -6529,12 +6582,12 @@ async function shareOpenPropsAsImageExclusive() {
       // Direction: BOLD white with subtle glow (no red/green color)
       h += `<div><span style="color:#fff;font-size:13px;font-weight:800;letter-spacing:0.3px;text-shadow:0 0 8px rgba(255,255,255,0.20),0 0 1px rgba(255,255,255,0.5);">${ouUpper} ${bestLine}</span> <span style="display:inline-block;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.10);padding:2px 8px;border-radius:5px;font-size:9.5px;font-weight:800;color:#fff;letter-spacing:0.5px;margin-left:6px;vertical-align:1px;">${statLabel}</span></div>`;
       // Headline: odds + logo + book name. Odds same color as secondary row.
-      h += `<div style="font-size:14px;color:#fff;font-weight:700;display:flex;align-items:center;gap:6px;"><span style="font-family:'Thernaly',monospace;">${oddsStr}</span>${bookLogoHtml(best.book, 17)}<span style="color:#fff;font-weight:700;">${esc(best.book)}</span></div>`;
+      h += `<div style="font-size:14px;color:#fff;font-weight:700;display:flex;align-items:center;gap:6px;"><span style="font-family:'JetBrains Mono','Menlo',monospace;">${oddsStr}</span>${bookLogoHtml(best.book, 17)}<span style="color:#fff;font-weight:700;">${esc(best.book)}</span></div>`;
       h += `</div>`;
       // Stop-sign entry — acts as the "play to" book at the end of the row.
       // Bold white value with subtle glow preserved.
       const playToEntry = playToStr
-        ? `<span style="display:inline-flex;align-items:center;gap:5px;margin-right:10px;">${stopSignSvg(16)}<span style="font-family:'Thernaly',monospace;color:#fff;font-weight:800;text-shadow:0 0 6px rgba(255,255,255,0.35);">${playToStr}</span></span>`
+        ? `<span style="display:inline-flex;align-items:center;gap:5px;margin-right:10px;">${stopSignSvg(16)}<span style="font-family:'JetBrains Mono','Menlo',monospace;color:#fff;font-weight:800;text-shadow:0 0 6px rgba(255,255,255,0.35);">${playToStr}</span></span>`
         : "";
       const fullBooksRow = booksRow + playToEntry;
       if (fullBooksRow) {
@@ -6552,12 +6605,12 @@ async function shareOpenPropsAsImageExclusive() {
         // Each book just shows its odds. The direction+line label sits at the
         // start of the row (mirrors the main bet card's "OVER 7.5" header style).
         const items = g.items.map(p => {
-          return `<span style="display:inline-flex;align-items:center;gap:5px;margin-right:10px;">${bookLogoHtml(p.book, 14)}<span style="font-family:'Thernaly',monospace;">${fmtOdds(p.odds)}</span></span>`;
+          return `<span style="display:inline-flex;align-items:center;gap:5px;margin-right:10px;">${bookLogoHtml(p.book, 14)}<span style="font-family:'JetBrains Mono','Menlo',monospace;">${fmtOdds(p.odds)}</span></span>`;
         }).join("");
         const altPt = g.fair != null ? playToOdds(g.fair, 5) : null;
         const altPtStr = altPt != null ? (altPt > 0 ? `+${altPt}` : `−${Math.abs(altPt)}`) : null;
         const altPtEntry = altPtStr
-          ? `<span style="display:inline-flex;align-items:center;gap:5px;margin-right:10px;">${stopSignSvg(14)}<span style="font-family:'Thernaly',monospace;color:#fff;font-weight:800;text-shadow:0 0 5px rgba(255,255,255,0.35);">${altPtStr}</span></span>`
+          ? `<span style="display:inline-flex;align-items:center;gap:5px;margin-right:10px;">${stopSignSvg(14)}<span style="font-family:'JetBrains Mono','Menlo',monospace;color:#fff;font-weight:800;text-shadow:0 0 5px rgba(255,255,255,0.35);">${altPtStr}</span></span>`
           : "";
         // Direction label (OVER 6.5 / UNDER 18.5) — matches the headline direction's white-with-glow styling, just sized down for the alt row context.
         const dirHeader = `<span style="display:inline-block;color:#fff;font-weight:800;font-size:11.5px;letter-spacing:0.3px;margin-right:12px;text-shadow:0 0 6px rgba(255,255,255,0.22),0 0 1px rgba(255,255,255,0.5);">${ouUpper} ${g.line}</span>`;
