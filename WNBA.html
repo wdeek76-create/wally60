@@ -412,6 +412,22 @@ table colgroup col.avg-col{width:16%;}
       </div>
     </div>
 
+    <div style="background:#0c0d10;border:1px solid #1a1d22;border-radius:8px;padding:14px;margin-top:18px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:10px;">
+        <div>
+          <div style="font-size:13px;font-weight:700;color:#d4dae3;letter-spacing:1px;text-transform:uppercase;">Daily Lineups</div>
+          <div style="font-size:10px;color:#a8b0bb;margin-top:2px;">Paste from <span style="color:#7dd3fc;font-family:'JetBrains Mono','Menlo',monospace;">rotowire.com/wnba/lineups.php</span> — drives lineup status pills and GTD teammate conditionals.</div>
+        </div>
+        <div style="display:flex;gap:6px;">
+          <button onclick="handleLineupsParseUpload()" style="background:#22c55e;border:none;color:#050507;border-radius:6px;padding:7px 16px;font-size:12px;font-weight:700;cursor:pointer;font-family:'Inter',sans-serif;">PARSE</button>
+          <button onclick="clearLineupsData()" style="background:#0c0d10;border:1px solid #1a1d22;color:#d4dae3;border-radius:6px;padding:7px 16px;font-size:12px;font-weight:600;cursor:pointer;font-family:'Inter',sans-serif;">CLEAR</button>
+        </div>
+      </div>
+      <textarea id="lineups-paste" placeholder="Paste the full Rotowire lineups page here..." spellcheck="false"
+        style="width:100%;min-height:60px;background:#050507;border:1px solid #1a1d22;border-radius:6px;padding:8px 10px;color:#e2e8f0;font-family:'JetBrains Mono','Menlo',monospace;font-size:11px;outline:none;resize:vertical;box-sizing:border-box;"></textarea>
+      <div id="lineups-status" style="font-size:11px;color:#525a64;margin-top:8px;">no data loaded</div>
+    </div>
+
     <div style="text-align:center;margin-top:24px;padding:12px 0;font-family:'Inter',sans-serif;font-size:13px;font-style:italic;font-weight:300;letter-spacing:2px;color:rgba(125,211,252,0.45);text-transform:lowercase;">ball is life</div>
   </div>
 
@@ -1409,7 +1425,7 @@ function renderTable() {
             const inj = getInjuryForPlayer(r.rawName, r.team);
             if (!inj) return "";
             const label = _injuryStatusLabel(inj.status);
-            const color = _injuryStatusColor(inj.status);
+            const color = _injuryStatusColor(inj.status, inj.longComment || inj.comment || "");
             const typeHint = inj.type ? ` · ${inj.type.toUpperCase()}` : '';
             // Rich tooltip with full headline + analysis. Encoded as JSON-safe
             // string in data-tip; the hover handler reads, decodes, and shows.
@@ -1499,8 +1515,17 @@ function renderTable() {
                 const teamList = injuriesByTeam.get(r.team) || injuriesByTeam.get(espn) || [];
                 teamList.forEach(rec => {
                   const s = (rec?.status || "").toLowerCase();
-                  if (s.includes("game time") || s.includes("question") || s.includes("day-to-day") || s.includes("dtd") || s.includes("probable") || s === "p" || s === "gtd" || s === "dtd") {
+                  const isOut = s === "out";
+                  const isUncertain = s.includes("game time") || s.includes("question") || s.includes("day-to-day") || s.includes("dtd") || s.includes("probable") || s === "p" || s === "gtd";
+                  if (isUncertain) {
                     gtdTeammates.push({ name: rec.name || rec.player || "—", status: rec.status, detail: rec.detail || rec.type || rec.comment || "" });
+                  } else if (isOut) {
+                    // Only surface OUT teammates if they have a beneficiary in the blurb
+                    const recNorm = norm(rec.name || rec.player || "");
+                    const hasBeneficiary = beneficiariesCache && [...beneficiariesCache.values()].some(entries =>
+                      entries.some(e => norm(e.causedBy) === recNorm)
+                    );
+                    if (hasBeneficiary) gtdTeammates.push({ name: rec.name || rec.player || "—", status: rec.status, detail: rec.detail || rec.type || rec.comment || "" });
                   }
                 });
               }
@@ -1518,13 +1543,22 @@ function renderTable() {
                   };
                   const myTeamKey = teamNorm(r.team);
                   Object.values(ldata.players).forEach(p => {
-                    if ((p.status === "GTD" || p.status === "QUESTIONABLE") && teamNorm(p.team) === myTeamKey) {
+                    const isUncertain = p.status === "GTD" || p.status === "DTD" || p.status === "QUESTIONABLE" || p.status === "PROBABLE";
+                    const isOut = p.status === "OUT";
+                    let include = false;
+                    if (isUncertain && teamNorm(p.team) === myTeamKey) include = true;
+                    if (isOut && teamNorm(p.team) === myTeamKey) {
+                      const pNorm = norm(p.name);
+                      include = beneficiariesCache && [...beneficiariesCache.values()].some(entries =>
+                        entries.some(e => norm(e.causedBy) === pNorm)
+                      );
+                    }
+                    if (!include) return;
                       // De-dupe: skip if a teammate by the same name is already in the list
-                      const norm = (s) => (s || "").toLowerCase().replace(/[^a-z]/g, "");
-                      if (!gtdTeammates.some(x => norm(x.name) === norm(p.name))) {
+                      const normName = (s) => (s || "").toLowerCase().replace(/[^a-z]/g, "");
+                      if (!gtdTeammates.some(x => normName(x.name) === normName(p.name))) {
                         gtdTeammates.push({ name: p.name, status: p.status, detail: "" });
                       }
-                    }
                   });
                 }
               }
@@ -3461,7 +3495,6 @@ function handleLineupsParseUpload() {
 }
 
 function clearLineupsData() {
-  if (!confirm("Clear daily lineups data?")) return;
   try { localStorage.removeItem(LINEUPS_STORAGE_KEY); } catch(e) {}
   renderLineupsStatus();
 }
@@ -5182,7 +5215,10 @@ function updateInjuryCtxInModal() {
   if (beneficiary) {
     const causingStatus = (beneficiary.causedByStatus || "").toLowerCase();
     const causingLabel = _injuryStatusLabel(beneficiary.causedByStatus);
-    const causingColor = _injuryStatusColor(beneficiary.causedByStatus);
+    // Look up blurb for the causing player to detect extended absence
+    const causingRec = injuriesCache && injuriesCache.get(norm(beneficiary.causedBy));
+    const causingBlurb = causingRec ? (causingRec.longComment || causingRec.comment || "") : "";
+    const causingColor = _injuryStatusColor(beneficiary.causedByStatus, causingBlurb);
     // For OVERS this is a tailwind (green). For UNDERS this is a trap warning (amber).
     const ceilingColor = ou === "over" ? "#22c55e" : "#f59e0b";
     const ceilingVerb = ou === "over"
@@ -5208,7 +5244,7 @@ function updateInjuryCtxInModal() {
 
   if (ownInjury) {
     const ownLabel = _injuryStatusLabel(ownInjury.status);
-    const ownColor = _injuryStatusColor(ownInjury.status);
+    const ownColor = _injuryStatusColor(ownInjury.status, ownInjury.longComment || ownInjury.comment || "");
     const isOut = (ownInjury.status || "").toLowerCase() === "out";
     // OUT = critical red. Q/DTD/GTD = amber floor warning.
     const panelColor = isOut ? "#f87171" : "#f59e0b";
@@ -5292,7 +5328,7 @@ function updateTeammateRiskInModal() {
   // Render the warning panel
   const rows = risky.map(r => {
     const label = _injuryStatusLabel(r.status);
-    const color = _injuryStatusColor(r.status);
+    const color = _injuryStatusColor(r.status, r.longComment || r.comment || "");
     const detail = (r.detail || r.type || "").trim();
     const blurb = (r.comment || "").trim();
     const analysis = (r.longComment || "").trim();
@@ -9997,11 +10033,15 @@ function _injuryStatusLabel(status) {
   if (s.includes("game time")) return "GTD";    // Game Time Decision
   return status.toUpperCase();
 }
-function _injuryStatusColor(status) {
+function _injuryStatusColor(status, blurb) {
   if (!status) return "#525a64";
   const s = status.toLowerCase();
   if (s === "out") return "#f87171";              // red
-  if (s.includes("day") || s.includes("question") || s.includes("game time")) return "#f59e0b"; // amber
+  if (s.includes("day") || s.includes("question") || s.includes("game time")) {
+    // If blurb mentions weeks/months, escalate to red
+    if (blurb && /\b(\d+\s+weeks?|several weeks?|multiple weeks?|few weeks?|month|season)\b/i.test(blurb)) return "#f87171";
+    return "#f59e0b"; // amber
+  }
   if (s.includes("probable")) return "#22c55e";   // green
   return "#a8b0bb";
 }
@@ -11077,7 +11117,7 @@ function updateInjuryPanel() {
   // bucket = "today" or "ongoing" — controls which per-row badge appears.
   function renderInjuryRow(rec, bucket) {
     const label = _injuryStatusLabel(rec.status);
-    const color = _injuryStatusColor(rec.status);
+    const color = _injuryStatusColor(rec.status, rec.longComment || rec.comment || "");
     // Subtle metadata line below the player name
     const metaBits = [];
     if (rec.type) metaBits.push(`<span style="color:#8b93a0;">${rec.type}${rec.detail ? ` <span style="color:#525a64;">(${rec.detail})</span>` : ""}</span>`);
