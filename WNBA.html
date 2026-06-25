@@ -5750,8 +5750,10 @@ function _copyDailyRecapFiltered(kind) {
     return db - da;
   });
 
-  // ---- Picks for the most recent date ----
-  // Default to most recent date
+  // ---- Picks for the most recent settled date ----
+  // Use whatever date is most recent in the settled bets — most natural for
+  // post-grade recaps. The Yesterday stat line is its own contextual row;
+  // it's about the prior calendar day, not the picks.
   const targetDate = dateKeys[0];
   const dayBets = byDate[targetDate];
   const hits = dayBets.filter(b => b.result === "hit");
@@ -5803,24 +5805,35 @@ function _copyDailyRecapFiltered(kind) {
     if (d >= yesterday0 && d <= yesterdayEnd) { acc.yd.pl += pl; if (hit) acc.yd.w++; else acc.yd.l++; }
   });
   const fmtPeriod = (rec) => `${rec.w}-${rec.l}  ${rec.pl >= 0 ? "+" : ""}${rec.pl.toFixed(2)}u`;
+  // Aligned period-line formatter — pads label + right-justifies W-L for clean
+  // column alignment across all four lines.
+  //   "Yesterday   2-10   -7.45u"
+  //   "WTD        17-23   -7.73u"
+  //   "MTD       222-166  +56.25u"
+  //   "YTD       352-288  +59.46u"
+  const fmtAligned = (label, rec) => {
+    const wlStr = `${rec.w}-${rec.l}`;
+    const plStr = `${rec.pl >= 0 ? "+" : ""}${rec.pl.toFixed(2)}u`;
+    return `${label.padEnd(10)}${wlStr.padStart(7)}  ${plStr}`;
+  };
 
   const lines = [];
-  // Strip year from "m/d/yyyy" → "m/d" for the compact header. Falls back to
-  // raw targetDate if format is unexpected.
+  // Strip year from "m/d/yyyy" → "m/d" for the compact date label
   const shortDate = (() => {
     const parts = (targetDate || "").split("/");
     return parts.length >= 2 ? `${parts[0]}/${parts[1]}` : targetDate;
   })();
-  const headerKind = kind === "props" ? "props" : kind === "totals" ? "totals" : "recap";
-  lines.push(`WNBA ${headerKind} ${shortDate}`);
-  // ALL-TIME stats — the big line
-  const allTimeRoiStr = allTimeRoi !== null ? `  ${allTimeRoi >= 0 ? "+" : ""}${allTimeRoi}% ROI` : "";
-  lines.push(`${allTimeHits.length}-${allTimeMisses.length}  ${allTimeNet >= 0 ? "+" : ""}${allTimeNet.toFixed(2)}u${allTimeRoiStr}`);
-  // Period summary lines
-  lines.push(`Yesterday ${fmtPeriod(acc.yd)}`);
-  lines.push(`WTD ${fmtPeriod(acc.wtd)}`);
-  lines.push(`MTD ${fmtPeriod(acc.mtd)}`);
-  lines.push(`YTD ${fmtPeriod(acc.ytd)}`);
+  const headerKind = kind === "props" ? "Props" : kind === "totals" ? "Totals" : "Recap";
+  lines.push(`WNBA ${headerKind}`);
+  // Recent activity context — picks day (colon-labeled with its date) + WTD/MTD/YTD.
+  // Picks day W-L matches the picks list below. No all-time / ROI line — recap
+  // is meant to be a compact day + rolling-period view.
+  const ydPl = hits.reduce((a, b) => a + b.toWin, 0) - misses.reduce((a, b) => a + b.stake, 0);
+  const ydRec = { w: hits.length, l: misses.length, pl: ydPl };
+  lines.push(fmtAligned(`${shortDate}:`, ydRec));
+  lines.push(fmtAligned("WTD:", acc.wtd));
+  lines.push(fmtAligned("MTD:", acc.mtd));
+  lines.push(fmtAligned("YTD:", acc.ytd));
   lines.push("");
 
   // Picks list — hits first, then misses, voids at bottom.
@@ -5865,12 +5878,11 @@ function _copyDailyRecapFiltered(kind) {
     else resultStr = `V`;
     return `${b.player}${teamStr}   ${lineStr}  ${oddsStr}  ${resultStr}`;
   };
-  // Render hits group, blank line, then misses group. No "Hits:"/"Misses:"
-  // labels — the empty line between groups is the only separator.
+  // Render hits, then misses, then voids — all flow continuously with no
+  // separator between hits and misses groups. Only voids get a blank line
+  // above them (when present) to set them apart from the win/loss list.
   orderedHits.forEach(b => lines.push(renderBet(b)));
-  if (orderedHits.length && orderedMisses.length) lines.push("");
   orderedMisses.forEach(b => lines.push(renderBet(b)));
-  // Voids tucked at the very bottom with no label
   if (voids.length) {
     if (orderedHits.length || orderedMisses.length) lines.push("");
     voids.forEach(b => lines.push(renderBet(b)));
