@@ -3193,8 +3193,10 @@ async function renderScoreboard() {
       const g = parseESPNGame(evt);
       if (!g) return;
       const gameId = evt.id;
+      // get MLB gamePk from the event if available
+      const mlbGamePk = evt.uid?.replace(/.*g:/,'') || evt.id;
       if (g.isPre) {
-        s += `<div class="scores-game" onclick="openBoxScore('${gameId}')" style="cursor:pointer;">
+        s += `<div class="scores-game" onclick="openBoxScore('${mlbGamePk}','${g.awayName}','${g.homeName}')" style="cursor:pointer;">
           <div class="scores-teams">
             <div class="scores-team-row">${espnLogo(g.awayName)}<span class="scores-team-name">${g.awayName}</span></div>
             <div class="scores-team-row">${espnLogo(g.homeName)}<span class="scores-team-name">${g.homeName}</span></div>
@@ -3202,7 +3204,7 @@ async function renderScoreboard() {
           <div class="scores-right"><div class="scores-time">${g.time}</div><div class="scores-tipoff">First Pitch</div></div>
         </div>`;
       } else {
-        s += `<div class="scores-game" onclick="openBoxScore('${gameId}')" style="cursor:pointer;">
+        s += `<div class="scores-game" onclick="openBoxScore('${mlbGamePk}','${g.awayName}','${g.homeName}')" style="cursor:pointer;">
           <div class="scores-teams">
             <div class="scores-team-row">${espnLogo(g.awayName)}<span class="scores-team-name${g.awayWin?'':' dim'}">${g.awayName}</span></div>
             <div class="scores-team-row">${espnLogo(g.homeName)}<span class="scores-team-name${g.homeWin?'':' dim'}">${g.homeName}</span></div>
@@ -3229,15 +3231,41 @@ function closeScores() { document.getElementById('scoresModal').classList.remove
 function scoresNavDay(dir) { scoresDate = new Date(scoresDate.getTime()+dir*86400000); renderScoreboard(); }
 function scoresGoToday() { scoresDate = new Date(); renderScoreboard(); }
 
-async function openBoxScore(gameId) {
+async function openBoxScore(espnId, awayName, homeName) {
   document.getElementById('boxscoreModal').classList.add('open');
   document.getElementById('boxscoreBody').innerHTML = '<div class="bs-loading">Loading box score...</div>';
   try {
-    const r = await fetch(`https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/summary?event=${gameId}`);
-    const data = await r.json();
-    console.log('ESPN summary keys:', Object.keys(data));
-    console.log('linescore:', JSON.stringify(data.linescore)?.slice(0,500));
-    renderBoxScore(data);
+    // Get gamePk from MLB schedule API by matching team names
+    const today = scoresDate;
+    const y=today.getFullYear(), m=String(today.getMonth()+1).padStart(2,'0'), d=String(today.getDate()).padStart(2,'0');
+    const sched = await fetch(`https://statsapi.mlb.com/api/v1/schedule?sportId=1&date=${y}-${m}-${d}&hydrate=team&season=${y}`);
+    const schedData = await sched.json();
+    const games = schedData.dates?.[0]?.games || [];
+
+    // find matching game
+    let gamePk = null;
+    for (const g of games) {
+      const hn = g.teams?.home?.team?.name || '';
+      const an = g.teams?.away?.team?.name || '';
+      if ((hn.includes(homeName.split(' ').pop()) || homeName.includes(hn.split(' ').pop())) &&
+          (an.includes(awayName.split(' ').pop()) || awayName.includes(an.split(' ').pop()))) {
+        gamePk = g.gamePk;
+        break;
+      }
+    }
+
+    if (!gamePk) {
+      document.getElementById('boxscoreBody').innerHTML = '<div class="bs-loading">Game not found in MLB schedule</div>';
+      return;
+    }
+
+    const [lsRes, boxRes] = await Promise.all([
+      fetch(`https://statsapi.mlb.com/api/v1/game/${gamePk}/linescore`),
+      fetch(`https://statsapi.mlb.com/api/v1/game/${gamePk}/boxscore`)
+    ]);
+    const ls = await lsRes.json();
+    const box = await boxRes.json();
+    renderBoxScore(gamePk, ls, box, awayName, homeName);
   } catch(e) {
     document.getElementById('boxscoreBody').innerHTML = '<div class="bs-loading">Failed to load box score.</div>';
   }
@@ -3245,143 +3273,85 @@ async function openBoxScore(gameId) {
 
 function closeBoxScore() { document.getElementById('boxscoreModal').classList.remove('open'); }
 
-function renderBoxScore(data) {
-  const comp = data.header?.competitions?.[0];
-  if (!comp) { document.getElementById('boxscoreBody').innerHTML = '<div class="bs-loading">No data available</div>'; return; }
-
-  const home = comp.competitors?.find(c=>c.homeAway==='home');
-  const away = comp.competitors?.find(c=>c.homeAway==='away');
-  const hS = parseInt(home?.score||0), aS = parseInt(away?.score||0);
-  const hWin = hS > aS, aWin = aS > hS;
-  const status = comp.status?.type;
-  const isLive = status?.state==='in', isFinal = status?.state==='post';
+function renderBoxScore(gameId, ls, box, awayName, homeName) {
+  const innings = ls.innings || [];
+  const awayScore = ls.teams?.away?.runs ?? '—';
+  const homeScore = ls.teams?.home?.runs ?? '—';
+  const awayHits = ls.teams?.away?.hits ?? '—';
+  const homeHits = ls.teams?.home?.hits ?? '—';
+  const awayErrors = ls.teams?.away?.errors ?? '—';
+  const homeErrors = ls.teams?.home?.errors ?? '—';
+  const hWin = parseInt(homeScore) > parseInt(awayScore);
+  const aWin = parseInt(awayScore) > parseInt(homeScore);
+  const inningOrdinal = ls.currentInningOrdinal || '';
+  const isTop = ls.isTopInning;
+  const isLive = !!inningOrdinal && awayScore !== '—';
+  const statusText = isLive ? `${isTop?'Top':'Bot'} ${inningOrdinal}` : (awayScore !== '—' ? 'Final' : 'Scheduled');
+  const awayAbbr = ESPN_ABBR[awayName] || '';
+  const homeAbbr = ESPN_ABBR[homeName] || '';
 
   let html = `<div class="bs-matchup">
     <div class="bs-team">
-      ${espnLogo(away?.team?.displayName||'', 48)}
-      <div class="bs-team-name">${away?.team?.displayName||'—'}</div>
-      <div class="bs-team-score${aWin?'':' dim'}">${isFinal||isLive?aS:'—'}</div>
+      <img src="https://a.espncdn.com/i/teamlogos/mlb/500/${awayAbbr}.png" onerror="this.style.display='none'" style="width:56px;height:56px;object-fit:contain;">
+      <div class="bs-team-name">${awayName||'Away'}</div>
+      <div class="bs-team-score${aWin?'':' dim'}">${awayScore}</div>
     </div>
-    <div style="text-align:center;">
-      <div class="bs-vs">@</div>
-      <div class="bs-status${isLive?' live':''}">${status?.detail||''}</div>
-    </div>
+    <div style="text-align:center;"><div class="bs-vs">@</div><div class="bs-status${isLive?' live':''}">${statusText}</div></div>
     <div class="bs-team">
-      ${espnLogo(home?.team?.displayName||'', 48)}
-      <div class="bs-team-name">${home?.team?.displayName||'—'}</div>
-      <div class="bs-team-score${hWin?'':' dim'}">${isFinal||isLive?hS:'—'}</div>
+      <img src="https://a.espncdn.com/i/teamlogos/mlb/500/${homeAbbr}.png" onerror="this.style.display='none'" style="width:56px;height:56px;object-fit:contain;">
+      <div class="bs-team-name">${homeName||'Home'}</div>
+      <div class="bs-team-score${hWin?'':' dim'}">${homeScore}</div>
     </div>
   </div>`;
 
-  // linescore by inning — ESPN summary uses data.linescore.lines
-  const ls = data.linescore;
-  const boxTeams = data.boxscore?.players;
-
-  if (ls?.lines?.length) {
-    const lines = ls.lines; // array of {displayValue} per inning
-    const awayVals = [], homeVals = [];
-    lines.forEach(l => {
-      awayVals.push(l.away ?? l.displayValue?.split('-')?.[0] ?? '—');
-      homeVals.push(l.home ?? l.displayValue?.split('-')?.[1] ?? '—');
-    });
-
-    // get totals from competitors
-    const hR = hS, aR = aS;
-    const awayH = ls.awayHits ?? '—';
-    const homeH = ls.homeHits ?? '—';
-    const awayE = ls.awayErrors ?? '—';
-    const homeE = ls.homeErrors ?? '—';
-
-    const numInnings = lines.length;
-    let innHeaders = '';
-    for(let i=1;i<=numInnings;i++) innHeaders += `<th>${i}</th>`;
-
-    html += `<div class="bs-linescore">
-      <table class="bs-linescore-table">
-        <tr><th></th>${innHeaders}<th>R</th><th>H</th><th>E</th></tr>
-        <tr>
-          <td>${away?.team?.abbreviation||'AWY'}</td>
-          ${awayVals.map(v=>`<td>${v}</td>`).join('')}
-          <td class="total${aWin?' winning':''}">${aR}</td>
-          <td>${awayH}</td><td>${awayE}</td>
-        </tr>
-        <tr>
-          <td>${home?.team?.abbreviation||'HME'}</td>
-          ${homeVals.map(v=>`<td>${v}</td>`).join('')}
-          <td class="total${hWin?' winning':''}">${hR}</td>
-          <td>${homeH}</td><td>${homeE}</td>
-        </tr>
-      </table>
-    </div>`;
-  } else if (data.boxscore?.teams) {
-    // fallback: try boxscore teams structure
-    const bsTeams = data.boxscore.teams;
-    const awayTeam = bsTeams.find(t=>t.homeAway==='away');
-    const homeTeam = bsTeams.find(t=>t.homeAway==='home');
-    const awayInn = awayTeam?.statistics?.find(s=>s.name==='innings')?.values || [];
-    const homeInn = homeTeam?.statistics?.find(s=>s.name==='innings')?.values || [];
-    const awayR = awayTeam?.statistics?.find(s=>s.name==='runs')?.displayValue||aS;
-    const homeR = homeTeam?.statistics?.find(s=>s.name==='runs')?.displayValue||hS;
-    const awayH = awayTeam?.statistics?.find(s=>s.name==='hits')?.displayValue||'—';
-    const homeH = homeTeam?.statistics?.find(s=>s.name==='hits')?.displayValue||'—';
-    const awayE = awayTeam?.statistics?.find(s=>s.name==='errors')?.displayValue||'—';
-    const homeE = homeTeam?.statistics?.find(s=>s.name==='errors')?.displayValue||'—';
-    const numInnings = Math.max(awayInn.length, homeInn.length, 9);
-    let innHeaders = '';
-    for(let i=1;i<=numInnings;i++) innHeaders += `<th>${i}</th>`;
-    html += `<div class="bs-linescore">
-      <table class="bs-linescore-table">
-        <tr><th></th>${innHeaders}<th>R</th><th>H</th><th>E</th></tr>
-        <tr><td>${away?.team?.abbreviation||'AWY'}</td>${Array.from({length:numInnings},(_,i)=>`<td>${awayInn[i]??'—'}</td>`).join('')}<td class="total${aWin?' winning':''}">${awayR}</td><td>${awayH}</td><td>${awayE}</td></tr>
-        <tr><td>${home?.team?.abbreviation||'HME'}</td>${Array.from({length:numInnings},(_,i)=>`<td>${homeInn[i]??'—'}</td>`).join('')}<td class="total${hWin?' winning':''}">${homeR}</td><td>${homeH}</td><td>${homeE}</td></tr>
-      </table>
-    </div>`;
+  if (innings.length) {
+    const numInn = Math.max(innings.length, 9);
+    let hdrs = '<th style="text-align:left;min-width:44px;"></th>';
+    for(let i=1;i<=numInn;i++) hdrs += `<th>${i}</th>`;
+    hdrs += '<th>R</th><th>H</th><th>E</th>';
+    let awayRow = `<td style="font-weight:700;">${box?.teams?.away?.team?.abbreviation||'AWY'}</td>`;
+    let homeRow = `<td style="font-weight:700;">${box?.teams?.home?.team?.abbreviation||'HME'}</td>`;
+    for(let i=0;i<numInn;i++) {
+      const inn = innings[i];
+      awayRow += `<td>${inn?.away?.runs??''}</td>`;
+      homeRow += `<td>${inn?.home?.runs??''}</td>`;
+    }
+    awayRow += `<td class="total${aWin?' winning':''}">${awayScore}</td><td>${awayHits}</td><td>${awayErrors}</td>`;
+    homeRow += `<td class="total${hWin?' winning':''}">${homeScore}</td><td>${homeHits}</td><td>${homeErrors}</td>`;
+    html += `<div class="bs-linescore" style="overflow-x:auto;"><table class="bs-linescore-table" style="min-width:500px;"><tr>${hdrs}</tr><tr>${awayRow}</tr><tr>${homeRow}</tr></table></div>`;
   } else {
-    html += `<div style="padding:16px 20px;color:var(--sub);font-size:12px;">Linescore not available yet</div>`;
+    html += `<div style="padding:12px 20px;color:var(--sub);font-size:12px;">Linescore not yet available</div>`;
   }
-  if (boxTeams) {
-    boxTeams.forEach(team => {
-      const teamName = team.team?.displayName||'';
-      const batters = team.statistics?.find(s=>s.name==='batting');
-      const pitchers = team.statistics?.find(s=>s.name==='pitching');
 
-      if (batters?.athletes?.length) {
-        const cols = batters.labels || ['AB','R','H','RBI','HR','BB','SO','AVG'];
-        html += `<div class="bs-section">
-          <div class="bs-section-title">${teamName} — Batting</div>
-          <div class="bs-player-row header"><span>PLAYER</span>${cols.slice(0,6).map(c=>`<span>${c}</span>`).join('')}</div>`;
-        batters.athletes.forEach(a => {
-          if (!a.athlete) return;
-          const stats = a.stats || [];
-          html += `<div class="bs-player-row">
-            <span>${a.athlete.displayName||'—'}${a.starter?'':' <span style="color:var(--sub);font-size:9px;">PH</span>'}</span>
-            ${cols.slice(0,6).map((_,i)=>`<span>${stats[i]??'—'}</span>`).join('')}
-          </div>`;
-        });
-        html += `</div>`;
-      }
-
-      if (pitchers?.athletes?.length) {
-        const pcols = pitchers.labels || ['IP','H','R','ER','BB','SO','ERA'];
-        html += `<div class="bs-section">
-          <div class="bs-section-title">${teamName} — Pitching</div>
-          <div class="bs-player-row header"><span>PLAYER</span>${pcols.slice(0,6).map(c=>`<span>${c}</span>`).join('')}</div>`;
-        pitchers.athletes.forEach(a => {
-          if (!a.athlete) return;
-          const stats = a.stats || [];
-          html += `<div class="bs-player-row">
-            <span>${a.athlete.displayName||'—'}</span>
-            ${pcols.slice(0,6).map((_,i)=>`<span>${stats[i]??'—'}</span>`).join('')}
-          </div>`;
-        });
-        html += `</div>`;
-      }
+  ['away','home'].forEach(side => {
+    const team = box?.teams?.[side];
+    if (!team) return;
+    const teamName = team.team?.name || (side==='away'?awayName:homeName);
+    const batters = team.batters || [];
+    const players = team.players || {};
+    if (!batters.length) return;
+    html += `<div class="bs-section"><div class="bs-section-title">${teamName} — Batting</div>
+      <div class="bs-player-row header"><span>PLAYER</span><span>AB</span><span>R</span><span>H</span><span>RBI</span><span>BB</span><span>SO</span></div>`;
+    batters.forEach(id => {
+      const p = players[`ID${id}`];
+      if (!p) return;
+      const s = p.stats?.batting || {};
+      html += `<div class="bs-player-row"><span>${p.person?.fullName||'—'} <span style="color:var(--sub);font-size:9px;">${p.position?.abbreviation||''}</span></span><span>${s.atBats??'—'}</span><span>${s.runs??'—'}</span><span>${s.hits??'—'}</span><span>${s.rbi??'—'}</span><span>${s.baseOnBalls??'—'}</span><span>${s.strikeOuts??'—'}</span></div>`;
     });
-  }
-
-  if (!linescore && !boxTeams) {
-    html += `<div class="bs-loading" style="padding:20px;">Box score not yet available</div>`;
-  }
+    html += `</div>`;
+    const pitchers = team.pitchers || [];
+    if (pitchers.length) {
+      html += `<div class="bs-section"><div class="bs-section-title">${teamName} — Pitching</div>
+        <div class="bs-player-row header"><span>PLAYER</span><span>IP</span><span>H</span><span>R</span><span>ER</span><span>BB</span><span>SO</span></div>`;
+      pitchers.forEach(id => {
+        const p = players[`ID${id}`];
+        if (!p) return;
+        const s = p.stats?.pitching || {};
+        html += `<div class="bs-player-row"><span>${p.person?.fullName||'—'}</span><span>${s.inningsPitched??'—'}</span><span>${s.hits??'—'}</span><span>${s.runs??'—'}</span><span>${s.earnedRuns??'—'}</span><span>${s.baseOnBalls??'—'}</span><span>${s.strikeOuts??'—'}</span></div>`;
+      });
+      html += `</div>`;
+    }
+  });
 
   document.getElementById('boxscoreBody').innerHTML = html;
 }
