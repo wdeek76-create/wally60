@@ -1785,6 +1785,21 @@ function loadBets() {
     const raw = localStorage.getItem("wnba_blender_bets");
     if (raw) bets = JSON.parse(raw).sort((a,b) => b.id - a.id);
   } catch(e) {}
+  // One-time migration: rename legacy "DK (Courtside/Onyx)" to "DraftKings"
+  // across all stored bets, including altBooks. Older bets were saved under
+  // the legacy book name; this normalizes them so the share card and tracker
+  // both display "DraftKings" instead of the old label. Idempotent — safe
+  // to run on every page load (no-op once all bets are migrated).
+  let migrated = 0;
+  bets.forEach(b => {
+    if (b.book === "DK (Courtside/Onyx)") { b.book = "DraftKings"; migrated++; }
+    if (Array.isArray(b.altBooks)) {
+      b.altBooks.forEach(a => {
+        if (a && a.book === "DK (Courtside/Onyx)") { a.book = "DraftKings"; migrated++; }
+      });
+    }
+  });
+  if (migrated > 0) saveBets();
 }
 
 function saveBets() {
@@ -2228,18 +2243,57 @@ function populateSourceAgreement() {
   panel.style.display = "block";
   // Render pills in display order, neutral by default — colors get applied by
   // updateSourceAgreement() once the user has typed a line + side.
-  pillsEl.innerHTML = sourcesWithData.map(s => {
+  // Each pill is clickable: tap to mark it as the DECIDER projection (the one
+  // you actually used to determine your edge). Saved on the bet for later
+  // analysis of which source is really driving your edge calls.
+  const sourcePills = sourcesWithData.map(s => {
     const v = vals[s.key];
     const label = s.key === "rotowire" ? "RW" : s.key === "roto" ? "RG" : s.key === "saber" ? "SAB" : s.key === "dimers" ? "DMR" : s.label;
-    return `<span class="modal-src-pill" data-src="${s.key}" style="display:inline-flex;align-items:center;gap:5px;background:#0c0d10;border:1px solid #1a1d22;border-radius:5px;padding:2px 7px;font-size:10px;">
+    return `<span class="modal-src-pill" data-src="${s.key}" data-val="${v}" onclick="setModalDecider('${s.key}', ${v})" style="display:inline-flex;align-items:center;gap:5px;background:#0c0d10;border:1px solid #1a1d22;border-radius:5px;padding:2px 7px;font-size:10px;cursor:pointer;transition:box-shadow 0.15s;">
       <span class="src-label" style="color:#8b93a0;font-weight:500;font-size:9px;letter-spacing:0.3px;">${label}</span>
       <span class="src-val" style="color:#d4dae3;font-weight:500;font-family:'Inter',sans-serif;font-variant-numeric:tabular-nums;">${v.toFixed(2)}</span>
       <span class="src-edge" style="font-size:9px;font-weight:600;font-family:'JetBrains Mono','Menlo',monospace;opacity:0.85;"></span>
       <span class="src-check" style="font-size:9px;opacity:0.9;"></span>
     </span>`;
-  }).join("");
+  });
+  // AVG pill — shows the blended Proj (same value as Blended Proj line).
+  // Clickable to mark AVG as the decider when you trust the consensus.
+  // This is the default decider when nothing is explicitly picked.
+  const avgVal = window._modalProj;
+  if (avgVal != null) {
+    sourcePills.push(`<span class="modal-src-pill" data-src="avg" data-val="${avgVal}" onclick="setModalDecider('avg', ${avgVal})" style="display:inline-flex;align-items:center;gap:5px;background:#0c0d10;border:1px solid #1e40af55;border-radius:5px;padding:2px 7px;font-size:10px;cursor:pointer;transition:box-shadow 0.15s;">
+      <span class="src-label" style="color:#7dd3fc;font-weight:600;font-size:9px;letter-spacing:0.3px;">AVG</span>
+      <span class="src-val" style="color:#fff;font-weight:600;font-family:'Inter',sans-serif;font-variant-numeric:tabular-nums;">${avgVal.toFixed(2)}</span>
+    </span>`);
+  }
+  pillsEl.innerHTML = sourcePills.join("");
   document.getElementById("modal-src-badge").textContent = "";
   document.getElementById("modal-src-badge").style.cssText = "font-size:9px;font-weight:500;padding:2px 7px;border-radius:4px;letter-spacing:0.5px;text-transform:uppercase;display:none;";
+  // Re-apply decider highlight after re-render (in case state was set)
+  if (typeof updateDeciderHighlight === "function") updateDeciderHighlight();
+}
+
+// Mark a source pill as the decider — the projection you actually used to
+// determine your edge. Saved on the bet so analytics can show which source
+// is most often driving your bet decisions. Stored as decider source key
+// (e.g. "rg", "rw", "dmr", "avg") + the actual projection value used.
+function setModalDecider(srcKey, projVal) {
+  window._modalDeciderSource = srcKey;
+  window._modalDeciderProj = projVal;
+  updateDeciderHighlight();
+}
+
+// Visual feedback for the decider selection — separate from agreement color
+// so both signals can coexist on the same pill. Outer ring in cyan = decider.
+function updateDeciderHighlight() {
+  const decider = window._modalDeciderSource;
+  document.querySelectorAll(".modal-src-pill").forEach(p => {
+    if (p.dataset.src === decider) {
+      p.style.boxShadow = "0 0 0 2px #7dd3fc, 0 0 8px rgba(125,211,252,0.4)";
+    } else {
+      p.style.boxShadow = "none";
+    }
+  });
 }
 
 function updateSourceAgreement() {
@@ -2383,6 +2437,8 @@ function openTrackModal(player, pos, stat, proj, team, presetDate) {
   window._modalProjSnapshots = null;
   window._modalProjPoss = null;
   window._modalPaceEffProj = null;
+  window._modalDeciderSource = null;
+  window._modalDeciderProj = null;
   clearAltBooks();
   const dateEl = document.getElementById("modal-date"); if(dateEl) dateEl.value = window._modalPresetDate || new Date().toISOString().split("T")[0];
   document.getElementById("modal-stat").value = stat || "PTS";
@@ -3534,6 +3590,13 @@ function saveBet() {
         if (Object.keys(edges).length) bet.srcEdges = edges;
       } catch (e) { /* edge snapshot is non-critical */ }
     }
+    // Capture the DECIDER projection — the source the user actually used to
+    // determine their edge for this bet. Set when user clicks a source pill
+    // in the modal. Defaults to "avg" + Blended Proj when nothing was clicked.
+    // Critical for analytics on which sources are driving edge decisions, and
+    // for the PROJ STATS export that copies the decider list for alt-edge work.
+    bet.deciderSource = window._modalDeciderSource || "avg";
+    bet.deciderProj = window._modalDeciderProj != null ? window._modalDeciderProj : window._modalProj;
     // Snapshot injury context at save-time: was the player FLOOR ↓ (Q/GTD,
     // downside risk) or CEILING ↑ (beneficiary of someone else's absence)?
     // Locked at save so analytics reflects the bet's actual context even if
@@ -5569,18 +5632,56 @@ function _copyDailyRecapFiltered(kind) {
     return db - da;
   });
 
+  // ---- Picks for the most recent date ----
   // Default to most recent date
   const targetDate = dateKeys[0];
   const dayBets = byDate[targetDate];
   const hits = dayBets.filter(b => b.result === "hit");
   const misses = dayBets.filter(b => b.result === "miss");
   const voids = dayBets.filter(b => b.result === "void");
-  const settledOnly = [...hits, ...misses]; // exclude voids from W-L
-  const totalWon = hits.reduce((a,b) => a + b.toWin, 0);
-  const totalLost = misses.reduce((a,b) => a + b.stake, 0);
-  const totalStaked = settledOnly.reduce((a,b) => a + b.stake, 0);
-  const netPL = totalWon - totalLost;
-  const roi = totalStaked > 0 ? ((netPL/totalStaked)*100).toFixed(1) : null;
+
+  // ---- HEADER STATS: all-time + Yesterday/WTD/MTD/YTD ----
+  // The big line shows the overall record across all settled props (or totals,
+  // or all), giving immediate context for the picks below. Period rows under it
+  // show recent activity. Same boundaries as OVR SMRY for consistency.
+  const allTimeHits = settled.filter(b => b.result === "hit");
+  const allTimeMisses = settled.filter(b => b.result === "miss");
+  const allTimeStaked = [...allTimeHits, ...allTimeMisses].reduce((a, b) => a + b.stake, 0);
+  const allTimeNet = allTimeHits.reduce((a, b) => a + b.toWin, 0) - allTimeMisses.reduce((a, b) => a + b.stake, 0);
+  const allTimeRoi = allTimeStaked > 0 ? ((allTimeNet / allTimeStaked) * 100).toFixed(1) : null;
+
+  // Compute period buckets (yesterday, WTD, MTD, YTD) — local time
+  const now = new Date();
+  const today0 = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const yesterday0 = new Date(today0.getTime() - 86400000);
+  const yesterdayEnd = new Date(today0.getTime() - 1);  // 11:59:59pm yesterday
+  // Week start: Monday. JS getDay() returns 0=Sun..6=Sat; convert to Mon=0..Sun=6
+  const weekday = (today0.getDay() + 6) % 7;
+  const weekStart = new Date(today0.getTime() - weekday * 86400000);
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const yearStart = new Date(now.getFullYear(), 0, 1);
+
+  // Helper — parse "m/d/yyyy" or ISO "yyyy-mm-dd" into local Date.
+  // Reuses existing _parseLocalDate when available; otherwise falls back.
+  const parseBetDate = (b) => {
+    if (b.gameDate && typeof _parseLocalDate === "function") return _parseLocalDate(b.gameDate);
+    if (b.date) return new Date(b.date);
+    return null;
+  };
+
+  // Accumulator: tally W/L/P&L per period
+  const acc = { yd: {w:0, l:0, pl:0}, wtd: {w:0, l:0, pl:0}, mtd: {w:0, l:0, pl:0}, ytd: {w:0, l:0, pl:0} };
+  settled.forEach(b => {
+    const d = parseBetDate(b);
+    if (!d || isNaN(d)) return;
+    const hit = b.result === "hit";
+    const pl = hit ? b.toWin : -b.stake;
+    if (d >= yearStart) { acc.ytd.pl += pl; if (hit) acc.ytd.w++; else acc.ytd.l++; }
+    if (d >= monthStart) { acc.mtd.pl += pl; if (hit) acc.mtd.w++; else acc.mtd.l++; }
+    if (d >= weekStart) { acc.wtd.pl += pl; if (hit) acc.wtd.w++; else acc.wtd.l++; }
+    if (d >= yesterday0 && d <= yesterdayEnd) { acc.yd.pl += pl; if (hit) acc.yd.w++; else acc.yd.l++; }
+  });
+  const fmtPeriod = (rec) => `${rec.w}-${rec.l}  ${rec.pl >= 0 ? "+" : ""}${rec.pl.toFixed(2)}u`;
 
   const lines = [];
   // Strip year from "m/d/yyyy" → "m/d" for the compact header. Falls back to
@@ -5591,12 +5692,14 @@ function _copyDailyRecapFiltered(kind) {
   })();
   const headerKind = kind === "props" ? "props" : kind === "totals" ? "totals" : "recap";
   lines.push(`WNBA ${headerKind} ${shortDate}`);
-  lines.push("");
-  // Stats line: hyphenated W-L, signed units & ROI
-  const roiStr = roi !== null
-    ? `    ${roi >= 0 ? "+" : ""}${roi}% ROI`
-    : "";
-  lines.push(`${hits.length}-${misses.length}${voids.length?` ${voids.length}V`:""}    ${netPL>=0?"+":""}${netPL.toFixed(2)}u${roiStr}`);
+  // ALL-TIME stats — the big line
+  const allTimeRoiStr = allTimeRoi !== null ? `  ${allTimeRoi >= 0 ? "+" : ""}${allTimeRoi}% ROI` : "";
+  lines.push(`${allTimeHits.length}-${allTimeMisses.length}  ${allTimeNet >= 0 ? "+" : ""}${allTimeNet.toFixed(2)}u${allTimeRoiStr}`);
+  // Period summary lines
+  lines.push(`Yesterday ${fmtPeriod(acc.yd)}`);
+  lines.push(`WTD ${fmtPeriod(acc.wtd)}`);
+  lines.push(`MTD ${fmtPeriod(acc.mtd)}`);
+  lines.push(`YTD ${fmtPeriod(acc.ytd)}`);
   lines.push("");
 
   // Picks list — hits first, then misses, voids at bottom.
@@ -5620,34 +5723,37 @@ function _copyDailyRecapFiltered(kind) {
       })
       .flat();
   }
-  const ordered = [
-    ...groupByPlayer(hits, "toWin"),
-    ...groupByPlayer(misses, "stake"),
-    ...voids
-  ];
+  const orderedHits = groupByPlayer(hits, "toWin");
+  const orderedMisses = groupByPlayer(misses, "stake");
   // Title-case a stat code: "AST" → "Ast", "PTS" → "Pts", "TO" → "To"
   const titleCaseStat = s => s ? s.charAt(0).toUpperCase() + s.slice(1).toLowerCase() : "";
-  ordered.forEach(b => {
+  const renderBet = (b) => {
     const oddsStr = b.odds > 0 ? `+${b.odds}` : `${b.odds}`;
-    // Lowercase direction: o/u
     const dirChar = (b.ou || "").toLowerCase().startsWith("u") ? "u" : "o";
-    // Stat label after the line (skipped for game totals)
     const statLbl = isTotal(b) ? "" : ` ${titleCaseStat(b.stat)}`;
     const lineStr = `${dirChar}${b.line}${statLbl}`;
     const teamStr = b.team ? ` (${b.team})` : "";
-    // Actual final stat — formatted as integer when whole, 1dp otherwise.
     let actualStr = "";
     if (b.actual != null && b.result !== "void") {
       const a = b.actual;
       actualStr = ` (${Number.isInteger(a) ? a : a.toFixed(1)})`;
     }
-    // Result block: W/L/V + (actual) + units. Voids have no units to show.
     let resultStr;
     if (b.result === "hit") resultStr = `W${actualStr} +${b.toWin.toFixed(2)}u`;
     else if (b.result === "miss") resultStr = `L${actualStr} -${b.stake.toFixed(2)}u`;
     else resultStr = `V`;
-    lines.push(`${b.player}${teamStr}   ${lineStr}  ${oddsStr}  ${resultStr}`);
-  });
+    return `${b.player}${teamStr}   ${lineStr}  ${oddsStr}  ${resultStr}`;
+  };
+  // Render hits group, blank line, then misses group. No "Hits:"/"Misses:"
+  // labels — the empty line between groups is the only separator.
+  orderedHits.forEach(b => lines.push(renderBet(b)));
+  if (orderedHits.length && orderedMisses.length) lines.push("");
+  orderedMisses.forEach(b => lines.push(renderBet(b)));
+  // Voids tucked at the very bottom with no label
+  if (voids.length) {
+    if (orderedHits.length || orderedMisses.length) lines.push("");
+    voids.forEach(b => lines.push(renderBet(b)));
+  }
 
   const text = lines.join("\n");
   // Bulletproof copy (works inside Claude artifact iframe + GitHub Pages)
@@ -8185,6 +8291,47 @@ const STAT_FULL_NAMES = {
 //   Over  9-26 -9.13u
 //   Under 56-103 +3.30u
 // Uses the same scope/filter as the on-screen panel (kind filter respected).
+// Copy a list of open prop bets with their decider projections for the
+// prop.shop fair pricing calculator workflow. Each line: player, direction,
+// line, stat, decider proj, and which source the decider came from in
+// parens. Helps quickly compute alt-edge fair odds without re-typing each
+// projection manually.
+function copyProjStats() {
+  const isTotal = b => (b.stat || "").toUpperCase() === "GAME_TOTAL";
+  const open = bets.filter(b => b.result === "pending" && !isTotal(b));
+  if (!open.length) { showToast("No open props to copy"); return; }
+  const titleCaseStat = s => s ? s.charAt(0).toUpperCase() + s.slice(1).toLowerCase() : "";
+  // Sort by player then stat for predictable scanning
+  const STAT_ORDER_LOCAL = { "PTS":1, "REB":2, "AST":3, "PRA":4, "3PM":5, "PR":6, "PA":7, "RA":8 };
+  const sorted = [...open].sort((a, b) => {
+    const pCmp = (a.player || "").localeCompare(b.player || "");
+    if (pCmp !== 0) return pCmp;
+    const sa = STAT_ORDER_LOCAL[(a.stat || "").toUpperCase()] || 99;
+    const sb = STAT_ORDER_LOCAL[(b.stat || "").toUpperCase()] || 99;
+    return sa - sb;
+  });
+  const lines = sorted.map(b => {
+    const dirChar = (b.ou || "").toLowerCase().startsWith("u") ? "u" : "o";
+    const statLbl = ` ${titleCaseStat(b.stat)}`;
+    const lineStr = `${dirChar}${b.line}${statLbl}`;
+    const teamStr = b.team ? ` (${b.team})` : "";
+    // Decider proj: prefer the explicit decider field, fall back to b.proj
+    const projVal = (b.deciderProj != null) ? b.deciderProj : b.proj;
+    const projStr = (projVal != null) ? `Proj: ${projVal.toFixed(2)}` : `Proj: —`;
+    // Decider source in parens (e.g. "(rw)" or "(avg)") — short, lowercase
+    const srcLabelMap = { "rotowire": "rw", "roto": "rg", "saber": "sab", "dimers": "dmr", "avg": "avg" };
+    const src = b.deciderSource || "avg";
+    const srcStr = ` (${srcLabelMap[src] || src})`;
+    return `${b.player}${teamStr}   ${lineStr}   ${projStr}${srcStr}`;
+  });
+  const header = `WNBA props · ${sorted.length} open`;
+  const text = `${header}\n\n${lines.join("\n")}`;
+  copyTextToClipboard(text,
+    () => showToast(`Copied ${sorted.length} prop projection${sorted.length === 1 ? "" : "s"}`),
+    () => showToast("Copy blocked — text in console")
+  );
+}
+
 // Copy a compact WTD / MTD / YTD P&L summary respecting the active kind
 // filter. Useful for quick weekly check-ins / Discord posts.
 //   WNBA props
@@ -8896,7 +9043,7 @@ function renderTracker() {
             }).join("")}
           </div>
           <button onclick="toggleOpenOnly()" style="background:${openOnly?'#1e40af30':'#0c0d10'};border:1px solid ${openOnly?'#1e40af':'#1a1d22'};color:${openOnly?'#7dd3fc':'#d4dae3'};border-radius:6px;padding:6px 12px;font-size:11px;font-weight:700;letter-spacing:0.5px;cursor:pointer;font-family:'Inter',sans-serif;">${openOnly?'✓ OPEN ONLY':'OPEN ONLY'}</button>
-          <button onclick="copyOverallSummary()" title="Copy WTD / MTD / YTD totals" style="background:#0c0d10;border:1px solid #1e40af;color:#7dd3fc;border-radius:6px;padding:6px 12px;font-size:11px;font-weight:700;letter-spacing:0.5px;cursor:pointer;font-family:'Inter',sans-serif;">📋 OVR SMRY</button>
+          <button onclick="copyProjStats()" title="Copy decider projections for open props — for theprop.shop fair pricing calculator" style="background:#0c0d10;border:1px solid #ec4899;color:#ec4899;border-radius:6px;padding:6px 12px;font-size:11px;font-weight:700;letter-spacing:0.5px;cursor:pointer;font-family:'Inter',sans-serif;">📋 PROJ STATS</button>
         </div>
       </div>
       ${filtered.length === 0 ? '<p style="color:#525a64;font-size:13px;padding:20px 0;text-align:center;">'+(search?"No bets match search.":openOnly?"No open bets.":"No bets yet. Hit TRACK on any player.")+'</p>' : `
