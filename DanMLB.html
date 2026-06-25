@@ -3235,6 +3235,8 @@ async function openBoxScore(gameId) {
   try {
     const r = await fetch(`https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/summary?event=${gameId}`);
     const data = await r.json();
+    console.log('ESPN summary keys:', Object.keys(data));
+    console.log('linescore:', JSON.stringify(data.linescore)?.slice(0,500));
     renderBoxScore(data);
   } catch(e) {
     document.getElementById('boxscoreBody').innerHTML = '<div class="bs-loading">Failed to load box score.</div>';
@@ -3271,12 +3273,51 @@ function renderBoxScore(data) {
     </div>
   </div>`;
 
-  // linescore by inning
-  const linescore = data.boxscore?.teams;
-  if (linescore) {
-    const awayTeam = linescore.find(t=>t.homeAway==='away');
-    const homeTeam = linescore.find(t=>t.homeAway==='home');
-    const innings = awayTeam?.statistics?.find(s=>s.name==='innings')?.values || [];
+  // linescore by inning — ESPN summary uses data.linescore.lines
+  const ls = data.linescore;
+  const boxTeams = data.boxscore?.players;
+
+  if (ls?.lines?.length) {
+    const lines = ls.lines; // array of {displayValue} per inning
+    const awayVals = [], homeVals = [];
+    lines.forEach(l => {
+      awayVals.push(l.away ?? l.displayValue?.split('-')?.[0] ?? '—');
+      homeVals.push(l.home ?? l.displayValue?.split('-')?.[1] ?? '—');
+    });
+
+    // get totals from competitors
+    const hR = hS, aR = aS;
+    const awayH = ls.awayHits ?? '—';
+    const homeH = ls.homeHits ?? '—';
+    const awayE = ls.awayErrors ?? '—';
+    const homeE = ls.homeErrors ?? '—';
+
+    const numInnings = lines.length;
+    let innHeaders = '';
+    for(let i=1;i<=numInnings;i++) innHeaders += `<th>${i}</th>`;
+
+    html += `<div class="bs-linescore">
+      <table class="bs-linescore-table">
+        <tr><th></th>${innHeaders}<th>R</th><th>H</th><th>E</th></tr>
+        <tr>
+          <td>${away?.team?.abbreviation||'AWY'}</td>
+          ${awayVals.map(v=>`<td>${v}</td>`).join('')}
+          <td class="total${aWin?' winning':''}">${aR}</td>
+          <td>${awayH}</td><td>${awayE}</td>
+        </tr>
+        <tr>
+          <td>${home?.team?.abbreviation||'HME'}</td>
+          ${homeVals.map(v=>`<td>${v}</td>`).join('')}
+          <td class="total${hWin?' winning':''}">${hR}</td>
+          <td>${homeH}</td><td>${homeE}</td>
+        </tr>
+      </table>
+    </div>`;
+  } else if (data.boxscore?.teams) {
+    // fallback: try boxscore teams structure
+    const bsTeams = data.boxscore.teams;
+    const awayTeam = bsTeams.find(t=>t.homeAway==='away');
+    const homeTeam = bsTeams.find(t=>t.homeAway==='home');
     const awayInn = awayTeam?.statistics?.find(s=>s.name==='innings')?.values || [];
     const homeInn = homeTeam?.statistics?.find(s=>s.name==='innings')?.values || [];
     const awayR = awayTeam?.statistics?.find(s=>s.name==='runs')?.displayValue||aS;
@@ -3285,36 +3326,19 @@ function renderBoxScore(data) {
     const homeH = homeTeam?.statistics?.find(s=>s.name==='hits')?.displayValue||'—';
     const awayE = awayTeam?.statistics?.find(s=>s.name==='errors')?.displayValue||'—';
     const homeE = homeTeam?.statistics?.find(s=>s.name==='errors')?.displayValue||'—';
-
     const numInnings = Math.max(awayInn.length, homeInn.length, 9);
     let innHeaders = '';
     for(let i=1;i<=numInnings;i++) innHeaders += `<th>${i}</th>`;
-
-    let awayRow = '', homeRow = '';
-    for(let i=0;i<numInnings;i++) {
-      awayRow += `<td>${awayInn[i]??'—'}</td>`;
-      homeRow += `<td>${homeInn[i]??'—'}</td>`;
-    }
-
     html += `<div class="bs-linescore">
       <table class="bs-linescore-table">
         <tr><th></th>${innHeaders}<th>R</th><th>H</th><th>E</th></tr>
-        <tr>
-          <td>${away?.team?.abbreviation||'AWY'}</td>${awayRow}
-          <td class="total${aWin?' winning':''}">${awayR}</td>
-          <td>${awayH}</td><td>${awayE}</td>
-        </tr>
-        <tr>
-          <td>${home?.team?.abbreviation||'HME'}</td>${homeRow}
-          <td class="total${hWin?' winning':''}">${homeR}</td>
-          <td>${homeH}</td><td>${homeE}</td>
-        </tr>
+        <tr><td>${away?.team?.abbreviation||'AWY'}</td>${Array.from({length:numInnings},(_,i)=>`<td>${awayInn[i]??'—'}</td>`).join('')}<td class="total${aWin?' winning':''}">${awayR}</td><td>${awayH}</td><td>${awayE}</td></tr>
+        <tr><td>${home?.team?.abbreviation||'HME'}</td>${Array.from({length:numInnings},(_,i)=>`<td>${homeInn[i]??'—'}</td>`).join('')}<td class="total${hWin?' winning':''}">${homeR}</td><td>${homeH}</td><td>${homeE}</td></tr>
       </table>
     </div>`;
+  } else {
+    html += `<div style="padding:16px 20px;color:var(--sub);font-size:12px;">Linescore not available yet</div>`;
   }
-
-  // batting stats
-  const boxTeams = data.boxscore?.players;
   if (boxTeams) {
     boxTeams.forEach(team => {
       const teamName = team.team?.displayName||'';
