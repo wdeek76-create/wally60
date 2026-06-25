@@ -2838,6 +2838,9 @@ function parseMatchupCsv(text) {
 }
 // Map team names/abbreviations into a consistent lookup key.
 // CSV might have "Connecticut Sun", "CON", or "Con" — normalize to abbr.
+// Also collapses known abbr variants (PHO↔PHX, LV↔LVA, etc.) to a single
+// canonical form so the matchup lookup works regardless of which spelling
+// the CSV uses vs the scoreboard.
 const _MATCHUP_NAME_TO_ABBR = {
   "atlanta dream":"ATL", "chicago sky":"CHI", "connecticut sun":"CON",
   "dallas wings":"DAL", "golden state valkyries":"GSV", "indiana fever":"IND",
@@ -2846,13 +2849,27 @@ const _MATCHUP_NAME_TO_ABBR = {
   "seattle storm":"SEA", "toronto tempo":"TOR", "washington mystics":"WAS",
   // Common abbreviation variants that might appear in the CSV
   "lav":"LVA", "lv":"LVA", "ny":"NYL", "la":"LAS", "gs":"GSV", "wsh":"WAS",
+  "pho":"PHX", "phx":"PHX",  // PHO ↔ PHX collapse
+};
+// Final canonicalization pass — even if the input is already an abbr, it might
+// be in the non-canonical form (e.g. CSV has "PHO" but our internal key is
+// "PHX"). Map abbr → canonical abbr.
+const _MATCHUP_ABBR_CANONICAL = {
+  "PHO":"PHX", "PHX":"PHX",
+  "LV":"LVA", "LAV":"LVA", "LVA":"LVA",
+  "NY":"NYL", "NYL":"NYL",
+  "LA":"LAS", "LAS":"LAS",
+  "GS":"GSV", "GSV":"GSV",
+  "WSH":"WAS", "WAS":"WAS",
 };
 function _matchupKey(teamStr) {
   if (!teamStr) return null;
   const lc = teamStr.toLowerCase().trim();
   if (_MATCHUP_NAME_TO_ABBR[lc]) return _MATCHUP_NAME_TO_ABBR[lc];
-  // Already an abbr? Just uppercase
-  return teamStr.toUpperCase();
+  const up = teamStr.toUpperCase();
+  // Second pass: if the input is already an abbr, normalize it to canonical
+  if (_MATCHUP_ABBR_CANONICAL[up]) return _MATCHUP_ABBR_CANONICAL[up];
+  return up;
 }
 // Lookup matchup adjustment for a bet's stat against an opponent.
 // Returns { opp, stat, oppValue, leagueAvg, boostPct, favorable } or null.
@@ -5773,6 +5790,9 @@ function _copyDailyRecapFiltered(kind) {
   // Accumulator: tally W/L/P&L per period
   const acc = { yd: {w:0, l:0, pl:0}, wtd: {w:0, l:0, pl:0}, mtd: {w:0, l:0, pl:0}, ytd: {w:0, l:0, pl:0} };
   settled.forEach(b => {
+    // Voids don't count toward W-L or P&L — stake-neutral. Without this skip
+    // they were being silently counted as losses, throwing off every period.
+    if (b.result !== "hit" && b.result !== "miss") return;
     const d = parseBetDate(b);
     if (!d || isNaN(d)) return;
     const hit = b.result === "hit";
