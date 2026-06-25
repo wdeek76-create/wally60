@@ -2277,9 +2277,17 @@ function populateSourceAgreement() {
 // determine your edge. Saved on the bet so analytics can show which source
 // is most often driving your bet decisions. Stored as decider source key
 // (e.g. "rg", "rw", "dmr", "avg") + the actual projection value used.
+// Clicking the same pill again toggles it OFF — useful for correcting a
+// misclick. With no pill selected, the bet defaults to "avg" + Blended Proj.
 function setModalDecider(srcKey, projVal) {
-  window._modalDeciderSource = srcKey;
-  window._modalDeciderProj = projVal;
+  if (window._modalDeciderSource === srcKey) {
+    // Toggle off — clear the decider state entirely
+    window._modalDeciderSource = null;
+    window._modalDeciderProj = null;
+  } else {
+    window._modalDeciderSource = srcKey;
+    window._modalDeciderProj = projVal;
+  }
   updateDeciderHighlight();
 }
 
@@ -2315,6 +2323,9 @@ function updateSourceAgreement() {
   // No line typed yet → neutral pills, no badge.
   if (line == null || !side) {
     pills.forEach(p => {
+      // Skip the AVG pill — it doesn't have .src-check/.src-edge children
+      // and uses its own styling outside the agreement system.
+      if (p.dataset.src === "avg") return;
       p.style.background = "#0c0d10";
       p.style.borderColor = "#1a1d22";
       p.querySelector(".src-label").style.color = "#8b93a0";
@@ -2333,6 +2344,9 @@ function updateSourceAgreement() {
   let agree = 0, total = 0;
   pills.forEach(p => {
     const key = p.dataset.src;
+    // AVG pill has its own styling and no .src-check/.src-edge children —
+    // skip it in the agreement loop. Decider-highlight still applies to AVG.
+    if (key === "avg") return;
     const v = vals[key];
     if (v == null) return;
     total++;
@@ -2918,7 +2932,7 @@ function renderMatchupStatus() {
   if (!el) return;
   const data = getMatchupData();
   if (!data || !data.teams || Object.keys(data.teams).length === 0) {
-    el.textContent = "no data loaded";
+    el.innerHTML = `<div style="color:#525a64;">no data loaded</div>`;
     return;
   }
   const teamCount = Object.keys(data.teams).length;
@@ -2928,7 +2942,94 @@ function renderMatchupStatus() {
   else if (ago < 60) agoStr = `${ago}m ago`;
   else if (ago < 1440) agoStr = `${Math.round(ago/60)}h ago`;
   else agoStr = `${Math.round(ago/1440)}d ago`;
-  el.textContent = `${teamCount} teams loaded · ${agoStr}`;
+  el.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;color:#d4dae3;margin-bottom:10px;">
+      <span>${teamCount} teams loaded · ${agoStr}</span>
+      <button onclick="toggleMatchupHeatmap()" id="matchup-heatmap-toggle" style="background:transparent;border:1px solid #1a1d22;color:#a8b0bb;border-radius:5px;padding:3px 9px;font-size:10px;font-weight:600;cursor:pointer;font-family:'Inter',sans-serif;letter-spacing:0.4px;">HIDE</button>
+    </div>
+    <div id="matchup-heatmap-wrap">${_buildMatchupHeatmapHtml(data)}</div>
+  `;
+}
+
+// Toggle the heatmap visibility — useful when the table is taking up too much
+// space and the user just wants the upload status line.
+function toggleMatchupHeatmap() {
+  const wrap = document.getElementById("matchup-heatmap-wrap");
+  const btn = document.getElementById("matchup-heatmap-toggle");
+  if (!wrap || !btn) return;
+  if (wrap.style.display === "none") {
+    wrap.style.display = "";
+    btn.textContent = "HIDE";
+  } else {
+    wrap.style.display = "none";
+    btn.textContent = "SHOW";
+  }
+}
+
+// Build the heatmap HTML — opponent defense averages by stat with color tint
+// vs league average. Cyan = above avg (weaker defense, favorable for overs).
+// Red = below avg (stronger defense, favorable for unders).
+function _buildMatchupHeatmapHtml(data) {
+  if (!data || !data.teams) return "";
+  // Pick the stats to display — match what the bet modal uses
+  const statCols = ["PTS", "REB", "AST", "3PM", "PRA"];
+  const teamKeys = Object.keys(data.teams).sort();
+  const leagueAvg = data.leagueAvg || {};
+  // Tint helper — return rgba bg + text color based on deviation %
+  const tintFor = (val, avg) => {
+    if (val == null || avg == null || avg === 0) return { bg: "transparent", color: "#d4dae3" };
+    const devPct = ((val - avg) / avg) * 100;
+    // Clamp to ±10% for full intensity
+    const clamped = Math.max(-10, Math.min(10, devPct));
+    const intensity = Math.abs(clamped) / 10; // 0..1
+    if (devPct > 0.5) {
+      // Above average — weaker defense → cyan tint (over-favorable)
+      const alpha = (0.06 + intensity * 0.22).toFixed(2);
+      return { bg: `rgba(125,211,252,${alpha})`, color: intensity > 0.5 ? "#7dd3fc" : "#d4dae3" };
+    } else if (devPct < -0.5) {
+      // Below average — stronger defense → red tint (under-favorable)
+      const alpha = (0.06 + intensity * 0.22).toFixed(2);
+      return { bg: `rgba(248,113,113,${alpha})`, color: intensity > 0.5 ? "#f87171" : "#d4dae3" };
+    }
+    return { bg: "transparent", color: "#d4dae3" };
+  };
+  // Header
+  let html = `<div style="overflow-x:auto;border:1px solid #1a1d22;border-radius:8px;margin-top:4px;">
+    <table style="width:100%;border-collapse:collapse;font-family:'Inter',sans-serif;font-size:11px;min-width:340px;">
+      <thead>
+        <tr style="background:rgba(255,255,255,0.025);">
+          <th style="padding:6px 9px;text-align:left;color:#8b93a0;font-weight:700;letter-spacing:0.5px;text-transform:uppercase;font-size:9px;border-bottom:1px solid #1a1d22;position:sticky;left:0;background:#0c0d10;">Team</th>`;
+  statCols.forEach(stat => {
+    const avg = leagueAvg[stat];
+    const avgStr = avg != null ? avg.toFixed(1) : "—";
+    html += `<th style="padding:6px 9px;text-align:right;color:#8b93a0;font-weight:700;letter-spacing:0.4px;font-size:9px;border-bottom:1px solid #1a1d22;">
+      <div style="text-transform:uppercase;">${stat}</div>
+      <div style="font-size:8px;font-weight:500;opacity:0.7;margin-top:1px;">avg ${avgStr}</div>
+    </th>`;
+  });
+  html += `</tr></thead><tbody>`;
+  // Rows
+  teamKeys.forEach((teamName, idx) => {
+    const row = data.teams[teamName];
+    const rowBg = idx % 2 ? "rgba(255,255,255,0.012)" : "transparent";
+    html += `<tr style="background:${rowBg};">
+      <td style="padding:5px 9px;color:#d4dae3;font-weight:600;font-size:11px;border-bottom:1px solid rgba(255,255,255,0.03);position:sticky;left:0;background:${idx % 2 ? '#0d0e11' : '#0c0d10'};">${teamName}</td>`;
+    statCols.forEach(stat => {
+      const v = row[stat];
+      const avg = leagueAvg[stat];
+      const t = tintFor(v, avg);
+      const valStr = v != null ? v.toFixed(1) : "—";
+      html += `<td style="padding:5px 9px;text-align:right;font-family:'JetBrains Mono','Menlo',monospace;font-variant-numeric:tabular-nums;font-size:11px;color:${t.color};background:${t.bg};border-bottom:1px solid rgba(255,255,255,0.03);font-weight:${t.bg === 'transparent' ? '500' : '700'};">${valStr}</td>`;
+    });
+    html += `</tr>`;
+  });
+  html += `</tbody></table>
+  </div>
+  <div style="display:flex;align-items:center;gap:14px;margin-top:8px;font-size:10px;color:#8b93a0;font-family:'Inter',sans-serif;flex-wrap:wrap;">
+    <span style="display:inline-flex;align-items:center;gap:5px;"><span style="display:inline-block;width:10px;height:10px;background:rgba(125,211,252,0.28);border-radius:2px;"></span>above league avg · favorable OVER</span>
+    <span style="display:inline-flex;align-items:center;gap:5px;"><span style="display:inline-block;width:10px;height:10px;background:rgba(248,113,113,0.28);border-radius:2px;"></span>below league avg · favorable UNDER</span>
+  </div>`;
+  return html;
 }
 
 // ── DAILY LINEUPS (Rotowire) ──────────────────────────────────────────────
