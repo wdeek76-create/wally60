@@ -7366,7 +7366,186 @@ async function shareOpenPropsAsImageExclusive() {
   showToast(totalPages > 1 ? `Saved ${totalPages}` : "Saved");
 }
 
-// ── SOURCE ANALYTICS ──────────────────────────────────────────────────────
+async function shareOpenPropsAsImageDiscord() {
+  const open = bets.filter(b => b.result === "pending");
+  if (!open.length) { showToast("No open props to share"); return; }
+  const isTotal = b => (b.stat || "").toUpperCase() === "GAME_TOTAL";
+  const filtered = open.filter(b => !isTotal(b));
+  if (!filtered.length) { showToast("No open props"); return; }
+
+  const pickBest = (b) => {
+    const candidates = [{ book: b.book, odds: b.odds, fair: b.fair, line: b.line }];
+    if (Array.isArray(b.altBooks)) b.altBooks.forEach(a => { if (a && a.book && a.odds != null) candidates.push({ book: a.book, odds: a.odds, fair: a.fair != null ? a.fair : b.fair, line: a.line != null ? a.line : b.line }); });
+    let best = null;
+    candidates.forEach(c => { if (!c.fair) return; const ev = calcEdge(c.odds, c.fair); if (ev == null) return; if (!best || ev > best.ev) best = { ...c, ev }; });
+    return best;
+  };
+  const enriched = filtered.map(b => { const best = pickBest(b); return best ? { bet: b, best } : null; }).filter(x => x);
+  if (!enriched.length) { showToast("No open props"); return; }
+
+  const playerOrder = [];
+  const playerBestEv = new Map();
+  enriched.forEach(e => { const p = e.bet.player; if (!playerBestEv.has(p)) { playerOrder.push(p); playerBestEv.set(p, e.best.ev); } else if (e.best.ev > playerBestEv.get(p)) playerBestEv.set(p, e.best.ev); });
+  playerOrder.sort((a, b) => playerBestEv.get(b) - playerBestEv.get(a));
+
+  const teamToMatchup = {}, matchupTeams = {};
+  if (typeof _tickerCachedEvents !== "undefined" && Array.isArray(_tickerCachedEvents)) {
+    _tickerCachedEvents.forEach(ev => {
+      const comp = ev.competitions?.[0]; if (!comp) return;
+      const away = comp.competitors?.find(c => c.homeAway === "away");
+      const home = comp.competitors?.find(c => c.homeAway === "home");
+      const aw = away?.team?.abbreviation, hm = home?.team?.abbreviation;
+      if (!aw || !hm) return;
+      const key = `${aw} @ ${hm}`;
+      teamToMatchup[aw] = key; teamToMatchup[hm] = key;
+      if (typeof INTERNAL_TO_ESPN_ABBR !== "undefined") Object.keys(INTERNAL_TO_ESPN_ABBR).forEach(i => { const e = INTERNAL_TO_ESPN_ABBR[i]; if (e === aw || e === hm) teamToMatchup[i] = key; });
+      matchupTeams[key] = { away: aw, home: hm };
+    });
+  }
+  enriched.forEach(e => { const t = e.bet.team || ""; const et = (typeof INTERNAL_TO_ESPN_ABBR !== "undefined" && INTERNAL_TO_ESPN_ABBR[t]) || t; e.matchup = teamToMatchup[t] || teamToMatchup[et] || t || "Other"; });
+
+  const matchupBestEv = new Map();
+  enriched.forEach(e => { const m = e.matchup; if (!matchupBestEv.has(m) || e.best.ev > matchupBestEv.get(m)) matchupBestEv.set(m, e.best.ev); });
+  const matchupOrder = [...matchupBestEv.keys()].sort((a, b) => matchupBestEv.get(b) - matchupBestEv.get(a));
+  enriched.sort((a, b) => {
+    const mi = matchupOrder.indexOf(a.matchup) - matchupOrder.indexOf(b.matchup); if (mi !== 0) return mi;
+    const ai = playerOrder.indexOf(a.bet.player), bi = playerOrder.indexOf(b.bet.player); if (ai !== bi) return ai - bi;
+    return statRank(a.bet.stat) - statRank(b.bet.stat);
+  });
+
+  const propsPerMatchup = {}, propsPerPlayer = {};
+  enriched.forEach(e => { propsPerMatchup[e.matchup] = (propsPerMatchup[e.matchup] || 0) + 1; propsPerPlayer[e.bet.player] = (propsPerPlayer[e.bet.player] || 0) + 1; });
+
+  const esc = (s) => String(s == null ? "" : s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+  const days = ["SUN","MON","TUE","WED","THU","FRI","SAT"], months = ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"];
+  const now = new Date();
+  const headerDate = `${days[now.getDay()]} ${months[now.getMonth()]} ${now.getDate()} · ${now.getFullYear()}`;
+
+  const teamsNeeded = new Set();
+  enriched.forEach(e => { if (e.bet.team) teamsNeeded.add(e.bet.team); });
+  Object.values(matchupTeams).forEach(({ away, home }) => { if (away) teamsNeeded.add(away); if (home) teamsNeeded.add(home); });
+  const teamLogosMap = {};
+  showToast("Loading logos…");
+  await Promise.all(Array.from(teamsNeeded).map(async (abbr) => { const uri = await _teamLogoAsDataUri(abbr); if (uri) teamLogosMap[abbr] = uri; }));
+
+  const bookLogoHtml = (book, size) => { const sz = size||13; const data = (typeof logoFor === "function") ? logoFor(book) : null; if (data) return `<img src="${data}" alt="${esc(book)}" style="width:${sz}px;height:${sz}px;border-radius:3px;object-fit:cover;vertical-align:middle;display:inline-block;flex-shrink:0;"/>`; return `<span style="display:inline-flex;width:${sz}px;height:${sz}px;border-radius:3px;background:#1a1d22;color:#fff;font-size:${Math.round(sz*0.5)}px;font-weight:700;align-items:center;justify-content:center;vertical-align:middle;flex-shrink:0;font-family:'Inter',sans-serif;">${esc(book).slice(0,2).toUpperCase()}</span>`; };
+  const teamLogoHtml = (abbr, size) => { if (!abbr || !teamLogosMap[abbr]) return ""; const sz = size||14; return `<img src="${teamLogosMap[abbr]}" alt="${esc(abbr)}" style="width:${sz}px;height:${sz}px;object-fit:contain;vertical-align:middle;display:inline-block;flex-shrink:0;"/>`; };
+  const stopSignSvg = (size) => { const sz = size||16; return `<svg width="${sz}" height="${sz}" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg" style="vertical-align:middle;display:inline-block;flex-shrink:0;filter:drop-shadow(0 0 3px rgba(220,38,38,0.65));"><polygon points="30,5 70,5 95,30 95,70 70,95 30,95 5,70 5,30" fill="#dc2626" stroke="#fff" stroke-width="3"/><text x="50" y="62" font-family="Arial,sans-serif" font-size="28" font-weight="900" fill="#fff" text-anchor="middle">STOP</text></svg>`; };
+
+  const ESPN_TO_FULL = {"LA":"Los Angeles Sparks","NY":"New York Liberty","LV":"Las Vegas Aces","GS":"Golden State Valkyries","CON":"Connecticut Sun","IND":"Indiana Fever","CHI":"Chicago Sky","ATL":"Atlanta Dream","DAL":"Dallas Wings","MIN":"Minnesota Lynx","PHX":"Phoenix Mercury","POR":"Portland Fire","SEA":"Seattle Storm","TOR":"Toronto Tempo","WAS":"Washington Mystics"};
+  const _abbrToFull = {};
+  if (typeof _RW_TEAM_NAME_TO_ABBR !== "undefined") Object.entries(_RW_TEAM_NAME_TO_ABBR).forEach(([full, abbr]) => { _abbrToFull[abbr] = full; });
+  const fullName = (abbr) => _abbrToFull[abbr] || ESPN_TO_FULL[abbr] || abbr;
+
+  // Group by matchup
+  const byMatchup = new Map();
+  matchupOrder.forEach(m => byMatchup.set(m, []));
+  enriched.forEach(e => { if (!byMatchup.has(e.matchup)) byMatchup.set(e.matchup, []); byMatchup.get(e.matchup).push(e); });
+
+  const CARD_W = 420;
+  const playToOdds = (fair, vig) => { const p = fair / 100; const b = (vig || 5) / 100; const jp = p / (1 - b); return jp >= 0.5 ? -Math.round((jp / (1 - jp)) * 100) : Math.round(((1 - jp) / jp) * 100); };
+
+  // Build one player card HTML
+  const renderPlayerCard = (playerBets) => {
+    const b0 = playerBets[0].bet;
+    const teamAbbr = b0.team || "";
+    let h = `<div style="background:#0c0d10;border:1px solid #1a1d22;border-radius:10px;padding:12px;margin-bottom:8px;">`;
+    // Player header
+    h += `<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">`;
+    h += teamLogoHtml(teamAbbr, 20);
+    h += `<span style="font-size:15px;font-weight:800;color:#fff;letter-spacing:0.1px;">${esc(b0.player)}</span>`;
+    h += `<span style="font-size:10px;font-weight:700;color:#7dd3fc;background:rgba(125,211,252,0.1);border:1px solid rgba(125,211,252,0.25);border-radius:4px;padding:2px 6px;">${esc(teamAbbr)}</span>`;
+    h += `</div>`;
+    playerBets.forEach(({ bet, best }) => {
+      const ouLabel = bet.ou === "over" ? "OVER" : "UNDER";
+      const ouColor = bet.ou === "over" ? "#4ade80" : "#f87171";
+      const oddsStr = best.odds > 0 ? `+${best.odds}` : `${best.odds}`;
+      h += `<div style="margin-bottom:6px;">`;
+      h += `<div style="display:flex;align-items:center;gap:6px;margin-bottom:3px;">`;
+      h += `<span style="font-size:11px;font-weight:800;color:${ouColor};">${ouLabel} ${bet.line}</span>`;
+      h += `<span style="font-size:10px;font-weight:700;color:#fff;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);border-radius:4px;padding:1px 6px;">${esc(bet.stat)}</span>`;
+      h += `</div>`;
+      // Best book row
+      h += `<div style="display:flex;align-items:center;justify-content:space-between;padding:4px 8px;background:rgba(255,255,255,0.03);border:1px solid #1a1d22;border-radius:6px;margin-bottom:2px;">`;
+      h += `<div style="display:flex;align-items:center;gap:5px;font-size:11px;color:#fff;">${bookLogoHtml(best.book, 13)} ${esc(best.book)} <span style="font-size:9px;color:#7dd3fc;font-weight:700;">BEST</span></div>`;
+      h += `<span style="font-family:'JetBrains Mono','Menlo',monospace;font-size:13px;font-weight:800;color:#fff;">${oddsStr}</span>`;
+      h += `</div>`;
+      // Play to row
+      if (bet.fair != null) {
+        const pt = playToOdds(bet.fair, 5);
+        const ptStr = pt > 0 ? `+${pt}` : `${pt}`;
+        h += `<div style="display:flex;align-items:center;justify-content:space-between;padding:4px 8px;background:rgba(255,255,255,0.02);border:1px solid #1a1d22;border-radius:6px;margin-bottom:2px;">`;
+        h += `<div style="display:flex;align-items:center;gap:5px;font-size:11px;color:#fff;">${stopSignSvg(13)} Play to</div>`;
+        h += `<span style="font-family:'JetBrains Mono','Menlo',monospace;font-size:13px;font-weight:800;color:#fff;">${ptStr}</span>`;
+        h += `</div>`;
+      }
+      h += `</div>`;
+    });
+    h += `</div>`;
+    return h;
+  };
+
+  // Render full Discord image HTML — wide grid
+  const renderDiscordHtml = () => {
+    const overCount = enriched.filter(e => (e.bet.ou||"").toLowerCase() === "over").length;
+    const underCount = enriched.length - overCount;
+    let h = `<div style="font-family:'Inter','Helvetica Neue',sans-serif;background:#050507;padding:24px;width:900px;box-sizing:border-box;">`;
+    // Header
+    h += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;border-bottom:1px solid #1a1d22;padding-bottom:14px;">`;
+    h += `<div><div style="font-size:22px;font-weight:900;color:#fff;letter-spacing:-0.5px;">ballislife<span style="color:#7dd3fc;">.blend</span></div><div style="font-size:11px;color:#fff;font-weight:700;margin-top:2px;letter-spacing:0.5px;">${headerDate}</div></div>`;
+    h += `<div style="text-align:right;"><div style="font-size:28px;font-weight:900;color:#fff;">${enriched.length} props</div><div style="font-size:11px;font-weight:700;color:#fff;margin-top:2px;">${overCount} over · ${underCount} under</div></div>`;
+    h += `</div>`;
+    // Two-column grid of matchup sections
+    h += `<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">`;
+    byMatchup.forEach((bets, matchup) => {
+      const teams = matchupTeams[matchup];
+      const count = propsPerMatchup[matchup];
+      h += `<div style="background:#0a0b0d;border:1px solid #1a1d22;border-radius:12px;padding:14px;">`;
+      // Matchup header
+      h += `<div style="text-align:center;margin-bottom:12px;padding-bottom:10px;border-bottom:1px solid #1a1d22;">`;
+      h += `<div style="display:flex;align-items:center;justify-content:center;gap:6px;margin-bottom:4px;">`;
+      if (teams) { h += teamLogoHtml(teams.away, 22); }
+      h += `<span style="font-size:13px;font-weight:800;color:#fff;">${esc(fullName(teams ? teams.away : matchup))} @ ${esc(fullName(teams ? teams.home : matchup))}</span>`;
+      if (teams) { h += teamLogoHtml(teams.home, 22); }
+      h += `</div>`;
+      h += `<div style="font-size:10px;font-weight:800;color:#fff;">${count} ${count === 1 ? "prop" : "props"}</div>`;
+      h += `</div>`;
+      // Group by player
+      const playersSeen = new Map();
+      bets.forEach(e => { if (!playersSeen.has(e.bet.player)) playersSeen.set(e.bet.player, []); playersSeen.get(e.bet.player).push(e); });
+      playersSeen.forEach((playerBets) => { h += renderPlayerCard(playerBets); });
+      h += `</div>`;
+    });
+    h += `</div></div>`;
+    return h;
+  };
+
+  showToast("Generating Discord image…");
+  try { if (document.fonts && document.fonts.load) { await document.fonts.load("16px 'Inter'"); await document.fonts.ready; } } catch(e) {}
+  let blob;
+  try {
+    const h2c = await _ensureHtml2Canvas();
+    const container = document.createElement("div");
+    container.style.cssText = "position:fixed;left:-9999px;top:0;z-index:-1;";
+    container.innerHTML = renderDiscordHtml();
+    document.body.appendChild(container);
+    try {
+      const canvas = await h2c(container.firstChild, { backgroundColor: "#050507", scale: 4, logging: false, useCORS: true });
+      blob = await new Promise(res => canvas.toBlob(res, "image/png"));
+    } finally { document.body.removeChild(container); }
+  } catch(err) { console.error("Discord image failed:", err); showToast("Image failed"); return; }
+  if (!blob) { showToast("Image failed"); return; }
+  const fileDate = new Date().toISOString().slice(0, 10);
+  const file = new File([blob], `props-discord-${fileDate}.png`, { type: "image/png" });
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    try { await navigator.share({ files: [file] }); showToast("Shared"); return; } catch(err) { if (err && err.name === "AbortError") return; }
+  }
+  const url = URL.createObjectURL(file);
+  const a = document.createElement("a"); a.href = url; a.download = file.name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  showToast("Saved");
+}
 // Analyzes settled prop bets (props only — totals are tracked separately) to
 // surface which projection sources (RG, RW, DIMERS) have been profitable when
 // they agreed with the bet's side at its line. Tracks:
@@ -9558,6 +9737,7 @@ function renderTracker() {
         <button onclick="openQuickGrade()" style="background:#1e40af;border:none;color:#050507;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:700;cursor:pointer;font-family:'Inter',sans-serif;">Quick Grade</button>
         <button onclick="copyOpenPlays()" style="background:#0c0d10;border:1px solid #1e40af;color:#7dd3fc;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:600;cursor:pointer;font-family:'Inter',sans-serif;">Copy Props</button>
         <button onclick="shareOpenPropsAsImageExclusive()" title="Branded ballislife.blend card — for personal sharing" style="background:#0c0d10;border:1px solid #a78bfa;color:#a78bfa;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:600;cursor:pointer;font-family:'Inter',sans-serif;">📸 ExclusiveSC</button>
+        <button onclick="shareOpenPropsAsImageDiscord()" title="Wide grid layout optimized for Discord" style="background:#0c0d10;border:1px solid #5865f2;color:#5865f2;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:600;cursor:pointer;font-family:'Inter',sans-serif;">🖼 DiscordPic</button>
         <button onclick="shareOpenPropsAsImage()" title="Plain notes-style image — for partners" style="background:#0c0d10;border:1px solid #525a64;color:#a8b0bb;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:600;cursor:pointer;font-family:'Inter',sans-serif;">📸 PartnerSC</button>
         <button onclick="copyOpenTotals()" style="background:#0c0d10;border:1px solid #1e40af;color:#7dd3fc;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:600;cursor:pointer;font-family:'Inter',sans-serif;">Copy Totals</button>
         <button onclick="copyUA()" title="Quick grouped-by-player list — for cross-checking before adding more bets" style="background:#0c0d10;border:1px solid #7dd3fc;color:#7dd3fc;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:700;cursor:pointer;font-family:'Inter',sans-serif;letter-spacing:0.3px;">UA</button>
