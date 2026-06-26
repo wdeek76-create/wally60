@@ -1505,7 +1505,10 @@ function renderTable() {
               if (typeof injuriesByTeam !== "undefined" && injuriesByTeam?.get && r.team) {
                 const espn = (typeof INTERNAL_TO_ESPN_ABBR !== "undefined" && INTERNAL_TO_ESPN_ABBR[r.team]) || r.team;
                 const teamList = injuriesByTeam.get(r.team) || injuriesByTeam.get(espn) || [];
+                const selfNorm = norm(r.rawName || "");
                 teamList.forEach(rec => {
+                  // Never flag a player as their own conditional
+                  if (norm(rec.name || "") === selfNorm) return;
                   const s = (rec?.status || "").toLowerCase();
                   const isOut = s === "out";
                   const isUncertain = s.includes("game time") || s.includes("question") || s.includes("day-to-day") || s.includes("dtd") || s.includes("probable") || s === "p" || s === "gtd";
@@ -2535,7 +2538,9 @@ function openTrackModal(player, pos, stat, proj, team, presetDate) {
   if (typeof updateMatchupInModal === "function") updateMatchupInModal();
   if (typeof updateTeammateRiskInModal === "function") updateTeammateRiskInModal();
   if (typeof updateInjuryCtxInModal === "function") updateInjuryCtxInModal();
+  window._modalMatchupAdj = null;
   if (typeof updateBBRefAdvInModal === "function") updateBBRefAdvInModal();
+  if (typeof updateStatsSignalBorder === "function") updateStatsSignalBorder();
   const shorthand = document.getElementById("modal-shorthand");
   if (shorthand) { shorthand.value = ""; shorthand.style.borderColor = "#1a1d22"; }
   const sp = document.getElementById("shorthand-preview");
@@ -5233,11 +5238,7 @@ function updateInjuryCtxInModal() {
       else                              { sevLabel = "MINOR";    sevColor = "#a8b0bb"; sevBg = "rgba(255,255,255,0.05)"; }
     }
     const sevBadge = sevLabel ? `<span style="background:${sevBg};border:1px solid ${sevColor}55;color:${sevColor};border-radius:4px;padding:2px 7px;font-size:9px;font-weight:800;letter-spacing:0.5px;margin-left:6px;">${sevLabel}</span>` : "";
-    const advRow = causingAdv ? `<div style="display:flex;gap:12px;margin-top:5px;padding:4px 8px;background:rgba(255,255,255,0.02);border-radius:5px;">
-      ${causingAdv.usg!=null?`<span style="font-size:10px;color:#7dd3fc;font-weight:700;">USG ${causingAdv.usg.toFixed(1)}%</span>`:""}
-      ${causingAdv.per!=null?`<span style="font-size:10px;color:#d4dae3;font-weight:600;">PER ${causingAdv.per.toFixed(1)}</span>`:""}
-      ${causingAdv.ortg!=null?`<span style="font-size:10px;color:#d4dae3;font-weight:600;">ORtg ${causingAdv.ortg.toFixed(0)}</span>`:""}
-    </div>` : "";
+    const advRow = _buildAdvRow(causingAdv);
     const blurbBlock = (causingRec?.comment || causingRec?.longComment) ? `<div style="margin-top:6px;padding:7px 9px;background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.05);border-radius:6px;">
       ${causingRec.comment?`<div style="font-size:11px;color:#fff;font-weight:600;line-height:1.45;margin-bottom:${causingRec.longComment?'5px':'0'};">${causingRec.comment}</div>`:""}
       ${causingRec.longComment?`<div style="font-size:10.5px;color:#d4dae3;line-height:1.55;opacity:0.88;">${causingRec.longComment}</div>`:""}
@@ -5362,11 +5363,7 @@ function updateTeammateRiskInModal() {
     const detail = (r.detail||r.type||"").trim();
     const injLabel = _injuryStatusLabel(r.status);
     const injColor = _injuryStatusColor(r.status, r.longComment||"");
-    const advRow = adv ? `<div style="display:flex;gap:12px;margin-top:5px;padding:4px 8px;background:rgba(255,255,255,0.02);border-radius:5px;">
-      ${adv.usg!=null?`<span style="font-size:10px;color:#7dd3fc;font-weight:700;">USG ${adv.usg.toFixed(1)}%</span>`:""}
-      ${adv.per!=null?`<span style="font-size:10px;color:#d4dae3;font-weight:600;">PER ${adv.per.toFixed(1)}</span>`:""}
-      ${adv.ortg!=null?`<span style="font-size:10px;color:#d4dae3;font-weight:600;">ORtg ${adv.ortg.toFixed(0)}</span>`:""}
-    </div>` : "";
+    const advRow = _buildAdvRow(adv);
     const blurbBlock = (blurb||analysis) ? `<div style="margin-top:6px;padding:7px 9px;background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.05);border-radius:6px;">
       ${blurb?`<div style="font-size:11px;color:#fff;font-weight:600;line-height:1.45;margin-bottom:${analysis?'5px':'0'};">${esc(blurb)}</div>`:""}
       ${analysis?`<div style="font-size:10.5px;color:#d4dae3;line-height:1.55;opacity:0.88;">${esc(analysis)}</div>`:""}
@@ -5401,6 +5398,127 @@ function updateTeammateRiskInModal() {
 // _tickerCachedEvents (paired by bet.team), looks up the opp-avg row, and
 // shows a single colored bar like the Volatility row. Bar color reflects
 // favorability for the bet direction (positive favorable = green, negative = red).
+function updateStatsSignalBorder() {
+  const btn = document.getElementById("modal-save-btn-top");
+  const btn2 = document.getElementById("modal-save-btn");
+  const shorthand = document.getElementById("modal-shorthand");
+  if (!btn && !btn2) return;
+
+  const player = window._modalPlayer || (document.getElementById("modal-player-name") || {}).textContent || "";
+  const ou = (shorthand?.value || "").trim().toLowerCase().startsWith("u") ? "under" : "over";
+
+  const adv = (typeof getBBRefAdvForPlayer === "function") ? getBBRefAdvForPlayer(player) : null;
+  const matchupAdj = window._modalMatchupAdj || null; // favorable % if stored
+
+  // Score signals: +1 supports bet, -1 contradicts, 0 neutral
+  let score = 0, signals = 0;
+
+  if (adv) {
+    const usg = adv.usg || 0;
+    const ortg = adv.ortg || 0;
+
+    // USG% signal
+    if (usg >= 22) {
+      score += ou === "over" ? 1 : -1; signals++;
+    } else if (usg < 18) {
+      score += ou === "under" ? 1 : -1; signals++;
+    } else {
+      signals++; // neutral
+    }
+
+    // ORtg signal (offensive efficiency → scoring volume)
+    if (ortg >= 112) {
+      score += ou === "over" ? 1 : -1; signals++;
+    } else if (ortg < 100) {
+      score += ou === "under" ? 1 : -1; signals++;
+    } else {
+      signals++;
+    }
+  }
+
+  // Matchup signal
+  if (matchupAdj != null) {
+    if (matchupAdj >= 5) {
+      score += ou === "over" ? 1 : -1; signals++;
+    } else if (matchupAdj <= -5) {
+      score += ou === "under" ? 1 : -1; signals++;
+    } else {
+      signals++;
+    }
+  }
+
+  // Determine color
+  let color, glow, label;
+  if (signals === 0) {
+    // No data — neutral blue
+    color = "#1e40af"; glow = "rgba(30,64,175,0.4)"; label = null;
+  } else {
+    const ratio = score / signals;
+    if (ratio >= 0.5) {
+      color = "#16a34a"; glow = "rgba(22,163,74,0.5)"; label = "✓ Stats agree";
+    } else if (ratio <= -0.5) {
+      color = "#dc2626"; glow = "rgba(220,38,38,0.5)"; label = "✗ Stats conflict";
+    } else {
+      color = "#d97706"; glow = "rgba(217,119,6,0.45)"; label = "~ Mixed signals";
+    }
+  }
+
+  const input = document.getElementById("modal-shorthand");
+
+  const btnStyle = `background:${color};border:2px solid ${color};color:#fff;border-radius:8px;padding:8px 16px;font-size:12px;font-weight:800;cursor:pointer;font-family:'Inter',sans-serif;letter-spacing:0.3px;box-shadow:0 2px 12px ${glow};white-space:nowrap;transition:background 0.2s,box-shadow 0.2s;`;
+  if (btn) btn.style.cssText = btnStyle;
+  if (btn2) { btn2.style.background = color; btn2.style.boxShadow = `0 2px 8px ${glow}`; btn2.style.border = `2px solid ${color}`; }
+
+  // Glow the quick entry input border
+  if (input && signals > 0) {
+    input.style.border = `2px solid ${color}`;
+    input.style.boxShadow = `0 0 8px ${glow}, 0 0 2px ${color}`;
+    input.style.outline = "none";
+  } else if (input) {
+    input.style.border = "1px solid #1a1d22";
+    input.style.boxShadow = "none";
+  }
+
+  // Update label on top button
+  if (btn && label) btn.textContent = `Track Bet ↗  ${label}`;
+  else if (btn) btn.textContent = "Track Bet ↗";
+}
+
+function _advRoleSummary(adv) {
+  if (!adv) return "";
+  const g = adv.g || 0;
+  if (g < 5) return ""; // too few games — stats unreliable
+  const usg = adv.usg || 0, per = adv.per || 0, ortg = adv.ortg;
+  let role = "";
+  if (usg >= 28) role = "primary option";
+  else if (usg >= 23) role = "high-usage starter";
+  else if (usg >= 18) role = "rotation starter";
+  else if (usg >= 12) role = "role player";
+  else role = "bench contributor";
+  let eff = "";
+  if (per >= 22) eff = "elite efficiency";
+  else if (per >= 17) eff = "above-avg efficiency";
+  else if (per >= 12) eff = "average efficiency";
+  else if (per > 0) eff = "below-avg efficiency";
+  const ortgNote = ortg != null ? (ortg >= 115 ? ", strong offense" : ortg < 100 ? ", weak offense" : "") : "";
+  return `${role}${eff ? ` · ${eff}` : ""}${ortgNote}`;
+}
+
+function _buildAdvRow(adv, tinyText) {
+  if (!adv) return "";
+  const g = adv.g || 0;
+  if (g < 5) return `<div style="font-size:9.5px;color:#525a64;margin-top:4px;">Too few games (${g}) — adv stats unreliable</div>`;
+  const summary = _advRoleSummary(adv);
+  return `<div style="margin-top:5px;">
+    <div style="display:flex;gap:12px;padding:4px 8px;background:rgba(255,255,255,0.02);border-radius:5px;flex-wrap:wrap;">
+      ${adv.usg!=null?`<span style="font-size:10px;color:#7dd3fc;font-weight:700;">USG ${adv.usg.toFixed(1)}%</span>`:""}
+      ${adv.per!=null?`<span style="font-size:10px;color:#d4dae3;font-weight:600;">PER ${adv.per.toFixed(1)}</span>`:""}
+      ${adv.ortg!=null?`<span style="font-size:10px;color:#d4dae3;font-weight:600;">ORtg ${adv.ortg.toFixed(0)}</span>`:""}
+      ${summary?`<span style="font-size:9.5px;color:#8b93a0;font-style:italic;">${summary}</span>`:""}
+    </div>
+  </div>`;
+}
+
 function updateBBRefAdvInModal() {
   const container = document.getElementById("modal-bbref-adv");
   if (!container) return;
@@ -5411,6 +5529,8 @@ function updateBBRefAdvInModal() {
 
   const fmt = (v, dec) => v != null ? v.toFixed(dec) : "—";
   const pct = (v) => v != null ? v.toFixed(1) + "%" : "—";
+  const g = adv.g || 0;
+  const lowSample = g < 5;
 
   const stat = (label, val, color) => `
     <div style="display:flex;flex-direction:column;align-items:center;min-width:52px;">
@@ -5418,24 +5538,28 @@ function updateBBRefAdvInModal() {
       <div style="font-size:9px;color:#525a64;font-weight:700;letter-spacing:0.5px;text-transform:uppercase;margin-top:2px;">${label}</div>
     </div>`;
 
-  // Color USG% — high usage = cyan, low = muted
   const usgColor = adv.usg != null ? (adv.usg >= 28 ? "#7dd3fc" : adv.usg >= 22 ? "#d4dae3" : "#525a64") : "#525a64";
-  // Color PER — elite = cyan
   const perColor = adv.per != null ? (adv.per >= 22 ? "#7dd3fc" : adv.per >= 15 ? "#d4dae3" : "#525a64") : "#525a64";
-  // ORtg color
   const ortgColor = adv.ortg != null ? (adv.ortg >= 115 ? "#22c55e" : adv.ortg >= 105 ? "#d4dae3" : "#f87171") : "#525a64";
+  const summary = _advRoleSummary(adv);
 
   container.innerHTML = `
     <div style="background:#0a0b0d;border:1px solid #1a1d22;border-radius:8px;padding:10px 12px;">
-      <div style="font-size:10px;font-weight:700;color:#8b93a0;letter-spacing:0.5px;text-transform:uppercase;margin-bottom:8px;">Season Advanced · ${adv.g != null ? adv.g + 'g' : ''}</div>
-      <div style="display:flex;gap:0;justify-content:space-around;flex-wrap:wrap;gap:4px;">
-        ${stat("USG%", pct(adv.usg), usgColor)}
-        ${stat("PER", fmt(adv.per, 1), perColor)}
-        ${stat("ORtg", fmt(adv.ortg, 0), ortgColor)}
-        ${stat("DRtg", fmt(adv.drtg, 0), "#d4dae3")}
-        ${stat("TS%", pct(adv.ts), "#d4dae3")}
-        ${stat("AST%", pct(adv.ast), "#d4dae3")}
+      <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px;">
+        <div style="font-size:10px;font-weight:700;color:#8b93a0;letter-spacing:0.5px;text-transform:uppercase;">Season Advanced · ${g}g</div>
+        ${summary ? `<div style="font-size:9.5px;color:#a8b0bb;font-style:italic;">${summary}</div>` : ""}
       </div>
+      ${lowSample
+        ? `<div style="font-size:10px;color:#525a64;">Too few games (${g}) — stats unreliable</div>`
+        : `<div style="display:flex;justify-content:space-around;flex-wrap:wrap;gap:4px;">
+            ${stat("USG%", pct(adv.usg), usgColor)}
+            ${stat("PER", fmt(adv.per, 1), perColor)}
+            ${stat("ORtg", fmt(adv.ortg, 0), ortgColor)}
+            ${stat("DRtg", fmt(adv.drtg, 0), "#d4dae3")}
+            ${stat("TS%", pct(adv.ts), "#d4dae3")}
+            ${stat("AST%", pct(adv.ast), "#d4dae3")}
+          </div>`
+      }
     </div>`;
   container.style.display = "block";
 }
@@ -5488,6 +5612,8 @@ function updateMatchupInModal() {
   //   −5..+10 → amber (neutral-ish)
   //   ≤ −5%   → red (headwind)
   const fav = adj.favorable;  // already signed toward bet direction
+  window._modalMatchupAdj = fav; // store for stats signal border
+  if (typeof updateStatsSignalBorder === "function") updateStatsSignalBorder();
   let color, tier;
   if (fav >= 10)      { color = "#4ade80"; tier = "favorable"; }
   else if (fav >= -5) { color = "#fbbf24"; tier = "neutral"; }
@@ -10423,7 +10549,7 @@ function _rebuildBeneficiariesCache() {
     // (Salaun ↔ Salaün), apostrophe variants (O'Connor ↔ OConnor), and
     // hyphenated names uniformly. Multiple beneficiaries per blurb are all
     // captured because we iterate every match, not just the first.
-    const NAME_RUN_RE = /\b[A-ZÀ-ÖØ-Ý][a-zà-öø-ÿ'\-]+(?:\s+[A-ZÀ-ÖØ-Ý][a-zà-öø-ÿ'\-]+){0,3}\b/g;
+    const NAME_RUN_RE = /\b[A-ZÀ-ÖØ-Ý][a-zà-öø-ÿ']+(?:-[A-Za-zà-öø-ÿ']+)*(?:\s+[A-ZÀ-ÖØ-Ý][a-zà-öø-ÿ']+(?:-[A-Za-zà-öø-ÿ']+)*){0,3}\b/g;
     const matches = [...blurb.matchAll(NAME_RUN_RE)];
     const seen = new Set();  // dedupe within this blurb
     matches.forEach(m => {
@@ -10445,12 +10571,29 @@ function _rebuildBeneficiariesCache() {
         // Skip the injured player themselves
         if (cand === norm(rec.name)) break;
         seen.add(cand);
-        const displayName = rosterByNorm.get(cand);
+        // Extract the sentence containing this name for context
+        const sentences = blurb.split(/(?<=[.!?])\s+/);
+        const nameSentence = sentences.find(s => s.toLowerCase().includes(run.toLowerCase())) || "";
+        // Classify reason based on context keywords
+        let reason;
+        const ctx = nameSentence.toLowerCase();
+        const injStatus = (rec.status || "").toLowerCase();
+        const isReturning = injStatus === "probable" || injStatus === "questionable" ||
+          /expected to play|set to return|return to|making.*debut|season debut|return.*floor/.test(ctx);
+        if (isReturning) {
+          reason = `${rec.name} returning → floor risk`;
+        } else if (/cut into|cut.*playing time|limit.*minutes|reduce.*role|fewer minutes/.test(ctx)) {
+          reason = `${rec.name} out → floor risk (losing minutes)`;
+        } else if (/pick up.*slack|absorb|increased.*role|expanded.*role|larger.*role|more.*minutes|see.*more|step up|start|replace|fill in|boost|benefit|open.*minutes|playing time.*open|candidates?.*increased/.test(ctx)) {
+          reason = `${rec.name} out → ceiling (usage boost)`;
+        } else {
+          reason = `${rec.name} out → mentioned in report`;
+        }
         if (!beneficiariesCache.has(cand)) beneficiariesCache.set(cand, []);
         beneficiariesCache.get(cand).push({
           causedBy: rec.name,
           causedByStatus: rec.status,
-          reason: "mentioned in injury report"
+          reason
         });
         break;  // only tag once per matched run
       }
@@ -10783,6 +10926,9 @@ const _RW_TEAM_NAME_TO_ABBR = {
 };
 function parseRotoWireInjuries(text) {
   if (!text) return [];
+  // Strip markdown hyperlinks [text](url) → just text, and bare URLs
+  text = text.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
+  text = text.replace(/https?:\/\/\S+/g, '');
   const lines = text.split("\n").map(l => l.trim()).filter(Boolean);
   const records = [];
   const POS_TEAM_RE = /^([CFG](?:-[CFG])?)([A-Z][a-zA-Z ]+)$/;
@@ -10978,11 +11124,30 @@ function parseRotoWireInjuriesPaste() {
   const byNorm = new Map();
   records.forEach(rec => {
     const key = norm(rec.athlete.displayName);
-    if (byNorm.has(key)) return;
+    if (byNorm.has(key)) return; // RW is newest-first, keep first = most recent
     byNorm.set(key, rec);
   });
-  // Fresh paste = fresh cache. No localStorage — injury data is session-only.
-  const mergedRecords = [...byNorm.values()];
+
+  // Only keep entries dated today or yesterday — anything older is stale.
+  // RW pages show multiple days of history; we only want current news.
+  const MONTHS = {january:0,february:1,march:2,april:3,may:4,june:5,july:6,august:7,september:8,october:9,november:10,december:11};
+  const parseEntryDate = (dateStr) => {
+    if (!dateStr) return null;
+    const m = dateStr.trim().match(/^([A-Za-z]+)\s+(\d+),\s+(\d{4})$/);
+    if (!m) return null;
+    const mo = MONTHS[m[1].toLowerCase()];
+    if (mo === undefined) return null;
+    return new Date(parseInt(m[3]), mo, parseInt(m[2]));
+  };
+  const now = new Date();
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const yesterdayStart = new Date(todayStart.getTime() - 86400000);
+
+  const mergedRecords = [...byNorm.values()].filter(rec => {
+    const d = parseEntryDate(rec.date);
+    if (!d) return true; // no date = keep (week-to-week etc)
+    return d >= yesterdayStart; // today or yesterday only
+  });
   _ingestInjuryRecords(mergedRecords);
   injuriesLastFetched = Date.now();
   const msg = `${mergedRecords.length} entries loaded · ${injuriesCache.size} total`;
@@ -11171,7 +11336,7 @@ function updateInjuryPanel() {
       if (typeof beneficiariesCache !== "undefined" && beneficiariesCache) {
         beneficiariesCache.forEach((_, normName) => beneficiarySet.add(normName));
       }
-      const NAME_RUN_RE = /\b[A-ZÀ-ÖØ-Ý][a-zà-öø-ÿ'\-]+(?:\s+[A-ZÀ-ÖØ-Ý][a-zà-öø-ÿ'\-]+){0,3}\b(?![^<]*<\/span>)/g;
+      const NAME_RUN_RE = /\b[A-ZÀ-ÖØ-Ý][a-zà-öø-ÿ']+(?:-[A-Za-zà-öø-ÿ']+)*(?:\s+[A-ZÀ-ÖØ-Ý][a-zà-öø-ÿ']+(?:-[A-Za-zà-öø-ÿ']+)*){0,3}\b(?![^<]*<\/span>)/g;
       out = out.replace(NAME_RUN_RE, (run) => {
         if (run.indexOf("<strong") !== -1) return run;
         const wrap = (text, isBeneficiary) =>
@@ -11235,8 +11400,8 @@ function updateInjuryPanel() {
     const color = _injuryStatusColor(rec.status, rec.longComment || rec.comment || "");
     // Subtle metadata line below the player name
     const metaBits = [];
-    if (rec.type) metaBits.push(`<span style="color:#8b93a0;">${rec.type}${rec.detail ? ` <span style="color:#525a64;">(${rec.detail})</span>` : ""}</span>`);
-    if (rec.returnDate) metaBits.push(`<span style="color:#525a64;">ETA ${rec.returnDate}</span>`);
+    if (rec.type) metaBits.push(`<span style="color:#fff;">${rec.type}${rec.detail ? ` <span style="color:#fff;">(${rec.detail})</span>` : ""}</span>`);
+    if (rec.returnDate) metaBits.push(`<span style="color:#fff;">ETA ${rec.returnDate}</span>`);
     // Per-row bucket badge — only when the bucket meaningfully applies
     let bucketBadge = "";
     if (bucket === "today") {
@@ -11246,16 +11411,16 @@ function updateInjuryPanel() {
     }
     // "recent" bucket gets no badge — these are context entries
     const headline = rec.comment
-      ? `<div style="font-size:12.5px;color:#d4dae3;margin-top:6px;line-height:1.5;letter-spacing:0.05px;">${decorateHeadline(rec.comment)}</div>`
+      ? `<div style="font-size:12.5px;color:#fff;margin-top:6px;line-height:1.5;letter-spacing:0.05px;">${decorateHeadline(rec.comment)}</div>`
       : "";
     const analysis = rec.longComment && rec.longComment !== rec.comment
-      ? `<div style="font-size:11.5px;color:#8b93a0;margin-top:10px;line-height:1.55;padding:10px 12px;background:rgba(255,255,255,0.02);border-radius:8px;letter-spacing:0.05px;"><span style="color:#7dd3fc;font-weight:700;letter-spacing:0.6px;font-size:9.5px;text-transform:uppercase;margin-right:6px;">Analysis</span>${decorateAnalysis(rec.longComment)}</div>`
+      ? `<div style="font-size:11.5px;color:#fff;margin-top:10px;line-height:1.55;padding:10px 12px;background:rgba(255,255,255,0.02);border-radius:8px;letter-spacing:0.05px;"><span style="color:#7dd3fc;font-weight:700;letter-spacing:0.6px;font-size:9.5px;text-transform:uppercase;margin-right:6px;">Analysis</span>${decorateAnalysis(rec.longComment)}</div>`
       : "";
     return `<div style="padding:14px 0;border-bottom:1px solid rgba(255,255,255,0.04);">
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
         <span style="background:${color}1a;color:${color};font-size:9.5px;font-weight:700;letter-spacing:0.6px;border-radius:5px;padding:3px 8px;min-width:34px;text-align:center;border:1px solid ${color}33;">${label}</span>
         <span style="font-size:14.5px;font-weight:600;color:#fff;letter-spacing:-0.1px;">${rec.name}</span>
-        ${metaBits.length ? `<span style="font-size:11px;font-weight:500;letter-spacing:0.1px;">${metaBits.join(' <span style="color:#2c333d;">·</span> ')}</span>` : ""}
+        ${metaBits.length ? `<span style="font-size:11px;font-weight:500;letter-spacing:0.1px;">${metaBits.join(' <span style="color:#525a64;">·</span> ')}</span>` : ""}
         ${bucketBadge ? `<span style="margin-left:auto;">${bucketBadge}</span>` : ""}
       </div>
       ${headline}
@@ -13548,7 +13713,7 @@ loadBets();
         injuriesCache.forEach((entry) => { if (entry.name && !rosterByNorm.has(norm(entry.name))) rosterByNorm.set(norm(entry.name), entry.name); });
       }
       if (rosterByNorm.size > 0) {
-        const NAME_RUN_RE = /\b[A-ZÀ-ÖØ-Ý][a-zà-öø-ÿ'\-]+(?:\s+[A-ZÀ-ÖØ-Ý][a-zà-öø-ÿ'\-]+){0,3}\b(?![^<]*<\/span>)/g;
+        const NAME_RUN_RE = /\b[A-ZÀ-ÖØ-Ý][a-zà-öø-ÿ']+(?:-[A-Za-zà-öø-ÿ']+)*(?:\s+[A-ZÀ-ÖØ-Ý][a-zà-öø-ÿ']+(?:-[A-Za-zà-öø-ÿ']+)*){0,3}\b(?![^<]*<\/span>)/g;
         out = out.replace(NAME_RUN_RE, (run) => {
           const fullNorm = norm(run);
           if (rosterByNorm.has(fullNorm)) {
@@ -15610,7 +15775,7 @@ document.addEventListener("DOMContentLoaded", () => {
         <label>Quick Entry</label>
         <input type="text" id="modal-shorthand" placeholder="u17.5 +111 fd 11.77"
           autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
-          oninput="parseShorthand(this)"
+          oninput="parseShorthand(this); if(typeof updateStatsSignalBorder==='function') updateStatsSignalBorder();"
           onkeydown="if(event.key==='Enter'){event.preventDefault();saveBet();}"/>
         <div id="shorthand-preview" style="font-size:11px;color:#d4dae3;margin-top:4px;min-height:14px;"></div>
       </div>
