@@ -6717,7 +6717,9 @@ async function shareOpenPropsAsImage() {
 
   // Chunk by player — keep all of a player's bets together. PartnerSC is more
   // compact per row than ExclusiveSC, so we can fit slightly more per image.
-  const MAX_BETS_PER_IMAGE = 12;
+  // Chunk by matchup — each matchup starts a new image so cards stay clean.
+  // If a single matchup has too many bets, split it further by player groups.
+  const MAX_BETS_PER_IMAGE = 6;
   const playerGroups = [];
   {
     let curPlayer = null;
@@ -6734,11 +6736,13 @@ async function shareOpenPropsAsImage() {
   }
   const chunks = [];
   let _curChunk = [];
+  let _curMatchup = null;
   playerGroups.forEach(group => {
-    if (_curChunk.length > 0 && _curChunk.length + group.length > MAX_BETS_PER_IMAGE) {
-      chunks.push(_curChunk);
-      _curChunk = [];
-    }
+    const groupMatchup = group[0]?.matchup;
+    const matchupChanged = _curMatchup !== null && groupMatchup !== _curMatchup;
+    const tooLong = _curChunk.length > 0 && _curChunk.length + group.length > MAX_BETS_PER_IMAGE;
+    if (matchupChanged || tooLong) { chunks.push(_curChunk); _curChunk = []; }
+    _curMatchup = groupMatchup;
     _curChunk.push(...group);
   });
   if (_curChunk.length) chunks.push(_curChunk);
@@ -10361,6 +10365,9 @@ function _rebuildBeneficiariesCache() {
   if (typeof merged !== "undefined" && merged && merged.length) {
     merged.forEach(r => { if (r.rawName) rosterByNorm.set(norm(r.rawName), r.rawName); });
   }
+  // Also add everyone currently in injuriesCache — so players mentioned in
+  // blurbs get ceiling badges even if they have no projections loaded today.
+  injuriesCache.forEach((entry, key) => { if (entry.name && !rosterByNorm.has(key)) rosterByNorm.set(key, entry.name); });
   if (rosterByNorm.size === 0) return;
   // Upside phrases to detect — same list used by the analysis highlighter.
   // We don't require all phrases; one match is enough to tag a player as a beneficiary.
@@ -10953,13 +10960,19 @@ function parseRotoWireInjuriesPaste() {
     if (byNorm.has(key)) return;
     byNorm.set(key, rec);
   });
-  const mergedRecords = [...byNorm.values()];
+  // Filter to today's news + ongoing situations only — drop stale game-specific entries
+  const filtered = [...byNorm.values()].filter(rec => {
+    const isOngoing = (typeof _injuryIsOngoing === "function") && _injuryIsOngoing(rec);
+    const isToday = (typeof _injuryIsForToday === "function") && _injuryIsForToday(rec);
+    return isOngoing || isToday;
+  });
+  const mergedRecords = filtered.length > 0 ? filtered : [...byNorm.values()]; // fallback if all filtered
   _ingestInjuryRecords(mergedRecords);
   injuriesLastFetched = Date.now();
   try {
     localStorage.setItem("wnba_injuries_cache", JSON.stringify({ records: mergedRecords, fetchedAt: injuriesLastFetched }));
   } catch(e) {}
-  const msg = `${records.length} entries loaded · ${injuriesCache.size} total`;
+  const msg = `${mergedRecords.length} of ${records.length} entries (today) · ${injuriesCache.size} total`;
   if (status) { status.textContent = msg; status.style.color = "#22c55e"; }
   showToast(`Parsed ${records.length} RotoWire entries`);
   if (ta) ta.value = "";
@@ -11078,8 +11091,8 @@ function updateInjuryPanel() {
 
   // Build a roster name lookup so we can bold players in analysis blurbs.
   // Uses both first+last name and last name alone (handles "Williams" matching "Courtney Williams").
-  const rosterNames = new Map();        // normalized → display raw
-  const rosterLastNames = new Map();    // normalized last → display raw (only if unambiguous)
+  const rosterNames = new Map();
+  const rosterLastNames = new Map();
   if (typeof merged !== "undefined" && merged && merged.length) {
     merged.forEach(r => {
       if (!r.rawName) return;
@@ -11088,6 +11101,15 @@ function updateInjuryPanel() {
       const lastNorm = norm(last);
       if (!rosterLastNames.has(lastNorm)) rosterLastNames.set(lastNorm, [r.rawName]);
       else rosterLastNames.get(lastNorm).push(r.rawName);
+    });
+  }
+  // Also add everyone in injuriesCache so mentioned players get highlighted
+  // even if they have no projections loaded today
+  if (typeof injuriesCache !== "undefined" && injuriesCache) {
+    injuriesCache.forEach((entry) => {
+      if (!entry.name) return;
+      const n = norm(entry.name);
+      if (!rosterNames.has(n)) rosterNames.set(n, entry.name);
     });
   }
   // Decorates an analysis blurb: bolds roster players, highlights key signal words.
