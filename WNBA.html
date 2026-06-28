@@ -8262,7 +8262,9 @@ async function shareOpenPropsAsImageExclusive() {
     const subtitle = `<span>${enriched.length} ${enriched.length === 1 ? "prop" : "props"}</span><span style="margin-left:14px;">${overCount} over</span><span style="margin-left:14px;">${underCount} under</span>`;
 
     // Wrapper uses Inter (Results page font). Odds + team abbrs explicitly use Thernaly.
-    let h = `<div id="_propsImageRootEx${pageIdx}" style="width:380px;background:#0c0d10;border:1px solid #1a1d22;border-radius:18px;padding:22px 18px 20px;font-family:'Inter',sans-serif;color:#fff;box-sizing:border-box;">`;
+    // Outer pad container gives the card's glow room to render without html2canvas
+    // clipping it to the card bounds.
+    let h = `<div style="display:inline-block;padding:18px;background:#070809;box-sizing:border-box;"><div id="_propsImageRootEx${pageIdx}" style="width:380px;background:#0c0d10;border:1px solid #283041;border-radius:18px;padding:22px 18px 20px;font-family:'Inter',sans-serif;color:#fff;box-sizing:border-box;box-shadow:0 0 0 1px rgba(125,211,252,0.06),0 6px 30px rgba(125,211,252,0.07),inset 0 1px 0 rgba(255,255,255,0.02);">`;
 
     // Header: date + counts (white/bold) on left, page indicator pinned to top-right corner.
     h += `<div style="margin-bottom:22px;padding-bottom:16px;border-bottom:1px solid #1a1d22;display:flex;justify-content:space-between;align-items:flex-start;gap:16px;">`;
@@ -8429,7 +8431,8 @@ async function shareOpenPropsAsImageExclusive() {
     if (playerBlockOpen) h += `</div></div>`;
     if (matchupBlockOpen) h += `</div>`;
     // no footer tagline
-    h += `</div>`;
+    h += `</div>`;   // close card
+    h += `</div>`;   // close outer pad wrapper (glow halo room)
     return h;
   }
 
@@ -8584,19 +8587,37 @@ async function shareOpenPropsAsImageDiscord() {
   const renderMatchupCol = (matchupKey, matchupBets) => {
     const teams = matchupTeams[matchupKey];
     const count = propsPerMatchup[matchupKey];
-    let h = `<div style="background:#0a0b0d;border:1px solid #1a1d22;border-radius:14px;padding:16px;">`;
-    // Matchup header
-    h += `<div style="text-align:center;padding:10px 14px;background:rgba(255,255,255,0.02);border:1px solid #1a1d22;border-radius:8px;margin-bottom:14px;">`;
-    h += `<div style="display:flex;align-items:center;justify-content:center;gap:6px;margin-bottom:4px;">`;
-    if (teams) { h += teamLogoHtml(teams.away, 18); h += teamLogoHtml(teams.home, 18); }
+    let h = `<div style="background:#0a0b0d;border:1px solid #283041;border-radius:14px;padding:16px;box-shadow:0 0 0 1px rgba(125,211,252,0.05),0 4px 22px rgba(125,211,252,0.06),inset 0 1px 0 rgba(255,255,255,0.02);height:100%;box-sizing:border-box;display:flex;flex-direction:column;">`;
+    // Matchup header — compact: logos + matchup on one line, time · count below.
+    h += `<div style="text-align:center;padding:8px 12px;background:rgba(125,211,252,0.03);border:1px solid #1a1d22;border-radius:8px;margin-bottom:12px;">`;
+    h += `<div style="display:flex;align-items:center;justify-content:center;gap:6px;margin-bottom:3px;">`;
+    if (teams) { h += teamLogoHtml(teams.away, 15); h += teamLogoHtml(teams.home, 15); }
+    const _matchLabel = teams
+      ? `${esc(fullName(teams.away))} @ ${esc(fullName(teams.home))}`
+      : esc(fullName(matchupKey));
+    h += `<span style="font-size:11px;font-weight:800;color:#fff;">${_matchLabel}</span>`;
     h += `</div>`;
-    h += `<div style="font-size:12px;font-weight:800;color:#fff;margin-bottom:2px;">${esc(fullName(teams ? teams.away : matchupKey))} @ ${esc(fullName(teams ? teams.home : matchupKey))}</div>`;
     const _gt2 = teams && teams.date ? _fmtGameTime(teams.date) : null;
-    if (_gt2) h += `<div style="font-size:9px;font-weight:700;color:#9ca3af;letter-spacing:0.4px;margin-bottom:3px;">${_gt2}</div>`;
-    h += `<div style="font-size:10px;font-weight:800;color:#fff;">${count} ${count===1?"prop":"props"}</div>`;
+    h += `<div style="font-size:9px;font-weight:700;color:#9ca3af;letter-spacing:0.3px;">${_gt2 ? esc(_gt2) + " · " : ""}${count} ${count===1?"prop":"props"}</div>`;
     h += `</div>`;
 
     let lastPlayer = null, playerBlockOpen = false;
+    // Count the visible odds rows for one prop (best + same-line books + play-to
+    // + alt groups), so we can pad every prop to the same row count.
+    const countRows = ({ bet, best }) => {
+      const bestLine = best.line != null ? best.line : bet.line;
+      const allPrices = [{ book: bet.book, odds: bet.odds, line: bet.line, fair: bet.fair }];
+      if (Array.isArray(bet.altBooks)) bet.altBooks.forEach(a => { if (a && a.book && a.odds != null) allPrices.push({ book: a.book, odds: a.odds, line: a.line!=null?a.line:bet.line, fair: a.fair!=null?a.fair:bet.fair }); });
+      const seen = new Set();
+      const remaining = allPrices.filter(p => { if (p.book===best.book && p.odds===best.odds && p.line===bestLine) return false; const k=`${p.book}|${p.odds}|${p.line}`; if (seen.has(k)) return false; seen.add(k); return true; });
+      const sameLine = remaining.filter(p => (p.line??bet.line)===bestLine);
+      let n = 1 + sameLine.length + 1; // best + same-line books + play-to
+      const diffGroups = {};
+      remaining.forEach(p => { if ((p.line??bet.line)===bestLine) return; const k=String(p.line); if (!diffGroups[k]) diffGroups[k]=[]; diffGroups[k].push(p); });
+      Object.values(diffGroups).forEach(items => { n += 1 + items.length + 1; });
+      return n;
+    };
+    const maxRows = Math.max(1, ...matchupBets.map(countRows));
     matchupBets.forEach(({ bet, best }) => {
       if (bet.player !== lastPlayer) {
         if (playerBlockOpen) h += `</div></div>`;
@@ -8644,6 +8665,12 @@ async function shareOpenPropsAsImageDiscord() {
         return dirLabel + rows + altPtRow;
       });
       if (altLineRows.length) { h += `<div style="margin-top:8px;"><div style="font-size:9px;font-weight:800;color:#fff;letter-spacing:0.8px;margin-bottom:5px;">ALTS</div>${altLineRows.join("")}</div>`; }
+      // Pad with blank rows so every prop box has the same number of odds rows.
+      const renderedRows = countRows({ bet, best });
+      const padCount = Math.max(0, maxRows - renderedRows);
+      for (let _p = 0; _p < padCount; _p++) {
+        h += `<div style="padding:5px 9px;border-radius:6px;background:rgba(255,255,255,0.012);border:1px solid #121519;margin-bottom:3px;height:13px;"></div>`;
+      }
       h += `</div>`;
     });
     if (playerBlockOpen) h += `</div></div>`;
@@ -8658,18 +8685,106 @@ async function shareOpenPropsAsImageDiscord() {
 
   const overCount = enriched.filter(e => (e.bet.ou||"").toLowerCase()==="over").length;
   const underCount = enriched.length - overCount;
-  const cols = Math.min(byMatchup.size, 3); // 1, 2, or 3 columns depending on matchup count
+
+  // ── Uniform prop-box renderer ──────────────────────────────────────────────
+  // One box = one prop (player + line + stat + all odds rows). Every box padded
+  // to the SAME number of odds rows (maxRows) so they're identical height and
+  // lock into a clean grid. Slight glow on each.
+  const countPropRows = (bet, best) => {
+    const bestLine = best.line != null ? best.line : bet.line;
+    const allPrices = [{ book: bet.book, odds: bet.odds, line: bet.line, fair: bet.fair }];
+    if (Array.isArray(bet.altBooks)) bet.altBooks.forEach(a => { if (a && a.book && a.odds != null) allPrices.push({ book: a.book, odds: a.odds, line: a.line!=null?a.line:bet.line, fair: a.fair!=null?a.fair:bet.fair }); });
+    const seen = new Set();
+    const remaining = allPrices.filter(p => { if (p.book===best.book && p.odds===best.odds && p.line===bestLine) return false; const k=`${p.book}|${p.odds}|${p.line}`; if (seen.has(k)) return false; seen.add(k); return true; });
+    const sameLine = remaining.filter(p => (p.line??bet.line)===bestLine);
+    let n = 1 + sameLine.length + 1; // best + same-line books + play-to
+    const diffGroups = {};
+    remaining.forEach(p => { if ((p.line??bet.line)===bestLine) return; const k=String(p.line); if (!diffGroups[k]) diffGroups[k]=[]; diffGroups[k].push(p); });
+    Object.values(diffGroups).forEach(items => { n += 1 + items.length + 1; });
+    return n;
+  };
+  const renderPropBox = (bet, best, maxRows) => {
+    const statName = (typeof STAT_FULL_NAME !== "undefined" && STAT_FULL_NAME[bet.stat]) ? STAT_FULL_NAME[bet.stat] : bet.stat;
+    const statLabel = String(statName).toUpperCase();
+    const ouUpper = (bet.ou||"").toUpperCase();
+    const bestLine = best.line != null ? best.line : bet.line;
+    const allPrices = [{ book: bet.book, odds: bet.odds, line: bet.line, fair: bet.fair }];
+    if (Array.isArray(bet.altBooks)) bet.altBooks.forEach(a => { if (a && a.book && a.odds != null) allPrices.push({ book: a.book, odds: a.odds, line: a.line!=null?a.line:bet.line, fair: a.fair!=null?a.fair:bet.fair }); });
+    const seen2 = new Set();
+    const remaining = allPrices.filter(p => { if (p.book===best.book && p.odds===best.odds && p.line===bestLine) return false; const k=`${p.book}|${p.odds}|${p.line}`; if (seen2.has(k)) return false; seen2.add(k); return true; });
+    const sameLine = remaining.filter(p => (p.line??bet.line)===bestLine).sort((a,b)=>b.odds-a.odds);
+    const headlinePlayTo = sameLine.length>0 ? null : playToOdds2(best.fair,5);
+    let playToValue = headlinePlayTo;
+    if (playToValue==null && sameLine.length>0) { const gf = sameLine.reduce((f,p)=>(p.fair!=null&&(f==null||p.fair<f))?p.fair:f, best.fair); playToValue = playToOdds2(gf,5); }
+    const playToStr = playToValue!=null ? (playToValue>0?`+${playToValue}`:`−${Math.abs(playToValue)}`) : null;
+    const tPillLogo = teamLogoHtml(bet.team, 12);
+
+    let b = `<div style="background:#0a0b0d;border:1px solid #283041;border-radius:11px;padding:12px;box-shadow:0 0 0 1px rgba(125,211,252,0.05),0 4px 18px rgba(125,211,252,0.06),inset 0 1px 0 rgba(255,255,255,0.02);box-sizing:border-box;display:flex;flex-direction:column;">`;
+    // player + team
+    b += `<div style="display:flex;align-items:center;gap:6px;margin-bottom:7px;flex-wrap:wrap;">`;
+    b += `<span style="font-size:13px;font-weight:800;color:#fff;">${esc(bet.player)}</span>`;
+    if (bet.team) b += `<span style="display:inline-flex;align-items:center;gap:3px;background:rgba(125,211,252,0.08);border:1px solid rgba(125,211,252,0.30);padding:2px 6px;border-radius:20px;font-size:8px;font-weight:800;color:#7dd3fc;letter-spacing:0.4px;">${tPillLogo}${esc(bet.team)}</span>`;
+    b += `</div>`;
+    // line + stat chip
+    b += `<div style="display:flex;align-items:center;margin-bottom:7px;"><span style="color:#fff;font-size:13px;font-weight:800;">${ouUpper} ${bestLine}</span><span style="display:inline-block;background:rgba(125,211,252,0.10);border:1px solid rgba(125,211,252,0.25);padding:2px 9px;border-radius:20px;font-size:8px;font-weight:800;color:#7dd3fc;letter-spacing:0.5px;margin-left:7px;">${statLabel}</span></div>`;
+    // odds rows
+    [{ book: best.book, odds: best.odds, isBest: true }, ...sameLine.map(p=>({book:p.book,odds:p.odds,isBest:false}))].forEach(p => {
+      const rowBg = p.isBest ? `background:rgba(125,211,252,0.05);border:1px solid rgba(125,211,252,0.18);` : `background:rgba(255,255,255,0.02);border:1px solid #1a1d22;`;
+      const oddsColor = p.isBest ? `#7dd3fc` : `#fff`;
+      const bestLabel = p.isBest ? `<span style="font-size:7px;font-weight:800;color:#7dd3fc;margin-left:3px;">BEST</span>` : ``;
+      b += `<div style="display:flex;align-items:center;justify-content:space-between;padding:4px 8px;border-radius:6px;${rowBg}margin-bottom:3px;"><div style="display:flex;align-items:center;gap:5px;font-size:10px;color:#fff;">${bookLogoHtml(p.book,13)}${esc(p.book)}${bestLabel}</div><span style="font-family:'JetBrains Mono','Menlo',monospace;font-size:11px;font-weight:700;color:${oddsColor};">${fmtOdds(p.odds)}</span></div>`;
+    });
+    if (playToStr) b += `<div style="display:flex;align-items:center;justify-content:space-between;padding:4px 8px;border-radius:6px;background:rgba(255,255,255,0.02);border:1px solid #1a1d22;margin-bottom:3px;"><div style="display:flex;align-items:center;gap:5px;font-size:10px;color:#fff;">${stopSignSvg(13)} Play to</div><span style="font-family:'JetBrains Mono','Menlo',monospace;font-size:11px;font-weight:800;color:#fff;">${playToStr}</span></div>`;
+    // alt lines
+    const diffLineGroups = {};
+    remaining.forEach(p => { if ((p.line??bet.line)===bestLine) return; const k=String(p.line); if (!diffLineGroups[k]) diffLineGroups[k]={line:p.line,fair:p.fair,items:[]}; diffLineGroups[k].items.push(p); });
+    Object.values(diffLineGroups).forEach(g => {
+      g.items.sort((a,b)=>b.odds-a.odds);
+      b += `<div style="font-size:9px;font-weight:800;color:#7dd3fc;margin:3px 0;">${ouUpper} ${g.line}</div>`;
+      g.items.forEach(p => { b += `<div style="display:flex;align-items:center;justify-content:space-between;padding:4px 8px;border-radius:6px;background:rgba(255,255,255,0.02);border:1px solid #1a1d22;margin-bottom:3px;"><div style="display:flex;align-items:center;gap:5px;font-size:10px;color:#fff;">${bookLogoHtml(p.book,12)}${esc(p.book)}</div><span style="font-family:'JetBrains Mono','Menlo',monospace;font-size:11px;font-weight:700;color:#fff;">${fmtOdds(p.odds)}</span></div>`; });
+      const altPt = g.fair!=null ? playToOdds2(g.fair,5) : null;
+      if (altPt!=null) b += `<div style="display:flex;align-items:center;justify-content:space-between;padding:4px 8px;border-radius:6px;background:rgba(255,255,255,0.02);border:1px solid #1a1d22;margin-bottom:3px;"><div style="display:flex;align-items:center;gap:5px;font-size:10px;color:#fff;">${stopSignSvg(12)} Play to</div><span style="font-family:'JetBrains Mono','Menlo',monospace;font-size:11px;font-weight:800;color:#fff;">${altPt>0?`+${altPt}`:`−${Math.abs(altPt)}`}</span></div>`;
+    });
+    // pad blank rows to maxRows so all boxes are identical height
+    const rendered = countPropRows(bet, best);
+    for (let _p = 0; _p < Math.max(0, maxRows - rendered); _p++) {
+      b += `<div style="padding:4px 8px;border-radius:6px;background:rgba(255,255,255,0.012);border:1px solid #121519;margin-bottom:3px;height:12px;"></div>`;
+    }
+    b += `</div>`;
+    return b;
+  };
+
+  // Global max odds rows across EVERY prop → all boxes identical height.
+  const globalMaxRows = Math.max(1, ...enriched.map(e => countPropRows(e.bet, e.best)));
+  // Boxes per row.
+  const BOX_COLS = Math.min(enriched.length, 4);
+  const BOX_W = 300; // px per box
+  const totalW = BOX_COLS * BOX_W + (BOX_COLS - 1) * 14 + 48;
 
   const renderDiscordHtml = () => {
-    let h = `<div style="font-family:'Inter','Helvetica Neue',sans-serif;background:#0c0d10;border:1px solid #1a1d22;border-radius:18px;padding:24px;width:${cols===1?420:cols===2?860:1260}px;box-sizing:border-box;">`;
-    // Header — same as ExclusiveSC
-    h += `<div style="margin-bottom:20px;padding-bottom:16px;border-bottom:1px solid #1a1d22;display:flex;justify-content:space-between;align-items:flex-start;">`;
-    h += `<div><div style="font-size:18px;font-weight:800;color:#fff;letter-spacing:-0.2px;">${niceDate}</div><div style="font-size:12px;font-weight:700;color:#fff;margin-top:9px;">${enriched.length} ${enriched.length===1?"prop":"props"} &nbsp;·&nbsp; ${overCount} over &nbsp;·&nbsp; ${underCount} under</div></div>`;
+    let h = `<div style="font-family:'Inter','Helvetica Neue',sans-serif;background:#0c0d10;border:1px solid #1a1d22;border-radius:18px;padding:24px;width:${totalW}px;box-sizing:border-box;">`;
+    h += `<div style="margin-bottom:20px;padding-bottom:16px;border-bottom:1px solid #1a1d22;">`;
+    h += `<div style="font-size:18px;font-weight:800;color:#fff;letter-spacing:-0.2px;">${niceDate}</div><div style="font-size:12px;font-weight:700;color:#fff;margin-top:9px;">${enriched.length} ${enriched.length===1?"prop":"props"} &nbsp;·&nbsp; ${overCount} over &nbsp;·&nbsp; ${underCount} under</div>`;
     h += `</div>`;
-    // Matchup columns
-    h += `<div style="display:grid;grid-template-columns:repeat(${cols},1fr);gap:14px;">`;
-    byMatchup.forEach((mbets, key) => { h += renderMatchupCol(key, mbets); });
-    h += `</div></div>`;
+    // Per game: a compact full-width header, then that game's prop boxes in a grid.
+    byMatchup.forEach((mbets, key) => {
+      if (!mbets.length) return;
+      const teams = matchupTeams[key];
+      const count = propsPerMatchup[key];
+      const _gt = teams && teams.date ? _fmtGameTime(teams.date) : null;
+      const matchLabel = teams ? `${esc(fullName(teams.away))} @ ${esc(fullName(teams.home))}` : esc(fullName(key));
+      // compact game header
+      h += `<div style="display:flex;align-items:center;gap:7px;margin:4px 0 10px;padding:7px 12px;background:rgba(125,211,252,0.04);border:1px solid #1a1d22;border-radius:8px;">`;
+      if (teams) { h += teamLogoHtml(teams.away, 15); h += teamLogoHtml(teams.home, 15); }
+      h += `<span style="font-size:12px;font-weight:800;color:#fff;">${matchLabel}</span>`;
+      h += `<span style="font-size:9px;font-weight:700;color:#9ca3af;margin-left:auto;">${_gt ? esc(_gt)+" · " : ""}${count} ${count===1?"prop":"props"}</span>`;
+      h += `</div>`;
+      // prop boxes grid
+      h += `<div style="display:grid;grid-template-columns:repeat(${BOX_COLS},1fr);gap:14px;align-items:stretch;margin-bottom:18px;">`;
+      mbets.forEach(({ bet, best }) => { h += renderPropBox(bet, best, globalMaxRows); });
+      h += `</div>`;
+    });
+    h += `</div>`;
     return h;
   };
 
@@ -15843,11 +15958,6 @@ function renderScheduleModalBody() {
       { date: tomorrow, events: tomorrowEvents },
     ];
   }
-  const sectionsWithGames = sections.filter(s => s.events.length > 0);
-  if (sectionsWithGames.length === 0) {
-    body.innerHTML = `<div style="padding:32px 24px;text-align:center;color:#8b93a0;font-size:13px;">No WNBA games in the next 7 days.</div>`;
-    return;
-  }
   body.innerHTML = sections.map(({ date, events }) => renderScheduleSection(date, events)).filter(Boolean).join("");
   // Aggregate total games across all days for the modal header sub-line
   const totalGames = sections.reduce((s, x) => s + x.events.length, 0);
@@ -15859,7 +15969,6 @@ function renderScheduleModalBody() {
   }
 }
 function renderScheduleSection(date, events) {
-  if (!events || events.length === 0) return "";
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   const d = new Date(date);
@@ -15870,6 +15979,22 @@ function renderScheduleSection(date, events) {
   if (isToday) label = "Today";
   else if (diffDays === 1) label = "Tomorrow";
   else label = date.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+  // No games this day → show a DAY OFF row so the date still appears.
+  if (!events || events.length === 0) {
+    const dateStr = date.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+    const headerStyle = isToday
+      ? `padding:14px 20px 8px 20px;display:flex;align-items:center;gap:8px;background:linear-gradient(180deg,rgba(125,211,252,0.06) 0%,transparent 100%);border-top:1px solid rgba(125,211,252,0.12);`
+      : `padding:14px 20px 6px 20px;display:flex;align-items:center;gap:8px;`;
+    const labelColor = isToday ? "#7dd3fc" : "#a8b0bb";
+    return `
+      <div style="${headerStyle}">
+        <span style="font-size:${isToday ? 11 : 10}px;color:${labelColor};letter-spacing:1.4px;font-weight:${isToday ? 800 : 700};text-transform:uppercase;">${label}</span>
+      </div>
+      <div style="display:flex;align-items:center;justify-content:center;gap:10px;padding:18px 20px;border-left:3px solid #2c333d;">
+        <span style="font-size:13px;font-weight:800;letter-spacing:2px;color:#525a64;text-transform:uppercase;">Day Off</span>
+        <span style="font-size:11px;color:#3d4450;">${escapeHtmlBasic(dateStr)}</span>
+      </div>`;
+  }
   const rows = events.map(ev => renderScheduleRow(ev, isToday)).filter(Boolean).join("");
   if (!rows) return "";
   const gameCount = events.length;
@@ -15887,7 +16012,7 @@ function renderScheduleSection(date, events) {
   return `
     <div style="padding:14px 20px 6px 20px;display:flex;align-items:center;gap:8px;">
       <span style="font-size:10px;color:#a8b0bb;letter-spacing:1.4px;font-weight:700;text-transform:uppercase;">${label}</span>
-      <span style="font-size:9px;color:#525a64;font-weight:600;background:rgba(125,211,252,0.06);padding:2px 7px;border-radius:4px;letter-spacing:0.4px;">${gameCount} ${gameCount === 1 ? "game" : "games"}</span>
+      <span style="font-size:9px;color:#7dd3fc;font-weight:700;background:rgba(125,211,252,0.10);border:1px solid rgba(125,211,252,0.28);padding:2px 7px;border-radius:4px;letter-spacing:0.4px;">${gameCount} ${gameCount === 1 ? "game" : "games"}</span>
     </div>
     ${rows}`;
 }
@@ -16053,6 +16178,34 @@ function renderScheduleExpandContent(summary) {
   const state = summary?.header?.competitions?.[0]?.status?.type?.state;
   const teams = summary?.boxscore?.players || [];
   const injuries = summary?.injuries || [];
+  // Build a map of YOUR tracked bets by normalized player name, so we can
+  // surface them right on the box score (highlight the player + show the line
+  // and whether it's currently hitting based on live/final stats).
+  let betsByPlayer = {};
+  try {
+    loadBets();
+    if (typeof bets !== "undefined" && Array.isArray(bets)) {
+      bets.forEach(b => {
+        if (!b.player || !b.stat || b.line == null) return;
+        if (b.stat === "GAME_TOTAL" || b.stat === "GAME_SPREAD") return;
+        const k = norm(b.player);
+        if (!betsByPlayer[k]) betsByPlayer[k] = [];
+        betsByPlayer[k].push(b);
+      });
+    }
+  } catch (e) {}
+  // Given a player's live stat line, decide if a bet is currently hitting.
+  const STAT_FROM_BET = { PTS: "pts", REB: "reb", AST: "ast", PRA: "pra", "3PM": "threepm" };
+  const betActual = (b, line) => {
+    // line = {pts, reb, ast, tpm}. Returns the current value for the bet's stat, or null.
+    const s = (b.stat || "").toUpperCase();
+    if (s === "PTS") return line.pts;
+    if (s === "REB") return line.reb;
+    if (s === "AST") return line.ast;
+    if (s === "PRA") return line.pts + line.reb + line.ast;
+    if (s === "3PM") return line.tpm;
+    return null;
+  };
   // LIVE / FINAL: render top performers from each team's box score
   if ((state === "in" || state === "post") && teams.length > 0) {
     const sections = teams.map(teamGroup => {
@@ -16065,6 +16218,8 @@ function renderScheduleExpandContent(summary) {
         pts: labels.findIndex(l => l === "pts"),
         reb: labels.findIndex(l => l === "reb"),
         ast: labels.findIndex(l => l === "ast"),
+        // 3-pointers come as a "3pt" column formatted "makes-attempts" (e.g. "4-9").
+        threept: labels.findIndex(l => l === "3pt" || l === "3p" || l === "fg3"),
       };
       const athletes = stats.athletes || [];
       const players = athletes
@@ -16073,19 +16228,48 @@ function renderScheduleExpandContent(summary) {
           const pts = idx.pts >= 0 ? (parseInt(a.stats[idx.pts]) || 0) : 0;
           const reb = idx.reb >= 0 ? (parseInt(a.stats[idx.reb]) || 0) : 0;
           const ast = idx.ast >= 0 ? (parseInt(a.stats[idx.ast]) || 0) : 0;
+          // 3PM = the makes side of "makes-attempts".
+          let tpm = 0;
+          if (idx.threept >= 0) {
+            const raw = String(a.stats[idx.threept] || "");
+            const m = raw.split("-")[0];
+            tpm = parseInt(m) || 0;
+          }
           const min = idx.min >= 0 ? (a.stats[idx.min] || "") : "";
-          return { name: a.athlete?.displayName || "?", pts, reb, ast, min, starter: a.starter === true };
+          return { name: a.athlete?.displayName || "?", pts, reb, ast, tpm, min, starter: a.starter === true };
         })
-        .sort((a, b) => b.pts - a.pts)
-        .slice(0, 8);
-      const rows = players.map(p => `
-        <div style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12px;">
-          <span style="flex:1;color:#fff;font-weight:${p.starter ? 600 : 500};">${p.starter ? '<span style="color:#7dd3fc;font-size:9px;margin-right:4px;">★</span>' : ""}${escapeHtmlBasic(p.name)}</span>
-          <span style="font-family:'JetBrains Mono',monospace;color:#a8b0bb;font-size:11px;min-width:24px;text-align:right;">${escapeHtmlBasic(p.min)}'</span>
+        .sort((a, b) => b.pts - a.pts);
+      // Show top 8 by points, but ALWAYS include any player you have a bet on
+      // even if they're outside the top 8 — so your plays never get hidden.
+      const top = players.slice(0, 8);
+      const betExtras = players.slice(8).filter(p => (betsByPlayer[norm(p.name)] || []).length > 0);
+      const shownPlayers = top.concat(betExtras);
+      const rows = shownPlayers.map(p => {
+        const myBets = betsByPlayer[norm(p.name)] || [];
+        const hasBet = myBets.length > 0;
+        // Build bet pills: each shows "ou line STAT" + a hit/miss/▲ indicator.
+        const betPills = myBets.map(b => {
+          const actual = betActual(b, { pts: p.pts, reb: p.reb, ast: p.ast, tpm: p.tpm });
+          const statLbl = (b.stat || "").toUpperCase();
+          const ouLbl = (b.ou || "").toLowerCase() === "under" ? "u" : "o";
+          let dotColor = "#7dd3fc", mark = "";
+          if (actual != null) {
+            const hitting = (b.ou || "").toLowerCase() === "under" ? actual < b.line : actual > b.line;
+            dotColor = hitting ? "#4ade80" : "#f87171";
+            mark = state === "post" ? (hitting ? " ✓" : " ✗") : ` (${actual})`;
+          }
+          return `<span style="display:inline-flex;align-items:center;gap:3px;font-size:9px;font-weight:700;font-family:'JetBrains Mono',monospace;color:${dotColor};background:${dotColor}1a;border:1px solid ${dotColor}55;border-radius:3px;padding:1px 5px;letter-spacing:0.2px;">${ouLbl}${b.line} ${statLbl}${mark}</span>`;
+        }).join("");
+        const nameColor = hasBet ? "#fde047" : "#fff";
+        return `
+        <div style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12px;${hasBet ? "background:rgba(253,224,71,0.05);margin:0 -8px;padding-left:8px;padding-right:8px;border-radius:4px;" : ""}">
+          <span style="font-family:'JetBrains Mono',monospace;color:#fff;font-weight:800;font-size:11px;min-width:30px;text-align:left;">${escapeHtmlBasic(p.min)}'</span>
+          <span style="flex:1;color:${nameColor};font-weight:${p.starter || hasBet ? 700 : 500};display:flex;align-items:center;gap:5px;flex-wrap:wrap;">${p.starter ? '<span style="color:#7dd3fc;font-size:9px;">★</span>' : ""}${escapeHtmlBasic(p.name)}${betPills}</span>
           <span style="font-family:'JetBrains Mono',monospace;color:#fff;font-weight:700;min-width:22px;text-align:right;">${p.pts}</span>
           <span style="font-family:'JetBrains Mono',monospace;color:#a8b0bb;font-size:11px;min-width:18px;text-align:right;">${p.reb}r</span>
           <span style="font-family:'JetBrains Mono',monospace;color:#a8b0bb;font-size:11px;min-width:18px;text-align:right;">${p.ast}a</span>
-        </div>`).join("");
+        </div>`;
+      }).join("");
       const logoHtml = teamLogo ? `<img src="${escapeHtmlBasic(teamLogo)}" alt="" style="width:22px;height:22px;object-fit:contain;" onerror="this.style.display='none'">` : "";
       return `
         <div style="padding:10px 14px;">
