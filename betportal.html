@@ -175,7 +175,6 @@
   .bk-val { font-weight:700; color:var(--text); font-family:'SF Mono',monospace; }
   .bk-val.pos { color:var(--green); } .bk-val.neg { color:var(--red); }
 
-  .clear-log-btn { width:100%; padding:10px; background:transparent; color:#444; border:1px solid #222; border-radius:8px; font-size:10px; font-weight:600; letter-spacing:0.08em; text-transform:uppercase; cursor:pointer; margin-top:10px; }
   .no-bets { text-align:center; color:var(--muted); font-size:12px; padding:30px 0; }
 
   .grading-indicator { font-size:10px; color:var(--warn); margin-top:6px; }
@@ -549,8 +548,9 @@ async function fetchTeamLogo(sport, teamName) {
 
   // Strip spread/total indicators from team name for search
   const searchName = teamName
-    .replace(/\s*[+-]\d+(\.\d+)?\s*$/, '')  // strip spread
-    .replace(/\s*(over|under)\s+[\d.]+/i, '') // strip total
+    .replace(/\s*(over|under)\s+[\d.]+.*/i, '')  // strip "over/under X" and everything after
+    .replace(/\s*[+-]\d+(\.\d+)?\s*$/, '')       // strip trailing spread like -1.5
+    .replace(/\s+under$|\s+over$/i, '')              // strip bare over/under
     .trim();
 
   try {
@@ -569,7 +569,7 @@ async function fetchTeamLogo(sport, teamName) {
         if (n === norm) { best = tm; bestScore = 3; break; }
         if (n.includes(norm) || norm.includes(n)) {
           const score = Math.min(n.length, norm.length) / Math.max(n.length, norm.length);
-          if (score > bestScore) { best = tm; bestScore = score; }
+          if (score > bestScore && score > 0.45) { best = tm; bestScore = score; }
         }
       }
       if (bestScore === 3) break;
@@ -934,15 +934,35 @@ function normalizeTeam(str) {
     .trim();
 }
 
+function cleanForMatch(str) {
+  return str.toLowerCase()
+    .replace(/\s*(over|under)\s+[\d.]+.*/i, '')
+    .replace(/\s*[+-]\d+(\.\d+)?\s*$/, '')
+    .replace(/[^a-z0-9\s]/g,'')
+    .replace(/\s+/g,' ')
+    .trim();
+}
+
 function teamMatchesEvent(team, event) {
-  const norm = normalizeTeam(team);
+  const norm = cleanForMatch(team);
+  if (!norm) return {matched:false};
   const competitors = event.competitions?.[0]?.competitors || [];
   for (const c of competitors) {
     const names = [
       c.team?.displayName, c.team?.shortDisplayName,
-      c.team?.name, c.team?.nickname, c.team?.abbreviation
-    ].filter(Boolean).map(n=>normalizeTeam(n));
-    if (names.some(n => n.includes(norm) || norm.includes(n))) return {matched:true, competitor:c, competitors};
+      c.team?.name, c.team?.nickname, c.team?.location, c.team?.abbreviation
+    ].filter(Boolean).map(n=>n.toLowerCase().replace(/[^a-z0-9\s]/g,'').replace(/\s+/g,' ').trim());
+    // Exact match first
+    if (names.some(n => n === norm)) return {matched:true, competitor:c, competitors};
+    // Strong partial — norm must be at least 4 chars and match ratio > 0.6
+    if (norm.length >= 4) {
+      for (const n of names) {
+        if (n.includes(norm) || norm.includes(n)) {
+          const ratio = Math.min(n.length,norm.length)/Math.max(n.length,norm.length);
+          if (ratio > 0.6) return {matched:true, competitor:c, competitors};
+        }
+      }
+    }
   }
   return {matched:false};
 }
@@ -1071,12 +1091,6 @@ async function gradeAllPending() {
 function deleteBet(id) {
   const bets = loadBets().filter(b=>String(b.id)!==String(id));
   saveBets(bets);
-  renderLog();
-}
-
-function clearLog() {
-  if (!confirm('Clear all logged bets? This cannot be undone.')) return;
-  saveBets([]);
   renderLog();
 }
 
