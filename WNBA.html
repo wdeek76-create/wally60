@@ -9247,7 +9247,78 @@ function renderSrcAnalytics() {
     }
   }
 
-  // ── Solo breakdown: each source standalone ──
+  // ── LADDERS: same player, same game, same direction, 2+ different stats ──
+  // e.g. u22.5 PTS + u3.5 AST + u6.5 REB + u32.5 PRA tracked together on one
+  // player in one game. Groups settled props by player+game+direction, and for
+  // any group with 2+ legs, tracks both PER-LEG performance (how each individual
+  // bet within a ladder did) and the ladder AS A UNIT (did every leg hit — the
+  // "parlay" outcome — since that's the real signal of whether stacking direction
+  // on a player is a good strategy).
+  const ladderGroups = {};
+  settled.forEach(b => {
+    if (b.result === "void") return; // voids don't cleanly fit unit outcome
+    const day = (b.gameDate || b.date || "").toString().slice(0, 10);
+    if (!day || !b.player || !b.ou) return;
+    const key = `${norm(b.player)}|${day}|${(b.ou||"").toLowerCase()}`;
+    if (!ladderGroups[key]) ladderGroups[key] = { player: b.player, day, ou: b.ou, legs: [] };
+    ladderGroups[key].legs.push(b);
+  });
+  const ladders = Object.values(ladderGroups).filter(g => g.legs.length >= 2);
+  const singles = Object.values(ladderGroups).filter(g => g.legs.length === 1).map(g => g.legs[0]);
+
+  // Per-leg stats: every individual bet that was PART OF a ladder, win/loss as normal.
+  const ladderLegStats = emptyStats();
+  // By ladder size (2-leg, 3-leg, 4+-leg) — per-leg performance within each size.
+  const legsBySize = { 2: emptyStats(), 3: emptyStats(), "4+": emptyStats() };
+  // Unit outcome: did ALL legs of the ladder hit? (the parlay-style result)
+  const unitStats = emptyStats();
+  const unitBySize = { 2: emptyStats(), 3: emptyStats(), "4+": emptyStats() };
+  // Single (non-ladder) bets, for comparison baseline.
+  const singleStats = emptyStats();
+  singles.forEach(b => accum(b, singleStats));
+
+  ladders.forEach(g => {
+    const sizeKey = g.legs.length === 2 ? 2 : g.legs.length === 3 ? 3 : "4+";
+    g.legs.forEach(b => { accum(b, ladderLegStats); accum(b, legsBySize[sizeKey]); });
+    // Unit: treat as a single "parlay" bet — stake 1u, all-hit = win at combined
+    // decimal odds product, any miss = full loss. This shows whether stacking
+    // ALL legs together (as you'd often bet it, or want to know the correlation)
+    // pays off, distinct from each leg's standalone win rate.
+    const allHit = g.legs.every(b => b.result === "hit");
+    const anyMiss = g.legs.some(b => b.result === "miss");
+    const unitStake = 1;
+    let unitDec = 1;
+    g.legs.forEach(b => { const o = Number(b.odds || -110); unitDec *= (o > 0 ? o / 100 + 1 : 100 / Math.abs(o) + 1); });
+    const unitBet = { result: allHit ? "hit" : (anyMiss ? "miss" : "void"), stake: unitStake, odds: (unitDec - 1) * 100 };
+    accum(unitBet, unitStats);
+    accum(unitBet, unitBySize[sizeKey]);
+  });
+
+  const ladderRows =
+    row("All ladder legs (individual)", ladderLegStats, { featured: true }) +
+    row("2-leg ladders · per leg", legsBySize[2]) +
+    row("3-leg ladders · per leg", legsBySize[3]) +
+    row("4+-leg ladders · per leg", legsBySize["4+"]) +
+    row("Single (non-ladder) bets", singleStats, { dim: true });
+  const ladderUnitRows =
+    row("All ladders · as a unit (all legs hit)", unitStats, { featured: true }) +
+    row("2-leg · as a unit", unitBySize[2]) +
+    row("3-leg · as a unit", unitBySize[3]) +
+    row("4+-leg · as a unit", unitBySize["4+"]);
+
+  // Per-player ladder leaderboard — which players you stack most, and how it's gone.
+  const byPlayerLadder = {};
+  ladders.forEach(g => {
+    if (!byPlayerLadder[g.player]) byPlayerLadder[g.player] = emptyStats();
+    g.legs.forEach(b => accum(b, byPlayerLadder[g.player]));
+  });
+  const ladderPlayerRows = Object.entries(byPlayerLadder)
+    .sort((a, b) => b[1].total - a[1].total)
+    .slice(0, 12)
+    .map(([player, s]) => row(player, s))
+    .join("");
+
+
   const solo = {};
   SRC_KEYS.forEach(k => { solo[k] = emptyStats(); });
   settled.forEach(b => {
@@ -9836,6 +9907,7 @@ function renderSrcAnalytics() {
     </div>
 
     ${section("Sources · Solo", `${SRC_KEYS.length} sources`, tableShell(soloRows, { labelHead: "Source" }), true)}
+    ${ladders.length > 0 ? section("Ladders", `${ladders.length} ladder${ladders.length===1?"":"s"} · same player, same game, same direction, 2+ stats`, tableShell(ladderRows, { labelHead: "Ladder Breakdown" }) + tableShell(ladderUnitRows, { labelHead: "Unit Outcome (all legs)" }) + (ladderPlayerRows ? `<div style="padding:8px 10px 2px;font-size:9px;color:#525a64;font-weight:700;letter-spacing:0.8px;text-transform:uppercase;">Most Laddered Players</div>` + tableShell(ladderPlayerRows, { labelHead: "Player" }) : ""), true) : ""}
     ${section("Sources · Combos", `${sortedCombos.length} combos · sorted by P/L`, tableShell(comboRows, { labelHead: "Combination" }))}
     ${section("Sources · Fade", "When source disagreed with your pick", tableShell(fadeRows, { labelHead: "Fade" }))}
     ${section("By Market", "Source records per stat (overs/unders)", tableShell(byMarketRows, { labelHead: "Stat · Source" }))}
