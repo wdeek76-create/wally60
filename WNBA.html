@@ -15862,6 +15862,7 @@ function renderTotals() {
         // "average," hiding both). PTS/REB/AST/3PM are the real, direct
         // opponent-allowed numbers, so those are what's shown.
         const DEF_REF_STATS = ["PTS", "REB", "AST", "3PM"];
+        const STAT_FULL_NAME_LOCAL = { PTS: "points", REB: "rebounds", AST: "assists", "3PM": "threes" };
         const teamRow = (abbr) => {
           const key = (typeof _matchupKey === "function") ? _matchupKey(abbr) : abbr;
           if (mData.teams[key]) return mData.teams[key];
@@ -15881,32 +15882,58 @@ function renderTotals() {
             const rank = sorted.findIndex(v => v === val) + 1;
             return { rank, of: sorted.length };
           };
-          const statCell = (row, statKey) => {
+          // Each stat cell is now a full block: big number, clear rank badge,
+          // and a hover tooltip that spells out the reasoning in plain English
+          // — "MIN allows 82.4 PTS/gm (league avg 79.0, #2/13 most allowed).
+          // That's more than average, which supports the OVER lean on this total."
+          const statCell = (abbr, row, statKey) => {
             const col = BET_STAT_TO_OPP_COL[statKey] || statKey;
             const val = row ? row[col] : null;
             const avg = mData.leagueAvg[col];
-            if (val == null) return `<span style="color:#525a64;">—</span>`;
+            const fullStatName = STAT_FULL_NAME_LOCAL[statKey] || statKey;
+            if (val == null) {
+              return `<div style="flex:1;text-align:center;">
+                <div style="font-size:15px;font-weight:800;color:#fff;">—</div>
+                <div style="font-size:9px;font-weight:700;color:#fff;margin-top:1px;">no data</div>
+              </div>`;
+            }
             const diff = avg != null && avg !== 0 ? ((val / avg - 1) * 100) : null;
             // Color = does this number SUPPORT the card's current edge lean?
-            // Team allows more than avg (diff>0) supports an OVER lean;
-            // allows less than avg (diff<0) supports an UNDER lean. Compare
-            // against cardLeansOver to decide green (supports) vs red
-            // (contradicts). No lean yet (no market line) → neutral grey.
-            let numColor = "#fff";
+            let cellColor = "#fff";
+            let verdict = "no line loaded yet to compare against";
             if (hasEdgeLean && diff != null && Math.abs(diff) > 2) {
               const statSupportsOver = diff > 0;
               const supportsEdge = statSupportsOver === cardLeansOver;
-              numColor = supportsEdge ? "#4ade80" : "#f87171";
+              cellColor = supportsEdge ? "#4ade80" : "#f87171";
+              const leanWord = cardLeansOver ? "OVER" : "UNDER";
+              verdict = supportsEdge
+                ? `this supports the ${leanWord} lean on this total`
+                : `this works against the ${leanWord} lean on this total`;
+            } else if (diff != null && Math.abs(diff) <= 2) {
+              verdict = "right around league average — not a strong signal either way";
             }
-            const diffStr = diff != null ? ` <span style="color:${numColor};font-size:9px;opacity:0.85;">${diff>=0?'+':''}${diff.toFixed(0)}%</span>` : "";
             const rk = rankFor(col, val);
-            const rankStr = rk ? `<div style="font-size:8px;color:#525a64;margin-top:1px;">#${rk.rank}/${rk.of}</div>` : "";
-            return `<span style="color:${numColor};font-weight:700;">${val.toFixed(1)}</span>${diffStr}${rankStr}`;
+            const rankBadge = rk ? `#${rk.rank}/${rk.of}` : null;
+            const compareWord = diff == null ? "" : diff >= 0 ? "more" : "less";
+            const tipText = `${abbr} allows ${val.toFixed(1)} ${statKey} per game` +
+              (avg != null ? ` (league avg ${avg.toFixed(1)}${rankBadge ? `, ${rankBadge} most allowed` : ""}).` : ".") +
+              (diff != null ? ` That's ${Math.abs(diff).toFixed(0)}% ${compareWord} ${fullStatName} than an average team allows — ${verdict}.` : "");
+            const diffStr = diff != null
+              ? `<div style="font-size:10px;font-weight:800;color:${cellColor};margin-top:2px;">${diff>=0?'+':''}${diff.toFixed(0)}% vs avg</div>`
+              : "";
+            const rankStr = rankBadge
+              ? `<div style="font-size:9px;font-weight:700;color:#fff;margin-top:1px;">${rankBadge} most allowed</div>`
+              : "";
+            return `<div class="tip" data-tip="${tipText.replace(/"/g,'&quot;')}" style="flex:1;text-align:center;cursor:help;">
+              <div style="font-size:16px;font-weight:800;color:${cellColor};">${val.toFixed(1)}</div>
+              ${diffStr}
+              ${rankStr}
+            </div>`;
           };
           const rowHtml = (abbr, row) => `
-            <div style="display:flex;align-items:start;gap:8px;padding:5px 0;">
-              <span style="font-size:10px;font-weight:800;color:#7dd3fc;letter-spacing:0.3px;min-width:34px;padding-top:2px;">${abbr}</span>
-              ${DEF_REF_STATS.map(s => `<span style="flex:1;text-align:center;font-size:11px;">${statCell(row, s)}</span>`).join("")}
+            <div style="display:flex;align-items:start;gap:10px;padding:8px 0;${row ? '' : 'opacity:0.5;'}">
+              <span style="font-size:13px;font-weight:800;color:#7dd3fc;letter-spacing:0.3px;min-width:38px;padding-top:2px;">${abbr}</span>
+              ${DEF_REF_STATS.map(s => statCell(abbr, row, s)).join("")}
             </div>`;
 
           // ── Injury warning — visual only, same "any named player matters"
@@ -15948,21 +15975,21 @@ function renderTotals() {
                 return `⚠ ${f.name}${usgStr} — ${f.status}`;
               });
               injuryWarning = `
-                <div style="margin-top:6px;padding-top:6px;border-top:1px solid #1a1d22;">
-                  ${lines.map(l => `<div style="font-size:10px;color:#fbbf24;font-weight:700;">${l}</div>`).join("")}
+                <div style="margin-top:8px;padding-top:8px;border-top:1px solid #1a1d22;">
+                  ${lines.map(l => `<div style="font-size:11px;color:#fbbf24;font-weight:800;">${l}</div>`).join("")}
                 </div>`;
             }
           }
 
           defStatsRef = `
-            <div style="margin-top:10px;padding:9px 12px;background:#050507;border:1px solid #1a1d22;border-radius:6px;">
-              <div style="display:flex;align-items:center;gap:8px;margin-bottom:3px;padding-bottom:4px;border-bottom:1px solid #1a1d22;">
-                <span style="font-size:9px;font-weight:800;color:#a8b0bb;letter-spacing:0.6px;text-transform:uppercase;min-width:34px;">DEF vs</span>
-                ${DEF_REF_STATS.map(s => `<span style="flex:1;text-align:center;font-size:9px;font-weight:700;color:#a8b0bb;letter-spacing:0.4px;">${s}</span>`).join("")}
+            <div style="margin-top:10px;padding:12px 14px;background:#050507;border:1px solid #283041;border-radius:8px;">
+              <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;padding-bottom:6px;border-bottom:1px solid #1a1d22;">
+                <span style="font-size:11px;font-weight:800;color:#fff;letter-spacing:0.6px;text-transform:uppercase;min-width:38px;">DEF vs</span>
+                ${DEF_REF_STATS.map(s => `<span style="flex:1;text-align:center;font-size:11px;font-weight:800;color:#fff;letter-spacing:0.4px;">${s}</span>`).join("")}
               </div>
               ${rowHtml(g.awayAbbr, awayRow)}
               ${rowHtml(g.homeAbbr, homeRow)}
-              <div style="font-size:8.5px;color:#525a64;margin-top:3px;">Opponent-allowed avg · rank among loaded teams · green = supports current edge</div>
+              <div style="font-size:9.5px;color:#fff;font-weight:600;margin-top:6px;opacity:0.75;">Hover a number for the full reasoning · green = supports this total's current lean, red = works against it</div>
               ${injuryWarning}
             </div>`;
         }
