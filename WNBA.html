@@ -6749,10 +6749,12 @@ function updateAdvBar() {
         }
       }
       if (rankStr) {
-        // Same favorable/headwind color logic as the Matchup section below —
-        // green if this ranks in the pick's favor, red if it doesn't.
+        // Green if this matchup supports the bet's side, red if it works
+        // against it — e.g. betting OVER points against the #1 (stingiest)
+        // defense should read red; betting UNDER against that same #1
+        // defense should read green. No neutral middle for the rank itself.
         const fav = adj.favorable;
-        const rankColor = fav >= 10 ? "#4ade80" : fav <= -5 ? "#f87171" : "#d4dae3";
+        const rankColor = fav > 0 ? "#4ade80" : fav < 0 ? "#f87171" : "#d4dae3";
         const matchupSection = section("Matchup", [pill(`vs ${oppTeam}`, `${rankStr} allowed`, rankColor)]);
         if (matchupSection) rows.push(matchupSection);
       }
@@ -19368,62 +19370,12 @@ function renderEvCalc() {
   const playerRow = snap && selectedPlayer ? snap.players[norm(selectedPlayer)] : null;
 
   // Compute the EV panel for the currently selected player+stat+line+odds.
+  // The actual EV cards, auto-pick logic, and context block are built by
+  // evCalcUpdateEvPanel() — called right after this innerHTML is set below.
+  // Keeping ONE implementation (instead of duplicating the card-building
+  // logic here too) avoids the two versions silently drifting apart, which
+  // is exactly the kind of bug that's bitten this file before.
   let evPanelHtml = "";
-  if (playerRow) {
-    const line = window._evCalcLine;
-    const odds = window._evCalcOdds;
-    const side = window._evCalcSide || "over";
-    const rows = SOURCES.filter(s => playerRow.bySource[s.key]).map(s => {
-      const proj = _evCalcStatVal(playerRow.bySource[s.key], selectedStat);
-      if (proj == null) return { label: s.label, proj: null };
-      return { label: s.label, proj };
-    });
-    // Blended average across whichever sources have this stat.
-    const validProjs = rows.filter(r => r.proj != null).map(r => r.proj);
-    const avgProj = validProjs.length ? validProjs.reduce((a,b)=>a+b,0)/validProjs.length : null;
-    if (avgProj != null) rows.push({ label: "AVG", proj: avgProj, isAvg: true });
-
-    const evCards = rows.map(r => {
-      if (r.proj == null) {
-        return `<div style="background:#050507;border:1px solid #1a1d22;border-radius:8px;padding:12px 14px;opacity:0.4;">
-          <div style="font-size:10px;font-weight:800;color:#a8b0bb;letter-spacing:0.5px;text-transform:uppercase;">${r.label}</div>
-          <div style="font-size:12px;color:#525a64;margin-top:4px;">no data</div>
-        </div>`;
-      }
-      let evHtml = `<div style="font-size:11px;color:#525a64;margin-top:4px;">enter line + odds</div>`;
-      if (line != null && odds != null) {
-        const p = modelWinProb(r.proj, line, side, selectedStat);
-        const fairOdds = p != null ? probToAmerican(p) : null;
-        const ev = (fairOdds != null) ? calcEdge(odds, fairOdds) : null;
-        if (ev != null) {
-          const evColor = ev >= 5 ? "#4ade80" : ev >= 0 ? "#7dd3fc" : "#f87171";
-          const fairStr = fairOdds != null ? `${fairOdds>=0?"+":""}${fairOdds}` : "—";
-          evHtml = `<div style="display:flex;align-items:baseline;gap:8px;margin-top:6px;">
-            <span style="font-size:20px;font-weight:800;color:${evColor};">${ev>=0?"+":""}${ev.toFixed(1)}%</span>
-            <span style="font-size:10px;color:#a8b0bb;">fair ${fairStr}</span>
-          </div>`;
-        }
-      }
-      return `<div style="background:#050507;border:1px solid ${r.isAvg ? '#7dd3fc55' : '#1a1d22'};border-radius:8px;padding:12px 14px;${r.isAvg ? 'box-shadow:0 0 0 1px rgba(125,211,252,0.06);' : ''}">
-        <div style="font-size:10px;font-weight:800;color:${r.isAvg ? '#7dd3fc' : '#a8b0bb'};letter-spacing:0.5px;text-transform:uppercase;">${r.label}</div>
-        <div style="font-size:15px;font-weight:800;color:#fff;margin-top:2px;">${r.proj.toFixed(2)}</div>
-        ${evHtml}
-      </div>`;
-    }).join("");
-
-    evPanelHtml = `
-      <div style="margin-top:16px;">
-        <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap;">
-          <span style="font-size:15px;font-weight:800;color:#fff;">${playerRow.rawName}</span>
-          ${playerRow.team ? `<span style="background:#7dd3fc1a;border:1px solid #7dd3fc55;color:#7dd3fc;font-size:10px;font-weight:800;letter-spacing:0.4px;border-radius:4px;padding:2px 7px;">${playerRow.team}</span>` : ""}
-          <span style="background:rgba(125,211,252,0.10);border:1px solid rgba(125,211,252,0.25);color:#7dd3fc;font-size:11px;font-weight:800;letter-spacing:0.5px;border-radius:14px;padding:3px 10px;">${side.toUpperCase()} ${line ?? "—"} ${selectedStat}</span>
-        </div>
-        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:10px;">
-          ${evCards}
-        </div>
-        ${evCalcBuildContextBlock(playerRow, selectedStat)}
-      </div>`;
-  }
 
   el.innerHTML = `
   <div style="max-width:820px;margin:0 auto;padding:18px 16px 60px;font-family:'Inter',sans-serif;">
@@ -19492,6 +19444,9 @@ function renderEvCalc() {
       <div id="evcalc-ev-panel">${evPanelHtml}</div>
     </div>`}
   </div>`;
+  // Populate the EV cards / auto-pick / context block via the single shared
+  // implementation (also used for live updates while typing line/odds).
+  evCalcUpdateEvPanel();
 }
 
 // Lightweight update for the search dropdown only — avoids re-rendering the
@@ -19555,19 +19510,38 @@ function evCalcBuildContextBlock(playerRow, statKey) {
       if (match) teamRow = mData.teams[match];
     }
     if (teamRow) {
+      const betSide = window._evCalcSide || "over";
       const cells = DEF_STATS.map(s => {
         const col = BET_STAT_TO_OPP_COL[s] || s;
         const val = teamRow[col];
         if (val == null) return `<div style="text-align:center;opacity:0.35;"><div style="font-size:9px;font-weight:800;color:#a8b0bb;">${s}</div><div style="font-size:12px;color:#525a64;">—</div></div>`;
         const allVals = Object.values(mData.teams).map(t => t[col]).filter(v => v != null);
         let rankStr = "";
+        // Color the rank by whether THIS stat's matchup supports the side
+        // you're betting. A stingy defense (low rank #, allows less than
+        // league avg) supports the UNDER and fights the OVER — e.g. betting
+        // OVER points against the #1 (best) defense should read red, since
+        // that matchup works against you. Betting UNDER against that same
+        // #1 defense reads green, since it supports you. Only the currently
+        // selected stat is colored this way (rank is directional per-stat,
+        // not meaningful for stats you're not betting); other stats stay
+        // neutral blue for reference.
+        const isSelectedStat = s === statKey;
+        let rankColor = "#7dd3fc";
         if (allVals.length >= 2) {
           // Standard DEF rank convention (matches theprop.shop and every other
           // tool): #1 = the stingiest defense, allowing the LEAST of this stat.
           // Ascending sort — lower allowed value = lower (better) rank number.
           const sorted = [...allVals].sort((a,b) => a - b);
           const rank = sorted.findIndex(v => v === val) + 1;
-          rankStr = `<div style="font-size:8.5px;font-weight:700;color:#7dd3fc;margin-top:1px;">#${rank}/${sorted.length}</div>`;
+          if (isSelectedStat && mData.leagueAvg && mData.leagueAvg[col] != null && mData.leagueAvg[col] !== 0) {
+            const diff = val - mData.leagueAvg[col];
+            // diff > 0 (allows MORE than average) supports OVER; diff < 0 supports UNDER.
+            const statSupportsOver = diff > 0;
+            const supportsBet = betSide === "over" ? statSupportsOver : !statSupportsOver;
+            if (Math.abs(diff) > 0.001) rankColor = supportsBet ? "#4ade80" : "#f87171";
+          }
+          rankStr = `<div style="font-size:8.5px;font-weight:700;color:${rankColor};margin-top:1px;">#${rank}/${sorted.length}</div>`;
         }
         const isSelected = s === statKey || (statKey === "3PM" && s === "3PM");
         return `<div style="text-align:center;${isSelected?'background:rgba(125,211,252,0.08);border-radius:6px;padding:4px 2px;':''}">
@@ -19626,15 +19600,44 @@ function evCalcUpdateEvPanel() {
   const side = window._evCalcSide || "over";
   const rows = SOURCES.filter(s => playerRow.bySource[s.key]).map(s => {
     const proj = _evCalcStatVal(playerRow.bySource[s.key], selectedStat);
-    return { label: s.label, proj };
+    return { key: s.key, label: s.label, proj };
   });
   const validProjs = rows.filter(r => r.proj != null).map(r => r.proj);
   const avgProj = validProjs.length ? validProjs.reduce((a,b)=>a+b,0)/validProjs.length : null;
-  if (avgProj != null) rows.push({ label: "AVG", proj: avgProj, isAvg: true });
+  if (avgProj != null) rows.push({ key: "avg", label: "AVG", proj: avgProj, isAvg: true });
+
+  // Auto-pick the most conservative source for the current side: lowest
+  // projection for OVER (hardest bar to clear, protects against cherry-
+  // picking an optimistic source), highest projection for UNDER (same idea,
+  // opposite direction). This is just the default "primary" card — every
+  // source's EV is still shown and clickable; clicking one explicitly
+  // overrides the auto-pick until you change player/stat/side again.
+  const withProj = rows.filter(r => r.proj != null && !r.isAvg);
+  let autoKey = null;
+  if (withProj.length) {
+    const best = withProj.reduce((acc, r) => {
+      if (!acc) return r;
+      if (side === "over") return r.proj < acc.proj ? r : acc;
+      return r.proj > acc.proj ? r : acc;
+    }, null);
+    autoKey = best ? best.key : null;
+  }
+  // Reset to auto whenever the player/stat/side changes (tracked via a
+  // signature string) so an old manual pick doesn't silently carry over to
+  // a different player and quietly mislead you.
+  const selSig = `${selectedPlayer}|${selectedStat}|${side}`;
+  if (window._evCalcSelSig !== selSig) {
+    window._evCalcSelSig = selSig;
+    window._evCalcSelectedSource = null; // null = follow auto-pick
+  }
+  const activeKey = window._evCalcSelectedSource || autoKey;
 
   const evCards = rows.map(r => {
+    const isActive = r.key === activeKey;
+    const isAutoPick = r.key === autoKey && !window._evCalcSelectedSource;
+    const clickHandler = r.proj != null ? `onclick="window._evCalcSelectedSource='${r.key}'; evCalcUpdateEvPanel();" style="cursor:pointer;` : `style="`;
     if (r.proj == null) {
-      return `<div style="background:#050507;border:1px solid #1a1d22;border-radius:8px;padding:12px 14px;opacity:0.4;">
+      return `<div ${clickHandler}background:#050507;border:1px solid #1a1d22;border-radius:8px;padding:12px 14px;opacity:0.4;">
         <div style="font-size:10px;font-weight:800;color:#a8b0bb;letter-spacing:0.5px;text-transform:uppercase;">${r.label}</div>
         <div style="font-size:12px;color:#525a64;margin-top:4px;">no data</div>
       </div>`;
@@ -19653,12 +19656,26 @@ function evCalcUpdateEvPanel() {
         </div>`;
       }
     }
-    return `<div style="background:#050507;border:1px solid ${r.isAvg ? '#7dd3fc55' : '#1a1d22'};border-radius:8px;padding:12px 14px;${r.isAvg ? 'box-shadow:0 0 0 1px rgba(125,211,252,0.06);' : ''}">
-      <div style="font-size:10px;font-weight:800;color:${r.isAvg ? '#7dd3fc' : '#a8b0bb'};letter-spacing:0.5px;text-transform:uppercase;">${r.label}</div>
+    const borderColor = isActive ? "#7dd3fc" : (r.isAvg ? "#7dd3fc55" : "#1a1d22");
+    const badge = isActive
+      ? `<span style="font-size:7.5px;font-weight:800;color:#050507;background:#7dd3fc;border-radius:3px;padding:1px 5px;margin-left:6px;letter-spacing:0.3px;">${isAutoPick ? "AUTO" : "SELECTED"}</span>`
+      : "";
+    return `<div ${clickHandler}background:#050507;border:1.5px solid ${borderColor};border-radius:8px;padding:12px 14px;${isActive ? 'box-shadow:0 0 0 1px rgba(125,211,252,0.15);' : ''}">
+      <div style="font-size:10px;font-weight:800;color:${r.isAvg || isActive ? '#7dd3fc' : '#a8b0bb'};letter-spacing:0.5px;text-transform:uppercase;display:flex;align-items:center;">${r.label}${badge}</div>
       <div style="font-size:15px;font-weight:800;color:#fff;margin-top:2px;">${r.proj.toFixed(2)}</div>
       ${evHtml}
     </div>`;
   }).join("");
+
+  // Summary line naming which source is driving the headline number and why.
+  const activeRow = rows.find(r => r.key === activeKey);
+  const conservativeNote = activeRow
+    ? `<div style="font-size:10px;color:#a8b0bb;margin-top:10px;">
+        Using <span style="color:#7dd3fc;font-weight:700;">${activeRow.label}</span> (${activeRow.proj.toFixed(2)}) —
+        ${window._evCalcSelectedSource ? "manually selected" : `most conservative for ${side.toUpperCase()} (${side==='over'?'lowest':'highest'} projection)`}.
+        Click any card above to use that source instead.
+      </div>`
+    : "";
 
   const sideEl = window._evCalcSide || "over";
   panel.innerHTML = `
@@ -19671,6 +19688,7 @@ function evCalcUpdateEvPanel() {
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:10px;">
         ${evCards}
       </div>
+      ${conservativeNote}
       ${evCalcBuildContextBlock(playerRow, selectedStat)}
     </div>`;
 }
