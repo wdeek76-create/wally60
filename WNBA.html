@@ -19243,15 +19243,29 @@ document.addEventListener("DOMContentLoaded", () => {
 // just without needing to open a bet or type anything into Quick Entry.
 //
 // "Daily" by design: hitting REFRESH inside the tool snapshots whatever's
-// currently loaded in the source CSVs (via getSlotLookups()) into
-// window._evCalcSnapshot. That snapshot sticks around across tab switches
-// for the rest of the session — it just doesn't survive a full page reload,
-// and you control exactly when it updates via the REFRESH button. Nothing
-// new is persisted to localStorage; this is meant to be regenerated fresh
-// each day, same as the Projections table.
+// currently loaded in the source CSVs (via getSlotLookups()) and PERSISTS
+// it to localStorage. That snapshot now survives page reloads and stays put
+// until you explicitly hit REFRESH again — same persistence pattern as the
+// bets/depth-chart data elsewhere in the app. It's still meant to be
+// refreshed once a day (or whenever your source CSVs change), you just
+// won't lose it by accident from a reload.
 // ══════════════════════════════════════════════════════════════════════════
 
-window._evCalcSnapshot = window._evCalcSnapshot || null; // { takenAt, players: {normName: {rawName, team, bySource: {roto:{...}, ...}}} }
+const EV_CALC_SNAPSHOT_KEY = "wnba_evcalc_snapshot_v1";
+
+function getEvCalcSnapshot() {
+  try {
+    const raw = localStorage.getItem(EV_CALC_SNAPSHOT_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch (e) { return null; }
+}
+function saveEvCalcSnapshot(snap) {
+  try { localStorage.setItem(EV_CALC_SNAPSHOT_KEY, JSON.stringify(snap)); } catch (e) { /* quota or other failure — non-critical, just won't persist */ }
+}
+// Load once at script init so the snapshot is available immediately on page
+// load, before any tab switch or refresh click.
+window._evCalcSnapshot = getEvCalcSnapshot();
 
 function evCalcRefreshSnapshot() {
   if (typeof merged === "undefined" || !merged || !merged.length) {
@@ -19278,7 +19292,23 @@ function evCalcRefreshSnapshot() {
     players[n] = { rawName: r.rawName, team: r.team || "", pos: r.pos || "", bySource };
   });
   window._evCalcSnapshot = { takenAt: Date.now(), players };
+  saveEvCalcSnapshot(window._evCalcSnapshot);
   showToast(`Snapshot refreshed · ${Object.keys(players).length} players`);
+  renderEvCalc();
+}
+
+// Explicit reset — clears the persisted snapshot entirely (localStorage +
+// in-memory), separate from just re-capturing via REFRESH. Also resets the
+// selected player/stat/line/odds so the tool starts clean.
+function evCalcClearSnapshot() {
+  if (!confirm("Clear the EV Calc snapshot? You'll need to hit Refresh again to reload today's projections.")) return;
+  window._evCalcSnapshot = null;
+  try { localStorage.removeItem(EV_CALC_SNAPSHOT_KEY); } catch (e) {}
+  window._evCalcPlayer = null;
+  window._evCalcSearch = "";
+  window._evCalcLine = null;
+  window._evCalcOdds = null;
+  showToast("Snapshot cleared");
   renderEvCalc();
 }
 
@@ -19312,6 +19342,27 @@ function renderEvCalc() {
     searchResults = Object.values(snap.players)
       .filter(p => p.rawName.toLowerCase().includes(searchQuery))
       .slice(0, 8);
+  }
+
+  // "Bet on today" quick-pick list — players already tracked today, matched
+  // against the snapshot so clicking one jumps straight to their EV numbers.
+  // Only shown when NOT actively searching (search takes over the space).
+  let todaysPlayers = [];
+  if (snap && !searchQuery && typeof bets !== "undefined" && Array.isArray(bets)) {
+    try { loadBets(); } catch (e) {}
+    const todayIso = new Date().toISOString().slice(0, 10);
+    const seen = new Set();
+    (typeof bets !== "undefined" ? bets : []).forEach(b => {
+      if (!b.player) return;
+      const biso = (typeof getBetISODate === "function") ? getBetISODate(b) : null;
+      if (biso !== todayIso) return;
+      const n = norm(b.player);
+      if (seen.has(n)) return;
+      const snapRow = snap.players[n];
+      if (!snapRow) return; // only list players we can actually price today
+      seen.add(n);
+      todaysPlayers.push(snapRow);
+    });
   }
 
   const playerRow = snap && selectedPlayer ? snap.players[norm(selectedPlayer)] : null;
@@ -19383,7 +19434,10 @@ function renderEvCalc() {
           ${snap ? `${playerCount} players snapshotted · updated ${takenLabel}` : "No snapshot yet — hit refresh to capture today's projections"}
         </div>
       </div>
-      <button onclick="evCalcRefreshSnapshot()" style="background:#7dd3fc1a;border:1px solid #7dd3fc;color:#7dd3fc;border-radius:6px;padding:9px 16px;font-size:12px;font-weight:800;cursor:pointer;font-family:'Inter',sans-serif;letter-spacing:0.3px;">⟳ REFRESH SNAPSHOT</button>
+      <div style="display:flex;gap:8px;">
+        ${snap ? `<button onclick="evCalcClearSnapshot()" style="background:#0c0d10;border:1px solid #1a1d22;color:#a8b0bb;border-radius:6px;padding:9px 14px;font-size:12px;font-weight:700;cursor:pointer;font-family:'Inter',sans-serif;letter-spacing:0.3px;">CLEAR</button>` : ""}
+        <button onclick="evCalcRefreshSnapshot()" style="background:#7dd3fc1a;border:1px solid #7dd3fc;color:#7dd3fc;border-radius:6px;padding:9px 16px;font-size:12px;font-weight:800;cursor:pointer;font-family:'Inter',sans-serif;letter-spacing:0.3px;">⟳ REFRESH SNAPSHOT</button>
+      </div>
     </div>
 
     ${!snap ? `
@@ -19406,6 +19460,17 @@ function renderEvCalc() {
         </div>` : ""}</div>
       </div>
 
+      ${todaysPlayers.length ? `
+      <div style="margin-bottom:14px;">
+        <div style="font-size:9.5px;font-weight:800;color:#7dd3fc;letter-spacing:0.6px;text-transform:uppercase;margin-bottom:6px;">Bet On Today (${todaysPlayers.length})</div>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;">
+          ${todaysPlayers.map(p => `
+            <button onclick="window._evCalcPlayer='${p.rawName.replace(/'/g,"\\'")}'; renderEvCalc();"
+              style="background:${selectedPlayer===p.rawName?'#7dd3fc':'#050507'};color:${selectedPlayer===p.rawName?'#050507':'#fff'};border:1px solid ${selectedPlayer===p.rawName?'#7dd3fc':'#1a1d22'};border-radius:20px;padding:6px 12px;font-size:11px;font-weight:700;cursor:pointer;font-family:'Inter',sans-serif;display:inline-flex;align-items:center;gap:5px;">
+              ${p.rawName}${p.team ? `<span style="opacity:0.6;font-size:9px;">${p.team}</span>` : ""}
+            </button>`).join("")}
+        </div>
+      </div>` : ""}
       ${playerRow ? `
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
         <div style="display:flex;gap:4px;">
