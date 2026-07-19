@@ -3,6 +3,12 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Live.">
+<meta name="theme-color" content="#0a1f1a">
+<link rel="apple-touch-icon" href="live-icon.svg">
+<link rel="manifest" href="manifest.json">
 <title>Live Now</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -352,7 +358,7 @@
   .popup-title { font-size: 11px; font-weight: 800; color: var(--green); text-transform: uppercase; letter-spacing: 1px; }
   .popup-time  { font-size: 10px; color: rgba(255,255,255,0.4); }
   .popup-close { background:none; border:none; color:rgba(255,255,255,0.35); font-size:20px; cursor:pointer; padding:0; line-height:1; }
-  .popup-body  { font-size: 13px; font-weight: 500; color: var(--text); line-height: 1.6; }
+  .popup-body  { font-size: 12px; font-weight: 600; color: var(--text); line-height: 1.8; white-space: pre; }
   .popup-loading { color: rgba(255,255,255,0.35); font-size: 12px; display:flex; align-items:center; gap:8px; }
   .popup-spinner { width:14px; height:14px; border:2px solid rgba(255,255,255,0.1); border-top-color:var(--green); border-radius:50%; animation:spin 0.7s linear infinite; }
 
@@ -874,42 +880,28 @@ function switchDate(offset) {
   fetchAll();
 }
 
-function buildWindowSummary(w, timeRange) {
-  const live  = w.games.filter(g => g.bucket === 'live');
-  const upcoming = w.games.filter(g => g.bucket !== 'live');
+function buildWindowSummary(w) {
   const fmt = ms => new Date(ms).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'});
-  const lines = [];
-
+  const leagueOrder = ['MLB','WNBA','NBA','NFL','NHL'];
   const byLeague = {};
-  w.games.forEach(g => { byLeague[g.league] = (byLeague[g.league]||0)+1; });
-  const leagueSummary = Object.entries(byLeague).map(([l,n]) => `${n} ${l}`).join(', ');
-  lines.push(`${w.count} games in this window — ${leagueSummary}.`);
+  w.games.forEach(g => { (byLeague[g.league]||=[]).push(g); });
 
-  if (live.length) {
-    const liveDetails = live.map(g => {
-      const diff = Math.abs(g.away.score - g.home.score);
-      const leader = g.away.score > g.home.score ? g.away.abbr : g.home.score > g.away.score ? g.home.abbr : null;
-      const score = `${g.away.score}-${g.home.score}`;
-      const sit = leader ? `${leader} leads by ${diff} (${score})` : `tied ${score}`;
-      return `${g.away.abbr} @ ${g.home.abbr}: ${sit}${g.stateDesc ? ', ' + g.stateDesc : ''}`;
+  const sections = leagueOrder.filter(l => byLeague[l]).map(league => {
+    const games = byLeague[league];
+    const rows = games.map(g => {
+      if (g.bucket === 'live') {
+        const score = `${g.away.score}-${g.home.score}`;
+        return `${g.away.abbr} @ ${g.home.abbr}  ${score}  ${g.stateDesc||'Live'}`;
+      } else if (g.bucket === 'final') {
+        return `${g.away.abbr} @ ${g.home.abbr}  ${g.away.score}-${g.home.score}  Final`;
+      } else {
+        return `${g.away.abbr} @ ${g.home.abbr}  ${fmt(g.startTime.getTime())}`;
+      }
     });
-    lines.push(`Live now:\n${liveDetails.join('\n')}`);
-  }
+    return `── ${league} ──\n${rows.join('\n')}`;
+  });
 
-  if (upcoming.length) {
-    const starts = upcoming.map(g => `${g.away.abbr} @ ${g.home.abbr} (${fmt(g.startTime.getTime())})`);
-    lines.push(`Starting soon:\n${starts.join('\n')}`);
-  }
-
-  const angles = [];
-  if (live.some(g => g.league === 'MLB')) angles.push(`MLB live totals shift fast — watch bullpen usage and pace.`);
-  if (live.some(g => ['NBA','WNBA'].includes(g.league))) angles.push(`Live hoops spreads move on runs — look for momentum shifts.`);
-  if (live.some(g => g.league === 'NHL')) angles.push(`NHL puck lines move fast after goals.`);
-  if (live.some(g => g.league === 'NFL')) angles.push(`NFL live lines swing on turnovers and scoring drives.`);
-  if (!angles.length && upcoming.length >= 2) angles.push(`${upcoming.length} games kicking off — watch opening line movement at start.`);
-  if (angles.length) lines.push(`💡 ${angles[0]}`);
-
-  return lines.join('\n\n');
+  return sections.join('\n\n');
 }
 
 function closePopup(e) {
@@ -942,85 +934,48 @@ async function selectWindow(idx) {
   document.getElementById('win-popup-overlay').classList.add('open');
 
   // Generate summary from local game data
-  const summary = buildWindowSummary(w, timeRange);
+  const summary = buildWindowSummary(w);
   document.getElementById('popup-body').textContent = summary;
 }
 
 const AVG_DURATION = { NBA:150, WNBA:130, NFL:200, MLB:185, NHL:155 };
 
 function gameEndMs(g) {
-  // If game is already final, use actual end (now); otherwise estimate
   if (g.bucket === 'final') return Date.now();
   return g.startTime.getTime() + (AVG_DURATION[g.league] || 150) * 60000;
 }
 
 function computeWindows(games) {
   if (!games.length) return [];
-
-  const BUCKET = 15 * 60000; // 15-min resolution
-  const MIN_GAMES = 2;
-
-  // Range: earliest start to latest estimated end
-  const rangeStart = Math.min(...games.map(g => g.startTime.getTime()));
-  const rangeEnd   = Math.max(...games.map(g => gameEndMs(g)));
-
-  // Scan buckets — count how many games are live in each
-  const buckets = [];
-  for (let t = rangeStart; t < rangeEnd; t += BUCKET) {
-    const active = games.filter(g => {
-      const s = g.startTime.getTime();
-      const e = gameEndMs(g);
-      return s <= t + BUCKET && e >= t;
-    });
-    if (active.length >= MIN_GAMES) {
-      buckets.push({ t, active });
-    }
-  }
-
-  if (!buckets.length) return [];
-
-  // Merge consecutive buckets into windows (gap tolerance: 1 bucket)
-  const windows = [];
+  const sorted = [...games].sort((a,b) => a.startTime - b.startTime);
+  const CLUSTER_MS = 45 * 60000;
+  const clusters = [];
   let cur = null;
-  for (const b of buckets) {
-    if (!cur || b.t - (cur.end) > BUCKET * 2) {
-      if (cur) windows.push(cur);
-      cur = {
-        start: b.t,
-        end: b.t + BUCKET,
-        peakCount: b.active.length,
-        allGames: new Set(b.active.map(g => g.id)),
-        peakGames: b.active,
-      };
+  for (const g of sorted) {
+    if (!cur || g.startTime - cur.anchorMs > CLUSTER_MS) {
+      cur = { anchorMs: g.startTime.getTime(), games: [g] };
+      clusters.push(cur);
     } else {
-      cur.end = b.t + BUCKET;
-      if (b.active.length > cur.peakCount) {
-        cur.peakCount = b.active.length;
-        cur.peakGames = b.active;
-      }
-      b.active.forEach(g => cur.allGames.add(g.id));
+      cur.games.push(g);
     }
   }
-  if (cur) windows.push(cur);
-
-  // Resolve game objects for allGames
-  return windows
-    .map(w => {
-      const gameObjs = games.filter(g => w.allGames.has(g.id));
-      const leagues = [...new Set(w.peakGames.map(g => g.league))];
+  return clusters
+    .map(c => {
+      const starts = c.games.map(g => g.startTime.getTime());
+      const leagues = [...new Set(c.games.map(g => g.league))];
       return {
-        count:   w.peakCount,           // peak simultaneous games
-        total:   gameObjs.length,       // total games touched
-        start:   w.start,
-        end:     w.end,
-        liveEnd: w.end,
+        count:   c.games.length,
+        total:   c.games.length,
+        start:   Math.min(...starts),
+        end:     Math.max(...starts),
+        liveEnd: Math.max(...c.games.map(g => gameEndMs(g))),
         leagues,
-        ids:     new Set(gameObjs.map(g => g.id)),
-        games:   gameObjs,
-        peakGames: w.peakGames,
+        ids:     new Set(c.games.map(g => g.id)),
+        games:   c.games,
+        peakGames: c.games,
       };
     })
-    .filter(w => w.count >= MIN_GAMES)
+    .filter(w => w.count >= 2)
     .sort((a,b) => b.count - a.count)
     .slice(0, 3);
 }
