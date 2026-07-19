@@ -99,7 +99,20 @@
     animation: blink 1.3s infinite;
   }
 
-  /* ── STATUS BAR ── */
+  /* ── DATE TOGGLE ── */
+  .date-toggle {
+    display: flex; gap: 4px;
+    margin: 0 16px 10px;
+  }
+  .date-btn {
+    flex: 1; padding: 7px 0; border-radius: 8px; border: 1.5px solid var(--border);
+    background: transparent; color: rgba(255,255,255,0.4); font-family: var(--font);
+    font-size: 11px; font-weight: 800; letter-spacing: 0.8px; text-transform: uppercase;
+    cursor: pointer; transition: all 0.15s;
+  }
+  .date-btn.active {
+    border-color: var(--green); color: var(--green); background: var(--green-dim);
+  }
   .status-strip {
     display: flex; align-items: center;
     margin: 0 16px 10px;
@@ -390,6 +403,11 @@
 </div>
 
 <!-- STATUS BAR -->
+<div class="date-toggle">
+  <button class="date-btn active" id="btn-today" onclick="switchDate(0)">Today</button>
+  <button class="date-btn" id="btn-tomorrow" onclick="switchDate(1)">Tomorrow</button>
+</div>
+
 <div class="status-strip">
   <div class="stat-cell">
     <span class="stat-val red" id="sum-live">—</span>
@@ -430,26 +448,30 @@ const BREAK_KW = ['halftime','half time','between innings','end of inning',
 let allGames = [];
 let activeLeagues = new Set(Object.keys(LEAGUE_CFG));
 let autoTimer = null, cdTimer = null;
+let viewingDate = 0; // 0 = today, 1 = tomorrow
 
 // ── DATE ─────────────────────────────────────────────────────────
-function todayStr() {
+function dateStr(offsetDays = 0) {
   const n = new Date();
+  n.setDate(n.getDate() + offsetDays);
   return `${n.getFullYear()}${String(n.getMonth()+1).padStart(2,'0')}${String(n.getDate()).padStart(2,'0')}`;
 }
-function isToday(iso) {
-  const d = new Date(iso), n = new Date();
+function isViewingDay(iso) {
+  const d = new Date(iso);
+  const n = new Date();
+  n.setDate(n.getDate() + viewingDate);
   return d.getFullYear()===n.getFullYear() && d.getMonth()===n.getMonth() && d.getDate()===n.getDate();
 }
 
 // ── FETCH ─────────────────────────────────────────────────────────
 async function fetchLeague(key, cfg) {
   try {
-    const r = await fetch(`${cfg.url}?dates=${todayStr()}`);
+    const r = await fetch(`${cfg.url}?dates=${dateStr(viewingDate)}`);
     if (!r.ok) throw new Error(r.status);
     const d = await r.json();
     const st = d.season?.type?.id ?? d.leagues?.[0]?.season?.type?.id ?? 2;
     if (SKIP_SEASON.has(Number(st))) return [];
-    return (d.events||[]).filter(ev=>isToday(ev.date)).map(ev=>parseEvent(ev,key));
+    return (d.events||[]).filter(ev=>isViewingDay(ev.date)).map(ev=>parseEvent(ev,key));
   } catch(e) { console.warn(key,e); return []; }
 }
 
@@ -550,11 +572,13 @@ async function fetchAll() {
   startCd();
   startLiveClock();
 
-  // Smart refresh: 30s if live games, 2min if games soon, 5min otherwise
-  if (autoTimer) clearTimeout(autoTimer);
-  const hasSoon = allGames.some(g => g.bucket === 'soon');
-  const interval = hasLive ? 30000 : hasSoon ? 120000 : 300000;
-  autoTimer = setTimeout(fetchAll, interval);
+  // Only auto-refresh for today
+  if (viewingDate === 0) {
+    if (autoTimer) clearTimeout(autoTimer);
+    const hasSoon = allGames.some(g => g.bucket === 'soon');
+    const interval = hasLive ? 30000 : hasSoon ? 120000 : 300000;
+    autoTimer = setTimeout(fetchAll, interval);
+  }
 }
 
 // ── CHIPS ─────────────────────────────────────────────────────────
@@ -826,6 +850,18 @@ function finalRow(g) {
 let selectedWindowIds = null;
 let currentWindows = [];
 
+function switchDate(offset) {
+  if (viewingDate === offset) return;
+  viewingDate = offset;
+  document.getElementById('btn-today').classList.toggle('active', offset === 0);
+  document.getElementById('btn-tomorrow').classList.toggle('active', offset === 1);
+  document.getElementById('loading').style.display = 'flex';
+  document.getElementById('content').style.display = 'none';
+  document.getElementById('windows-wrap').style.display = 'none';
+  if (autoTimer) clearTimeout(autoTimer);
+  fetchAll();
+}
+
 function buildWindowSummary(w, timeRange) {
   const live  = w.games.filter(g => g.bucket === 'live');
   const upcoming = w.games.filter(g => g.bucket !== 'live');
@@ -898,38 +934,81 @@ async function selectWindow(idx) {
   document.getElementById('popup-body').textContent = summary;
 }
 
+const AVG_DURATION = { NBA:150, WNBA:130, NFL:200, MLB:185, NHL:155 };
+
+function gameEndMs(g) {
+  // If game is already final, use actual end (now); otherwise estimate
+  if (g.bucket === 'final') return Date.now();
+  return g.startTime.getTime() + (AVG_DURATION[g.league] || 150) * 60000;
+}
+
 function computeWindows(games) {
-  // Include ALL games (even finals) so we can show done windows dimmed
-  const all = [...games].sort((a,b) => a.startTime - b.startTime);
-  if (!all.length) return [];
+  if (!games.length) return [];
 
-  const CLUSTER_MS = 45 * 60000;
-  const clusters = [];
-  let cur = null;
+  const BUCKET = 15 * 60000; // 15-min resolution
+  const MIN_GAMES = 2;
 
-  for (const g of all) {
-    if (!cur || g.startTime - cur.anchorMs > CLUSTER_MS) {
-      cur = { anchorMs: g.startTime.getTime(), games: [g] };
-      clusters.push(cur);
-    } else {
-      cur.games.push(g);
+  // Range: earliest start to latest estimated end
+  const rangeStart = Math.min(...games.map(g => g.startTime.getTime()));
+  const rangeEnd   = Math.max(...games.map(g => gameEndMs(g)));
+
+  // Scan buckets — count how many games are live in each
+  const buckets = [];
+  for (let t = rangeStart; t < rangeEnd; t += BUCKET) {
+    const active = games.filter(g => {
+      const s = g.startTime.getTime();
+      const e = gameEndMs(g);
+      return s <= t + BUCKET && e >= t;
+    });
+    if (active.length >= MIN_GAMES) {
+      buckets.push({ t, active });
     }
   }
 
-  return clusters
-    .map(c => {
-      const starts = c.games.map(g => g.startTime.getTime());
-      const leagues = [...new Set(c.games.map(g => g.league))];
+  if (!buckets.length) return [];
+
+  // Merge consecutive buckets into windows (gap tolerance: 1 bucket)
+  const windows = [];
+  let cur = null;
+  for (const b of buckets) {
+    if (!cur || b.t - (cur.end) > BUCKET * 2) {
+      if (cur) windows.push(cur);
+      cur = {
+        start: b.t,
+        end: b.t + BUCKET,
+        peakCount: b.active.length,
+        allGames: new Set(b.active.map(g => g.id)),
+        peakGames: b.active,
+      };
+    } else {
+      cur.end = b.t + BUCKET;
+      if (b.active.length > cur.peakCount) {
+        cur.peakCount = b.active.length;
+        cur.peakGames = b.active;
+      }
+      b.active.forEach(g => cur.allGames.add(g.id));
+    }
+  }
+  if (cur) windows.push(cur);
+
+  // Resolve game objects for allGames
+  return windows
+    .map(w => {
+      const gameObjs = games.filter(g => w.allGames.has(g.id));
+      const leagues = [...new Set(w.peakGames.map(g => g.league))];
       return {
-        count: c.games.length,
-        start: Math.min(...starts),
-        end:   Math.max(...starts),
+        count:   w.peakCount,           // peak simultaneous games
+        total:   gameObjs.length,       // total games touched
+        start:   w.start,
+        end:     w.end,
+        liveEnd: w.end,
         leagues,
-        ids: new Set(c.games.map(g => g.id)),
-        games: c.games,
+        ids:     new Set(gameObjs.map(g => g.id)),
+        games:   gameObjs,
+        peakGames: w.peakGames,
       };
     })
-    .filter(w => w.count >= 2)
+    .filter(w => w.count >= MIN_GAMES)
     .sort((a,b) => b.count - a.count)
     .slice(0, 3);
 }
@@ -944,18 +1023,17 @@ function renderWindows(games) {
   const fmt = ms => new Date(ms).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'});
 
   const cards = currentWindows.map((w, i) => {
-    // A window is "done" if all its games are finished
     const allDone = w.games.every(g => g.bucket === 'final');
-    const isActive = !allDone && nowMs >= w.start - 30*60000 && nowMs <= w.end + 180*60000;
-    const isNow = !allDone && nowMs >= w.start - 10*60000 && nowMs <= w.end + 120*60000;
+    const isActive = !allDone && nowMs >= w.start - 10*60000 && nowMs <= w.liveEnd;
     const cls = allDone ? 'w-done' : isActive ? 'w-active' : 'w-inactive';
-    const timeRange = w.start === w.end ? fmt(w.start) : `${fmt(w.start)} – ${fmt(w.end)}`;
-    const leagueStr = w.leagues.join(' · ');
+
+    const timeRange = `${fmt(w.start)} – ${fmt(w.end)}`;
+    const leagueStr = [...new Set(w.peakGames.map(g => g.league))].join(' · ');
     const badge = allDone
       ? `<span class="win-badge win-badge-done">DONE</span>`
-      : isNow
+      : isActive
         ? `<span class="win-badge now">NOW</span>`
-        : `<span class="win-badge">${w.count} games</span>`;
+        : `<span class="win-badge">${w.total} games</span>`;
 
     return { html: `<div class="window-card ${cls}" onclick="selectWindow(${i})">
       <span class="win-count">${w.count}</span>
