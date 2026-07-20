@@ -698,21 +698,21 @@
           <span style="color:var(--saber);">Saber weight</span>
           <span class="meta" id="modelWSaberLbl">55</span>
         </label>
-        <input type="range" id="modelWSaber" min="0" max="100" value="55" oninput="onModelWeightChange('top')" style="width:100%;">
+        <input type="range" id="modelWSaber" min="0" max="100" value="55" oninput="onModelWeightChange(this.id)" style="width:100%;">
       </div>
       <div>
         <label class="fld" style="display:flex; align-items:center; justify-content:space-between;">
           <span style="color:var(--gold);">MMAEye weight</span>
           <span class="meta" id="modelWEyeLbl">45</span>
         </label>
-        <input type="range" id="modelWEye" min="0" max="100" value="45" oninput="onModelWeightChange('top')" style="width:100%;">
+        <input type="range" id="modelWEye" min="0" max="100" value="45" oninput="onModelWeightChange(this.id)" style="width:100%;">
       </div>
       <div>
         <label class="fld" style="display:flex; align-items:center; justify-content:space-between;">
           <span style="color:var(--stok);">Action weight</span>
           <span class="meta" id="modelWActionLbl">0</span>
         </label>
-        <input type="range" id="modelWAction" min="0" max="100" value="0" oninput="onModelWeightChange('top')" style="width:100%;">
+        <input type="range" id="modelWAction" min="0" max="100" value="0" oninput="onModelWeightChange(this.id)" style="width:100%;">
       </div>
     </div>
 
@@ -735,21 +735,21 @@
           <span style="color:var(--saber);">Saber weight</span>
           <span class="meta" id="modelWSaberLblB">55</span>
         </label>
-        <input type="range" id="modelWSaberB" min="0" max="100" value="55" oninput="onModelWeightChange('bot')" style="width:100%;">
+        <input type="range" id="modelWSaberB" min="0" max="100" value="55" oninput="onModelWeightChange(this.id)" style="width:100%;">
       </div>
       <div>
         <label class="fld" style="display:flex; align-items:center; justify-content:space-between;">
           <span style="color:var(--gold);">MMAEye weight</span>
           <span class="meta" id="modelWEyeLblB">45</span>
         </label>
-        <input type="range" id="modelWEyeB" min="0" max="100" value="45" oninput="onModelWeightChange('bot')" style="width:100%;">
+        <input type="range" id="modelWEyeB" min="0" max="100" value="45" oninput="onModelWeightChange(this.id)" style="width:100%;">
       </div>
       <div>
         <label class="fld" style="display:flex; align-items:center; justify-content:space-between;">
           <span style="color:var(--stok);">Action weight</span>
           <span class="meta" id="modelWActionLblB">0</span>
         </label>
-        <input type="range" id="modelWActionB" min="0" max="100" value="0" oninput="onModelWeightChange('bot')" style="width:100%;">
+        <input type="range" id="modelWActionB" min="0" max="100" value="0" oninput="onModelWeightChange(this.id)" style="width:100%;">
       </div>
     </div>
 
@@ -1969,6 +1969,71 @@ function editBetMarket(cardId, betId) {
   const bookStr = newBook ? ` @ ${newBook}` : '';
   if (updated > 1) toast(`Updated ${updated} bets for ${b.fighter}: ${am > 0 ? '+' : ''}${am}${bookStr}`);
   else toast(`Updated ${b.fighter}: ${am > 0 ? '+' : ''}${am}${bookStr}`);
+  rerenderCurrentTab();
+}
+
+// Edit a card's market line for a specific fighter, direct from the Model tab
+// or any view that reads from card.ml. Prompts for American odds + optional
+// book, updates the card map, then fans out to every bet on the same fighter
+// (same behavior as editBetMarket — edge recomputes, CLV re-stamps if closing
+// is stored). Difference from editBetMarket: works even if no bet exists yet.
+function editCardMl(cardId, fighterKey) {
+  const card = STATE.cards.find(c => c.id === cardId);
+  if (!card) { toast('Card not found', 'error'); return; }
+
+  // Resolve the fighter's ml entry
+  let m = (card.ml || {})[fighterKey];
+  if (!m) {
+    const mk = findMatchKey(card.ml || {}, fighterKey);
+    if (mk != null) { m = card.ml[mk]; fighterKey = mk; }
+  }
+  if (!m) { toast('Fighter not found on card', 'error'); return; }
+
+  const current = m.odds;
+  const input = prompt(`Market odds for ${m.name}\n(American, e.g. -150 or +200 — blank to cancel)`, current != null ? String(current) : '');
+  if (input === null) return;
+  const trimmed = input.trim();
+  if (trimmed === '') return;
+
+  const clean = trimmed.replace(/[^\d+\-]/g, '');
+  const parsed = parseInt(clean, 10);
+  if (isNaN(parsed) || parsed === 0 || (parsed > -100 && parsed < 100)) {
+    toast('Enter American odds (e.g. -150 or +200)', 'error'); return;
+  }
+  const newImplied = americanToImplied(parsed);
+  if (newImplied == null) { toast('Could not convert odds', 'error'); return; }
+
+  const bookInput = prompt(`Book for ${m.name}? (e.g. FanDuel, BetOnline — blank to keep "${m.book || ''}")`, m.book || '');
+  if (bookInput === null) return;
+  const newBook = bookInput.trim();
+
+  // Update card map
+  m.odds = parsed;
+  if (newBook !== '') m.book = newBook;
+  const closeKey = card.closing ? findMatchKey(card.closing, m.name) : null;
+  const closeEntry = closeKey ? card.closing[closeKey] : null;
+  let updated = 0;
+  (card.bets || []).forEach(other => {
+    if (normalizeName(other.fighter) !== normalizeName(m.name)) return;
+    if (other.ml != null && other.ml !== parsed) other.prevMl = other.ml;
+    other.ml = parsed;
+    other.mlImplied = newImplied;
+    if (newBook) other.book = newBook;
+    if (other.prob != null) other.edge = other.prob - newImplied;
+    if (closeEntry) {
+      const res = computeCLV(closeEntry, card.closing, parsed);
+      if (res) {
+        other.closingMl = res.closeOdds;
+        other.closingImplied = americanToImplied(res.closeOdds);
+        other.closingBook = res.closeBook;
+        other.clv = res.clv;
+      }
+    }
+    updated++;
+  });
+
+  saveState(STATE);
+  toast(`Updated ${m.name}: ${trimmed}${newBook ? ' at ' + newBook : ''}${updated ? ` · ${updated} bet${updated===1?'':'s'} restamped` : ''}`);
   rerenderCurrentTab();
 }
 
@@ -3533,6 +3598,7 @@ function renderModel() {
       if (clvBet) { clv = clvBet.clv; closingMl = clvBet.closingMl; }
 
       rows.push({
+        cardId: c.id,
         cardLabel: c.label,
         fighter: m.name,
         opponent: m.opponent,
@@ -3584,20 +3650,31 @@ function renderModel() {
   </tr></thead><tbody>`;
 
   rows.forEach(r => {
-    // Source cell — American odds on top (white bold), implied % below in the
-    // source's accent color (or white for Saber/Eye/Action which are all
-    // white bold per the "kill color coding" pass). Missing → white bold em-dash.
-    const cell = (prob, color) => {
-      if (prob == null) return `<td class="num" style="color:var(--text); font-weight:700;">—</td>`;
+    // Source cell — clickable. Clicking calls editProjection which pops a
+    // prompt to edit that source's projection for this fighter. The edit
+    // fans out through the app: bet probs restamp, edges recompute, and
+    // Consensus / Solo tabs pick it up. Model Win % + Edge here recalc from
+    // the updated source on next render.
+    const fighterAttr = (r.fighter || '').replace(/'/g, "\\'");
+    const cell = (prob, color, source) => {
+      // Action is per-bet (stokProb on each Consensus/Action bet) rather than
+      // a card-level source map — editing it from here would create a phantom
+      // card.action map. Only make Saber / Eye / Arena editable in this cell.
+      const editable = (source === 'saber' || source === 'eye' || source === 'arena');
+      const clickAttr = editable
+        ? `onclick="editProjection('${r.cardId}','${source}','${fighterAttr}')" style="cursor:pointer;" title="Click to edit ${source} %"`
+        : '';
+      if (prob == null) return `<td class="num" ${clickAttr} style="color:var(--text); font-weight:700;${editable ? ' cursor:pointer;' : ''}">—${editable ? '<div style="font-size:9px; color:var(--muted2); margin-top:2px;">edit</div>' : ''}</td>`;
       const am = impliedToAmerican(prob);
-      return `<td class="num">
+      return `<td class="num" ${clickAttr}>
         <div style="color:var(--text); font-weight:700; font-size:13px;">${fmtAm(am)}</div>
         <div style="color:${color}; font-weight:700; font-size:11px; margin-top:2px;">${fmtPct(prob, 1)}</div>
       </td>`;
     };
+    const mlClickAttr = `onclick="editCardMl('${r.cardId}','${fighterAttr}')" style="cursor:pointer;" title="Click to edit market odds"`;
     const marketCell = r.mkt != null
-      ? `<td class="num"><div style="color:var(--text); font-weight:700;">${fmtAm(r.ml)}</div><div style="color:var(--text); font-weight:700; font-size:11px;">${fmtPct(r.mkt, 1)}</div></td>`
-      : `<td class="num" style="color:var(--text); font-weight:700;">—</td>`;
+      ? `<td class="num" ${mlClickAttr}><div style="color:var(--text); font-weight:700;">${fmtAm(r.ml)}</div><div style="color:var(--text); font-weight:700; font-size:11px;">${fmtPct(r.mkt, 1)}</div></td>`
+      : `<td class="num" ${mlClickAttr} style="color:var(--text); font-weight:700;">—<div style="font-size:9px; color:var(--muted2); margin-top:2px;">edit</div></td>`;
     const blendedAm = impliedToAmerican(r.blended);
     const blendedCell = `<td class="num"><div style="color:var(--text); font-weight:700; font-size:13px;">${fmtAm(blendedAm)}</div><div style="color:var(--text); font-weight:700; font-size:11px; margin-top:2px;">${fmtPct(r.blended, 1)}</div></td>`;
     const edgeColor = r.edge == null ? 'var(--text)' : r.edge >= 1 ? 'var(--green)' : r.edge >= 0 ? 'var(--amber)' : 'var(--red)';
@@ -3625,10 +3702,10 @@ function renderModel() {
         })()}
       </td>
       ${marketCell}
-      ${cell(r.saberProb,  'var(--text)')}
-      ${cell(r.eyeProb,    'var(--text)')}
-      ${cell(r.actionProb, 'var(--stok)')}
-      ${ARENA_ENABLED ? cell(r.arenaProb, 'var(--orange)') : ''}
+      ${cell(r.saberProb,  'var(--text)',   'saber')}
+      ${cell(r.eyeProb,    'var(--text)',   'eye')}
+      ${cell(r.actionProb, 'var(--stok)',   'action')}
+      ${ARENA_ENABLED ? cell(r.arenaProb, 'var(--orange)', 'arena') : ''}
       ${blendedCell}
       ${edgeCell}
       ${(() => {
@@ -4061,49 +4138,37 @@ function exportModelCardImage() {
   const topPicks = rendered.filter(fx => fx.edge >= 5).slice(0, 5);
 
   // ---- Canvas drawing ----
-  // "Editorial" layout — dark navy header, white body table, Inter font (same
-  // as the app), grouped MODEL/MARKET column bands, edge as a rounded chip.
-  // Keeps all 10 data points from the original export but presents them like
-  // an actual bettors' newsletter card.
+  // Barebones layout — no accent bars, no group headers, no zebra shading.
+  // Just: dark title bar → column labels → rows → edge chips. Odds + Win %
+  // merged into a single "F1 MODEL" / "F2 MODEL" cell per fighter so the
+  // reader gets both in one look (-773 88.5%) instead of scanning two columns.
   const DPI = 2;
   const paddingSides = 30;
-  const paddingBottom = 40;
+  const paddingBottom = 30;
 
-  // Columns — full data preserved from the original export.
   const columns = [
     { key: 'rank',   label: '#',         w: 40,  align: 'center' },
-    { key: 'f1',     label: 'Fighter 1', w: 175, align: 'left'   },
-    { key: 'f2',     label: 'Fighter 2', w: 175, align: 'left'   },
-    { key: 'f1win',  label: 'F1 Win %',  w: 85,  align: 'center', group: 'MODEL WIN %' },
-    { key: 'f2win',  label: 'F2 Win %',  w: 85,  align: 'center', group: 'MODEL WIN %' },
-    { key: 'f1fair', label: 'F1 Fair',   w: 85,  align: 'center', group: 'FAIR ODDS' },
-    { key: 'f2fair', label: 'F2 Fair',   w: 85,  align: 'center', group: 'FAIR ODDS' },
-    { key: 'f1odds', label: 'F1 Odds',   w: 85,  align: 'center', group: 'MARKET ODDS' },
-    { key: 'f2odds', label: 'F2 Odds',   w: 85,  align: 'center', group: 'MARKET ODDS' },
-    { key: 'pick',   label: 'Pick',      w: 160, align: 'left'   },
-    { key: 'edge',   label: 'Edge',      w: 110, align: 'center' },
+    { key: 'f1',     label: 'Fighter 1', w: 180, align: 'left'   },
+    { key: 'f2',     label: 'Fighter 2', w: 180, align: 'left'   },
+    { key: 'f1mod',  label: 'F1 Model',  w: 130, align: 'center' },
+    { key: 'f2mod',  label: 'F2 Model',  w: 130, align: 'center' },
+    { key: 'f1odds', label: 'F1 Market', w: 90,  align: 'center' },
+    { key: 'f2odds', label: 'F2 Market', w: 90,  align: 'center' },
+    { key: 'pick',   label: 'Pick',      w: 170, align: 'left'   },
+    { key: 'edge',   label: 'Edge',      w: 100, align: 'center' },
   ];
   const tableW = columns.reduce((s, c) => s + c.w, 0);
   const W = tableW + paddingSides * 2;
 
-  // Palette — white body, dark navy header, muted greys, green highlights.
+  // Palette
   const BG           = '#f5f5f5';
   const HEADER_BG    = '#0f172a';
-  const HEADER_ACCENT= '#22c55e';
   const HEADER_TITLE = '#ffffff';
-  const HEADER_SUB   = '#ffffff';    // was #cbd5e1 — event/date now full white
   const TABLE_BG     = '#ffffff';
-  const ROW_ZEBRA    = '#fafafa';
-  const ROW_DIVIDER  = '#f1f5f9';
-  const COL_HEAD_BG  = '#f8fafc';
-  const COL_HEAD_TXT = '#0f172a';    // was #64748b — full dark text on column headers
-  const GROUP_TXT    = '#0f172a';    // was #94a3b8 — full dark on group header
-  const CELL_DIVIDER = '#e2e8f0';
+  const ROW_DIVIDER  = '#e2e8f0';
+  const COL_HEAD_TXT = '#0f172a';
   const TEXT         = '#0f172a';
-  const TEXT_MUTED   = '#0f172a';    // was #64748b — same as TEXT now (no dim non-pick %)
-  const TEXT_DIM     = '#0f172a';    // was #94a3b8 — same as TEXT now (rank # full weight)
   const FAIR_HI      = '#15803d';
-  const FAIR_LO      = '#0f172a';    // was #94a3b8 — non-pick fair now just dark, not faded
   const EDGE_GREEN_BG = '#dcfce7';
   const EDGE_GREEN_TX = '#15803d';
   const EDGE_AMBER_BG = '#fef3c7';
@@ -4111,30 +4176,26 @@ function exportModelCardImage() {
   const EDGE_RED_BG   = '#fee2e2';
   const EDGE_RED_TX   = '#991b1b';
 
-  // Font stack — Inter first, then system fallbacks. Uses .8 weight scale.
   const FONT_STACK   = "'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif";
   const FONT_TITLE   = `700 22px ${FONT_STACK}`;
   const FONT_SUB     = `500 13px ${FONT_STACK}`;
-  const FONT_GROUP   = `600 10px ${FONT_STACK}`;
-  const FONT_COLHDR  = `600 10px ${FONT_STACK}`;
+  const FONT_COLHDR  = `700 11px ${FONT_STACK}`;
   const FONT_RANK    = `600 14px ${FONT_STACK}`;
   const FONT_NAME    = `700 15px ${FONT_STACK}`;
+  const FONT_ODDS    = `700 15px ${FONT_STACK}`;   // Odds are the big number
+  const FONT_PCT     = `500 12px ${FONT_STACK}`;   // Win % is smaller, muted role
   const FONT_CELL    = `600 14px ${FONT_STACK}`;
-  const FONT_CELL_DIM= `500 14px ${FONT_STACK}`;
   const FONT_EDGE_N  = `700 16px ${FONT_STACK}`;
   const FONT_EDGE_L  = `600 8px ${FONT_STACK}`;
 
   // Sizing
-  const titleBlockH  = 78;
-  const accentH      = 3;
-  const groupHeaderH = 22;
-  const colHeaderH   = 32;
-  const rowMinH      = 58;
+  const titleBlockH  = 68;
+  const colHeaderH   = 40;
+  const rowMinH      = 56;
   const cellPadding  = 12;
 
   const measureCanvas = document.createElement('canvas');
   const mctx = measureCanvas.getContext('2d');
-
   function wrapText(text, maxW, font) {
     mctx.font = font;
     if (mctx.measureText(text).width <= maxW) return [text];
@@ -4150,21 +4211,20 @@ function exportModelCardImage() {
     return lines.length ? lines : [text];
   }
 
-  // Pre-compute wrapped lines + row heights
   const rowLayouts = rendered.map((f, i) => {
     const wF1 = columns[1].w - cellPadding * 2;
     const wF2 = columns[2].w - cellPadding * 2;
-    const wPick = columns[9].w - cellPadding * 2;
+    const wPick = columns[7].w - cellPadding * 2;
     const l1 = wrapText(f.fighter1, wF1, FONT_NAME);
     const l2 = wrapText(f.fighter2, wF2, FONT_NAME);
-    const lPick = wrapText(f.predictedWinner, wPick, FONT_CELL);  // FULL name in Pick column
+    const lPick = wrapText(f.predictedWinner, wPick, FONT_CELL);
     const maxLines = Math.max(l1.length, l2.length, lPick.length);
     const height = Math.max(rowMinH, 14 + maxLines * 20);
-    return { fight: f, rank: i + 1, f1Lines: l1, f2Lines: l2, pickLines: lPick, height, zebra: i % 2 === 1 };
+    return { fight: f, rank: i + 1, f1Lines: l1, f2Lines: l2, pickLines: lPick, height };
   });
   const bodyH = rowLayouts.reduce((s, r) => s + r.height, 0);
 
-  const H = titleBlockH + accentH + groupHeaderH + colHeaderH + bodyH + paddingBottom;
+  const H = titleBlockH + colHeaderH + bodyH + paddingBottom;
 
   const canvas = document.createElement('canvas');
   canvas.width = W * DPI;
@@ -4174,59 +4234,28 @@ function exportModelCardImage() {
   const ctx = canvas.getContext('2d');
   ctx.scale(DPI, DPI);
 
-  // Background (edge behind rounded corners)
+  // Background
   ctx.fillStyle = BG;
   ctx.fillRect(0, 0, W, H);
 
   // ---------- Title block ----------
   ctx.fillStyle = HEADER_BG;
   ctx.fillRect(paddingSides, 0, tableW, titleBlockH);
-  // Three centered lines: "UFC MODEL" (big) / event name / date. No source
-  // breakdown, no bullet separators — clean and direct.
   ctx.textBaseline = 'middle';
   ctx.textAlign = 'center';
   ctx.fillStyle = HEADER_TITLE;
-  ctx.font = `700 22px ${FONT_STACK}`;
+  ctx.font = FONT_TITLE;
   ctx.fillText('UFC MODEL', paddingSides + tableW / 2, 22);
-  ctx.font = `600 14px ${FONT_STACK}`;
-  ctx.fillText(card.label, paddingSides + tableW / 2, 46);
-  ctx.font = `500 13px ${FONT_STACK}`;
-  ctx.fillText(card.date || '', paddingSides + tableW / 2, 66);
-  // Green accent bar
-  ctx.fillStyle = HEADER_ACCENT;
-  ctx.fillRect(paddingSides, titleBlockH, tableW, accentH);
-
-  // ---------- Group headers row ----------
-  const groupY = titleBlockH + accentH;
-  ctx.fillStyle = COL_HEAD_BG;
-  ctx.fillRect(paddingSides, groupY, tableW, groupHeaderH);
-  // Draw group labels centered over their span
-  ctx.font = FONT_GROUP;
-  ctx.fillStyle = GROUP_TXT;
-  ctx.textBaseline = 'middle';
-  ctx.textAlign = 'center';
-  const groups = {};
-  columns.forEach((c, i) => {
-    if (!c.group) return;
-    if (!groups[c.group]) groups[c.group] = { start: i, end: i };
-    else groups[c.group].end = i;
-  });
-  Object.entries(groups).forEach(([label, span]) => {
-    let x = paddingSides;
-    for (let i = 0; i < span.start; i++) x += columns[i].w;
-    let w = 0;
-    for (let i = span.start; i <= span.end; i++) w += columns[i].w;
-    ctx.fillText(label, x + w / 2, groupY + groupHeaderH / 2);
-  });
+  ctx.font = FONT_SUB;
+  const eventLine = card.label + (card.date ? '  ' + card.date : '');
+  ctx.fillText(eventLine, paddingSides + tableW / 2, 48);
 
   // ---------- Column headers ----------
-  const colHeadY = groupY + groupHeaderH;
-  ctx.fillStyle = COL_HEAD_BG;
+  const colHeadY = titleBlockH;
+  ctx.fillStyle = TABLE_BG;
   ctx.fillRect(paddingSides, colHeadY, tableW, colHeaderH);
-  // 2px bottom border under column headers
-  ctx.fillStyle = CELL_DIVIDER;
-  ctx.fillRect(paddingSides, colHeadY + colHeaderH - 2, tableW, 2);
-  // Header labels
+  ctx.fillStyle = ROW_DIVIDER;
+  ctx.fillRect(paddingSides, colHeadY + colHeaderH - 1, tableW, 1);
   ctx.font = FONT_COLHDR;
   ctx.fillStyle = COL_HEAD_TXT;
   ctx.textBaseline = 'middle';
@@ -4238,16 +4267,15 @@ function exportModelCardImage() {
       : c.align === 'right'
         ? cx + c.w - cellPadding
         : cx + c.w / 2;
-    ctx.fillText((c.label || '').toUpperCase(), tx, colHeadY + colHeaderH / 2 - 1);
+    ctx.fillText(c.label.toUpperCase(), tx, colHeadY + colHeaderH / 2);
     cx += c.w;
   });
 
   // ---------- Data rows ----------
   let ry = colHeadY + colHeaderH;
-  rowLayouts.forEach(({ fight: f, rank, f1Lines, f2Lines, pickLines, height, zebra }) => {
-    ctx.fillStyle = zebra ? ROW_ZEBRA : TABLE_BG;
+  rowLayouts.forEach(({ fight: f, rank, f1Lines, f2Lines, pickLines, height }) => {
+    ctx.fillStyle = TABLE_BG;
     ctx.fillRect(paddingSides, ry, tableW, height);
-    // Row divider
     ctx.fillStyle = ROW_DIVIDER;
     ctx.fillRect(paddingSides, ry + height - 1, tableW, 1);
 
@@ -4258,48 +4286,63 @@ function exportModelCardImage() {
 
     // Rank
     ctx.font = FONT_RANK;
-    ctx.fillStyle = TEXT_DIM;
+    ctx.fillStyle = TEXT;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(String(rank), midCol(0), rowMid);
 
-    // Fighter 1 name (equal weight for both; Pick column shows the model's opinion)
+    // F1 name
     drawWrapped(ctx, f1Lines, xAt(1) + cellPadding, rowMid, {
       align: 'left', color: TEXT, font: FONT_NAME, lineHeight: 20,
     });
-    // Fighter 2 name
+    // F2 name
     drawWrapped(ctx, f2Lines, xAt(2) + cellPadding, rowMid, {
       align: 'left', color: TEXT, font: FONT_NAME, lineHeight: 20,
     });
 
-    // F1 Win %  — both fighters get the same weight; Pick column shows model's opinion
-    ctx.font = FONT_CELL;
+    // F1 Model = fair odds + implied %  — merged into one cell
+    // Odds are the primary number (large), % is secondary (smaller, muted role)
+    // Pick side: fair odds green; non-pick: text black
+    const drawModelCell = (isPickSide, odds, pct, colIdx) => {
+      const cx = midCol(colIdx);
+      ctx.font = FONT_ODDS;
+      ctx.fillStyle = isPickSide ? FAIR_HI : TEXT;
+      ctx.textAlign = 'center';
+      // Draw "<odds>  <pct%>" together with a small gap so they align cleanly
+      // and the % feels attached to its odds. Use tabular measures.
+      const oddsStr = fmtAm(odds);
+      const pctStr = fmtPct(pct, 1);
+      const gap = 10;
+      const wOdds = mctx.measureText(oddsStr).width; mctx.font = FONT_ODDS;
+      const measureOdds = ctx.measureText(oddsStr).width;
+      ctx.font = FONT_PCT;
+      const measurePct = ctx.measureText(pctStr).width;
+      const total = measureOdds + gap + measurePct;
+      const startX = cx - total / 2;
+      ctx.font = FONT_ODDS;
+      ctx.fillStyle = isPickSide ? FAIR_HI : TEXT;
+      ctx.textAlign = 'left';
+      ctx.fillText(oddsStr, startX, rowMid);
+      ctx.font = FONT_PCT;
+      ctx.fillStyle = TEXT;
+      ctx.fillText(pctStr, startX + measureOdds + gap, rowMid);
+    };
+    drawModelCell(pickIsF1,  f.f1Fair, f.f1Prob, 3);
+    drawModelCell(!pickIsF1, f.f2Fair, f.f2Prob, 4);
+
+    // Market odds
+    ctx.font = FONT_ODDS;
     ctx.fillStyle = TEXT;
     ctx.textAlign = 'center';
-    ctx.fillText(fmtPct(f.f1Prob, 1), midCol(3), rowMid);
-    // F2 Win %
-    ctx.fillText(fmtPct(f.f2Prob, 1), midCol(4), rowMid);
+    ctx.fillText(fmtAm(f.f1Ml), midCol(5), rowMid);
+    ctx.fillText(fmtAm(f.f2Ml), midCol(6), rowMid);
 
-    // F1 Fair — green if this side is the pick, dim otherwise
-    ctx.font = FONT_CELL;
-    ctx.fillStyle = pickIsF1 ? FAIR_HI : FAIR_LO;
-    ctx.fillText(fmtAm(f.f1Fair), midCol(5), rowMid);
-    // F2 Fair
-    ctx.fillStyle = pickIsF1 ? FAIR_LO : FAIR_HI;
-    ctx.fillText(fmtAm(f.f2Fair), midCol(6), rowMid);
-
-    // Market odds — same weight both sides
-    ctx.fillStyle = TEXT;
-    ctx.font = FONT_CELL;
-    ctx.fillText(fmtAm(f.f1Ml), midCol(7), rowMid);
-    ctx.fillText(fmtAm(f.f2Ml), midCol(8), rowMid);
-
-    // Pick — FULL fighter name (wraps if long)
-    drawWrapped(ctx, pickLines, xAt(9) + cellPadding, rowMid, {
+    // Pick — full fighter name
+    drawWrapped(ctx, pickLines, xAt(7) + cellPadding, rowMid, {
       align: 'left', color: TEXT, font: FONT_CELL, lineHeight: 20,
     });
 
-    // Edge as rounded chip
+    // Edge chip
     const edgeIsGreen = f.edge >= 5;
     const edgeIsAmber = f.edge >= 1 && f.edge < 5;
     const edgeIsRed = f.edge < 0;
@@ -4307,9 +4350,8 @@ function exportModelCardImage() {
     const chipTxt = edgeIsGreen ? EDGE_GREEN_TX : edgeIsAmber ? EDGE_AMBER_TX : edgeIsRed ? EDGE_RED_TX : EDGE_AMBER_TX;
     const chipW = 74;
     const chipH = 36;
-    const chipX = midCol(10) - chipW / 2;
+    const chipX = midCol(8) - chipW / 2;
     const chipY = rowMid - chipH / 2;
-    // Rounded rectangle
     const r = 6;
     ctx.fillStyle = chipBg;
     ctx.beginPath();
@@ -4324,13 +4366,12 @@ function exportModelCardImage() {
     ctx.quadraticCurveTo(chipX, chipY, chipX + r, chipY);
     ctx.closePath();
     ctx.fill();
-    // Chip text: big value on top, "PP EDGE" small under
     ctx.fillStyle = chipTxt;
     ctx.font = FONT_EDGE_N;
     ctx.textAlign = 'center';
-    ctx.fillText((f.edge >= 0 ? '+' : '') + f.edge.toFixed(1), midCol(10), chipY + 12);
+    ctx.fillText((f.edge >= 0 ? '+' : '') + f.edge.toFixed(1), midCol(8), chipY + 12);
     ctx.font = FONT_EDGE_L;
-    ctx.fillText('PP EDGE', midCol(10), chipY + 26);
+    ctx.fillText('PP', midCol(8), chipY + 26);
 
     ry += height;
   });
@@ -4383,19 +4424,78 @@ function shortName(full) {
   return parts.slice(-2).join(' ');
 }
 
-function onModelWeightChange(which) {
-  const pairs = [
-    ['modelWSaber',  'modelWSaberB'],
-    ['modelWEye',    'modelWEyeB'],
-    ['modelWAction', 'modelWActionB'],
-  ];
-  pairs.forEach(([top, bot]) => {
-    const src = which === 'bot' ? bot : top;
-    const dst = which === 'bot' ? top : bot;
-    const sEl = document.getElementById(src);
-    const dEl = document.getElementById(dst);
-    if (sEl && dEl) dEl.value = sEl.value;
-  });
+// Slider handler with two responsibilities:
+//   1. Sync the changed slider's value to its twin (top ↔ bottom)
+//   2. Enforce that Saber + Eye + Action sums to exactly 100 by absorbing the
+//      change into the other two sliders proportionally to their current ratio
+// The `id` arg is the element ID of whichever slider the user dragged
+// (e.g. 'modelWSaberB'). We map that to a source ('saber'|'eye'|'action') and
+// use that to figure out which two sliders should absorb the delta.
+function onModelWeightChange(id) {
+  // Map slider ID → source name. The bottom twins have a 'B' suffix.
+  const idToSource = {
+    modelWSaber:  'saber',  modelWSaberB:  'saber',
+    modelWEye:    'eye',    modelWEyeB:    'eye',
+    modelWAction: 'action', modelWActionB: 'action',
+  };
+  const changed = idToSource[id];
+  if (!changed) { renderModel(); return; }
+
+  // Current values (read from whichever pair the user touched; either half is
+  // fine since they always mirror each other)
+  const getVal = (base) => {
+    const el = document.getElementById(base);
+    return el ? +el.value : 0;
+  };
+  let wSaber  = getVal('modelWSaber');
+  let wEye    = getVal('modelWEye');
+  let wAction = getVal('modelWAction');
+  // The bottom set — if user moved a bottom slider, that's the fresh value; the top
+  // hasn't caught up yet. Pull whichever pair had the change so 'new value' is correct.
+  const isBot = id.endsWith('B');
+  if (isBot) {
+    wSaber  = getVal('modelWSaberB');
+    wEye    = getVal('modelWEyeB');
+    wAction = getVal('modelWActionB');
+  }
+
+  // Clamp: whichever slider was changed keeps its new value (already in wSaber/wEye/wAction).
+  // The other two need to absorb (100 - changed) proportional to their prior ratio.
+  const values = { saber: wSaber, eye: wEye, action: wAction };
+  const newVal = values[changed];
+  const budget = 100 - newVal; // amount left for the other two sliders combined
+
+  const others = ['saber', 'eye', 'action'].filter(s => s !== changed);
+  const otherSum = others.reduce((s, k) => s + values[k], 0);
+
+  if (budget <= 0) {
+    // User pushed the changed slider to 100 — both others go to 0
+    others.forEach(k => { values[k] = 0; });
+  } else if (otherSum <= 0) {
+    // Both others were at 0 — split budget evenly
+    const half = budget / 2;
+    values[others[0]] = Math.round(half);
+    values[others[1]] = budget - values[others[0]]; // keeps integer sum exact
+  } else {
+    // Split budget proportional to prior ratio
+    const raw0 = (values[others[0]] / otherSum) * budget;
+    const rounded0 = Math.round(raw0);
+    values[others[0]] = rounded0;
+    values[others[1]] = budget - rounded0; // exact complement so total stays at 100
+  }
+
+  // Write new values back to BOTH sliders in each pair so they stay in sync
+  const setBoth = (source, val) => {
+    const cap = source.charAt(0).toUpperCase() + source.slice(1);
+    const top = document.getElementById('modelW' + cap);
+    const bot = document.getElementById('modelW' + cap + 'B');
+    if (top) top.value = String(val);
+    if (bot) bot.value = String(val);
+  };
+  setBoth('saber',  values.saber);
+  setBoth('eye',    values.eye);
+  setBoth('action', values.action);
+
   renderModel();
 }
 
@@ -4745,9 +4845,48 @@ function importAll(ev) {
       if (!confirm(`Import ${s.cards.length} cards? This REPLACES current data.`)) return;
       STATE = s;
       saveState(STATE);
+
+      // Old filter values might point to cards that no longer exist. Clear
+      // ALL card selectors so refresh sets each to a valid default (most
+      // recent card by date). Otherwise the tab renders "nothing" because
+      // its filter is stuck on an id that doesn't exist in the new data.
+      const allSelectIds = [
+        'dashCardFilter','consCardFilter','eyeCardFilter','arenaCardFilter',
+        'saberCardFilter','actionCardFilter','modelCardFilter',
+        'dashComboCardFilter','consComboCardFilter','resCardFilter',
+        'clvCardTarget','gradeCardSelect','ingestTargetCard',
+      ];
+      allSelectIds.forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.value = '';
+      });
+
+      // Snap LAST_INGESTED_CARD_ID to the newest card by date so all
+      // "auto-focus most recent" paths land on real data.
+      const sorted = [...STATE.cards].sort((a,b) => (b.date||'').localeCompare(a.date||''));
+      LAST_INGESTED_CARD_ID = sorted[0]?.id || null;
+
+      // Populate every card dropdown in the app
       refreshCardFilters();
+      if (typeof populateGradeCardSelect === 'function') populateGradeCardSelect();
+      if (typeof refreshAddActionCard === 'function') refreshAddActionCard();
+      if (typeof refreshIngestTarget === 'function') refreshIngestTarget();
+
+      // For the tabs that filter to a single card, force-select the newest
+      // one so the render has something to show immediately instead of the
+      // "pick a card" empty state.
+      if (LAST_INGESTED_CARD_ID) {
+        ['resCardFilter','consCardFilter','eyeCardFilter','arenaCardFilter',
+         'saberCardFilter','actionCardFilter','dashCardFilter'].forEach(id => {
+          const el = document.getElementById(id);
+          if (el && [...el.options].some(o => o.value === LAST_INGESTED_CARD_ID)) {
+            el.value = LAST_INGESTED_CARD_ID;
+          }
+        });
+      }
+
       rerenderCurrentTab();
-      toast('Imported');
+      toast(`Imported ${s.cards.length} cards`);
     } catch (err) { toast('Import failed: ' + err.message, 'error'); }
   };
   r.readAsText(f);
