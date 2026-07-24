@@ -3776,7 +3776,34 @@ function renderMatchupStatus() {
   `;
 }
 
-// Collapse/expand the whole Matchup Data section on the upload page.
+// Click-to-sort on the Matchup Data table. Clicking the currently-active
+// column flips direction; clicking a different column switches to it,
+// starting ascending (lowest/best first, matching the lowest=best
+// convention this table uses throughout). Only re-renders the heatmap
+// wrapper, not the whole status block or tab, so it stays snappy.
+function sortMatchupHeatmap(colKey) {
+  window._matchupSort = window._matchupSort || { col: "team", dir: "asc" };
+  if (window._matchupSort.col === colKey) {
+    window._matchupSort.dir = window._matchupSort.dir === "asc" ? "desc" : "asc";
+  } else {
+    window._matchupSort.col = colKey;
+    window._matchupSort.dir = "asc";
+  }
+  const wrap = document.getElementById("matchup-heatmap-wrap");
+  const data = getMatchupData();
+  if (!wrap || !data) return;
+  // Rebuilding innerHTML resets scroll position to 0 by default, which was
+  // snapping the table back to its leftmost columns every time a header
+  // further right got clicked. Capture and restore the actual scrolling
+  // element's (the overflow-x:auto div, first child of wrap) horizontal
+  // scroll offset across the rebuild so the view stays put.
+  const scroller = wrap.querySelector('div[style*="overflow-x:auto"]');
+  const scrollLeft = scroller ? scroller.scrollLeft : 0;
+  wrap.innerHTML = _buildMatchupHeatmapHtml(data);
+  const newScroller = wrap.querySelector('div[style*="overflow-x:auto"]');
+  if (newScroller) newScroller.scrollLeft = scrollLeft;
+}
+
 // Parse the WNBA.com Advanced Stats "Teams > Defense" table — the piece the
 // plain Opponent table above can't give you: DEF RTG (points allowed per 100
 // possessions), which strips pace out entirely. A team can allow a lot of
@@ -3925,68 +3952,150 @@ function toggleMatchupHeatmap() {
   }
 }
 
-// Build the heatmap HTML — opponent defense averages by stat with color tint
-// vs league average. Cyan = above avg (weaker defense, favorable for overs).
-// Red = below avg (stronger defense, favorable for unders).
+// Build the heatmap HTML — every loaded stat (Opponent + Defense tables),
+// ranked lowest=best (stingiest defense), sortable per column, with hover
+// tooltips explaining each stat. Green = top-tier stingy, red = bottom-tier
+// soft, for whichever column is highlighted/sorted.
 function _buildMatchupHeatmapHtml(data) {
   if (!data || !data.teams) return "";
-  // Pick the stats to display — match what the bet modal uses
-  const statCols = ["PTS", "REB", "AST", "3PM", "PRA"];
-  const teamKeys = Object.keys(data.teams).sort();
-  const leagueAvg = data.leagueAvg || {};
-  // Tint helper — return rgba bg + text color based on deviation %
-  const tintFor = (val, avg) => {
-    if (val == null || avg == null || avg === 0) return { bg: "transparent", color: "#d4dae3" };
-    const devPct = ((val - avg) / avg) * 100;
-    // Clamp to ±10% for full intensity
-    const clamped = Math.max(-10, Math.min(10, devPct));
-    const intensity = Math.abs(clamped) / 10; // 0..1
-    if (devPct > 0.5) {
-      // Above average — weaker defense → cyan tint (over-favorable)
-      const alpha = (0.06 + intensity * 0.22).toFixed(2);
-      return { bg: `rgba(125,211,252,${alpha})`, color: intensity > 0.5 ? "#7dd3fc" : "#d4dae3" };
-    } else if (devPct < -0.5) {
-      // Below average — stronger defense → red tint (under-favorable)
-      const alpha = (0.06 + intensity * 0.22).toFixed(2);
-      return { bg: `rgba(248,113,113,${alpha})`, color: intensity > 0.5 ? "#f87171" : "#d4dae3" };
-    }
-    return { bg: "transparent", color: "#d4dae3" };
+  let teamKeys = Object.keys(data.teams).sort();
+  if (!teamKeys.length) return "";
+
+  // Show every column that's ACTUALLY present in the loaded data, not a
+  // fixed list — so this reflects whatever mix of Opponent-table and
+  // Defense-table stats you've pasted, instead of silently ignoring half
+  // of what's loaded. Grouped into two sections so a wide table stays
+  // readable: "Allowed" (Opponent-table volume/efficiency) and "Defense"
+  // (Defense-table rate/situational stats). Column order is fixed within
+  // each group so the table doesn't reshuffle between renders.
+  const ALLOWED_COLS = [
+    { key: "PTS", label: "PTS" }, { key: "REB", label: "REB" }, { key: "AST", label: "AST" },
+    { key: "STL", label: "STL" }, { key: "BLK", label: "BLK" }, { key: "3PM", label: "3PM" },
+    { key: "TO", label: "TO" }, { key: "FG%", label: "FG%" }, { key: "3P%", label: "3P%" },
+    { key: "PRA", label: "PRA" },
+  ];
+  const DEFENSE_COLS = [
+    { key: "DEFRTG", label: "DEF RTG" }, { key: "DREB", label: "DREB" }, { key: "DREB%", label: "DREB%" },
+    { key: "OPP_PTS_PAINT", label: "PAINT" }, { key: "OPP_PTS_FB", label: "FAST BRK" },
+    { key: "OPP_PTS_OFF_TOV", label: "OFF TOV" }, { key: "OPP_PTS_2NDCHANCE", label: "2ND CH" },
+  ];
+  const hasAnyValue = (col) => teamKeys.some(t => data.teams[t][col.key] != null);
+  const allowedCols = ALLOWED_COLS.filter(hasAnyValue);
+  const defenseCols = DEFENSE_COLS.filter(hasAnyValue);
+  const activeCols = [...allowedCols, ...defenseCols];
+  if (!activeCols.length) return "";
+
+  // Sort state — click a header to sort by that column, click again to flip
+  // direction. Persists in window so it survives re-renders (e.g. after a
+  // new paste) until explicitly changed again. "team" sorts alphabetically;
+  // any stat key sorts by value (nulls always last, regardless of direction,
+  // so missing data doesn't jump to the top when sorting ascending).
+  window._matchupSort = window._matchupSort || { col: "team", dir: "asc" };
+  const sortState = window._matchupSort;
+  if (sortState.col !== "team") {
+    const withVal = teamKeys.filter(t => data.teams[t][sortState.col] != null);
+    const withoutVal = teamKeys.filter(t => data.teams[t][sortState.col] == null);
+    withVal.sort((a, b) => {
+      const diff = data.teams[a][sortState.col] - data.teams[b][sortState.col];
+      return sortState.dir === "asc" ? diff : -diff;
+    });
+    teamKeys = [...withVal, ...withoutVal];
+  } else if (sortState.dir === "desc") {
+    teamKeys = [...teamKeys].reverse();
+  }
+
+  // Rank-based color instead of raw-value tint: every column here is a
+  // "how much does this defense allow/give up" stat, so LOWER is always
+  // better defense — same convention locked in across the whole app
+  // (bet modal Matchup section, EV Calc DEF vs grid, Totals DEF block).
+  // Rank #1 (lowest allowed) = green/stingy, worst rank = red/soft.
+  // NOTE: rank is always computed against the FULL team set regardless of
+  // sort/filter, so ranks stay meaningful (not re-ranked within a subset).
+  const allTeamKeysForRank = Object.keys(data.teams);
+  const rankOf = (col, val) => {
+    if (val == null) return null;
+    const allVals = allTeamKeysForRank.map(t => data.teams[t][col.key]).filter(v => v != null);
+    if (allVals.length < 2) return null;
+    const sorted = [...allVals].sort((a, b) => a - b);
+    return { rank: sorted.findIndex(v => v === val) + 1, of: sorted.length };
   };
-  // Header
+  const colorFor = (rankInfo) => {
+    if (!rankInfo || rankInfo.of < 2) return "#d4dae3";
+    // Position in the pack, 0 (best/lowest) to 1 (worst/highest).
+    const pos = (rankInfo.rank - 1) / (rankInfo.of - 1);
+    if (pos <= 0.2) return "#4ade80";      // stingiest tier
+    if (pos >= 0.8) return "#f87171";      // softest tier
+    return "#d4dae3";                       // middle of the pack
+  };
+
+  // Plain-English tooltip per stat, shown on hover — so you don't need to
+  // remember what OFF TOV or DREB% means at a glance.
+  const STAT_TOOLTIPS = {
+    PTS: "Points allowed per game", REB: "Rebounds allowed per game", AST: "Assists allowed per game",
+    STL: "Steals allowed per game", BLK: "Blocks allowed per game", "3PM": "Three-pointers made allowed per game",
+    TO: "Turnovers forced per game", "FG%": "Opponent field goal % allowed", "3P%": "Opponent three-point % allowed",
+    PRA: "Points + rebounds + assists allowed per game (sum)",
+    DEFRTG: "Defensive rating — points allowed per 100 possessions (pace-adjusted; tells you if a defense is actually good, not just fast)",
+    DREB: "Defensive rebounds per 100 possessions", "DREB%": "Defensive rebound rate — % of available defensive rebounds grabbed",
+    OPP_PTS_PAINT: "Opponent points scored in the paint, per 100 possessions",
+    OPP_PTS_FB: "Opponent fast-break points, per 100 possessions",
+    OPP_PTS_OFF_TOV: "Opponent points off turnovers, per 100 possessions",
+    OPP_PTS_2NDCHANCE: "Opponent second-chance points, per 100 possessions",
+  };
+
+  // Group header uses a neutral gray, deliberately NOT the same blue used
+  // for the active sort column below — otherwise it reads as if the whole
+  // group is highlighted rather than just the one sorted column.
+  const colGroupHeader = (label, cols) => cols.length
+    ? `<th colspan="${cols.length}" style="padding:4px 9px;text-align:center;color:#8b93a0;font-weight:800;letter-spacing:0.6px;text-transform:uppercase;font-size:8.5px;border-bottom:1px solid #1a1d22;background:rgba(255,255,255,0.02);">${label}</th>`
+    : "";
+
+  // Sort arrow shown on the currently-active sort column only.
+  const sortArrow = (colKey) => sortState.col === colKey ? (sortState.dir === "asc" ? " ▲" : " ▼") : "";
+
   let html = `<div style="overflow-x:auto;border:1px solid #1a1d22;border-radius:8px;margin-top:4px;">
-    <table style="width:100%;border-collapse:collapse;font-family:'Inter',sans-serif;font-size:11px;min-width:340px;">
+    <table style="width:100%;border-collapse:collapse;font-family:'Inter',sans-serif;font-size:11px;min-width:${120 + activeCols.length * 62}px;">
       <thead>
-        <tr style="background:rgba(255,255,255,0.025);">
-          <th style="padding:6px 9px;text-align:left;color:#8b93a0;font-weight:700;letter-spacing:0.5px;text-transform:uppercase;font-size:9px;border-bottom:1px solid #1a1d22;position:sticky;left:0;background:#0c0d10;">Team</th>`;
-  statCols.forEach(stat => {
-    const avg = leagueAvg[stat];
-    const avgStr = avg != null ? avg.toFixed(1) : "—";
-    html += `<th style="padding:6px 9px;text-align:right;color:#8b93a0;font-weight:700;letter-spacing:0.4px;font-size:9px;border-bottom:1px solid #1a1d22;">
-      <div style="text-transform:uppercase;">${stat}</div>
-      <div style="font-size:8px;font-weight:500;opacity:0.7;margin-top:1px;">avg ${avgStr}</div>
-    </th>`;
+        <tr>
+          <th rowspan="2" onclick="sortMatchupHeatmap('team')" title="Sort by team name" style="cursor:pointer;user-select:none;padding:6px 9px;text-align:left;color:${sortState.col==='team'?'#050507':'#8b93a0'};font-weight:700;letter-spacing:0.5px;text-transform:uppercase;font-size:9px;border-bottom:1px solid #1a1d22;position:sticky;left:0;background:${sortState.col==='team'?'#7dd3fc':'#0c0d10'};">Team${sortArrow('team')}</th>
+          ${colGroupHeader("Allowed (per game)", allowedCols)}
+          ${colGroupHeader("Defense (per 100)", defenseCols)}
+        </tr>
+        <tr style="background:rgba(255,255,255,0.025);">`;
+  activeCols.forEach(col => {
+    const isActive = sortState.col === col.key;
+    const tip = (STAT_TOOLTIPS[col.key] || col.label).replace(/"/g, "&quot;");
+    // Active column gets a solid background fill on its header — a much
+    // stronger, unambiguous signal than a text-color change alone, and
+    // clearly distinct from the group header's neutral gray above it.
+    html += `<th onclick="sortMatchupHeatmap('${col.key}')" title="${tip} — click to sort" style="cursor:pointer;user-select:none;padding:6px 8px;text-align:right;color:${isActive?'#050507':'#8b93a0'};font-weight:800;letter-spacing:0.3px;font-size:8.5px;border-bottom:1px solid #1a1d22;text-transform:uppercase;white-space:nowrap;background:${isActive?'#7dd3fc':'transparent'};">${col.label}${sortArrow(col.key)}</th>`;
   });
   html += `</tr></thead><tbody>`;
-  // Rows
+
   teamKeys.forEach((teamName, idx) => {
     const row = data.teams[teamName];
     const rowBg = idx % 2 ? "rgba(255,255,255,0.012)" : "transparent";
     html += `<tr style="background:${rowBg};">
       <td style="padding:5px 9px;color:#d4dae3;font-weight:600;font-size:11px;border-bottom:1px solid rgba(255,255,255,0.03);position:sticky;left:0;background:${idx % 2 ? '#0d0e11' : '#0c0d10'};">${teamName}</td>`;
-    statCols.forEach(stat => {
-      const v = row[stat];
-      const avg = leagueAvg[stat];
-      const t = tintFor(v, avg);
+    activeCols.forEach(col => {
+      const v = row[col.key];
+      const rankInfo = rankOf(col, v);
+      const color = colorFor(rankInfo);
       const valStr = v != null ? v.toFixed(1) : "—";
-      html += `<td style="padding:5px 9px;text-align:right;font-family:'JetBrains Mono','Menlo',monospace;font-variant-numeric:tabular-nums;font-size:11px;color:${t.color};background:${t.bg};border-bottom:1px solid rgba(255,255,255,0.03);font-weight:${t.bg === 'transparent' ? '500' : '700'};">${valStr}</td>`;
+      const rankStr = rankInfo ? `<span style="opacity:0.65;font-size:8.5px;"> #${rankInfo.rank}</span>` : "";
+      const isSortedCol = sortState.col === col.key;
+      const cellBg = isSortedCol ? "rgba(125,211,252,0.06)" : "transparent";
+      const tip = (STAT_TOOLTIPS[col.key] || col.label).replace(/"/g, "&quot;");
+      html += `<td title="${tip}" style="padding:5px 8px;text-align:right;font-family:'JetBrains Mono','Menlo',monospace;font-variant-numeric:tabular-nums;font-size:11px;color:${color};background:${cellBg};border-bottom:1px solid rgba(255,255,255,0.03);font-weight:${color !== '#d4dae3' ? '700' : '500'};">${valStr}${rankStr}</td>`;
     });
     html += `</tr>`;
   });
+
   html += `</tbody></table>
   </div>
   <div style="display:flex;align-items:center;gap:14px;margin-top:8px;font-size:10px;color:#8b93a0;font-family:'Inter',sans-serif;flex-wrap:wrap;">
-    <span style="display:inline-flex;align-items:center;gap:5px;"><span style="display:inline-block;width:10px;height:10px;background:rgba(125,211,252,0.28);border-radius:2px;"></span>above league avg · favorable OVER</span>
-    <span style="display:inline-flex;align-items:center;gap:5px;"><span style="display:inline-block;width:10px;height:10px;background:rgba(248,113,113,0.28);border-radius:2px;"></span>below league avg · favorable UNDER</span>
+    <span style="display:inline-flex;align-items:center;gap:5px;"><span style="display:inline-block;width:10px;height:10px;background:#4ade80;border-radius:2px;"></span>stingiest — allows least (best defense)</span>
+    <span style="display:inline-flex;align-items:center;gap:5px;"><span style="display:inline-block;width:10px;height:10px;background:#f87171;border-radius:2px;"></span>softest — allows most (worst defense)</span>
   </div>`;
   return html;
 }
@@ -16431,17 +16540,13 @@ function renderTotals() {
     }
 
     // Card key & per-card season override (auto | 2025 | 2026 | blend).
-    // For games that came in from the ESPN schedule paste with no posted line,
-    // we honor their `defaultSeason` hint (2026) so P×E uses current-season team
-    // stats by default. User can still override per card via the season selector.
+    // Default to 2026-only — the season lock decided earlier: no 2025
+    // mixing by default anymore. User can still override per card via the
+    // season selector if they want a blend for a specific matchup.
     const cardKey = `${g.awayAbbr}_${g.homeAbbr}`;
     window._cardSeason = window._cardSeason || {};
-    // Default to 50/50 blend across seasons unless the game data explicitly
-    // sets a season (e.g., schedule-only entries with no books default to '26).
-    // Previously defaulted to "auto" (Bayesian blend), but user feedback was
-    // that 50/50 produces more intuitive numbers especially early in the season.
     if (!window._cardSeason[cardKey]) {
-      window._cardSeason[cardKey] = g.defaultSeason || "blend";
+      window._cardSeason[cardKey] = g.defaultSeason || "2026";
     }
     const cardSeason = window._cardSeason[cardKey] || "2026";
     const seasonArg = cardSeason === "auto" ? undefined : cardSeason;
@@ -16450,9 +16555,11 @@ function renderTotals() {
     const indepInfo = independentTotal(g.awayAbbr, g.homeAbbr, seasonArg);
     const paceEffTotal = indepInfo ? indepInfo.total : null;
 
-    // Active projection source for this game card. Default: Pace×Eff (50/50
-    // season blend) — matches the totals model Brian's trusted source uses.
-    // User can still tap PLAYER or COMBINED bars to switch on a per-card basis.
+    // Active projection source for this game card. Default: COMBINED
+    // (Pace×Eff + Player-based) whenever BOTH are available — that's the
+    // real default model. Falls back to whichever ONE is actually loaded
+    // if only one exists, rather than defaulting to nothing / a narrower
+    // mode. User can still tap PLAYER or COMBINED bars to switch per card.
     window._cardProjSource = window._cardProjSource || {};
     if (!window._cardProjSource[cardKey]) {
       if (paceEffTotal != null && blendedTotal != null) window._cardProjSource[cardKey] = "both";
