@@ -15480,30 +15480,51 @@ function _briefLineForGame(g) {
   // COPY emits the exact number shown in the big ACTIVE label on the card.
   const indep = independentTotal(g.awayAbbr, g.homeAbbr, seasonArg);
   const paceEffTotal = indep?.total;
-  // RotoWire-blended total: sum of away + home team projections. Uses the
-  // totals-page override slot when loaded (so Totals can have its own RW file
-  // separate from the Upload tab's props RW). Falls back to slots[2] otherwise.
+  // Player-based total — Dimers preferred (matches this game's date) with
+  // RotoWire as fallback, SAME priority order renderTotals() actually uses.
+  // This was previously RW-only here, which meant COPY silently produced a
+  // different (often lower/incomplete) total than what the card displayed
+  // whenever Dimers was the loaded source — e.g. games missing entirely from
+  // the copied total because RW had no data even though Dimers did.
   let blendedTotal = null;
+  const _gDay = isoDate || (typeof _gameDayISO === "function" ? _gameDayISO(g) : null);
+  const dmAway = (typeof getTotalsDimersTeamSum === "function") ? getTotalsDimersTeamSum(g.awayAbbr, _gDay) : null;
+  const dmHome = (typeof getTotalsDimersTeamSum === "function") ? getTotalsDimersTeamSum(g.homeAbbr, _gDay) : null;
   const rwAway = (typeof getTotalsPageRwTeamSum === "function") ? getTotalsPageRwTeamSum(g.awayAbbr) : null;
   const rwHome = (typeof getTotalsPageRwTeamSum === "function") ? getTotalsPageRwTeamSum(g.homeAbbr) : null;
-  if (rwAway && rwHome && (rwAway.count + rwHome.count) > 0) {
+  if (dmAway && dmHome && (dmAway.count + dmHome.count) > 0) {
+    blendedTotal = dmAway.sum + dmHome.sum;
+  } else if (rwAway && rwHome && (rwAway.count + rwHome.count) > 0) {
     blendedTotal = rwAway.sum + rwHome.sum;
   }
-  // Active model lookup. If user clicked a bar to switch, that choice wins.
+  // Active model lookup. If user explicitly clicked a bar to switch, that
+  // choice wins. Otherwise — rather than trusting whatever got stored in
+  // window._cardProjSource[cardKey] on a PAST render (which may have locked
+  // in "paceeff" before Dimers/RW data was loaded yet, and never gets
+  // revisited once set) — resolve fresh, right now, the same way a brand
+  // new render would: Combined if both totals are currently available,
+  // else whichever single one is. This is what was causing COPY to disagree
+  // with the card: the card's own projSource read updates correctly because
+  // renderTotals() re-derives it, but that "only set once" stored value could
+  // still be stale garbage from before all your data was loaded, and COPY
+  // was trusting it blindly.
   const activeSrc = window._cardProjSource?.[cardKey];
   let projTotal;
   if (activeSrc === "blended" && blendedTotal != null) {
     projTotal = blendedTotal;
-  } else if (activeSrc === "paceeff" && paceEffTotal != null) {
+  } else if (activeSrc === "paceeff" && paceEffTotal != null && blendedTotal == null) {
+    // Only trust a stored "paceeff" preference if blended genuinely isn't
+    // available right now either — otherwise this is exactly the stale-lock
+    // scenario above, and Combined (both) is what should actually be used.
     projTotal = paceEffTotal;
-  } else if (activeSrc === "both" && blendedTotal != null && paceEffTotal != null) {
-    projTotal = (blendedTotal + paceEffTotal) / 2;
+  } else if (paceEffTotal != null && blendedTotal != null) {
+    projTotal = (paceEffTotal + blendedTotal) / 2;
+  } else if (paceEffTotal != null) {
+    projTotal = paceEffTotal;
+  } else if (blendedTotal != null) {
+    projTotal = blendedTotal;
   } else {
-    // No preference recorded yet or active source unavailable — match render's
-    // default-resolution order: paceeff first (50/50 solo), then blended, then both
-    if (paceEffTotal != null) projTotal = paceEffTotal;
-    else if (blendedTotal != null) projTotal = blendedTotal;
-    else projTotal = null;
+    projTotal = null;
   }
   // Find a line among the parsed books. Prefer the lowest-vig pair (book with both sides),
   // but we just need the consensus line for the brief output. Any book line works.
@@ -16297,13 +16318,24 @@ function _executeCopyTotalsByDate(dateFilter, modelOverride) {
   const games = betstampGames || [];
   const byDate = new Map();
   games.forEach(g => {
-    // Compute both candidate projections (PxE and RW-blended player sum)
+    // Compute both candidate projections (PxE and player-blended sum).
+    // Player-blended: Dimers preferred for this game's date, RW fallback —
+    // same priority order the card display and copyOneTotalProjection use.
+    // (Previously RW-only here too, same bug as the single-game copy: any
+    // game whose player data was loaded via Dimers rather than RW would
+    // silently drop out of the blended total, or get miscounted vs. what
+    // the card showed.)
     const indep = independentTotal(g.awayAbbr, g.homeAbbr, "2026");
     const paceEffTotal = indep?.total;
     let blendedTotal = null;
+    const _gDay = g.gameDate ? String(g.gameDate).slice(0,10) : (typeof _gameDayISO === "function" ? _gameDayISO(g) : null);
+    const dmAway = (typeof getTotalsDimersTeamSum === "function") ? getTotalsDimersTeamSum(g.awayAbbr, _gDay) : null;
+    const dmHome = (typeof getTotalsDimersTeamSum === "function") ? getTotalsDimersTeamSum(g.homeAbbr, _gDay) : null;
     const rwAway = (typeof getTotalsPageRwTeamSum === "function") ? getTotalsPageRwTeamSum(g.awayAbbr) : null;
     const rwHome = (typeof getTotalsPageRwTeamSum === "function") ? getTotalsPageRwTeamSum(g.homeAbbr) : null;
-    if (rwAway && rwHome && (rwAway.count + rwHome.count) > 0) {
+    if (dmAway && dmHome && (dmAway.count + dmHome.count) > 0) {
+      blendedTotal = dmAway.sum + dmHome.sum;
+    } else if (rwAway && rwHome && (rwAway.count + rwHome.count) > 0) {
       blendedTotal = rwAway.sum + rwHome.sum;
     }
     // Resolve which model to use for THIS game:
