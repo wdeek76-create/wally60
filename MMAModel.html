@@ -336,6 +336,25 @@
 <!-- ============ INGEST ============ -->
 <section id="tab-ingest" class="hidden">
   <div class="panel">
+    <h2>The Odds API · optional live-odds fetch</h2>
+    <p class="meta" style="margin:0 0 12px 0;">
+      Paste your <a href="https://the-odds-api.com" target="_blank" style="color:var(--green);">the-odds-api.com</a> key to enable auto-fetch buttons on the Cards tab.
+      Fetches best-price across FanDuel, DraftKings, BetOnline, Pinnacle etc for each fighter.
+      Your logged bet prices are NEVER overwritten — only <b>card.ml</b> (Model tab market column) updates.
+      Free tier: 500 requests/month.
+    </p>
+    <div class="row two">
+      <div>
+        <label class="fld">API key (stored locally in your browser)</label>
+        <input type="text" id="oddsApiKey" placeholder="paste key here" style="background:var(--bg2); border:1px solid var(--border); border-radius:6px; padding:9px 12px; color:var(--text); font-size:13px; width:100%;" oninput="onOddsApiKeyInput()">
+      </div>
+      <div style="display:flex; align-items:flex-end;">
+        <div id="oddsApiStatus" class="meta" style="padding:9px 12px;"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
     <h2>Save to card</h2>
     <p class="meta" style="margin:0 0 12px 0;">Pick exactly where this paste goes. No more auto-merging into the wrong card.</p>
     <div class="row two">
@@ -3596,6 +3615,11 @@ function renderModel() {
         .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))[0];
       if (clvBet) { clv = clvBet.clv; closingMl = clvBet.closingMl; }
 
+      // Pull previous odds snapshot (if auto-fetch has run before) so the
+      // Model tab can render a line-movement badge next to Market.
+      const prevOdds = (m.lastAutoFetch && m.lastAutoFetch.prevOdds != null)
+        ? m.lastAutoFetch.prevOdds : null;
+
       rows.push({
         cardId: c.id,
         cardLabel: c.label,
@@ -3603,6 +3627,7 @@ function renderModel() {
         opponent: m.opponent,
         oppOdds, oppImplied,
         ml: m.odds,
+        prevOdds,
         mkt,
         eyeProb: eP, arenaProb: aP, saberProb: sP, actionProb: acP,
         blended, edge,
@@ -3671,8 +3696,21 @@ function renderModel() {
       </td>`;
     };
     const mlClickAttr = `onclick="editCardMl('${r.cardId}','${fighterAttr}')" style="cursor:pointer;" title="Click to edit market odds"`;
+    // Line-movement badge — up arrow if odds moved MORE FAVORABLE for a bettor
+    // on this side (american number went higher, e.g. -150 → -120 or +150 → +180);
+    // down arrow if worse. Only shows if we have a prevOdds snapshot from a
+    // prior auto-fetch and the value actually changed.
+    let movementBadge = '';
+    if (r.prevOdds != null && r.ml != null && r.prevOdds !== r.ml) {
+      const better = r.ml > r.prevOdds;
+      const arrow = better ? '↑' : '↓';
+      const arrowColor = better ? 'var(--green)' : 'var(--red)';
+      const delta = r.ml - r.prevOdds;
+      const deltaStr = (delta >= 0 ? '+' : '') + delta;
+      movementBadge = `<div style="font-size:9px; color:${arrowColor}; font-weight:700; margin-top:2px;" title="Line moved from ${fmtAm(r.prevOdds)} to ${fmtAm(r.ml)} (${deltaStr})">${arrow} ${deltaStr}</div>`;
+    }
     const marketCell = r.mkt != null
-      ? `<td class="num" ${mlClickAttr}><div style="color:var(--text); font-weight:700;">${fmtAm(r.ml)}</div><div style="color:var(--text); font-weight:700; font-size:11px;">${fmtPct(r.mkt, 1)}</div></td>`
+      ? `<td class="num" ${mlClickAttr}><div style="color:var(--text); font-weight:700;">${fmtAm(r.ml)}</div><div style="color:var(--text); font-weight:700; font-size:11px;">${fmtPct(r.mkt, 1)}</div>${movementBadge}</td>`
       : `<td class="num" ${mlClickAttr} style="color:var(--text); font-weight:700;">—<div style="font-size:9px; color:var(--muted2); margin-top:2px;">edit</div></td>`;
     const blendedAm = impliedToAmerican(r.blended);
     const blendedCell = `<td class="num"><div style="color:var(--text); font-weight:700; font-size:13px;">${fmtAm(blendedAm)}</div><div style="color:var(--text); font-weight:700; font-size:11px; margin-top:2px;">${fmtPct(r.blended, 1)}</div></td>`;
@@ -4726,6 +4764,8 @@ function renderCards() {
       </div>
       <div class="actions">
         <button class="primary green" onclick="autoGradeFromESPN('${c.id}')" style="margin-right:6px;">🤖 Auto-grade</button>
+        <button class="primary" onclick="autoFetchOdds('${c.id}')" style="margin-right:6px;" title="Fetch best-price live odds from FanDuel/DK/BetOnline/Pinnacle etc. Updates card.ml only — your logged bet prices stay locked.">🎯 Fetch odds</button>
+        <button class="primary" onclick="autoFetchClosingLines('${c.id}')" style="margin-right:6px;" title="Fetch closing lines (prefers BetOnline, Pikkit standard). Populates card.closing + re-stamps CLV on every bet. Run day-of after lines settle.">🎯 Fetch closing</button>
         <button class="ghost" onclick="renameCard('${c.id}')" style="margin-right:6px;">Rename</button>
         <button class="danger" onclick="deleteCard('${c.id}')">Delete</button>
       </div>
@@ -5010,7 +5050,250 @@ function parseGradePaste(text) {
   return results;
 }
 
-// Auto-grade a card by fetching results from ESPN's undocumented MMA/UFC API.
+// ============================================================================
+// The Odds API integration — optional live-odds fetch.
+// User pastes a key on the Ingest tab; it saves to localStorage. Buttons on the
+// Cards tab (and Model tab dropdown area) call autoFetchOdds() which pulls
+// current lines from FanDuel/DraftKings/BetOnline/Pinnacle etc for every
+// fighter on the card, picks the BEST PRICE per fighter across all books, and
+// stamps card.ml. Bet.ml is NEVER touched — logged prices stay locked so CLV
+// remains honest. A line-movement badge shows up on Model tab when card.ml
+// (current market) differs from bet.ml (what you actually bet at).
+// ============================================================================
+
+const ODDS_API_KEY_STORAGE = 'mma_edge_tracker_oddsapi_key';
+
+function getOddsApiKey() {
+  try { return localStorage.getItem(ODDS_API_KEY_STORAGE) || ''; } catch { return ''; }
+}
+function setOddsApiKey(key) {
+  try { localStorage.setItem(ODDS_API_KEY_STORAGE, key || ''); } catch {}
+}
+function onOddsApiKeyInput() {
+  const el = document.getElementById('oddsApiKey');
+  if (!el) return;
+  const key = el.value.trim();
+  setOddsApiKey(key);
+  refreshOddsApiStatus();
+}
+function refreshOddsApiStatus() {
+  const el = document.getElementById('oddsApiStatus');
+  if (!el) return;
+  const key = getOddsApiKey();
+  if (!key) {
+    el.innerHTML = '<span style="color:var(--muted);">No key set — auto-fetch disabled</span>';
+    return;
+  }
+  el.innerHTML = `<span style="color:var(--green);">✓ Key set (${key.slice(0, 4)}…${key.slice(-4)}) — auto-fetch enabled</span>`;
+}
+
+// Best "price for the bettor" comparison. Higher American odds = better payout.
+// -110 beats -120; +150 beats +140. So we just pick the highest signed number.
+function isBetterPrice(candidate, current) {
+  if (current == null) return true;
+  return candidate > current;
+}
+
+// Fetch current live odds for MMA/UFC via The Odds API and update card.ml for
+// each matched fighter. Best-price-across-books logic: for each fighter, walk
+// every book's line and keep the highest (best) American odds along with which
+// book gave it.
+async function autoFetchOdds(cardId) {
+  const card = STATE.cards.find(c => c.id === cardId);
+  if (!card) { toast('Card not found', 'error'); return; }
+  const key = getOddsApiKey();
+  if (!key) {
+    toast('Set your Odds API key on the Ingest tab first', 'error');
+    return;
+  }
+
+  toast('Fetching live odds…');
+
+  // us,us2,eu → covers FanDuel, DraftKings, BetMGM, BetOnline, Fliff, Novig,
+  // ProphetX, Pinnacle etc in one call. Costs 1 request per region we hit.
+  const url = `https://api.the-odds-api.com/v4/sports/mma_mixed_martial_arts/odds/?apiKey=${encodeURIComponent(key)}&regions=us,us2,eu&markets=h2h&oddsFormat=american`;
+  let data, remainingReqs;
+  try {
+    const res = await fetch(url);
+    remainingReqs = res.headers.get('x-requests-remaining');
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      throw new Error(`HTTP ${res.status}: ${errText.slice(0, 100)}`);
+    }
+    data = await res.json();
+  } catch (err) {
+    toast(`Odds API fetch failed: ${err.message}`, 'error');
+    return;
+  }
+
+  if (!Array.isArray(data) || !data.length) {
+    toast('Odds API returned no events (may be no upcoming MMA cards)', 'error');
+    return;
+  }
+
+  // Build a fighter → best-price lookup from the response.
+  // { normalizedFighterName: { odds, book, allBooks: [{book, odds}] } }
+  const priceMap = {};
+  data.forEach(ev => {
+    (ev.bookmakers || []).forEach(bm => {
+      (bm.markets || []).forEach(mk => {
+        if (mk.key !== 'h2h') return;
+        (mk.outcomes || []).forEach(oc => {
+          if (typeof oc.price !== 'number') return;
+          const normName = normalizeName(oc.name);
+          if (!priceMap[normName]) priceMap[normName] = {
+            name: oc.name,
+            best: { odds: oc.price, book: bm.title },
+            all: [],
+          };
+          priceMap[normName].all.push({ odds: oc.price, book: bm.title });
+          if (isBetterPrice(oc.price, priceMap[normName].best.odds)) {
+            priceMap[normName].best = { odds: oc.price, book: bm.title };
+          }
+        });
+      });
+    });
+  });
+
+  // Walk this card's fighters and match against priceMap
+  const mismatches = [];
+  const allApiNames = Object.values(priceMap).map(v => v.name);
+  const allApiSeen = new Set();
+  const dedupedApiNames = [];
+  allApiNames.forEach(n => { if (!allApiSeen.has(n)) { allApiSeen.add(n); dedupedApiNames.push(n); } });
+
+  let updated = 0, skipped = 0;
+  Object.entries(card.ml || {}).forEach(([fighterKey, fighterMl]) => {
+    const norm = normalizeName(fighterMl.name);
+    let entry = priceMap[norm];
+    if (!entry) {
+      // No auto-match — prompt user with the API name list
+      const listStr = dedupedApiNames.map((n, i) => `${i + 1}. ${n}`).join('\n');
+      const answer = prompt(
+        `No Odds API match for: ${fighterMl.name}\n\n` +
+        `Which name from the API is this? Type a number (or 0 to skip):\n\n${listStr}`,
+        ''
+      );
+      if (answer === null || answer.trim() === '' || answer.trim() === '0') {
+        skipped++; mismatches.push(fighterMl.name); return;
+      }
+      const idx = parseInt(answer, 10) - 1;
+      if (isNaN(idx) || idx < 0 || idx >= dedupedApiNames.length) {
+        skipped++; mismatches.push(fighterMl.name); return;
+      }
+      entry = priceMap[normalizeName(dedupedApiNames[idx])];
+      if (!entry) { skipped++; mismatches.push(fighterMl.name); return; }
+    }
+
+    // Update card.ml. Preserve the previous card.ml.odds as fetchedFrom so the
+    // Model tab can show a line-movement badge (was X, now Y). Also stamp
+    // lastAutoFetch metadata for provenance.
+    const priorOdds = fighterMl.odds;
+    fighterMl.odds = entry.best.odds;
+    fighterMl.book = entry.best.book;
+    fighterMl.lastAutoFetch = {
+      odds: entry.best.odds,
+      book: entry.best.book,
+      fetchedAt: Date.now(),
+      prevOdds: priorOdds != null ? priorOdds : null,
+      allBooks: entry.all,   // Every book's price at fetch time (for reference)
+    };
+    updated++;
+  });
+
+  saveState(STATE);
+  rerenderCurrentTab();
+
+  const parts = [];
+  if (updated) parts.push(`${updated} odds updated`);
+  if (skipped) parts.push(`${skipped} skipped`);
+  const remStr = remainingReqs ? ` · ${remainingReqs} req remaining` : '';
+  const misStr = mismatches.length ? ` · Unmatched: ${mismatches.slice(0, 3).join(', ')}${mismatches.length > 3 ? '…' : ''}` : '';
+  toast(`Live odds: ${parts.join(', ') || 'no changes'}${remStr}${misStr}`);
+}
+
+// Optional closing-line auto-fetch — same endpoint, only run day-of after
+// lines have settled. Stores into card.closing (same shape as manual entry).
+async function autoFetchClosingLines(cardId) {
+  const card = STATE.cards.find(c => c.id === cardId);
+  if (!card) { toast('Card not found', 'error'); return; }
+  const key = getOddsApiKey();
+  if (!key) { toast('Set your Odds API key on the Ingest tab first', 'error'); return; }
+
+  toast('Fetching closing lines…');
+
+  const url = `https://api.the-odds-api.com/v4/sports/mma_mixed_martial_arts/odds/?apiKey=${encodeURIComponent(key)}&regions=us,us2,eu&markets=h2h&oddsFormat=american`;
+  let data, remainingReqs;
+  try {
+    const res = await fetch(url);
+    remainingReqs = res.headers.get('x-requests-remaining');
+    if (!res.ok) { const errText = await res.text().catch(() => ''); throw new Error(`HTTP ${res.status}: ${errText.slice(0, 100)}`); }
+    data = await res.json();
+  } catch (err) { toast(`Fetch failed: ${err.message}`, 'error'); return; }
+
+  // For closing lines we want BetOnline as the primary (Pikkit standard).
+  // Fall back to other books only if BetOnline doesn't cover the fighter.
+  const closingMap = {}; // norm → { name, odds, book }
+  data.forEach(ev => {
+    (ev.bookmakers || []).forEach(bm => {
+      (bm.markets || []).forEach(mk => {
+        if (mk.key !== 'h2h') return;
+        (mk.outcomes || []).forEach(oc => {
+          if (typeof oc.price !== 'number') return;
+          const norm = normalizeName(oc.name);
+          const cur = closingMap[norm];
+          // Prefer BetOnline; if not BetOnline and no entry yet, take best price
+          const isBetOnline = bm.key === 'betonlineag' || bm.title.toLowerCase().includes('betonline');
+          if (!cur) {
+            closingMap[norm] = { name: oc.name, odds: oc.price, book: bm.title, isBetOnline };
+          } else if (isBetOnline && !cur.isBetOnline) {
+            closingMap[norm] = { name: oc.name, odds: oc.price, book: bm.title, isBetOnline: true };
+          } else if (!cur.isBetOnline && isBetterPrice(oc.price, cur.odds)) {
+            closingMap[norm] = { name: oc.name, odds: oc.price, book: bm.title, isBetOnline: false };
+          }
+        });
+      });
+    });
+  });
+
+  // Init card.closing if missing
+  card.closing = card.closing || {};
+  let updated = 0;
+  Object.entries(card.ml || {}).forEach(([fighterKey, fighterMl]) => {
+    const norm = normalizeName(fighterMl.name);
+    const entry = closingMap[norm];
+    if (!entry) return;
+    card.closing[normalizeName(fighterMl.name)] = {
+      name: fighterMl.name,
+      odds: entry.odds,
+      book: entry.book,
+      autoFetched: true,
+      fetchedAt: Date.now(),
+    };
+    updated++;
+  });
+
+  // Re-stamp CLV on every bet using the fresh closing map
+  (card.bets || []).forEach(b => {
+    const closeKey = findMatchKey(card.closing, b.fighter);
+    if (!closeKey) return;
+    const closeEntry = card.closing[closeKey];
+    const res = computeCLV(closeEntry, card.closing, b.ml);
+    if (res) {
+      b.closingMl = res.closeOdds;
+      b.closingImplied = americanToImplied(res.closeOdds);
+      b.closingBook = res.closeBook;
+      b.clv = res.clv;
+    }
+  });
+
+  saveState(STATE);
+  rerenderCurrentTab();
+  const remStr = remainingReqs ? ` · ${remainingReqs} req remaining` : '';
+  toast(`Closing lines: ${updated} fighters updated${remStr}`);
+}
+
+
 // Endpoint: https://site.api.espn.com/apis/site/v2/sports/mma/ufc/scoreboard?dates=YYYYMMDD
 // Free, no auth, CORS-permissive. Because a card can span two dates (prelims
 // Sat night → main card past midnight local time), we query the card date AND
@@ -5279,6 +5562,13 @@ refreshIngestTarget();
 refreshAddActionCard();
 applyArenaVisibility();
 renderResults();
+
+// Pre-fill Odds API key input from localStorage + set the status pill
+(() => {
+  const el = document.getElementById('oddsApiKey');
+  if (el) el.value = getOddsApiKey();
+  refreshOddsApiStatus();
+})();
 
 // default date today
 document.getElementById('cardDate').value = new Date().toISOString().slice(0,10);
