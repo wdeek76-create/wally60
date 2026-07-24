@@ -703,47 +703,50 @@ const HALF_OFFSET = { MLB:0.45, WNBA:0.48, NBA:0.48, NFL:0.48, NHL:0.48 };
 
 function renderInsight(games) {
   const bar = document.getElementById('insight-bar');
-  if (viewingDate !== 0) { bar.style.display='none'; return; }
+  const nowMs = Date.now();
+  const tips = [];
 
   const fmt = ms => {
     const d = new Date(ms);
     const h = d.getHours();
     const m = String(d.getMinutes()).padStart(2,'0');
-    const ampm = h >= 12 ? 'PM' : 'AM';
-    const h12 = h % 12 || 12;
-    return `${h12}:${m} ${ampm}`;
+    return `${h%12||12}:${m} ${h>=12?'PM':'AM'}`;
   };
-  const nowMs = Date.now();
-  const tips = [];
 
-  // 1. Current high-value live games (still individual — these are specific)
-  const hotGames = games.filter(g => g.bucket === 'live' && highValueLabel(g));
-  hotGames.forEach(g => {
-    const lbl = highValueLabel(g);
-    tips.push({ icon:'·', time: nowMs, text:`${g.away.abbr}/${g.home.abbr} (${g.league}) — ${g.away.score}-${g.home.score} ${lbl}` });
-  });
+  // 1. Current high-value live games (today only)
+  if (viewingDate === 0) {
+    const hotGames = games.filter(g => g.bucket === 'live' && highValueLabel(g));
+    hotGames.forEach(g => {
+      const lbl = highValueLabel(g);
+      tips.push({ icon:'·', text:`${g.away.abbr}/${g.home.abbr} (${g.league}) — ${g.away.score}-${g.home.score} ${lbl}` });
+    });
+  }
 
-  // 2. Upcoming 2nd half estimates — group by ~20 min windows
+  // 2. 2nd half projections — all upcoming games, no time limit for tomorrow
+  const upcoming = viewingDate === 0
+    ? games.filter(g => g.bucket === 'sched' || g.bucket === 'soon')
+    : games.filter(g => g.bucket !== 'final');
+
   const halfEvents = [];
-
-  // Scheduled/soon games
-  games.filter(g => g.bucket === 'sched' || g.bucket === 'soon').forEach(g => {
+  upcoming.forEach(g => {
     const halfMs = (HALF_OFFSET[g.league]||0.48) * (AVG_DURATION[g.league]||150) * 60000;
     const halfTime = g.startTime.getTime() + halfMs;
-    if (halfTime > nowMs && halfTime < nowMs + 6*60*60000) {
-      halfEvents.push({ g, halfTime, icon:'·' });
+    if (viewingDate === 1 || halfTime > nowMs) {
+      halfEvents.push({ g, halfTime });
     }
   });
 
-  // Live games approaching 2nd half
-  games.filter(g => g.bucket === 'live').forEach(g => {
-    const halfMs = (HALF_OFFSET[g.league]||0.48) * (AVG_DURATION[g.league]||150) * 60000;
-    const estStart = nowMs - Math.max(0, g.period-1) * (AVG_DURATION[g.league]||150)/4 * 60000;
-    const halfTime = estStart + halfMs;
-    if (halfTime > nowMs && halfTime < nowMs + 90*60000 && !highValueLabel(g)) {
-      halfEvents.push({ g, halfTime, icon:'·' });
-    }
-  });
+  // Live games approaching 2nd half (today only)
+  if (viewingDate === 0) {
+    games.filter(g => g.bucket === 'live').forEach(g => {
+      const halfMs = (HALF_OFFSET[g.league]||0.48) * (AVG_DURATION[g.league]||150) * 60000;
+      const estStart = nowMs - Math.max(0, g.period-1) * (AVG_DURATION[g.league]||150)/4 * 60000;
+      const halfTime = estStart + halfMs;
+      if (halfTime > nowMs && halfTime < nowMs + 90*60000 && !highValueLabel(g)) {
+        halfEvents.push({ g, halfTime });
+      }
+    });
+  }
 
   // Group by 20-min buckets
   halfEvents.sort((a,b) => a.halfTime - b.halfTime);
@@ -814,8 +817,11 @@ function highValueLabel(g) {
   const desc = (g.stateDesc || '').toLowerCase();
   const period = g.period || 0;
   const diff = Math.abs(g.away.score - g.home.score);
-  const tied = diff === 0;
-  const close = diff <= 3;
+  const tied  = diff === 0;
+  const close = g.league === 'MLB'  ? diff <= 1 :
+                g.league === 'NHL'  ? diff <= 1 :
+                g.league === 'NFL'  ? diff <= 7 :
+                diff <= 5; // NBA/WNBA
 
   // Overtime / extra innings — must be explicit
   if (g.league === 'MLB' && period > 9) return 'Extra Innings';
@@ -825,9 +831,25 @@ function highValueLabel(g) {
 
   // MLB — 5th inning and beyond
   if (g.league === 'MLB') {
-    if (period >= 5 && tied) return 'Tied';
-    if (period >= 7) return close ? 'Close Game' : 'Late Innings';
-    if (period >= 5 && close) return 'Close Game';
+    const sit = g.sit || {};
+    const runnersOn = sit.onFirst || sit.onSecond || sit.onThird;
+    const scoringPos = sit.onSecond || sit.onThird;
+    const outs = sit.outs ?? null;
+    const highLeverage = runnersOn && (outs === 2 || scoringPos);
+
+    if (period >= 9) return tied ? 'Tied Late' : close ? 'Close Late' : null;
+    if (period >= 7) {
+      if (tied && highLeverage) return 'Tied + Runners';
+      if (tied) return 'Tied';
+      if (close && highLeverage) return 'Close + Runners';
+      if (close) return 'Close Game';
+      return null;
+    }
+    if (period >= 5) {
+      if (tied && highLeverage) return 'Tied + Runners';
+      if (close && scoringPos && outs === 2) return 'Close + 2 Outs';
+      return null;
+    }
     return null;
   }
 
