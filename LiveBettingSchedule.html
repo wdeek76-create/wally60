@@ -354,44 +354,37 @@
   }
   .tl-chart {
     display: flex; align-items: flex-end; justify-content: space-between;
-    gap: 3px; height: 110px; padding-top: 4px;
+    gap: 2px; height: 100px; padding-top: 4px;
   }
   .tl-slot {
     flex: 1; display: flex; flex-direction: column; align-items: center;
-    justify-content: flex-end; gap: 4px; height: 100%;
+    justify-content: flex-end; height: 100%;
     cursor: pointer; -webkit-tap-highlight-color: transparent;
-    min-width: 0; overflow: visible;
+    min-width: 0;
   }
-  .tl-count {
-    font-size: 10px; font-weight: 800; color: rgba(255,255,255,0.6);
-    height: 12px; line-height: 12px;
-  }
-  .tl-slot.peak .tl-count { color: var(--green); }
-  .tl-slot.busy .tl-count { color: var(--green); }
   .tl-bar {
-    width: 100%; border-radius: 4px;
+    width: 100%; border-radius: 3px;
+    transition: transform 0.15s, filter 0.15s;
+    min-height: 8px;
+  }
+  /* two-tone */
+  .tl-slot.low  .tl-bar { background: rgba(39,192,113,0.22); }
+  .tl-slot.mid  .tl-bar { background: rgba(39,192,113,0.45); }
+  .tl-slot.bright .tl-bar {
     background: var(--green);
-    transition: opacity 0.2s, transform 0.15s;
-    min-height: 6px;
-  }
-  .tl-slot.empty .tl-bar { background: rgba(255,255,255,0.15); }
-  .tl-slot.busy .tl-bar {
-    box-shadow: 0 0 8px rgba(39,192,113,0.4);
-  }
-  .tl-slot.peak .tl-bar {
-    box-shadow: 0 0 14px rgba(39,192,113,0.7), 0 0 28px rgba(39,192,113,0.3);
+    box-shadow: 0 0 10px rgba(39,192,113,0.4);
   }
   .tl-slot.now .tl-bar { outline: 1.5px solid rgba(255,255,255,0.4); outline-offset: 1px; }
-  .tl-slot.sel .tl-bar { transform: scaleY(1.04); box-shadow: 0 0 16px rgba(39,192,113,0.8); }
-  .tl-hour {
-    font-size: 9px; font-weight: 700; color: rgba(255,255,255,0.4);
-    white-space: nowrap;
+  .tl-slot.sel .tl-bar { transform: scaleY(1.03); filter: brightness(1.2); }
+
+  .tl-labels {
+    position: relative; height: 16px; margin-top: 6px;
   }
-  .tl-slot.now .tl-hour { color: #fff; }
-  .tl-slot.peak .tl-hour {
-    color: var(--green); font-size: 10px; font-weight: 900;
-    text-shadow: 0 0 6px rgba(39,192,113,0.5);
-    position: relative; z-index: 2;
+  .tl-clabel {
+    position: absolute; top: 0;
+    font-size: 11px; font-weight: 800; color: var(--green);
+    text-align: center; white-space: nowrap;
+    text-shadow: 0 0 8px rgba(39,192,113,0.4);
   }
   .tl-detail {
     max-height: 0; overflow: hidden; transition: max-height 0.25s ease;
@@ -844,53 +837,66 @@ function renderInsight(games) {
 
   if (!moments.length) { bar.style.display='none'; return; }
 
-  // Time range: floor to hour of earliest, ceil to hour of latest
-  // For tomorrow, don't anchor to now (that'd span 24+ empty hours)
   const momentTimes = moments.map(m => m.ms);
-  const minMs = viewingDate === 0
-    ? Math.min(...momentTimes, nowMs)
-    : Math.min(...momentTimes);
+  const minMs = viewingDate === 0 ? Math.min(...momentTimes, nowMs) : Math.min(...momentTimes);
   const maxMs = Math.max(...momentTimes);
-  const HOUR = 3600000;
-  const startHour = Math.floor(minMs / HOUR) * HOUR;
-  const endHour   = Math.ceil((maxMs + HOUR/2) / HOUR) * HOUR;
+  const SLOT = 30 * 60000; // 30-min bins for the wave shape
+  const startSlot = Math.floor(minMs / SLOT) * SLOT;
+  const endSlot   = Math.ceil((maxMs + SLOT) / SLOT) * SLOT;
 
-  // Bin moments into hourly slots
+  // Bin into 30-min slots
   const slots = [];
-  for (let t = startHour; t < endHour; t += HOUR) {
-    const inSlot = moments.filter(m => m.ms >= t && m.ms < t + HOUR);
+  for (let t = startSlot; t < endSlot; t += SLOT) {
+    const inSlot = moments.filter(m => m.ms >= t && m.ms < t + SLOT);
     slots.push({ t, count: inSlot.length, moments: inSlot });
   }
 
   const maxCount = Math.max(...slots.map(s => s.count), 1);
-  // Peak slot for the callout
   const peakSlot = slots.reduce((a,b) => b.count > a.count ? b : a, slots[0]);
 
-  // Build bars
+  // Identify peak clusters: runs of consecutive above-average slots
+  const avg = slots.reduce((s,x)=>s+x.count,0) / slots.length;
+  const threshold = Math.max(avg, maxCount * 0.5);
+  const clusters = [];
+  let run = null;
+  slots.forEach((s,i) => {
+    if (s.count >= threshold && s.count > 0) {
+      if (!run) { run = { startI:i, endI:i, peak:s.count }; clusters.push(run); }
+      else { run.endI = i; run.peak = Math.max(run.peak, s.count); }
+    } else {
+      run = null;
+    }
+  });
+
+  const fmtRange = (t0, t1) => {
+    const r = ms => {
+      const d = new Date(ms);
+      const h = d.getHours(), mn = d.getMinutes();
+      const ampm = h>=12?'p':'a', h12 = h%12||12;
+      return mn===0 ? `${h12}${ampm}` : `${h12}:${String(mn).padStart(2,'0')}${ampm}`;
+    };
+    const a = r(t0), b = r(t1);
+    return a === b ? a : `${a}-${b}`;
+  };
+
+  // Build bars — two-tone
   const barsHtml = slots.map((s,i) => {
     const pct = s.count / maxCount;
-    const height = s.count === 0 ? 8 : 20 + pct * 80;
-    const isNow = nowMs >= s.t && nowMs < s.t + HOUR;
-    const isPeak = s.count === maxCount && s.count > 1;
-    const isBusy = s.count >= 3;
-    const intensity = s.count === 0 ? 0.12 : 0.35 + pct * 0.65;
-    const cls = isPeak ? 'peak' : isBusy ? 'busy' : s.count > 0 ? 'has' : 'empty';
-    let hourLabel = fmtHour(s.t);
-    let peakBarLabel = false;
-    if (isPeak && s.moments.length) {
-      const times = s.moments.map(m => m.ms).sort((a,b)=>a-b);
-      const med = times[Math.floor(times.length/2)];
-      const d = new Date(med);
-      d.setMinutes(Math.round(d.getMinutes()/10)*10, 0, 0);
-      const h = d.getHours(), mn = String(d.getMinutes()).padStart(2,'0');
-      hourLabel = mn==='00' ? `${h%12||12}P` : `${h%12||12}:${mn}`;
-      peakBarLabel = true;
-    }
+    const height = s.count === 0 ? 10 : 24 + pct * 76;
+    const isNow = nowMs >= s.t && nowMs < s.t + SLOT;
+    const inCluster = clusters.some(c => i >= c.startI && i <= c.endI);
+    const cls = inCluster ? 'bright' : s.count > 0 ? 'mid' : 'low';
     return `<div class="tl-slot ${cls}${isNow?' now':''}" data-slot="${i}" onclick="showSlot(${i})">
-      <div class="tl-count">${s.count > 0 ? s.count : ''}</div>
-      <div class="tl-bar" style="height:${height}px;opacity:${intensity}"></div>
-      <div class="tl-hour${peakBarLabel?' peak-label':''}">${hourLabel}</div>
+      <div class="tl-bar" style="height:${height}px"></div>
     </div>`;
+  }).join('');
+
+  // Cluster labels — centered under each peak run
+  const labelsHtml = clusters.map(c => {
+    const leftPct = (c.startI / slots.length) * 100;
+    const widthPct = ((c.endI - c.startI + 1) / slots.length) * 100;
+    const label = fmtRange(slots[c.startI].t, slots[c.endI].t + SLOT);
+    return `<div class="tl-clabel" style="left:${leftPct}%;width:${widthPct}%">${label}</div>`;
   }).join('');
 
   // Peak callout
@@ -899,9 +905,8 @@ function renderInsight(games) {
   peakSlot.moments.forEach(m => { (byL[m.g.league]||=[]).push(m.g); });
   const leagueParts = Object.entries(byL).map(([l,gs]) => `${gs.length} ${l}`).join(' · ');
 
-  window._tlSlots = slots; // for showSlot
+  window._tlSlots = slots;
 
-  const totalGames = moments.length;
   const headerLabel = viewingDate === 1 ? "Tomorrow's busiest" : 'Busiest window';
   const peakTimes = peakSlot.moments.map(m => m.ms).sort((a,b)=>a-b);
   const roundLabel = (ms, withAmPm=true) => {
@@ -926,6 +931,7 @@ function renderInsight(games) {
       <span class="tl-peak">${leagueParts || peakGames + ' games'} <span class="tl-peak-time">${peakLabel}</span></span>
     </div>
     <div class="tl-chart">${barsHtml}</div>
+    <div class="tl-labels">${labelsHtml}</div>
     <div id="tl-detail" class="tl-detail"></div>`;
 }
 
