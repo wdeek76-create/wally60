@@ -3691,6 +3691,10 @@ function renderModel() {
       const bookName = m.book || null;
       const allBooksCount = (m.lastAutoFetch && Array.isArray(m.lastAutoFetch.allBooks))
         ? m.lastAutoFetch.allBooks.length : null;
+      const allBooks = (m.lastAutoFetch && Array.isArray(m.lastAutoFetch.allBooks))
+        ? m.lastAutoFetch.allBooks : null;
+      const lastFetchAt = (m.lastAutoFetch && m.lastAutoFetch.fetchedAt)
+        ? m.lastAutoFetch.fetchedAt : null;
       // OG price + book — the FIRST price ever captured for this fighter,
       // never overwritten. Drift = current odds vs OG.
       const originalOdds = m.originalOdds != null ? m.originalOdds : null;
@@ -3706,6 +3710,8 @@ function renderModel() {
         prevOdds,
         book: bookName,
         allBooksCount,
+        allBooks,
+        lastFetchAt,
         originalOdds,
         originalBook,
         mkt,
@@ -3776,33 +3782,63 @@ function renderModel() {
       </td>`;
     };
     const mlClickAttr = `onclick="editCardMl('${r.cardId}','${fighterAttr}')" style="cursor:pointer;" title="Click to edit market odds"`;
-    // OG drift badge — shows how far the current market has moved from the
-    // FIRST price captured for this fighter (locked forever, not overwritten
-    // by fetches/edits). Direction based on American odds sign:
-    //   current > OG = market moved to a BETTER price (green ↑)
-    //   current < OG = market moved to a WORSE price (red ↓)
-    // If OG matches current exactly, no badge shown (no movement).
+
+    // Model-direction arrow: was the market movement in the model's favor?
+    // Compare implied % (not american odds) so the sign math works cleanly.
+    //   isPickSide      = this fighter is the model's pick (edge > 0)
+    //   impliedWentUp   = market thinks this fighter is more likely now than OG
+    //   modelAgrees     = pick-side + implied up, OR non-pick-side + implied down
+    // GREEN ↑ = market moved TOWARD the pick (agrees with model)
+    // RED   ↓ = market moved AWAY from the pick (disagrees with model)
     let ogBadge = '';
-    if (r.originalOdds != null && r.ml != null && r.originalOdds !== r.ml) {
-      const better = r.ml > r.originalOdds;
-      const arrow = better ? '↑' : '↓';
-      const arrowColor = better ? 'var(--green)' : 'var(--red)';
-      const delta = r.ml - r.originalOdds;
-      const deltaStr = (delta >= 0 ? '+' : '') + delta;
-      const ogBookStr = r.originalBook ? ` @ ${r.originalBook}` : '';
-      ogBadge = `<div style="font-size:9px; color:${arrowColor}; font-weight:700; margin-top:2px;" title="Original: ${fmtAm(r.originalOdds)}${ogBookStr} → now ${fmtAm(r.ml)} (${deltaStr})">OG ${fmtAm(r.originalOdds)} ${arrow}${deltaStr}</div>`;
-    } else if (r.originalOdds != null && r.ml != null && r.originalOdds === r.ml) {
-      // Same as OG — show it as neutral so you know the OG was captured
-      ogBadge = `<div style="font-size:9px; color:var(--muted); font-weight:600; margin-top:2px;" title="Original price, unchanged">OG ${fmtAm(r.originalOdds)}</div>`;
+    let hoverSummary = '';
+    if (r.originalOdds != null && r.ml != null) {
+      const currentBook = r.book || '—';
+      const originalBook = r.originalBook || '—';
+      const fetchedAt = r.lastFetchAt ? new Date(r.lastFetchAt).toLocaleString() : '';
+
+      // Build a tooltip summary of all books tracked at last fetch
+      let bookLines = '';
+      if (Array.isArray(r.allBooks) && r.allBooks.length) {
+        bookLines = '\n\nLast fetch — all books:\n' + r.allBooks
+          .slice() // don't mutate original
+          .sort((a, b) => b.odds - a.odds)   // best price first
+          .map(b => `  ${b.book}: ${fmtAm(b.odds)}`)
+          .join('\n');
+      }
+
+      if (r.originalOdds !== r.ml) {
+        const isPickSide = r.edge != null && r.edge > 0;
+        const ogImplied = americanToImplied(r.originalOdds);
+        const currImplied = r.mkt;
+        const impliedWentUp = (ogImplied != null && currImplied != null && currImplied > ogImplied);
+        const modelAgrees = (isPickSide && impliedWentUp) || (!isPickSide && !impliedWentUp);
+        const arrow = modelAgrees ? '↑' : '↓';
+        const arrowColor = modelAgrees ? 'var(--green)' : 'var(--red)';
+        const verdict = modelAgrees ? 'Market moved toward the model' : 'Market moved against the model';
+
+        ogBadge = `<div style="font-size:10px; color:${arrowColor}; font-weight:700; margin-top:3px;">OG ${fmtAm(r.originalOdds)} ${arrow}</div>`;
+        hoverSummary = `Current: ${fmtAm(r.ml)} @ ${currentBook}\nOriginal: ${fmtAm(r.originalOdds)} @ ${originalBook}\n${verdict}${fetchedAt ? '\nLast fetch: ' + fetchedAt : ''}${bookLines}`;
+      } else {
+        // No movement — show OG in muted color, no arrow
+        ogBadge = `<div style="font-size:10px; color:var(--muted); font-weight:600; margin-top:3px;">OG ${fmtAm(r.originalOdds)}</div>`;
+        hoverSummary = `Current: ${fmtAm(r.ml)} @ ${currentBook}\nOriginal: ${fmtAm(r.originalOdds)} @ ${originalBook}\nNo line movement${fetchedAt ? '\nLast fetch: ' + fetchedAt : ''}${bookLines}`;
+      }
     }
-    // Book badge — where the current price came from
-    let bookBadge = '';
+
+    // Book label — kept in cell for at-a-glance visibility
+    let bookLine = '';
     if (r.book) {
       const booksSuffix = r.allBooksCount ? ` <span style="color:var(--muted); font-weight:500;">(${r.allBooksCount})</span>` : '';
-      bookBadge = `<div style="font-size:9px; color:var(--green); font-weight:600; margin-top:2px;">${r.book}${booksSuffix}</div>`;
+      bookLine = `<div style="font-size:10px; color:var(--green); font-weight:600; margin-top:2px;">${r.book}${booksSuffix}</div>`;
     }
+
+    // Cell tooltip — combine the edit hint with the odds summary if present
+    const cellTitle = hoverSummary ? hoverSummary + '\n\nClick to edit market odds' : 'Click to edit market odds';
+    const cellTitleAttr = `title="${cellTitle.replace(/"/g, '&quot;')}"`;
+
     const marketCell = r.mkt != null
-      ? `<td class="num" ${mlClickAttr}><div style="color:var(--text); font-weight:700;">${fmtAm(r.ml)}</div><div style="color:var(--text); font-weight:700; font-size:11px;">${fmtPct(r.mkt, 1)}</div>${bookBadge}${ogBadge}</td>`
+      ? `<td class="num" onclick="editCardMl('${r.cardId}','${fighterAttr}')" style="cursor:pointer;" ${cellTitleAttr}><div style="color:var(--text); font-weight:700;">${fmtAm(r.ml)}</div><div style="color:var(--text); font-weight:700; font-size:11px;">${fmtPct(r.mkt, 1)}</div>${bookLine}${ogBadge}</td>`
       : `<td class="num" ${mlClickAttr} style="color:var(--text); font-weight:700;">—<div style="font-size:9px; color:var(--muted2); margin-top:2px;">edit</div></td>`;
     const blendedAm = impliedToAmerican(r.blended);
     const blendedCell = `<td class="num"><div style="color:var(--text); font-weight:700; font-size:13px;">${fmtAm(blendedAm)}</div><div style="color:var(--text); font-weight:700; font-size:11px; margin-top:2px;">${fmtPct(r.blended, 1)}</div></td>`;
@@ -5155,6 +5191,23 @@ function parseGradePaste(text) {
 
 const ODDS_API_KEY_STORAGE = 'mma_edge_tracker_oddsapi_key';
 
+// Books allowed for LIVE ODDS fetches — best price wins across these six.
+// Book IDs come from The Odds API's `bookmakers[].key` field. Any book not in
+// this set is ignored even if the API returns it.
+const ODDS_LIVE_ALLOWED_KEYS = new Set([
+  'betonlineag',   // BetOnline
+  'fanduel',       // FanDuel
+  'pinnacle',      // Pinnacle
+  'bookmaker',     // Bookmaker.eu
+  'novig',         // Novig exchange
+  'prophetx',      // ProphetX exchange
+]);
+
+// Books allowed for CLOSING LINES — BetOnline only (Pikkit CLV benchmark).
+// If BetOnline isn't quoting a fighter's line, we skip that fighter rather
+// than falling back to another book — closing must be apples-to-apples.
+const ODDS_CLOSING_ALLOWED_KEYS = new Set(['betonlineag']);
+
 function getOddsApiKey() {
   try { return localStorage.getItem(ODDS_API_KEY_STORAGE) || ''; } catch { return ''; }
 }
@@ -5201,9 +5254,9 @@ async function autoFetchOdds(cardId) {
 
   toast('Fetching live odds…');
 
-  // us,us2,eu → covers FanDuel, DraftKings, BetMGM, BetOnline, Fliff, Novig,
-  // ProphetX, Pinnacle etc in one call. Costs 1 request per region we hit.
-  const url = `https://api.the-odds-api.com/v4/sports/mma_mixed_martial_arts/odds/?apiKey=${encodeURIComponent(key)}&regions=us,us2,eu&markets=h2h&oddsFormat=american`;
+  // Regions: us (BetOnline, FanDuel, Bookmaker), eu (Pinnacle), us_ex (Novig, ProphetX).
+  // us_ex may require paid tier — that's fine, we just ignore books we can't get.
+  const url = `https://api.the-odds-api.com/v4/sports/mma_mixed_martial_arts/odds/?apiKey=${encodeURIComponent(key)}&regions=us,eu,us_ex&markets=h2h&oddsFormat=american`;
   let data, remainingReqs;
   try {
     const res = await fetch(url);
@@ -5223,11 +5276,14 @@ async function autoFetchOdds(cardId) {
     return;
   }
 
-  // Build a fighter → best-price lookup from the response.
-  // { normalizedFighterName: { odds, book, allBooks: [{book, odds}] } }
+  // Build a fighter → best-price lookup, filtered to the allowlist. Books
+  // outside the allowlist (DraftKings, BetMGM, Fliff, exchanges outside our
+  // list, etc.) get skipped even if the API returns them.
   const priceMap = {};
   data.forEach(ev => {
     (ev.bookmakers || []).forEach(bm => {
+      // Filter — only allowed books contribute to best-price selection.
+      if (!ODDS_LIVE_ALLOWED_KEYS.has(bm.key)) return;
       (bm.markets || []).forEach(mk => {
         if (mk.key !== 'h2h') return;
         (mk.outcomes || []).forEach(oc => {
@@ -5323,7 +5379,11 @@ async function autoFetchClosingLines(cardId) {
 
   toast('Fetching closing lines…');
 
-  const url = `https://api.the-odds-api.com/v4/sports/mma_mixed_martial_arts/odds/?apiKey=${encodeURIComponent(key)}&regions=us,us2,eu&markets=h2h&oddsFormat=american`;
+  // Closing lines request — same endpoint but we ONLY keep BetOnline (Pikkit
+  // standard). Any other book returned by the API gets ignored. If BetOnline
+  // isn't quoting a fighter, we skip that fighter's close rather than falling
+  // back to another book (keeps CLV apples-to-apples).
+  const url = `https://api.the-odds-api.com/v4/sports/mma_mixed_martial_arts/odds/?apiKey=${encodeURIComponent(key)}&regions=us&markets=h2h&oddsFormat=american&bookmakers=betonlineag`;
   let data, remainingReqs;
   try {
     const res = await fetch(url);
@@ -5332,24 +5392,21 @@ async function autoFetchClosingLines(cardId) {
     data = await res.json();
   } catch (err) { toast(`Fetch failed: ${err.message}`, 'error'); return; }
 
-  // For closing lines we want BetOnline as the primary (Pikkit standard).
-  // We build a byBook map for every fighter — computeCLV specifically reads
-  // closeEntry.byBook['BetOnline'] to stamp CLV.
-  const closingByFighter = {}; // norm → { name, allBooks: {book: odds}, bestOdds, bestBook }
+  // Build a fighter → BetOnline price lookup. Filter to just BetOnline (in
+  // case the API returns extra books despite the bookmakers= param). computeCLV
+  // reads byBook.BetOnline literally, so we key it that way.
+  const closingByFighter = {}; // norm → { name, byBook: { BetOnline: odds } }
   data.forEach(ev => {
     (ev.bookmakers || []).forEach(bm => {
+      // Only BetOnline contributes to closing lines
+      if (!ODDS_CLOSING_ALLOWED_KEYS.has(bm.key)) return;
       (bm.markets || []).forEach(mk => {
         if (mk.key !== 'h2h') return;
         (mk.outcomes || []).forEach(oc => {
           if (typeof oc.price !== 'number') return;
           const norm = normalizeName(oc.name);
           if (!closingByFighter[norm]) closingByFighter[norm] = { name: oc.name, byBook: {} };
-          // Map to friendly book names computeCLV recognizes. BetOnline is the
-          // key one — computeCLV keys off byBook.BetOnline literally.
-          const bookName = (bm.key === 'betonlineag' || bm.title.toLowerCase().includes('betonline'))
-            ? 'BetOnline'
-            : bm.title;
-          closingByFighter[norm].byBook[bookName] = oc.price;
+          closingByFighter[norm].byBook['BetOnline'] = oc.price;
         });
       });
     });
@@ -5358,29 +5415,20 @@ async function autoFetchClosingLines(cardId) {
   // Init card.closing if missing
   card.closing = card.closing || {};
   let updated = 0;
+  let skippedNoBetOnline = 0;
   Object.entries(card.ml || {}).forEach(([fighterKey, fighterMl]) => {
     const norm = normalizeName(fighterMl.name);
     const entry = closingByFighter[norm];
-    if (!entry) return;
-    // Prefer BetOnline; fall back to best available price if BetOnline is missing
-    const betonline = entry.byBook['BetOnline'];
-    let displayOdds = betonline;
-    let displayBook = 'BetOnline';
-    if (displayOdds == null) {
-      // No BetOnline — pick best price across all books
-      const entries = Object.entries(entry.byBook);
-      if (entries.length) {
-        entries.sort((a, b) => b[1] - a[1]); // highest odds = best for bettor
-        displayOdds = entries[0][1];
-        displayBook = entries[0][0];
-      }
+    // Skip if fighter isn't in the API response OR BetOnline isn't quoting
+    if (!entry || entry.byBook['BetOnline'] == null) {
+      if (entry) skippedNoBetOnline++;
+      return;
     }
-    if (displayOdds == null) return;
     card.closing[norm] = {
       name: fighterMl.name,
-      odds: displayOdds,
-      book: displayBook,
-      byBook: entry.byBook,          // computeCLV needs this to work
+      odds: entry.byBook['BetOnline'],
+      book: 'BetOnline',
+      byBook: entry.byBook,          // computeCLV reads .BetOnline off this
       autoFetched: true,
       fetchedAt: Date.now(),
     };
@@ -5407,7 +5455,8 @@ async function autoFetchClosingLines(cardId) {
   rerenderCurrentTab();
   const remStr = remainingReqs ? ` · ${remainingReqs} req remaining` : '';
   const clvStr = clvStamped ? ` · CLV stamped on ${clvStamped} bet${clvStamped === 1 ? '' : 's'}` : '';
-  toast(`Closing lines: ${updated} fighters updated${clvStr}${remStr}`);
+  const skipStr = skippedNoBetOnline ? ` · ${skippedNoBetOnline} skipped (no BetOnline)` : '';
+  toast(`Closing lines: ${updated} fighters updated${clvStr}${skipStr}${remStr}`);
 }
 
 
