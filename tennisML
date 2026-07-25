@@ -1,0 +1,327 @@
+import React, { useState, useEffect } from 'react';
+import { ChevronDown } from 'lucide-react';
+
+const TennisSportsbookScreen = () => {
+  const [apiKey, setApiKey] = useState('');
+  const [matches, setMatches] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [selectedLeague, setSelectedLeague] = useState('tennis_atp');
+  const [error, setError] = useState('');
+  const [lastUpdate, setLastUpdate] = useState('');
+
+  const BOOKMAKERS = ['pinnacle', 'fanduel', 'betonline', 'novig', 'prophetx'];
+  const BOOK_COLORS = {
+    pinnacle: '#00a6d6',
+    fanduel: '#a020f0',
+    betonline: '#ff6b35',
+    novig: '#ff1744',
+    prophetx: '#00bfa5'
+  };
+
+  const BOOK_NAMES = {
+    pinnacle: 'PIN',
+    fanduel: 'FD',
+    betonline: 'BEO',
+    novig: 'NVG',
+    prophetx: 'PHX'
+  };
+
+  const fetchOdds = async () => {
+    if (!apiKey.trim()) {
+      setError('Enter your SharpAPI key first');
+      return;
+    }
+
+    setLoading(true);
+    setError('');
+
+    try {
+      const response = await fetch(
+        `https://api.sharpapi.io/api/v1/sports/${selectedLeague}/odds?regions=us&markets=h2h,spreads&bookmakers=${BOOKMAKERS.join(',')}`,
+        {
+          headers: { 'X-API-Key': apiKey }
+        }
+      );
+
+      if (!response.ok) {
+        if (response.status === 401) throw new Error('Invalid API key');
+        if (response.status === 403) throw new Error('Subscription tier too low for Pinnacle');
+        throw new Error(`API error: ${response.status}`);
+      }
+
+      const data = await response.json();
+      
+      // Parse SharpAPI response - group by match
+      const grouped = {};
+      if (Array.isArray(data)) {
+        data.forEach(line => {
+          const matchKey = `${line.home_team}_${line.away_team}`;
+          if (!grouped[matchKey]) {
+            grouped[matchKey] = {
+              home: line.home_team,
+              away: line.away_team,
+              commence: line.commence_time || new Date().toISOString(),
+              odds: {}
+            };
+          }
+          const key = `${line.bookmaker}_${line.market_key || 'h2h'}`;
+          grouped[matchKey].odds[key] = line;
+        });
+      } else if (data.bookmakers) {
+        // Alternative response format
+        data.bookmakers.forEach(bm => {
+          bm.markets?.forEach(market => {
+            market.outcomes?.forEach(outcome => {
+              const key = `${bm.key}_${market.key}`;
+              // This would need more detailed parsing
+            });
+          });
+        });
+      }
+
+      const matchArray = Object.values(grouped)
+        .filter(m => m.home && m.away)
+        .sort((a, b) => new Date(a.commence) - new Date(b.commence));
+
+      setMatches(matchArray);
+      setLastUpdate(new Date().toLocaleTimeString());
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Auto-refresh every 30 seconds
+  useEffect(() => {
+    if (apiKey) {
+      const interval = setInterval(fetchOdds, 30000);
+      return () => clearInterval(interval);
+    }
+  }, [apiKey, selectedLeague]);
+
+  const getOddsForPlayer = (match, player, market = 'h2h') => {
+    const odds = {};
+    BOOKMAKERS.forEach(book => {
+      const key = `${book}_${market}`;
+      const line = match.odds[key];
+      if (line && (line.home_team === player || line.away_team === player)) {
+        odds[book] = line;
+      }
+    });
+    return odds;
+  };
+
+  const formatTime = (isoString) => {
+    const date = new Date(isoString);
+    return date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+  };
+
+  return (
+    <div style={{ minHeight: '100vh', backgroundColor: '#0a0e27', color: '#fff', fontFamily: 'system-ui, -apple-system, sans-serif' }}>
+      {/* Header */}
+      <div style={{ padding: '16px', borderBottom: '1px solid #1a2038', backgroundColor: '#0f1229', position: 'sticky', top: 0, zIndex: 10 }}>
+        <div style={{ display: 'flex', gap: '12px', marginBottom: '12px' }}>
+          <input
+            type="password"
+            placeholder="SharpAPI Key"
+            value={apiKey}
+            onChange={(e) => setApiKey(e.target.value)}
+            style={{
+              flex: 1,
+              padding: '10px 12px',
+              backgroundColor: '#1a2038',
+              border: '1px solid #2a3a5a',
+              borderRadius: '6px',
+              color: '#fff',
+              fontSize: '14px'
+            }}
+          />
+          <button
+            onClick={fetchOdds}
+            disabled={loading}
+            style={{
+              padding: '10px 16px',
+              backgroundColor: '#27c071',
+              border: 'none',
+              borderRadius: '6px',
+              color: '#000',
+              fontWeight: '600',
+              fontSize: '14px',
+              cursor: loading ? 'not-allowed' : 'pointer',
+              opacity: loading ? 0.6 : 1
+            }}
+          >
+            {loading ? 'Loading...' : 'Load'}
+          </button>
+        </div>
+
+        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+          <select
+            value={selectedLeague}
+            onChange={(e) => setSelectedLeague(e.target.value)}
+            style={{
+              padding: '8px 12px',
+              backgroundColor: '#1a2038',
+              border: '1px solid #2a3a5a',
+              borderRadius: '6px',
+              color: '#fff',
+              fontSize: '14px'
+            }}
+          >
+            <option value="tennis_atp">ATP</option>
+            <option value="tennis_wta">WTA</option>
+            <option value="tennis_itf_men">ITF Men</option>
+            <option value="tennis_itf_women">ITF Women</option>
+          </select>
+
+          {lastUpdate && (
+            <span style={{ fontSize: '12px', color: '#7a8aa8', marginLeft: 'auto' }}>
+              {lastUpdate}
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* Error */}
+      {error && (
+        <div style={{ padding: '12px 16px', backgroundColor: '#6b2c2c', color: '#ff9999', fontSize: '14px' }}>
+          {error}
+        </div>
+      )}
+
+      {/* Matches */}
+      <div style={{ padding: '8px 0' }}>
+        {matches.length === 0 && !loading && (
+          <div style={{ padding: '32px 16px', textAlign: 'center', color: '#7a8aa8' }}>
+            {apiKey ? 'No matches available' : 'Enter API key and tap Load'}
+          </div>
+        )}
+
+        {matches.map((match, idx) => {
+          const homeOdds = getOddsForPlayer(match, match.home);
+          const awayOdds = getOddsForPlayer(match, match.away);
+          const homeSpreads = getOddsForPlayer(match, match.home, 'spreads');
+          const awaySpreads = getOddsForPlayer(match, match.away, 'spreads');
+
+          return (
+            <div key={idx} style={{ borderBottom: '1px solid #1a2038', padding: '12px 16px' }}>
+              {/* Match Header */}
+              <div style={{ marginBottom: '12px', fontSize: '13px', color: '#7a8aa8' }}>
+                {formatTime(match.commence)} · {selectedLeague.split('_')[1].toUpperCase()}
+              </div>
+
+              {/* Home Player */}
+              <div style={{ marginBottom: '12px' }}>
+                <div style={{ fontWeight: '600', marginBottom: '8px', fontSize: '15px' }}>
+                  {match.home}
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '6px', marginBottom: '4px' }}>
+                  {BOOKMAKERS.map(book => {
+                    const odd = homeOdds[book];
+                    return (
+                      <div
+                        key={book}
+                        style={{
+                          padding: '8px 6px',
+                          backgroundColor: '#1a2038',
+                          border: `1px solid ${BOOK_COLORS[book]}33`,
+                          borderRadius: '4px',
+                          textAlign: 'center',
+                          fontSize: '12px',
+                          fontWeight: '600',
+                          color: odd ? '#fff' : '#4a5a7a'
+                        }}
+                      >
+                        <div style={{ fontSize: '10px', color: '#7a8aa8', marginBottom: '2px' }}>
+                          {BOOK_NAMES[book]}
+                        </div>
+                        {odd ? odd.odds : '—'}
+                      </div>
+                    );
+                  })}
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '6px' }}>
+                  {BOOKMAKERS.map(book => {
+                    const spread = homeSpreads[book];
+                    return (
+                      <div
+                        key={`${book}_spread`}
+                        style={{
+                          padding: '6px 4px',
+                          backgroundColor: '#1a2038',
+                          border: `1px solid ${BOOK_COLORS[book]}22`,
+                          borderRadius: '4px',
+                          textAlign: 'center',
+                          fontSize: '11px',
+                          color: spread ? '#aaa' : '#4a5a7a'
+                        }}
+                      >
+                        {spread ? (spread.line > 0 ? '+' : '') + spread.line : '—'}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Away Player */}
+              <div>
+                <div style={{ fontWeight: '600', marginBottom: '8px', fontSize: '15px' }}>
+                  {match.away}
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '6px', marginBottom: '4px' }}>
+                  {BOOKMAKERS.map(book => {
+                    const odd = awayOdds[book];
+                    return (
+                      <div
+                        key={book}
+                        style={{
+                          padding: '8px 6px',
+                          backgroundColor: '#1a2038',
+                          border: `1px solid ${BOOK_COLORS[book]}33`,
+                          borderRadius: '4px',
+                          textAlign: 'center',
+                          fontSize: '12px',
+                          fontWeight: '600',
+                          color: odd ? '#fff' : '#4a5a7a'
+                        }}
+                      >
+                        <div style={{ fontSize: '10px', color: '#7a8aa8', marginBottom: '2px' }}>
+                          {BOOK_NAMES[book]}
+                        </div>
+                        {odd ? odd.odds : '—'}
+                      </div>
+                    );
+                  })}
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '6px' }}>
+                  {BOOKMAKERS.map(book => {
+                    const spread = awaySpreads[book];
+                    return (
+                      <div
+                        key={`${book}_spread`}
+                        style={{
+                          padding: '6px 4px',
+                          backgroundColor: '#1a2038',
+                          border: `1px solid ${BOOK_COLORS[book]}22`,
+                          borderRadius: '4px',
+                          textAlign: 'center',
+                          fontSize: '11px',
+                          color: spread ? '#aaa' : '#4a5a7a'
+                        }}
+                      >
+                        {spread ? (spread.line > 0 ? '+' : '') + spread.line : '—'}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+};
+
+export default TennisSportsbookScreen;
