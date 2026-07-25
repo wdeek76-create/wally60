@@ -5379,11 +5379,11 @@ async function autoFetchClosingLines(cardId) {
 
   toast('Fetching closing lines…');
 
-  // Closing lines request — same endpoint but we ONLY keep BetOnline (Pikkit
-  // standard). Any other book returned by the API gets ignored. If BetOnline
-  // isn't quoting a fighter, we skip that fighter's close rather than falling
-  // back to another book (keeps CLV apples-to-apples).
-  const url = `https://api.the-odds-api.com/v4/sports/mma_mixed_martial_arts/odds/?apiKey=${encodeURIComponent(key)}&regions=us&markets=h2h&oddsFormat=american&bookmakers=betonlineag`;
+  // Closing lines request. We used to server-side filter with `bookmakers=`
+  // but that param is a paid-tier feature — free tier silently returns
+  // nothing. Instead: request all US books (BetOnline lives in the `us`
+  // region) and filter to BetOnline client-side. Costs 1 credit either way.
+  const url = `https://api.the-odds-api.com/v4/sports/mma_mixed_martial_arts/odds/?apiKey=${encodeURIComponent(key)}&regions=us&markets=h2h&oddsFormat=american`;
   let data, remainingReqs;
   try {
     const res = await fetch(url);
@@ -5392,14 +5392,25 @@ async function autoFetchClosingLines(cardId) {
     data = await res.json();
   } catch (err) { toast(`Fetch failed: ${err.message}`, 'error'); return; }
 
-  // Build a fighter → BetOnline price lookup. Filter to just BetOnline (in
-  // case the API returns extra books despite the bookmakers= param). computeCLV
-  // reads byBook.BetOnline literally, so we key it that way.
+  if (!Array.isArray(data) || !data.length) {
+    toast('Odds API returned no events (may be no upcoming MMA cards)', 'error');
+    return;
+  }
+
+  // Count books seen for diagnostics — if BetOnline never appears, the user
+  // should know why fighters got skipped.
+  let betonlineEvents = 0;
+  let totalOutcomes = 0;
+
+  // Build a fighter → BetOnline price lookup. Filter client-side to BetOnline
+  // only. computeCLV reads byBook.BetOnline literally, so we key it that way.
   const closingByFighter = {}; // norm → { name, byBook: { BetOnline: odds } }
   data.forEach(ev => {
+    let evHasBetOnline = false;
     (ev.bookmakers || []).forEach(bm => {
       // Only BetOnline contributes to closing lines
       if (!ODDS_CLOSING_ALLOWED_KEYS.has(bm.key)) return;
+      evHasBetOnline = true;
       (bm.markets || []).forEach(mk => {
         if (mk.key !== 'h2h') return;
         (mk.outcomes || []).forEach(oc => {
@@ -5407,9 +5418,11 @@ async function autoFetchClosingLines(cardId) {
           const norm = normalizeName(oc.name);
           if (!closingByFighter[norm]) closingByFighter[norm] = { name: oc.name, byBook: {} };
           closingByFighter[norm].byBook['BetOnline'] = oc.price;
+          totalOutcomes++;
         });
       });
     });
+    if (evHasBetOnline) betonlineEvents++;
   });
 
   // Init card.closing if missing
@@ -5456,7 +5469,20 @@ async function autoFetchClosingLines(cardId) {
   const remStr = remainingReqs ? ` · ${remainingReqs} req remaining` : '';
   const clvStr = clvStamped ? ` · CLV stamped on ${clvStamped} bet${clvStamped === 1 ? '' : 's'}` : '';
   const skipStr = skippedNoBetOnline ? ` · ${skippedNoBetOnline} skipped (no BetOnline)` : '';
-  toast(`Closing lines: ${updated} fighters updated${clvStr}${skipStr}${remStr}`);
+
+  // Diagnostic: if the API returned events but NONE of them had BetOnline
+  // (past card, BOL took the market down early, or free tier restrictions),
+  // the user needs to know why nothing got stamped.
+  if (updated === 0 && totalOutcomes === 0) {
+    toast(`No BetOnline lines in API response (${data.length} events checked${remStr}). BOL may have closed the market — try earlier or use manual paste.`, 'error');
+    return;
+  }
+  if (updated === 0) {
+    toast(`No fighter name matches. API had ${totalOutcomes} BOL prices but none matched card fighters${remStr}.`, 'error');
+    return;
+  }
+
+  toast(`Closing: ${updated} fighter${updated===1?'':'s'}${clvStr}${skipStr}${remStr}`);
 }
 
 
