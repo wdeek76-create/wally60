@@ -64,59 +64,48 @@
         setError('');
 
         try {
-          const leagues = ['tennis_atp', 'tennis_wta'];
+          const url = `https://api.sharpapi.io/api/v1/odds?sport=tennis&sportsbook=${BOOKMAKERS.join(',')}&market=moneyline,point_spread`;
+          console.log('Fetching:', url);
+          
+          const response = await fetch(url, {
+            headers: { 'X-API-Key': apiKey }
+          });
+
+          if (!response.ok) {
+            let errText = '';
+            try {
+              errText = await response.text();
+            } catch (e) {}
+            if (response.status === 401) throw new Error('401: Invalid API key');
+            if (response.status === 403) throw new Error('403: Subscription tier too low - need Sharp tier for Pinnacle');
+            if (response.status === 404) throw new Error('404: Sport/league not found');
+            throw new Error(`HTTP ${response.status}: ${errText.substring(0, 150) || 'API error'}`);
+          }
+
+          let data;
+          try {
+            data = await response.json();
+          } catch (parseErr) {
+            throw new Error(`Failed to parse response: ${parseErr.message}`);
+          }
+          
+          // Parse SharpAPI response - group by event
           const grouped = {};
-
-          for (const league of leagues) {
-            const url = `https://api.sharpapi.io/api/v1/sports/${league}/odds?regions=us&markets=h2h,spreads&bookmakers=${BOOKMAKERS.join(',')}`;
-            console.log('Fetching:', url);
-            let response;
-            try {
-              response = await fetch(url, {
-                headers: { 'X-API-Key': apiKey }
-              });
-            } catch (networkErr) {
-              throw new Error(`Network error: ${networkErr.message}`);
-            }
-
-            if (!response.ok) {
-              let errText = '';
-              try {
-                errText = await response.text();
-              } catch (e) {}
-              if (response.status === 401) throw new Error('401: Invalid API key');
-              if (response.status === 403) throw new Error('403: Subscription tier too low - upgrade or use free tier');
-              if (response.status === 404) {
-                console.log(`${league} not available`);
-                continue;
+          if (Array.isArray(data.data)) {
+            data.data.forEach(line => {
+              const matchKey = `${line.home_team}_${line.away_team}_${line.event_id}`;
+              if (!grouped[matchKey]) {
+                grouped[matchKey] = {
+                  home: line.home_team,
+                  away: line.away_team,
+                  league: line.league ? line.league.toUpperCase() : 'TENNIS',
+                  commence: line.event_start_time || new Date().toISOString(),
+                  odds: {}
+                };
               }
-              throw new Error(`HTTP ${response.status}: ${errText.substring(0, 100) || 'API error'}`);
-            }
-
-            let data;
-            try {
-              data = await response.json();
-            } catch (parseErr) {
-              throw new Error(`Failed to parse response: ${parseErr.message}`);
-            }
-            
-            // Parse SharpAPI response
-            if (Array.isArray(data)) {
-              data.forEach(line => {
-                const matchKey = `${line.home_team}_${line.away_team}`;
-                if (!grouped[matchKey]) {
-                  grouped[matchKey] = {
-                    home: line.home_team,
-                    away: line.away_team,
-                    league: league.split('_')[1].toUpperCase(),
-                    commence: line.commence_time || new Date().toISOString(),
-                    odds: {}
-                  };
-                }
-                const key = `${line.bookmaker}_${line.market_key || 'h2h'}`;
-                grouped[matchKey].odds[key] = line;
-              });
-            }
+              const key = `${line.sportsbook}_${line.market_type}`;
+              grouped[matchKey].odds[key] = line;
+            });
           }
 
           const matchArray = Object.values(grouped)
@@ -126,9 +115,8 @@
           setMatches(matchArray);
           setLastUpdate(new Date().toLocaleTimeString());
         } catch (err) {
-          console.error('Full error object:', err);
-          const errorMsg = err.message || 'Unknown error';
-          setError(errorMsg);
+          console.error('Error:', err);
+          setError(err.message || 'Unknown error');
         } finally {
           setLoading(false);
         }
