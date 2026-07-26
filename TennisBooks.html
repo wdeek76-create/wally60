@@ -16,6 +16,19 @@
     body { font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif; background: transparent; color: #fff; }
     #root { min-height: 100vh; padding-bottom: 40px; overflow-y: auto; }
     .tab-bar { display: flex; gap: 8px; margin-top: 12px; }
+    .mkt-bar { display: flex; gap: 8px; margin: 10px auto 0; max-width: 460px; padding: 0 10px; }
+    .mkt-btn { flex: 1; padding: 7px; background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 16px; color: #aaa; font-family: inherit; font-size: 12px; font-weight: 700; -webkit-tap-highlight-color: transparent; }
+    .mkt-btn.active { background: rgba(255, 255, 255, 0.14); border-color: rgba(255, 255, 255, 0.3); color: #fff; }
+    .mh-line { font-size: 13px; color: #3b9eff; font-weight: 700; text-align: center; margin-bottom: 10px; }
+    .mh-line .starts-in { color: #27c071; margin-left: 6px; }
+    .col-heads { display: grid; grid-template-columns: 1fr 44px 1fr; gap: 8px; margin-bottom: 8px; }
+    .col-heads span { font-size: 14px; font-weight: 800; color: #fff; text-align: center; letter-spacing: -0.3px; }
+    .book-row { display: grid; grid-template-columns: 1fr 44px 1fr; gap: 8px; align-items: center; margin-bottom: 6px; }
+    .book-mid { display: flex; align-items: center; justify-content: center; }
+    .odds-cell { border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 8px; padding: 7px 6px; text-align: center; cursor: pointer; min-height: 44px; display: flex; flex-direction: column; justify-content: center; -webkit-tap-highlight-color: transparent; background: rgba(255, 255, 255, 0.02); }
+    .odds-cell.best { background: rgba(39, 192, 113, 0.28); border-color: rgba(39, 192, 113, 0.75); }
+    .cell-odds { font-size: 16px; font-weight: 900; color: #fff; font-family: 'SF Mono', 'Monaco', monospace; letter-spacing: -0.5px; }
+    .cell-limit { font-size: 10px; color: #9aa; font-weight: 700; min-height: 12px; }
     .tab-btn { flex: 1; padding: 9px; background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 6px; color: #aaa; font-family: inherit; font-size: 13px; font-weight: 700; -webkit-tap-highlight-color: transparent; }
     .tab-btn.active { background: rgba(39, 192, 113, 0.15); border-color: rgba(39, 192, 113, 0.5); color: #27c071; }
     .section-label { font-size: 11px; color: #888; font-weight: 800; text-transform: uppercase; letter-spacing: 1px; margin: 14px 12px 8px; }
@@ -111,6 +124,7 @@
       const [booksFound, setBooksFound] = useState([]);
       const [debugInfo, setDebugInfo] = useState('');
       const [tab, setTab] = useState('odds');
+      const [marketType, setMarketType] = useState('moneyline');
       const [bets, setBets] = useState(() => {
         try { return JSON.parse(localStorage.getItem('tennis_bets')) || []; } catch { return []; }
       });
@@ -221,7 +235,7 @@
             const url = new URL('https://api.sharpapi.io/api/v1/odds');
             url.searchParams.set('sport', 'tennis');
             url.searchParams.set('sportsbook', BOOKMAKERS.join(','));
-            url.searchParams.set('market', 'moneyline');
+            url.searchParams.set('market', 'moneyline,set_handicap');
             url.searchParams.set('limit', '200');
             if (cursor) url.searchParams.set('cursor', cursor);
             const response = await fetch(url.toString(), { headers: { 'X-API-Key': apiKey } });
@@ -272,7 +286,8 @@
               // Prefer longest non-comma display name per surname
               if (!g.names[line._sur] || disp.length > g.names[line._sur].length) g.names[line._sur] = disp;
               const key = `${canonicalBook(line.sportsbook)}_${line.market_type}_${line._sur}`;
-              g.odds[key] = line;
+              const prev = g.odds[key];
+              if (!prev || line.is_main_line) g.odds[key] = line;
             });
           });
           const preMerge = Object.values(grouped).map(g => {
@@ -307,7 +322,7 @@
               const sur = parts[parts.length - 1];
               parts[parts.length - 1] = surMap[sur] || sur;
               const nk = parts.join('_');
-              if (!target.odds[nk]) target.odds[nk] = v;
+              if (!target.odds[nk] || (v.is_main_line && !target.odds[nk].is_main_line)) target.odds[nk] = v;
             });
             const mHomeTarget = crossed ? 'away' : 'home';
             const mAwayTarget = crossed ? 'home' : 'away';
@@ -321,10 +336,8 @@
             setMatches(matchArray);
           }
           setBooksFound(Array.from(new Set(allOdds.map(l => l.sportsbook))).sort());
-          const pinRows = allOdds.filter(l => canonicalBook(l.sportsbook) === 'pinnacle');
-          const pinWithMax = pinRows.filter(l => l.max_bet != null);
-          const sample = pinWithMax[0];
-          setDebugInfo(`PIN rows: ${pinRows.length}, with max_bet: ${pinWithMax.length}${sample ? ` (e.g. ${sample.selection}: $${sample.max_bet})` : ''}`);
+          const fdRow = allOdds.find(l => canonicalBook(l.sportsbook) === 'fanduel' && (l.market_id || l.selection_id));
+          setDebugInfo(fdRow ? `FD ids — market_id: ${fdRow.market_id || 'none'} | selection_id: ${fdRow.selection_id || 'none'}` : 'No FD rows carry market_id/selection_id');
           setLastUpdate(new Date().toLocaleTimeString());
         } catch (err) {
           if (!silent) setError(err.message || 'Error fetching odds');
@@ -505,7 +518,11 @@
               <button className={`tab-btn ${tab === 'odds' ? 'active' : ''}`} onClick={() => setTab('odds')}>Odds</button>
               <button className={`tab-btn ${tab === 'bets' ? 'active' : ''}`} onClick={() => setTab('bets')}>Bets{bets.filter(b => b.result === 'pending').length > 0 ? ` (${bets.filter(b => b.result === 'pending').length})` : ''}</button>
             </div>
-            {matches.length > 0 && <div className="stats"><span>{filteredMatches.length} pregame • {matches.filter(m => m.isLive).length} live</span>{lastUpdate && <span>{lastUpdate}</span>}<span style={{color: '#666'}}>b10</span></div>}
+            {tab === 'odds' && <div className="mkt-bar">
+              <button className={`mkt-btn ${marketType === 'moneyline' ? 'active' : ''}`} onClick={() => setMarketType('moneyline')}>Moneyline</button>
+              <button className={`mkt-btn ${marketType === 'set_handicap' ? 'active' : ''}`} onClick={() => setMarketType('set_handicap')}>Sets</button>
+            </div>}
+            {matches.length > 0 && <div className="stats"><span>{filteredMatches.length} pregame • {matches.filter(m => m.isLive).length} live</span>{lastUpdate && <span>{lastUpdate}</span>}<span style={{color: '#666'}}>b13</span></div>}
             {booksFound.length > 0 && <div className="stats" style={{fontSize: '10px', color: '#888'}}><span>API books: {booksFound.join(', ')}</span></div>}
             {debugInfo && <div className="stats" style={{fontSize: '10px', color: '#888'}}><span>{debugInfo}</span></div>}
           </div>
@@ -551,58 +568,40 @@
 
           {tab === 'odds' && <div className="matches-container">
             {filteredMatches.map((match, idx) => {
-              const homeOdds = getOddsForPlayer(match, match.homeSur);
-              const awayOdds = getOddsForPlayer(match, match.awaySur);
+              const homeOdds = getOddsForPlayer(match, match.homeSur, marketType);
+              const awayOdds = getOddsForPlayer(match, match.awaySur, marketType);
+              const rowBooks = BOOKMAKERS.filter(b => homeOdds[b] || awayOdds[b]);
+              if (rowBooks.length === 0) return null;
+              const bestVal = (odds) => Math.max(...rowBooks.map(b => odds[b] ? odds[b].odds_american : -Infinity));
+              const bestHome = bestVal(homeOdds), bestAway = bestVal(awayOdds);
+              const cellText = (odd) => {
+                if (!odd) return '—';
+                const o = odd.odds_american > 0 ? `+${odd.odds_american}` : `${odd.odds_american}`;
+                if (marketType === 'set_handicap' && odd.line != null) return `${odd.line > 0 ? '+' : ''}${odd.line} ${o}`;
+                return o;
+              };
               return (
                 <div key={match.eventId} className="match-card">
-                  <div className="match-header">
-                    <div className="match-info">
-                      <div className="match-time">{formatTime(match.commence)} <span className="starts-in">{startsIn(match.commence)}</span></div>
-                      <div className="match-league">{match.league}</div>
-                    </div>
-                  </div>
-
-                  <div className="player-section">
-                    <div className="player-name">{match.home}</div>
-                    <div className="odds-list">
-                      {orderedBooks(match, homeOdds).map((book, bi) => {
-                        const odd = homeOdds[book];
-                        return (
-                          <div key={book} className={`odds-row${bi === 0 && odd ? ' best' : ''}`} onClick={() => fillBetForm(match.home, odd?.odds_american, book, odd?.event_id, match.homeSur)}>
-                            <div className="odds-left">
-                              {BOOK_LOGOS[book] ? <img src={BOOK_LOGOS[book]} alt={BOOK_NAMES[book]} className="book-logo" />: <div className="book-fallback">{BOOK_NAMES[book]}</div>}
-                            </div>
-                            <div className="odds-center">
-                              <div className="odds-value">{odd ? (odd.odds_american > 0 ? `+${odd.odds_american}` : odd.odds_american) : '—'}</div>
-                              <div className="odds-limit">{getLimit(odd)}</div>
-                            </div>
-                            {slipLink(odd) && <a className="deep-link" href={slipLink(odd)} target="_blank" rel="noopener" onClick={(e) => e.stopPropagation()}>↗</a>}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-
-                  <div className="player-section">
-                    <div className="player-name">{match.away}</div>
-                    <div className="odds-list">
-                      {orderedBooks(match, awayOdds).map((book, bi) => {
-                        const odd = awayOdds[book];
-                        return (
-                          <div key={book} className={`odds-row${bi === 0 && odd ? ' best' : ''}`} onClick={() => fillBetForm(match.away, odd?.odds_american, book, odd?.event_id, match.awaySur)}>
-                            <div className="odds-left">
-                              {BOOK_LOGOS[book] ? <img src={BOOK_LOGOS[book]} alt={BOOK_NAMES[book]} className="book-logo" />: <div className="book-fallback">{BOOK_NAMES[book]}</div>}
-                            </div>
-                            <div className="odds-center">
-                              <div className="odds-value">{odd ? (odd.odds_american > 0 ? `+${odd.odds_american}` : odd.odds_american) : '—'}</div>
-                              <div className="odds-limit">{getLimit(odd)}</div>
-                            </div>
-                            {slipLink(odd) && <a className="deep-link" href={slipLink(odd)} target="_blank" rel="noopener" onClick={(e) => e.stopPropagation()}>↗</a>}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
+                  <div className="mh-line">{formatTime(match.commence)} • {match.league}<span className="starts-in">{startsIn(match.commence)}</span></div>
+                  <div className="col-heads"><span>{match.home}</span><span></span><span>{match.away}</span></div>
+                  {rowBooks.map(book => {
+                    const h = homeOdds[book], a = awayOdds[book];
+                    return (
+                      <div key={book} className="book-row">
+                        <div className={`odds-cell${h && h.odds_american === bestHome ? ' best' : ''}`} onClick={() => h && fillBetForm(match.home, h.odds_american, book, h.event_id, match.homeSur)}>
+                          <div className="cell-odds">{cellText(h)}</div>
+                          <div className="cell-limit">{getLimit(h)}</div>
+                        </div>
+                        <div className="book-mid">
+                          {BOOK_LOGOS[book] ? <img src={BOOK_LOGOS[book]} alt={BOOK_NAMES[book]} className="book-logo" /> : <div className="book-fallback">{BOOK_NAMES[book]}</div>}
+                        </div>
+                        <div className={`odds-cell${a && a.odds_american === bestAway ? ' best' : ''}`} onClick={() => a && fillBetForm(match.away, a.odds_american, book, a.event_id, match.awaySur)}>
+                          <div className="cell-odds">{cellText(a)}</div>
+                          <div className="cell-limit">{getLimit(a)}</div>
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               );
             })}
