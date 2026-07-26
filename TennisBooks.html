@@ -126,12 +126,30 @@
         return () => window.removeEventListener('resize', upd);
       });
 
+      const idbOpen = () => new Promise((res, rej) => {
+        const r = indexedDB.open('tennisapp', 1);
+        r.onupgradeneeded = () => r.result.createObjectStore('kv');
+        r.onsuccess = () => res(r.result);
+        r.onerror = () => rej(r.error);
+      });
+      const idbGet = async (k) => { try { const db = await idbOpen(); return await new Promise(res => { const t = db.transaction('kv').objectStore('kv').get(k); t.onsuccess = () => res(t.result); t.onerror = () => res(null); }); } catch { return null; } };
+      const idbSet = async (k, v) => { try { const db = await idbOpen(); await new Promise(res => { const t = db.transaction('kv', 'readwrite').objectStore('kv').put(v, k); t.onsuccess = res; t.onerror = res; }); } catch {} };
+
+      // Restore from IndexedDB if localStorage came up empty (iOS standalone apps purge localStorage)
       useEffect(() => {
-        try { if (apiKey) localStorage.setItem('sharpapi_key', apiKey); } catch (e) {}
+        if (!apiKey) idbGet('sharpapi_key').then(v => { if (v) setApiKey(v); });
+        if (!bets.length) idbGet('tennis_bets').then(v => { if (v && v.length) setBets(v); });
+      }, []);
+
+      useEffect(() => {
+        if (!apiKey) return;
+        try { localStorage.setItem('sharpapi_key', apiKey); } catch (e) {}
+        idbSet('sharpapi_key', apiKey);
       }, [apiKey]);
 
       useEffect(() => {
         try { localStorage.setItem('tennis_bets', JSON.stringify(bets)); } catch (e) {}
+        idbSet('tennis_bets', bets);
       }, [bets]);
 
       const BOOKMAKERS = ['betonline', 'prophetx', 'novig', 'fanduel', 'pinnacle'];
@@ -243,8 +261,9 @@
             const day = commence.slice(0, 10);
             const league = rows[0].league?.toUpperCase() || 'TENNIS';
             const mKey = `${league}|${day}|${surs.join('|')}`;
-            if (!grouped[mKey]) grouped[mKey] = { league, commence, key: mKey, names: {}, odds: {} };
+            if (!grouped[mKey]) grouped[mKey] = { league, commence, key: mKey, names: {}, odds: {}, isLive: false };
             const g = grouped[mKey];
+            if (rows.some(r => r.is_live)) g.isLive = true;
             if (new Date(commence) < new Date(g.commence)) g.commence = commence;
             rows.forEach(line => {
               if (!line._sur) return;
@@ -257,7 +276,7 @@
           });
           const preMerge = Object.values(grouped).map(g => {
             const surs = Object.keys(g.names).sort();
-            return { league: g.league, commence: g.commence, eventId: g.key, home: g.names[surs[0]] || 'TBD', away: g.names[surs[1]] || 'TBD', homeSur: surs[0], awaySur: surs[1], odds: g.odds };
+            return { league: g.league, commence: g.commence, eventId: g.key, home: g.names[surs[0]] || 'TBD', away: g.names[surs[1]] || 'TBD', homeSur: surs[0], awaySur: surs[1], odds: g.odds, isLive: g.isLive };
           }).filter(m => m.home !== 'TBD' && m.away && m.away !== 'TBD').sort((a, b) => new Date(a.commence) - new Date(b.commence));
 
           // Second pass: merge cards where player names contain each other (e.g. "Luis Carlos Alvarez" vs "Luis Carlos Alvarez Valdes")
@@ -317,8 +336,12 @@
       const fetchOddsRef = useRef();
       fetchOddsRef.current = fetchOdds;
 
+      const didAutoFetch = useRef(false);
       useEffect(() => {
-        if (apiKey.trim()) fetchOdds();
+        if (apiKey.trim() && !didAutoFetch.current) { didAutoFetch.current = true; fetchOdds(); }
+      }, [apiKey]);
+
+      useEffect(() => {
         const id = setInterval(() => fetchOddsRef.current(true), 30000);
         return () => clearInterval(id);
       }, []);
@@ -473,7 +496,7 @@
               <button className={`tab-btn ${tab === 'odds' ? 'active' : ''}`} onClick={() => setTab('odds')}>Odds</button>
               <button className={`tab-btn ${tab === 'bets' ? 'active' : ''}`} onClick={() => setTab('bets')}>Bets{bets.filter(b => b.result === 'pending').length > 0 ? ` (${bets.filter(b => b.result === 'pending').length})` : ''}</button>
             </div>
-            {matches.length > 0 && <div className="stats"><span>{filteredMatches.length}/{matches.length} matches</span>{lastUpdate && <span>{lastUpdate}</span>}<span style={{color: '#666'}}>b5</span></div>}
+            {matches.length > 0 && <div className="stats"><span>{filteredMatches.length} pregame • {matches.filter(m => m.isLive).length} live</span>{lastUpdate && <span>{lastUpdate}</span>}<span style={{color: '#666'}}>b7</span></div>}
             {booksFound.length > 0 && <div className="stats" style={{fontSize: '10px', color: '#888'}}><span>API books: {booksFound.join(', ')}</span></div>}
             {debugInfo && <div className="stats" style={{fontSize: '10px', color: '#888'}}><span>{debugInfo}</span></div>}
           </div>
