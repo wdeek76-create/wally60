@@ -100,6 +100,7 @@
       const [searchName, setSearchName] = useState('');
       const [error, setError] = useState('');
       const [lastUpdate, setLastUpdate] = useState('');
+      const [booksFound, setBooksFound] = useState([]);
       const [bets, setBets] = useState(() => {
         try { return JSON.parse(localStorage.getItem('tennis_bets')) || []; } catch { return []; }
       });
@@ -109,6 +110,15 @@
       const searchInputRef = useRef(null);
 
       const BOOKMAKERS = ['betonline', 'prophetx', 'novig', 'fanduel', 'pinnacle'];
+      const canonicalBook = (name) => {
+        const n = (name || '').toLowerCase().replace(/[^a-z]/g, '');
+        if (n.startsWith('betonline')) return 'betonline';
+        if (n.startsWith('prophet')) return 'prophetx';
+        if (n.startsWith('novig')) return 'novig';
+        if (n.startsWith('fanduel')) return 'fanduel';
+        if (n.startsWith('pinnacle') || n === 'pinny') return 'pinnacle';
+        return n;
+      };
       const BOOK_NAMES = { pinnacle: 'PIN', fanduel: 'FD', betonline: 'BOL', novig: 'NVG', prophetx: 'PHX' };
       const BOOK_LOGOS = { 
         betonline: 'data:image/webp;base64,UklGRuoCAABXRUJQVlA4IN4CAABQEACdASpAAEAAPo06mUelIyKhLhSdUKARiWoAzUXu4vAmtgz1AfjPek+YD9lN7A6iXeVJbvkD79Mp24f/QOIzSQTQfJAAEf0MYmv5FQi/aC4YZfTwcUOkp9nl+i7xjjN+9jP3BsBS0dFTRXlO4Tao7x4ua6HlEP6lp7fk+KcyUzFPyqx71h31Z/QAAP7+BtfwSCyuIU82mMH4j59QP41RQH+tGCHn1SHrgPi3/VAz9b76KXN2r3cQLF9jGO4898o9uAZDjxl5R5uD4cD4+vdivx/7f8x5o+eyfQwzWIAi/4QvemQ5F4AAo19tJx2uCYcGbu8BrbU/H7ouVnzmAm6OtiBszZd+vLIR9dxwHO8eVwIY8GVuT0jKT4jJdrYXOiwBixVq9J6NJ5wNT/CyEYsQnZDdvmOJD8aUHaGUUQ6nseAJHUN+L/IfuHGtsfQsQzZU4w3T7xdtRH9AuPW/5uAc4HZOVAeai5yWoe6RXvlb8TBUrj1oYqpJ9sW+EiYLX2aiUqC8fxiEwpu85mlXZeOqgPuLffc7sb8gQHOpHYFFCuiydlW/Jfss5Kc4vMDyh64hLg9o+c0SadOLJec0dapF4oWuWnqR3qO4WpTuMT7l9KZEl9d5jT9DfCeCbuMKw5qIuwf+rDZ7R3Ur6mlwkA/+p+sjtZDR/hSPQniFguN6cvtGXVnOXQalwckhBP7/0fNujW6f3MLfMquf/69Fd89341Z0TurykupKaAzn9AZMOLTDjeGC41r476wiv9aSUrtX9jt/Q8bfoDU7YK+p31WlyvEEEtG0iLddfKc9AYsr5+x58wbOHBEfMoa5Qv+TKzQGl3kheBLEzn7Yb+HI0EqBaiuUmy6qd9eK6W149UsCX0R5H0sv2YyfMv38RHb4PjjsLsd6K+e+x8WNxFJxWaVT//9GLU8R/+vxy18lCvd91DUy254plI9AUEMI/qv/Z3XfILeb0sLmOfbAdGYAAA==',
@@ -152,16 +162,21 @@
         setModalOpen(true);
       };
 
-      const fetchOdds = async () => {
-        if (!apiKey.trim()) { setError('Enter your SharpAPI key first'); return; }
-        setLoading(true);
+      const fetchingRef = useRef(false);
+      const lastDataRef = useRef('');
+      const fetchOdds = async (silent = false) => {
+        if (!apiKey.trim()) { if (!silent) setError('Enter your SharpAPI key first'); return; }
+        if (fetchingRef.current) return;
+        if (silent && modalOpen) return;
+        fetchingRef.current = true;
+        if (!silent) setLoading(true);
         setError('');
         try {
           let allOdds = [], cursor = null;
           while (true) {
             const url = new URL('https://api.sharpapi.io/api/v1/odds');
             url.searchParams.set('sport', 'tennis');
-            url.searchParams.set('sportsbook', BOOKMAKERS.join(','));
+            url.searchParams.set('sportsbook', 'betonline,betonline.ag,betonlineag,prophetx,prophet_x,novig,fanduel,pinnacle');
             url.searchParams.set('market', 'moneyline');
             url.searchParams.set('limit', '200');
             if (cursor) url.searchParams.set('cursor', cursor);
@@ -186,20 +201,35 @@
           }).map(match => {
             allOdds.forEach(line => {
               if (line.event_id === match.eventId) {
-                const key = `${line.sportsbook.toLowerCase()}_${line.market_type}_${line.selection}`;
+                const key = `${canonicalBook(line.sportsbook)}_${line.market_type}_${line.selection}`;
                 match.odds[key] = line;
               }
             });
             return match;
           }).filter(m => m.home && m.away && m.home !== 'TBD').sort((a, b) => new Date(a.commence) - new Date(b.commence));
-          setMatches(matchArray);
+          const dataStr = JSON.stringify(matchArray);
+          if (dataStr !== lastDataRef.current) {
+            lastDataRef.current = dataStr;
+            setMatches(matchArray);
+          }
+          setBooksFound(Array.from(new Set(allOdds.map(l => l.sportsbook))).sort());
           setLastUpdate(new Date().toLocaleTimeString());
         } catch (err) {
-          setError(err.message || 'Error fetching odds');
+          if (!silent) setError(err.message || 'Error fetching odds');
         } finally {
+          fetchingRef.current = false;
           setLoading(false);
         }
       };
+
+      const fetchOddsRef = useRef();
+      fetchOddsRef.current = fetchOdds;
+
+      useEffect(() => {
+        if (apiKey.trim()) fetchOdds();
+        const id = setInterval(() => fetchOddsRef.current(true), 30000);
+        return () => clearInterval(id);
+      }, []);
 
       const logBet = (e) => {
         e.preventDefault();
@@ -298,6 +328,7 @@
               </div>}
             </div>
             {matches.length > 0 && <div className="stats"><span>{filteredMatches.length}/{matches.length} matches</span>{lastUpdate && <span>{lastUpdate}</span>}</div>}
+            {booksFound.length > 0 && <div className="stats" style={{fontSize: '10px', color: '#888'}}><span>API books: {booksFound.join(', ')}</span></div>}
           </div>
 
           {error && <div className="error">⚠️ {error}</div>}
@@ -330,7 +361,7 @@
               const homeOdds = getOddsForPlayer(match, match.home);
               const awayOdds = getOddsForPlayer(match, match.away);
               return (
-                <div key={idx} className="match-card">
+                <div key={match.eventId} className="match-card">
                   <div className="match-header">
                     <div className="match-info">
                       <div className="match-time">{formatTime(match.commence)}</div>
