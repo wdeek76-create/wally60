@@ -231,23 +231,56 @@
               g.odds[key] = line;
             });
           });
-          const matchArray = Object.values(grouped).map(g => {
+          const preMerge = Object.values(grouped).map(g => {
             const surs = Object.keys(g.names).sort();
             return { league: g.league, commence: g.commence, eventId: g.key, home: g.names[surs[0]] || 'TBD', away: g.names[surs[1]] || 'TBD', homeSur: surs[0], awaySur: surs[1], odds: g.odds };
           }).filter(m => m.home !== 'TBD' && m.away && m.away !== 'TBD').sort((a, b) => new Date(a.commence) - new Date(b.commence));
+
+          // Second pass: merge cards where player names contain each other (e.g. "Luis Carlos Alvarez" vs "Luis Carlos Alvarez Valdes")
+          const tokenSet = n => new Set(normName(n).toLowerCase().split(/\s+/).filter(Boolean));
+          const samePlayer = (a, b) => {
+            if (!a || !b) return false;
+            if (surKey(a) === surKey(b)) return true;
+            const ta = tokenSet(a), tb = tokenSet(b);
+            const [small, big] = ta.size <= tb.size ? [ta, tb] : [tb, ta];
+            if (small.size < 2) return false;
+            for (const t of small) { if (!big.has(t)) return false; }
+            return true;
+          };
+          const matchArray = [];
+          preMerge.forEach(m => {
+            const target = matchArray.find(x => x.league === m.league && x.commence.slice(0, 10) === m.commence.slice(0, 10) && (
+              (samePlayer(x.home, m.home) && samePlayer(x.away, m.away)) ||
+              (samePlayer(x.home, m.away) && samePlayer(x.away, m.home))
+            ));
+            if (!target) { matchArray.push(m); return; }
+            const crossed = !samePlayer(target.home, m.home);
+            const surMap = crossed
+              ? { [m.homeSur]: target.awaySur, [m.awaySur]: target.homeSur }
+              : { [m.homeSur]: target.homeSur, [m.awaySur]: target.awaySur };
+            Object.entries(m.odds).forEach(([k, v]) => {
+              const parts = k.split('_');
+              const sur = parts[parts.length - 1];
+              parts[parts.length - 1] = surMap[sur] || sur;
+              const nk = parts.join('_');
+              if (!target.odds[nk]) target.odds[nk] = v;
+            });
+            const mHomeTarget = crossed ? 'away' : 'home';
+            const mAwayTarget = crossed ? 'home' : 'away';
+            if (m.home.length > target[mHomeTarget].length) target[mHomeTarget] = m.home;
+            if (m.away.length > target[mAwayTarget].length) target[mAwayTarget] = m.away;
+            if (new Date(m.commence) < new Date(target.commence)) target.commence = m.commence;
+          });
           const dataStr = JSON.stringify(matchArray);
           if (dataStr !== lastDataRef.current) {
             lastDataRef.current = dataStr;
             setMatches(matchArray);
           }
           setBooksFound(Array.from(new Set(allOdds.map(l => l.sportsbook))).sort());
-          const pinRow = allOdds.find(l => canonicalBook(l.sportsbook) === 'pinnacle');
-          if (pinRow) {
-            const limitFields = Object.keys(pinRow).filter(k => /max|limit|liq|vol|interest|stake/i.test(k));
-            setDebugInfo(`PIN fields: ${limitFields.length ? limitFields.map(k => `${k}=${pinRow[k]}`).join(', ') : 'no limit fields — keys: ' + Object.keys(pinRow).join(',')}`);
-          } else {
-            setDebugInfo('No pinnacle rows in response');
-          }
+          const pinRows = allOdds.filter(l => canonicalBook(l.sportsbook) === 'pinnacle');
+          const pinWithMax = pinRows.filter(l => l.max_bet != null);
+          const sample = pinWithMax[0];
+          setDebugInfo(`PIN rows: ${pinRows.length}, with max_bet: ${pinWithMax.length}${sample ? ` (e.g. ${sample.selection}: $${sample.max_bet})` : ''}`);
           setLastUpdate(new Date().toLocaleTimeString());
         } catch (err) {
           if (!silent) setError(err.message || 'Error fetching odds');
