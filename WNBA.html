@@ -9533,6 +9533,45 @@ async function shareOpenPropsAsImageDiscord() {
   showToast("Loading logos…");
   await Promise.all(Array.from(teamsNeeded).map(async (abbr) => { const uri = await _teamLogoAsDataUri(abbr); if (uri) teamLogosMap[abbr] = uri; }));
 
+  // Player headshot cache — fetch once, reuse for all props with same player
+  const playerHeadshotCache = {};
+  const getPlayerHeadshot = async (playerName) => {
+    if (!playerName) return null;
+    if (playerHeadshotCache[playerName]) return playerHeadshotCache[playerName];
+    try {
+      const url = `https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/teams`;
+      const resp = await fetch(url);
+      const data = await resp.json();
+      let found = null;
+      for (const team of (data.teams || [])) {
+        const squad = team.squad || [];
+        for (const athlete of squad) {
+          const nameMatch = (athlete.displayName || "").toLowerCase() === playerName.toLowerCase() ||
+                           (athlete.athlete?.displayName || "").toLowerCase() === playerName.toLowerCase();
+          if (nameMatch) {
+            const pid = athlete.id || athlete.athlete?.id;
+            if (pid) {
+              found = `https://a.espncdn.com/i/headshots/wnba/players/full/${pid}.png`;
+              break;
+            }
+          }
+        }
+        if (found) break;
+      }
+      playerHeadshotCache[playerName] = found || null;
+      return found;
+    } catch (e) {
+      console.error("Headshot lookup failed:", e);
+      playerHeadshotCache[playerName] = null;
+      return null;
+    }
+  };
+
+  // Fetch all player headshots upfront
+  const uniquePlayers = [...new Set(enriched.map(e => e.bet.player))];
+  const playerHeadshotMap = {};
+  await Promise.all(uniquePlayers.map(async (name) => { const uri = await getPlayerHeadshot(name); if (uri) playerHeadshotMap[name] = uri; }));
+
   const bookLogoHtml = (book, size) => { const sz = size||13; const data = (typeof logoFor === "function") ? logoFor(book) : null; if (data) return `<img src="${data}" alt="${esc(book)}" style="width:${sz}px;height:${sz}px;border-radius:3px;object-fit:cover;vertical-align:middle;display:inline-block;flex-shrink:0;"/>`; return `<span style="display:inline-flex;width:${sz}px;height:${sz}px;border-radius:3px;background:#1a1d22;color:#fff;font-size:${Math.round(sz*0.5)}px;font-weight:700;align-items:center;justify-content:center;vertical-align:middle;flex-shrink:0;font-family:'Outfit',sans-serif;">${esc(book).slice(0,2).toUpperCase()}</span>`; };
   const teamLogoHtml = (abbr, size) => { if (!abbr || !teamLogosMap[abbr]) return ""; const sz = size||14; return `<img src="${teamLogosMap[abbr]}" alt="${esc(abbr)}" style="width:${sz}px;height:${sz}px;object-fit:contain;vertical-align:middle;display:inline-block;flex-shrink:0;"/>`; };
   const stopSignSvg = (size) => { const sz = size||16; return `<svg width="${sz}" height="${sz}" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg" style="vertical-align:middle;display:inline-block;flex-shrink:0;filter:drop-shadow(0 0 3px rgba(220,38,38,0.65));"><polygon points="30,5 70,5 95,30 95,70 70,95 30,95 5,70 5,30" fill="#dc2626" stroke="#fff" stroke-width="3"/><text x="50" y="62" font-family="Arial,sans-serif" font-size="28" font-weight="900" fill="#fff" text-anchor="middle">STOP</text></svg>`; };
@@ -9666,7 +9705,7 @@ async function shareOpenPropsAsImageDiscord() {
     Object.values(diffGroups).forEach(items => { n += 1 + items.length + 1; });
     return n;
   };
-  const renderPropBox = (bet, best, maxRows, matchupKey) => {
+  const renderPropBox = (bet, best, maxRows, matchupKey, playerHeadshotMap) => {
     const statName = (typeof STAT_FULL_NAME !== "undefined" && STAT_FULL_NAME[bet.stat]) ? STAT_FULL_NAME[bet.stat] : bet.stat;
     const statLabel = String(statName).toUpperCase();
     const ouUpper = (bet.ou||"").toUpperCase();
@@ -9718,7 +9757,14 @@ async function shareOpenPropsAsImageDiscord() {
     }
     if (_gt) b += `<span style="font-size:8px;font-weight:700;color:#fff;margin-left:6px;">· ${esc(_gt)}</span>`;
     b += `</div>`;
-    // player (team identification now lives in the header above)
+    // player headshot + team
+    const headshotUrl = playerHeadshotMap && playerHeadshotMap[bet.player];
+    if (headshotUrl) {
+      b += `<div style="display:flex;align-items:center;justify-content:center;margin-bottom:9px;"><img src="${headshotUrl}" alt="${esc(bet.player)}" style="width:90px;height:90px;border-radius:8px;object-fit:cover;object-position:center top;"/></div>`;
+      const betTeamAbbr = (typeof INTERNAL_TO_ESPN_ABBR !== "undefined" && INTERNAL_TO_ESPN_ABBR[bet.team]) || bet.team;
+      b += `<div style="display:flex;align-items:center;justify-content:center;gap:4px;margin-bottom:6px;font-size:10px;font-weight:700;color:#7dd3fc;letter-spacing:0.2px;">${teamLogoHtml(betTeamAbbr, 12)}<span>${esc(fullName(betTeamAbbr))}</span></div>`;
+    }
+    // player name
     b += `<div style="display:flex;align-items:center;justify-content:center;gap:6px;margin-bottom:7px;">`;
     b += `<span style="font-size:14px;font-weight:800;color:#fff;">${esc(bet.player)}</span>`;
     b += `</div>`;
@@ -9771,7 +9817,7 @@ async function shareOpenPropsAsImageDiscord() {
     // because props are already ordered by game (earliest→latest) then player.
     h += `<div style="display:grid;grid-template-columns:repeat(${BOX_COLS},1fr);gap:14px;align-items:stretch;">`;
     enriched.forEach(({ bet, best, matchup }) => {
-      h += renderPropBox(bet, best, globalMaxRows, matchup);
+      h += renderPropBox(bet, best, globalMaxRows, matchup, playerHeadshotMap);
     });
     h += `</div></div>`;
     return h;
