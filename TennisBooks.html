@@ -33,7 +33,7 @@
       const [apiKey, setApiKey] = useState('');
       const [matches, setMatches] = useState([]);
       const [loading, setLoading] = useState(false);
-      const [selectedLeague, setSelectedLeague] = useState('tennis_atp');
+      const [searchName, setSearchName] = useState('');
       const [error, setError] = useState('');
       const [lastUpdate, setLastUpdate] = useState('');
 
@@ -64,37 +64,59 @@
         setError('');
 
         try {
-          const url = `https://api.sharpapi.io/api/v1/sports/${selectedLeague}/odds?regions=us&markets=h2h,spreads&bookmakers=${BOOKMAKERS.join(',')}`;
-          console.log('Fetching:', url);
-          const response = await fetch(url, {
-            headers: { 'X-API-Key': apiKey }
-          });
-
-          if (!response.ok) {
-            const errText = await response.text();
-            if (response.status === 401) throw new Error('401: Invalid API key');
-            if (response.status === 403) throw new Error('403: Subscription tier too low for Pinnacle');
-            throw new Error(`${response.status}: ${errText.substring(0, 100) || 'API error'}`);
-          }
-
-          const data = await response.json();
-          
-          // Parse SharpAPI response - group by match
+          const leagues = ['tennis_atp', 'tennis_wta'];
           const grouped = {};
-          if (Array.isArray(data)) {
-            data.forEach(line => {
-              const matchKey = `${line.home_team}_${line.away_team}`;
-              if (!grouped[matchKey]) {
-                grouped[matchKey] = {
-                  home: line.home_team,
-                  away: line.away_team,
-                  commence: line.commence_time || new Date().toISOString(),
-                  odds: {}
-                };
+
+          for (const league of leagues) {
+            const url = `https://api.sharpapi.io/api/v1/sports/${league}/odds?regions=us&markets=h2h,spreads&bookmakers=${BOOKMAKERS.join(',')}`;
+            console.log('Fetching:', url);
+            let response;
+            try {
+              response = await fetch(url, {
+                headers: { 'X-API-Key': apiKey }
+              });
+            } catch (networkErr) {
+              throw new Error(`Network error: ${networkErr.message}`);
+            }
+
+            if (!response.ok) {
+              let errText = '';
+              try {
+                errText = await response.text();
+              } catch (e) {}
+              if (response.status === 401) throw new Error('401: Invalid API key');
+              if (response.status === 403) throw new Error('403: Subscription tier too low - upgrade or use free tier');
+              if (response.status === 404) {
+                console.log(`${league} not available`);
+                continue;
               }
-              const key = `${line.bookmaker}_${line.market_key || 'h2h'}`;
-              grouped[matchKey].odds[key] = line;
-            });
+              throw new Error(`HTTP ${response.status}: ${errText.substring(0, 100) || 'API error'}`);
+            }
+
+            let data;
+            try {
+              data = await response.json();
+            } catch (parseErr) {
+              throw new Error(`Failed to parse response: ${parseErr.message}`);
+            }
+            
+            // Parse SharpAPI response
+            if (Array.isArray(data)) {
+              data.forEach(line => {
+                const matchKey = `${line.home_team}_${line.away_team}`;
+                if (!grouped[matchKey]) {
+                  grouped[matchKey] = {
+                    home: line.home_team,
+                    away: line.away_team,
+                    league: league.split('_')[1].toUpperCase(),
+                    commence: line.commence_time || new Date().toISOString(),
+                    odds: {}
+                  };
+                }
+                const key = `${line.bookmaker}_${line.market_key || 'h2h'}`;
+                grouped[matchKey].odds[key] = line;
+              });
+            }
           }
 
           const matchArray = Object.values(grouped)
@@ -104,8 +126,9 @@
           setMatches(matchArray);
           setLastUpdate(new Date().toLocaleTimeString());
         } catch (err) {
-          console.error('Full error:', err);
-          setError(`Error: ${err.message}. Check console for details.`);
+          console.error('Full error object:', err);
+          const errorMsg = err.message || 'Unknown error';
+          setError(errorMsg);
         } finally {
           setLoading(false);
         }
@@ -117,7 +140,13 @@
           const interval = setInterval(fetchOdds, 30000);
           return () => clearInterval(interval);
         }
-      }, [apiKey, selectedLeague]);
+      }, [apiKey]);
+
+      // Filter matches by search
+      const filteredMatches = matches.filter(m => {
+        const searchLower = searchName.toLowerCase();
+        return m.home.toLowerCase().includes(searchLower) || m.away.toLowerCase().includes(searchLower);
+      });
 
       const getOddsForPlayer = (match, player, market = 'h2h') => {
         const odds = {};
@@ -176,10 +205,13 @@
             </div>
 
             <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-              <select
-                value={selectedLeague}
-                onChange={(e) => setSelectedLeague(e.target.value)}
+              <input
+                type="text"
+                placeholder="Search player name..."
+                value={searchName}
+                onChange={(e) => setSearchName(e.target.value)}
                 style={{
+                  flex: 1,
                   padding: '8px 12px',
                   backgroundColor: '#1a2038',
                   border: '1px solid #2a3a5a',
@@ -187,15 +219,10 @@
                   color: '#fff',
                   fontSize: '14px'
                 }}
-              >
-                <option value="tennis_atp">ATP</option>
-                <option value="tennis_wta">WTA</option>
-                <option value="tennis_itf_men">ITF Men</option>
-                <option value="tennis_itf_women">ITF Women</option>
-              </select>
+              />
 
               {lastUpdate && (
-                <span style={{ fontSize: '12px', color: '#7a8aa8', marginLeft: 'auto' }}>
+                <span style={{ fontSize: '11px', color: '#7a8aa8' }}>
                   {lastUpdate}
                 </span>
               )}
@@ -211,13 +238,13 @@
 
           {/* Matches */}
           <div style={{ padding: '8px 0' }}>
-            {matches.length === 0 && !loading && (
+            {filteredMatches.length === 0 && !loading && (
               <div style={{ padding: '32px 16px', textAlign: 'center', color: '#7a8aa8' }}>
-                {apiKey ? 'No matches available' : 'Enter API key and tap Load'}
+                {matches.length === 0 ? 'Load matches first' : 'No matches found'}
               </div>
             )}
 
-            {matches.map((match, idx) => {
+            {filteredMatches.map((match, idx) => {
               const homeOdds = getOddsForPlayer(match, match.home);
               const awayOdds = getOddsForPlayer(match, match.away);
               const homeSpreads = getOddsForPlayer(match, match.home, 'spreads');
@@ -227,7 +254,7 @@
                 <div key={idx} style={{ borderBottom: '1px solid #1a2038', padding: '12px 16px' }}>
                   {/* Match Header */}
                   <div style={{ marginBottom: '12px', fontSize: '13px', color: '#7a8aa8' }}>
-                    {formatTime(match.commence)} · {selectedLeague.split('_')[1].toUpperCase()}
+                    {formatTime(match.commence)} · {match.league || 'TENNIS'}
                   </div>
 
                   {/* Home Player */}
