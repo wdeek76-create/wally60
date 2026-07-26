@@ -45,10 +45,12 @@
       const [lastUpdate, setLastUpdate] = useState('');
       const [debugInfo, setDebugInfo] = useState('');
 
-      const BOOKMAKERS = ['pinnacle', 'draftkings', 'fanduel', 'betmgm', 'novig', 'prophetx'];
+      const BOOKMAKERS = ['pinnacle', 'fanduel', 'draftkings', 'betmgm', 'betonline'];
       const BOOK_COLORS = {
         pinnacle: '#00a6d6',
         fanduel: '#a020f0',
+        draftkings: '#ff6f00',
+        betmgm: '#005eb8',
         betonline: '#ff6b35',
         novig: '#ff1744',
         prophetx: '#00bfa5'
@@ -57,6 +59,8 @@
       const BOOK_NAMES = {
         pinnacle: 'PIN',
         fanduel: 'FD',
+        draftkings: 'DK',
+        betmgm: 'MGM',
         betonline: 'BEO',
         novig: 'NVG',
         prophetx: 'PHX'
@@ -74,18 +78,17 @@
         try {
           let allOdds = [];
           let cursor = null;
-          let pageCount = 0;
-          const maxPages = 5; // Get up to 5 pages (1000 results)
 
-          // Paginate through results
-          while (pageCount < maxPages) {
+          // Paginate through all results
+          while (true) {
             const url = new URL('https://api.sharpapi.io/api/v1/odds');
             url.searchParams.set('sport', 'tennis');
             url.searchParams.set('sportsbook', BOOKMAKERS.join(','));
+            url.searchParams.set('market', 'moneyline');
             url.searchParams.set('limit', '200');
             if (cursor) url.searchParams.set('cursor', cursor);
 
-            console.log(`Fetching page ${pageCount + 1}...`);
+            console.log(`Fetching page ${Math.floor(allOdds.length / 200) + 1}...`);
             
             const response = await fetch(url.toString(), {
               headers: { 'X-API-Key': apiKey }
@@ -108,14 +111,15 @@
             }
 
             allOdds = allOdds.concat(data.data);
-            console.log(`Page ${pageCount + 1}: got ${data.data.length} rows, total now: ${allOdds.length}`);
+            const pageNum = Math.floor(allOdds.length / 200);
+            console.log(`Page ${pageNum}: got ${data.data.length} rows, total now: ${allOdds.length}`);
 
             // Check if there are more pages
             if (!data.pagination?.has_more) {
+              console.log(`Done - fetched all ${allOdds.length} odds rows`);
               break;
             }
             cursor = data.pagination.next_cursor;
-            pageCount++;
           }
 
           console.log(`Total odds rows fetched: ${allOdds.length}`);
@@ -124,22 +128,46 @@
           const grouped = {};
           
           allOdds.forEach(line => {
-            const matchKey = `${line.home_team}_${line.away_team}_${line.event_id}`;
-            if (!grouped[matchKey]) {
-              grouped[matchKey] = {
-                home: line.home_team,
-                away: line.away_team,
+            const eventId = line.event_id;
+            if (!grouped[eventId]) {
+              grouped[eventId] = {
                 league: line.league ? line.league.toUpperCase() : 'TENNIS',
                 commence: line.event_start_time || new Date().toISOString(),
-                odds: {}
+                oddRows: []
               };
             }
-            const key = `${line.sportsbook}_${line.market_type}`;
-            grouped[matchKey].odds[key] = line;
+            grouped[eventId].oddRows.push(line);
           });
 
-          const matchArray = Object.values(grouped)
-            .filter(m => m.home && m.away)
+          // Convert to match array with deduped players
+          const matchArray = Object.values(grouped).map(event => {
+            // Get unique players from selections
+            const players = new Set();
+            event.oddRows.forEach(row => {
+              if (row.selection_type === 'home' || row.selection_type === 'away') {
+                players.add(row.selection);
+              }
+            });
+            
+            const playerList = Array.from(players);
+            return {
+              league: event.league,
+              commence: event.commence,
+              eventId: event.oddRows[0].event_id,
+              home: playerList[0] || 'TBD',
+              away: playerList[1] || 'TBD',
+              odds: {}
+            };
+          }).map(match => {
+            // Rebuild odds map with selection in key so both players' odds are stored
+            allOdds.forEach(line => {
+              if (line.event_id === match.eventId) {
+                const key = `${line.sportsbook}_${line.market_type}_${line.selection}`;
+                match.odds[key] = line;
+              }
+            });
+            return match;
+          }).filter(m => m.home && m.away && m.home !== 'TBD')
             .sort((a, b) => new Date(a.commence) - new Date(b.commence));
 
           setMatches(matchArray);
@@ -180,16 +208,26 @@
       const getOddsForPlayer = (match, player, market = 'moneyline') => {
         const odds = {};
         BOOKMAKERS.forEach(book => {
-          const key = `${book}_${market}`;
+          // Try to find odds for this specific player
+          const key = `${book}_${market}_${player}`;
           const line = match.odds[key];
           if (line) {
-            // Check if this line is for the correct player
-            if (line.selection === player || line.home_team === player || line.away_team === player) {
-              odds[book] = line;
-            }
+            odds[book] = line;
           }
         });
         return odds;
+      };
+
+      const getBooksWithOdds = (match) => {
+        const books = new Set();
+        BOOKMAKERS.forEach(book => {
+          // Check if any odds key starts with this book name
+          const hasOdds = Object.keys(match.odds).some(key => key.startsWith(book + '_'));
+          if (hasOdds) {
+            books.add(book);
+          }
+        });
+        return Array.from(books);
       };
 
       const formatTime = (isoString) => {
@@ -300,8 +338,8 @@
                     <div style={{ fontWeight: '600', marginBottom: '8px', fontSize: '15px' }}>
                       {match.home}
                     </div>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '6px', marginBottom: '4px' }}>
-                      {BOOKMAKERS.map(book => {
+                    <div style={{ display: 'grid', gridTemplateColumns: `repeat(${Math.max(1, getBooksWithOdds(match).length)}, 1fr)`, gap: '6px', marginBottom: '4px' }}>
+                      {getBooksWithOdds(match).map(book => {
                         const odd = homeOdds[book];
                         return (
                           <div
@@ -325,35 +363,15 @@
                         );
                       })}
                     </div>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '6px' }}>
-                      {BOOKMAKERS.map(book => {
-                        const spread = homeSpreads[book];
-                        return (
-                          <div
-                            key={`${book}_spread`}
-                            style={{
-                              padding: '6px 4px',
-                              backgroundColor: '#1a2038',
-                              border: `1px solid ${BOOK_COLORS[book]}22`,
-                              borderRadius: '4px',
-                              textAlign: 'center',
-                              fontSize: '11px',
-                              color: spread ? '#aaa' : '#4a5a7a'
-                            }}
-                          >
-                            {spread ? (spread.line > 0 ? '+' : '') + spread.line : '—'}
-                          </div>
-                        );
-                      })}
-                    </div>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '6px', marginTop: '4px' }}>
-                      {BOOKMAKERS.map(book => {
+                    {/* Limits row for Pinnacle max_bet and exchange volumes */}
+                    <div style={{ display: 'grid', gridTemplateColumns: `repeat(${Math.max(1, getBooksWithOdds(match).length)}, 1fr)`, gap: '6px', marginTop: '4px' }}>
+                      {getBooksWithOdds(match).map(book => {
                         const odd = homeOdds[book];
                         let limit = '';
                         if (book === 'pinnacle' && odd?.max_bet) {
                           limit = `$${(odd.max_bet / 1000).toFixed(0)}k`;
-                        } else if ((book === 'novig' || book === 'prophetx') && odd?.volume_24h) {
-                          limit = `${(odd.volume_24h / 1000).toFixed(0)}k`;
+                        } else if (odd?.volume_24h) {
+                          limit = `${(odd.volume_24h / 1000).toFixed(1)}k vol`;
                         }
                         return (
                           <div
@@ -380,8 +398,8 @@
                     <div style={{ fontWeight: '600', marginBottom: '8px', fontSize: '15px' }}>
                       {match.away}
                     </div>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '6px', marginBottom: '4px' }}>
-                      {BOOKMAKERS.map(book => {
+                    <div style={{ display: 'grid', gridTemplateColumns: `repeat(${Math.max(1, getBooksWithOdds(match).length)}, 1fr)`, gap: '6px', marginBottom: '4px' }}>
+                      {getBooksWithOdds(match).map(book => {
                         const odd = awayOdds[book];
                         return (
                           <div
@@ -405,35 +423,15 @@
                         );
                       })}
                     </div>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '6px' }}>
-                      {BOOKMAKERS.map(book => {
-                        const spread = awaySpreads[book];
-                        return (
-                          <div
-                            key={`${book}_spread`}
-                            style={{
-                              padding: '6px 4px',
-                              backgroundColor: '#1a2038',
-                              border: `1px solid ${BOOK_COLORS[book]}22`,
-                              borderRadius: '4px',
-                              textAlign: 'center',
-                              fontSize: '11px',
-                              color: spread ? '#aaa' : '#4a5a7a'
-                            }}
-                          >
-                            {spread ? (spread.line > 0 ? '+' : '') + spread.line : '—'}
-                          </div>
-                        );
-                      })}
-                    </div>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '6px', marginTop: '4px' }}>
-                      {BOOKMAKERS.map(book => {
+                    {/* Limits row for away player */}
+                    <div style={{ display: 'grid', gridTemplateColumns: `repeat(${Math.max(1, getBooksWithOdds(match).length)}, 1fr)`, gap: '6px', marginTop: '4px' }}>
+                      {getBooksWithOdds(match).map(book => {
                         const odd = awayOdds[book];
                         let limit = '';
                         if (book === 'pinnacle' && odd?.max_bet) {
                           limit = `$${(odd.max_bet / 1000).toFixed(0)}k`;
-                        } else if ((book === 'novig' || book === 'prophetx') && odd?.volume_24h) {
-                          limit = `${(odd.volume_24h / 1000).toFixed(0)}k`;
+                        } else if (odd?.volume_24h) {
+                          limit = `${(odd.volume_24h / 1000).toFixed(1)}k vol`;
                         }
                         return (
                           <div
