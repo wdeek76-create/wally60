@@ -424,7 +424,13 @@
     box-shadow: 0 0 10px rgba(39,192,113,0.4);
   }
   .tl-slot.now .tl-bar { outline: 1.5px solid rgba(255,255,255,0.4); outline-offset: 1px; }
-  .tl-slot.sel .tl-bar { transform: scaleY(1.03); filter: brightness(1.2); }
+  .tl-slot.sel .tl-bar {
+    transform: scaleY(1.05);
+    filter: brightness(1.3);
+    outline: 2px solid #fff;
+    outline-offset: 1px;
+    box-shadow: 0 0 16px rgba(39,192,113,0.9);
+  }
 
   .tl-ticks {
     display: flex; justify-content: space-between;
@@ -913,19 +919,25 @@ function renderInsight(games) {
   const maxCount = Math.max(...slots.map(s => s.count), 1);
   const peakSlot = slots.reduce((a,b) => b.count > a.count ? b : a, slots[0]);
 
-  // Identify peak clusters: runs of slots that are genuinely busy.
-  // A slot counts if it has 3+ games OR is well above the daily average.
-  // This lets a smaller early bunch AND a bigger late bunch both register.
+  // Identify peak clusters. A cluster STARTS at a genuinely busy slot (3+ or well
+  // above avg) but CONTINUES through adjacent slots that still have meaningful action
+  // (>= half the start threshold), so a tall bar pulls in the mediums next to it.
   const avg = slots.reduce((s,x)=>s+x.count,0) / slots.length;
-  const threshold = Math.max(3, avg * 1.4);
+  const startThresh = Math.max(3, avg * 1.4);
+  const contThresh  = Math.max(2, startThresh * 0.5);
   const clusters = [];
   let run = null;
   slots.forEach((s,i) => {
-    if (s.count >= threshold) {
-      if (!run) { run = { startI:i, endI:i, peak:s.count }; clusters.push(run); }
-      else { run.endI = i; run.peak = Math.max(run.peak, s.count); }
+    if (!run && s.count >= startThresh) {
+      run = { startI:i, endI:i, peak:s.count };
+      clusters.push(run);
+    } else if (run && s.count >= contThresh) {
+      run.endI = i;
+      run.peak = Math.max(run.peak, s.count);
     } else {
       run = null;
+      // allow this slot to start its own cluster
+      if (s.count >= startThresh) { run = { startI:i, endI:i, peak:s.count }; clusters.push(run); }
     }
   });
 
@@ -1018,13 +1030,13 @@ function renderInsight(games) {
     return { t0, t1, peak: c.peak, label: `${fmtSpan(t0).replace(/ [AP]M/,'')}–${fmtSpan(t1)}` };
   });
 
-  let cbTitle, cbSub;
+  let cbTitle, cbSub, cbState = 'green';
   if (isPeakNow) {
+    cbState = 'red';
     cbTitle = liveHotCount > 0 ? `Action is live now` : `Peak window now`;
     cbSub = liveHotCount > 0
       ? `${liveHotCount} game${liveHotCount>1?'s':''} in high-value spots right now`
       : `Multiple games in their 2nd half now`;
-    // Still mention upcoming windows if any are ahead of now
     const ahead = chronoWindows.filter(w => w.t0 > nowMs);
     if (ahead.length) cbSub += ` · next ${ahead[0].label}`;
   } else if (chronoWindows.length >= 2) {
@@ -1034,14 +1046,23 @@ function renderInsight(games) {
     const w = chronoWindows[0];
     cbTitle = `Best window ${w.label}`;
     cbSub = `${w.peak} games in high-value spots · tap a bar for details`;
+  } else if (viewingDate === 0 && liveHotCount === 0 && moments.some(m => m.live !== undefined && m.g.bucket==='live')) {
+    // A live game or two crawling to the finish, no real clusters
+    cbState = 'amber';
+    const liveGames = [...new Set(moments.filter(m => m.g.bucket==='live').map(m=>m.g.id))].length;
+    cbTitle = `Winding down`;
+    cbSub = `${liveGames} game${liveGames>1?'s':''} left today — light action`;
   } else {
     cbTitle = `Games spread through the day`;
     cbSub = `No big clusters — tap a bar to see what's on`;
   }
 
-  const iconColor = isPeakNow ? 'var(--red)' : 'var(--green)';
-  const iconBg = isPeakNow ? 'rgba(255,59,59,0.1)' : 'rgba(39,192,113,0.1)';
-  const iconBorder = isPeakNow ? 'rgba(255,59,59,0.25)' : 'rgba(39,192,113,0.2)';
+  const stateColors = {
+    red:   ['var(--red)', 'rgba(255,59,59,0.1)', 'rgba(255,59,59,0.25)'],
+    amber: ['var(--amber)', 'rgba(245,166,35,0.1)', 'rgba(245,166,35,0.25)'],
+    green: ['var(--green)', 'rgba(39,192,113,0.1)', 'rgba(39,192,113,0.2)'],
+  };
+  const [iconColor, iconBg, iconBorder] = stateColors[cbState];
 
   bar.innerHTML = `
     <div class="tl-cb-header">
