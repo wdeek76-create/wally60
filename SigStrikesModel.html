@@ -3703,10 +3703,27 @@ function parseBacktest() {
   const isNumberLine = s => /^-?\d+(\.\d+)?$/.test(s);
   const isTimeStats = s => /\d+[.,:]\d+.*[:0-9]\d+/.test(s) && s.split(/\s+/).length >= 3;
 
+  // Event header pattern: matches "UFC 328", "UFC Fight Night: X vs Y", "UFC on ESPN 42", etc.
+  const isEventHeader = s => /^UFC\s+(Fight\s+Night|\d+|on\s+ESPN|on\s+ABC|Live)/i.test(s.trim());
+
   const parsed = [];
+  let eventHeadersSeen = 0;
   let i = 0;
   while(i < rawLines.length) {
     const line = rawLines[i];
+
+    // Detect event headers — stop after the FIRST card's fighters are done
+    if(isEventHeader(line)) {
+      eventHeadersSeen++;
+      // If we've already collected fighters and hit ANY event header, that's the boundary of card 2
+      if(parsed.length > 0) {
+        break;
+      }
+      // If we haven't collected anything yet, this is card 1's header — skip it and continue
+      i++;
+      continue;
+    }
+
     if(!isName(line)) { i++; continue; }
 
     // Try to collect the next up-to-2 numeric lines (PP, UD).
@@ -3720,7 +3737,10 @@ function parseBacktest() {
     // Walk forward — up to ~12 lines to find the two projections
     while(j < rawLines.length && j < i + 15) {
       const l = rawLines[j];
-      if(isNumberLine(l)) {
+      if(isEventHeader(l)) {
+        // Hit next event card — bail out entirely
+        break;
+      } else if(isNumberLine(l)) {
         collected.push(parseFloat(l));
         numsCollected++;
         if(numsCollected >= 2) { j++; break; }
@@ -3753,32 +3773,42 @@ function parseBacktest() {
 
   // Merge with existing RG/Saber data to compute projection deltas
   // Helper: find a matching key in an object using fuzzy name matching
-  // Returns { key, method } or null. Methods: 'exact', 'contains', 'tokens', 'typo'
+  // Returns { key, method } or null. Methods: 'exact', 'lastname', 'tokens', 'typo'
   function fuzzyFindKey(targetName, mapObj) {
     const target = normName(targetName);
     if(!target) return null;
     // 1. exact
     if(mapObj[target]) return { key: target, method: 'exact' };
     const keys = Object.keys(mapObj);
-    // 2. one contains the other (handles "Stephanie Luciano" vs "Stephanie Bruna Luciano")
-    for(const k of keys) {
-      if(k === target) continue;
-      if(k.includes(target) || target.includes(k)) return { key: k, method: 'contains' };
-    }
-    // 3. token overlap: split raw name into words, require >=2 matching tokens (case-insensitive)
-    //    (uses raw target name, not normed, so we can split by whitespace)
-    const targetTokens = targetName.normalize('NFD').replace(/[\u0300-\u036f]/g,'')
-      .toLowerCase().split(/\s+/).filter(t => t.length >= 3);
-    if(targetTokens.length >= 2) {
+    const targetRaw = targetName.normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+    const targetTokens = targetRaw.split(/\s+/).filter(t => t.length >= 3);
+    // 2. Token match — require MOST tokens to overlap.
+    //    Rule: If target has N tokens ≥3 chars, need ≥ min(N, keyTokens) - 0 shared,
+    //    AND require at least the last token (surname) to match.
+    if(targetTokens.length >= 1) {
+      const targetLast = targetTokens[targetTokens.length - 1]; // surname
+      let bestKey = null;
+      let bestOverlap = 0;
       for(const k of keys) {
-        // We only have normed keys, but tokens are already lowercased chars; test string contains
-        let hits = 0;
-        for(const tok of targetTokens) if(k.includes(tok)) hits++;
-        if(hits >= 2) return { key: k, method: 'tokens' };
+        // k is normalized (no spaces). Need to rebuild key tokens by finding original.
+        // Simplest: check if k contains the target's LAST NAME + at least one other token from target.
+        if(!k.includes(targetLast)) continue; // surname must be present
+        let overlap = 1; // last name counted
+        for(let i = 0; i < targetTokens.length - 1; i++) {
+          if(k.includes(targetTokens[i])) overlap++;
+        }
+        // Require ≥2 tokens overlap (surname + 1 other), OR if target only has 1 token, allow direct match on that
+        const minRequired = targetTokens.length === 1 ? 1 : 2;
+        if(overlap >= minRequired && overlap > bestOverlap) {
+          bestOverlap = overlap;
+          bestKey = k;
+        }
       }
+      if(bestKey) return { key: bestKey, method: 'tokens' };
     }
-    // 4. Typo tolerance: Levenshtein distance ≤ 2 (for names of similar length)
+    // 3. Levenshtein typo tolerance — must be VERY close AND both strings not tiny
     for(const k of keys) {
+      if(k.length < 6 || target.length < 6) continue;   // Skip short strings — too risky
       if(Math.abs(k.length - target.length) > 2) continue;
       if(levenshtein(k, target) <= 2) return { key: k, method: 'typo' };
     }
