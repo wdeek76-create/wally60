@@ -355,7 +355,7 @@ table colgroup col.avg-col{width:16%;}
       </div>
       <button onclick="closeScheduleModal()" style="background:transparent;border:1px solid #1a1d22;color:#a8b0bb;border-radius:8px;width:32px;height:32px;font-size:18px;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;line-height:1;">×</button>
     </div>
-    <div id="schedule-modal-body" style="overflow-y:auto;padding:8px 0 16px 0;flex:1;"></div>
+    <div id="schedule-modal-body" style="overflow-y:auto;-webkit-overflow-scrolling:touch;padding:8px 0 16px 0;flex:1;-ms-overflow-style:auto;"></div>
   </div>
 </div>
 
@@ -18102,6 +18102,48 @@ function tickerGetStatFor(playerName, stat) {
 
 // Build ticker cards for tracked bets on today's slate. Shows player, line,
 // stat, current value, and a status dot (green=hit, red=busted, gray=pending).
+// Surgical ticker update: only update the score values for bets, keep animation intact
+function updateTickerBetScoresOnly() {
+  if (typeof bets === "undefined" || !Array.isArray(bets) || bets.length === 0) return;
+  const todayISO = new Date().toISOString().slice(0, 10);
+  const todayBets = bets.filter(b => {
+    if (!b || b.stat === "GAME_TOTAL") return false;
+    const d = b.gameDate || b.date || "";
+    if (d === todayISO) return true;
+    try { return new Date(d).toISOString().slice(0, 10) === todayISO; } catch { return false; }
+  });
+  if (todayBets.length === 0) return;
+  
+  // Find all bet cards in ticker by scanning for ones with player names
+  const tickerInner = document.getElementById("scoreboard-ticker-inner");
+  if (!tickerInner) return;
+  
+  const cards = tickerInner.querySelectorAll(".tk-game");
+  todayBets.forEach(b => {
+    const statInfo = tickerGetStatFor(b.player, b.stat);
+    const lastName = (b.player || "").split(/\s+/).slice(-1)[0] || b.player || "?";
+    
+    // Find the card for this player
+    for (let card of cards) {
+      const cardText = card.textContent;
+      if (cardText.includes(lastName)) {
+        // Update the score span if it exists
+        const scoreSpan = card.querySelector(".tk-score");
+        if (scoreSpan) {
+          let newValue = "—";
+          if (statInfo && statInfo.value != null) {
+            newValue = String(statInfo.value);
+          }
+          if (scoreSpan.textContent !== newValue) {
+            scoreSpan.textContent = newValue;
+          }
+          break; // Found the matching card
+        }
+      }
+    }
+  });
+}
+
 function buildTickerBetCards() {
   if (typeof bets === "undefined" || !Array.isArray(bets) || bets.length === 0) return [];
   // Today's bets only (gameDate or saved date matching today's ISO)
@@ -18446,6 +18488,7 @@ function renderScheduleRow(ev, isToday) {
 // (if not already cached) and show roster / box score / injury info inline.
 const _scheduleExpandCache = new Map();  // eventId → summary JSON
 const _scheduleExpandOpen = new Set();   // eventIds currently expanded
+const _scheduleRefreshIntervals = new Map();  // eventId → interval ID for live refreshes
 
 async function toggleScheduleExpand(eventId) {
   if (!eventId) return;
@@ -18458,6 +18501,11 @@ async function toggleScheduleExpand(eventId) {
     panel.style.display = "none";
     if (caret) caret.style.transform = "rotate(0deg)";
     _scheduleExpandOpen.delete(eventId);
+    // Clear refresh interval if it exists
+    if (_scheduleRefreshIntervals.has(eventId)) {
+      clearInterval(_scheduleRefreshIntervals.get(eventId));
+      _scheduleRefreshIntervals.delete(eventId);
+    }
     return;
   }
   // Expand
@@ -18483,6 +18531,164 @@ async function toggleScheduleExpand(eventId) {
     return;
   }
   panel.innerHTML = renderScheduleExpandContent(summary);
+  
+  // Check if game is live; if so, set up auto-refresh every 30 seconds
+  const state = summary?.header?.competitions?.[0]?.status?.type?.state;
+  if (state === "in") {
+    if (_scheduleRefreshIntervals.has(eventId)) {
+      clearInterval(_scheduleRefreshIntervals.get(eventId));
+    }
+    const refreshInterval = setInterval(async () => {
+      try {
+        const r = await fetch(`https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/summary?event=${eventId}`, { mode: "cors" });
+        if (r.ok) {
+          const updatedSummary = await r.json();
+          _scheduleExpandCache.set(eventId, updatedSummary);
+          // Only re-render box score section if panel is still open
+          if (_scheduleExpandOpen.has(eventId)) {
+            const currentPanel = document.getElementById(`schedule-expand-${eventId}`);
+            if (currentPanel) {
+              // Extract just the box score content and update in place
+              const boxscoreHtml = renderScheduleBoxscoreOnly(updatedSummary);
+              if (boxscoreHtml) {
+                const boxscoreContainer = currentPanel.querySelector('[data-boxscore-section]');
+                if (boxscoreContainer) {
+                  boxscoreContainer.innerHTML = boxscoreHtml;
+                }
+              }
+            }
+          }
+          // Also update ticker scores (surgically, no rebuild)
+          updateTickerBetScoresOnly();
+        }
+      } catch (e) {
+        console.log("[SCHEDULE] live refresh failed:", e?.message);
+      }
+    }, 30000);
+    _scheduleRefreshIntervals.set(eventId, refreshInterval);
+  }
+}
+
+// Render only the box score sections (for live updates without disrupting scroll/state)
+function renderScheduleBoxscoreOnly(summary) {
+  const state = summary?.header?.competitions?.[0]?.status?.type?.state;
+  const teams = summary?.boxscore?.players || [];
+  const _gameIso = summary?.header?.competitions?.[0]?.date || summary?.header?.competitions?.[0]?.startDate || null;
+  const _gameDay = _gameIso ? String(_gameIso).slice(0,10) : null;
+  const _betDay = (b) => {
+    const d = b.gameDate || b.date || "";
+    return String(d).slice(0,10);
+  };
+  let betsByPlayer = {};
+  try {
+    loadBets();
+    if (typeof bets !== "undefined" && Array.isArray(bets)) {
+      const seenBet = {};
+      bets.forEach(b => {
+        if (!b.player || !b.stat || b.line == null) return;
+        if (b.stat === "GAME_TOTAL" || b.stat === "GAME_SPREAD") return;
+        if (_gameDay && _betDay(b) && _betDay(b) !== _gameDay) return;
+        const k = norm(b.player);
+        const sig = `${k}|${(b.stat||"").toUpperCase()}|${(b.ou||"").toLowerCase()}|${b.line}`;
+        if (seenBet[sig]) return;
+        seenBet[sig] = true;
+        if (!betsByPlayer[k]) betsByPlayer[k] = [];
+        betsByPlayer[k].push(b);
+      });
+    }
+  } catch (e) {}
+  const STAT_FROM_BET = { PTS: "pts", REB: "reb", AST: "ast", PRA: "pra", "3PM": "threepm" };
+  const betActual = (b, line) => {
+    const s = (b.stat || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+    if (s === "PTS") return line.pts;
+    if (s === "REB") return line.reb;
+    if (s === "AST") return line.ast;
+    if (s === "PRA") return line.pts + line.reb + line.ast;
+    if (s === "3PM" || s === "THREEPM" || s === "3P") return line.tpm;
+    return null;
+  };
+  if ((state === "in" || state === "post") && teams.length > 0) {
+    const sections = teams.map(teamGroup => {
+      const teamAbbr = (teamGroup.team?.abbreviation || "").toUpperCase();
+      const teamLogo = teamGroup.team?.logo || "";
+      const stats = teamGroup.statistics?.[0] || {};
+      const labels = (stats.labels || stats.keys || []).map(s => s.toString().toLowerCase());
+      const idx = {
+        min: labels.findIndex(l => l === "min"),
+        pts: labels.findIndex(l => l === "pts"),
+        reb: labels.findIndex(l => l === "reb"),
+        ast: labels.findIndex(l => l === "ast"),
+        threept: (() => {
+          let i = labels.findIndex(l => l === "3pt" || l === "3p" || l === "fg3" || l === "3pm");
+          if (i < 0) i = labels.findIndex(l => l.startsWith("3p") || l.includes("three"));
+          return i;
+        })(),
+        fouls: labels.findIndex(l => l === "pf" || l === "f" || l === "fouls"),
+      };
+      const athletes = stats.athletes || [];
+      const players = athletes
+        .filter(a => !a.didNotPlay && a.stats && a.stats.length > 0)
+        .map(a => {
+          const pts = idx.pts >= 0 ? (parseInt(a.stats[idx.pts]) || 0) : 0;
+          const reb = idx.reb >= 0 ? (parseInt(a.stats[idx.reb]) || 0) : 0;
+          const ast = idx.ast >= 0 ? (parseInt(a.stats[idx.ast]) || 0) : 0;
+          let tpm = 0;
+          if (idx.threept >= 0) {
+            const raw = String(a.stats[idx.threept] || "");
+            const m = raw.split("-")[0];
+            tpm = parseInt(m) || 0;
+          }
+          const fouls = idx.fouls >= 0 ? (parseInt(a.stats[idx.fouls]) || 0) : 0;
+          const min = idx.min >= 0 ? (a.stats[idx.min] || "") : "";
+          return { name: a.athlete?.displayName || "?", pts, reb, ast, tpm, fouls, min, starter: a.starter === true };
+        })
+        .sort((a, b) => b.pts - a.pts);
+      const top = players.slice(0, 8);
+      const betExtras = players.slice(8).filter(p => (betsByPlayer[norm(p.name)] || []).length > 0);
+      const shownPlayers = top.concat(betExtras);
+      const rows = shownPlayers.map(p => {
+        const myBets = betsByPlayer[norm(p.name)] || [];
+        const hasBet = myBets.length > 0;
+        const betPills = myBets.map(b => {
+          const actual = betActual(b, { pts: p.pts, reb: p.reb, ast: p.ast, tpm: p.tpm });
+          const _statRaw = (b.stat || "").toUpperCase();
+          const statLbl = (_statRaw === "THREEPM" || _statRaw === "3P") ? "3PM" : _statRaw;
+          const ouLbl = (b.ou || "").toLowerCase() === "under" ? "u" : "o";
+          let barColor = "#7dd3fc", mark = "";
+          if (actual != null) {
+            const hitting = (b.ou || "").toLowerCase() === "under" ? actual < b.line : actual > b.line;
+            barColor = hitting ? "#4ade80" : "#f87171";
+            mark = state === "post" ? (hitting ? " ✓" : " ✗") : ` (${actual})`;
+          }
+          return `<span style="display:inline-flex;align-items:center;gap:4px;font-size:9px;font-weight:700;font-family:'JetBrains Mono',monospace;color:#fff;background:rgba(125,211,252,0.08);border:1px solid rgba(125,211,252,0.20);border-radius:3px;padding:2px 6px;letter-spacing:0.2px;border-left:3px solid ${barColor};">${ouLbl}${b.line} ${statLbl}${mark}</span>`;
+        }).join("");
+        const bgColor = hasBet ? "background:rgba(163,230,53,0.08);border-left:3px solid #a3e635;" : "";
+        const nameColor = hasBet ? "#a3e635" : "#fff";
+        return `
+        <div style="display:flex;align-items:center;gap:8px;padding:6px 4px;font-size:12px;${bgColor}border-radius:3px;">
+          <span style="flex:1;color:${nameColor};font-weight:${hasBet ? 800 : 700};display:flex;align-items:center;gap:5px;flex-wrap:wrap;">${escapeHtmlBasic(p.name)}${betPills}</span>
+          <span style="font-family:'JetBrains Mono',monospace;color:#fff;font-weight:800;font-size:11px;min-width:26px;text-align:right;">${escapeHtmlBasic(p.min)}'</span>
+          <span style="font-family:'JetBrains Mono',monospace;color:#fff;font-weight:800;min-width:22px;text-align:right;">${p.pts}</span>
+          <span style="font-family:'JetBrains Mono',monospace;color:#fff;font-weight:800;font-size:11px;min-width:18px;text-align:right;">${p.ast}a</span>
+          <span style="font-family:'JetBrains Mono',monospace;color:#fff;font-weight:800;font-size:11px;min-width:18px;text-align:right;">${p.reb}r</span>
+          <span style="font-family:'JetBrains Mono',monospace;color:#fff;font-weight:800;font-size:11px;min-width:18px;text-align:right;">${p.tpm}3</span>
+          <span style="font-family:'JetBrains Mono',monospace;color:#fff;font-weight:800;font-size:11px;min-width:18px;text-align:right;">${p.fouls}f</span>
+        </div>`;
+      }).join("");
+      const logoHtml = teamLogo ? `<img src="${escapeHtmlBasic(teamLogo)}" alt="" style="width:22px;height:22px;object-fit:contain;" onerror="this.style.display='none'">` : "";
+      return `
+        <div style="padding:10px 14px;">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;padding-bottom:6px;border-bottom:1px solid rgba(125,211,252,0.08);">
+            ${logoHtml}
+            <span style="font-size:11px;font-weight:700;letter-spacing:0.6px;color:#7dd3fc;">${escapeHtmlBasic(teamAbbr)}</span>
+            <span style="font-size:9px;color:#fff;font-weight:700;letter-spacing:0.6px;margin-left:auto;text-transform:uppercase;">MIN · PTS · AST · REB · 3s · F</span>
+          </div>
+          ${rows || `<div style="color:#fff;font-weight:700;font-size:11px;">No box score yet.</div>`}
+        </div>`;
+    }).join("");
+    return sections;
+  }
+  return "";
 }
 
 function renderScheduleExpandContent(summary) {
@@ -18553,6 +18759,7 @@ function renderScheduleExpandContent(summary) {
           if (i < 0) i = labels.findIndex(l => l.startsWith("3p") || l.includes("three"));
           return i;
         })(),
+        fouls: labels.findIndex(l => l === "pf" || l === "f" || l === "fouls"),
       };
       const athletes = stats.athletes || [];
       const players = athletes
@@ -18568,8 +18775,9 @@ function renderScheduleExpandContent(summary) {
             const m = raw.split("-")[0];
             tpm = parseInt(m) || 0;
           }
+          const fouls = idx.fouls >= 0 ? (parseInt(a.stats[idx.fouls]) || 0) : 0;
           const min = idx.min >= 0 ? (a.stats[idx.min] || "") : "";
-          return { name: a.athlete?.displayName || "?", pts, reb, ast, tpm, min, starter: a.starter === true };
+          return { name: a.athlete?.displayName || "?", pts, reb, ast, tpm, fouls, min, starter: a.starter === true };
         })
         .sort((a, b) => b.pts - a.pts);
       // Show top 8 by points, but ALWAYS include any player you have a bet on
@@ -18580,28 +18788,31 @@ function renderScheduleExpandContent(summary) {
       const rows = shownPlayers.map(p => {
         const myBets = betsByPlayer[norm(p.name)] || [];
         const hasBet = myBets.length > 0;
-        // Build bet pills: each shows "ou line STAT" + a hit/miss/▲ indicator.
+        // Build bet pills: each shows "ou line STAT" + a colored bar indicator.
         const betPills = myBets.map(b => {
           const actual = betActual(b, { pts: p.pts, reb: p.reb, ast: p.ast, tpm: p.tpm });
           const _statRaw = (b.stat || "").toUpperCase();
           const statLbl = (_statRaw === "THREEPM" || _statRaw === "3P") ? "3PM" : _statRaw;
           const ouLbl = (b.ou || "").toLowerCase() === "under" ? "u" : "o";
-          let dotColor = "#7dd3fc", mark = "";
+          let barColor = "#7dd3fc", mark = "";
           if (actual != null) {
             const hitting = (b.ou || "").toLowerCase() === "under" ? actual < b.line : actual > b.line;
-            dotColor = hitting ? "#4ade80" : "#f87171";
+            barColor = hitting ? "#4ade80" : "#f87171";
             mark = state === "post" ? (hitting ? " ✓" : " ✗") : ` (${actual})`;
           }
-          return `<span style="display:inline-flex;align-items:center;gap:3px;font-size:9px;font-weight:700;font-family:'JetBrains Mono',monospace;color:${dotColor};background:${dotColor}1a;border:1px solid ${dotColor}55;border-radius:3px;padding:1px 5px;letter-spacing:0.2px;">${ouLbl}${b.line} ${statLbl}${mark}</span>`;
+          return `<span style="display:inline-flex;align-items:center;gap:4px;font-size:9px;font-weight:700;font-family:'JetBrains Mono',monospace;color:#fff;background:rgba(125,211,252,0.08);border:1px solid rgba(125,211,252,0.20);border-radius:3px;padding:2px 6px;letter-spacing:0.2px;border-left:3px solid ${barColor};">${ouLbl}${b.line} ${statLbl}${mark}</span>`;
         }).join("");
+        const bgColor = hasBet ? "background:rgba(163,230,53,0.08);border-left:3px solid #a3e635;" : "";
         const nameColor = hasBet ? "#a3e635" : "#fff";
         return `
-        <div style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12px;">
+        <div style="display:flex;align-items:center;gap:8px;padding:6px 4px;font-size:12px;${bgColor}border-radius:3px;">
           <span style="flex:1;color:${nameColor};font-weight:${hasBet ? 800 : 700};display:flex;align-items:center;gap:5px;flex-wrap:wrap;">${escapeHtmlBasic(p.name)}${betPills}</span>
           <span style="font-family:'JetBrains Mono',monospace;color:#fff;font-weight:800;font-size:11px;min-width:26px;text-align:right;">${escapeHtmlBasic(p.min)}'</span>
           <span style="font-family:'JetBrains Mono',monospace;color:#fff;font-weight:800;min-width:22px;text-align:right;">${p.pts}</span>
-          <span style="font-family:'JetBrains Mono',monospace;color:#fff;font-weight:800;font-size:11px;min-width:18px;text-align:right;">${p.reb}r</span>
           <span style="font-family:'JetBrains Mono',monospace;color:#fff;font-weight:800;font-size:11px;min-width:18px;text-align:right;">${p.ast}a</span>
+          <span style="font-family:'JetBrains Mono',monospace;color:#fff;font-weight:800;font-size:11px;min-width:18px;text-align:right;">${p.reb}r</span>
+          <span style="font-family:'JetBrains Mono',monospace;color:#fff;font-weight:800;font-size:11px;min-width:18px;text-align:right;">${p.tpm}3</span>
+          <span style="font-family:'JetBrains Mono',monospace;color:#fff;font-weight:800;font-size:11px;min-width:18px;text-align:right;">${p.fouls}f</span>
         </div>`;
       }).join("");
       const logoHtml = teamLogo ? `<img src="${escapeHtmlBasic(teamLogo)}" alt="" style="width:22px;height:22px;object-fit:contain;" onerror="this.style.display='none'">` : "";
@@ -18610,12 +18821,12 @@ function renderScheduleExpandContent(summary) {
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;padding-bottom:6px;border-bottom:1px solid rgba(125,211,252,0.08);">
             ${logoHtml}
             <span style="font-size:11px;font-weight:700;letter-spacing:0.6px;color:#7dd3fc;">${escapeHtmlBasic(teamAbbr)}</span>
-            <span style="font-size:9px;color:#fff;font-weight:700;letter-spacing:0.6px;margin-left:auto;text-transform:uppercase;">MIN · PTS · REB · AST</span>
+            <span style="font-size:9px;color:#fff;font-weight:700;letter-spacing:0.6px;margin-left:auto;text-transform:uppercase;">MIN · PTS · AST · REB · 3s · F</span>
           </div>
           ${rows || `<div style="color:#fff;font-weight:700;font-size:11px;">No box score yet.</div>`}
         </div>`;
     }).join("");
-    return sections;
+    return `<div data-boxscore-section>${sections}</div>`;
   }
   // PRE-GAME: render injuries from both teams as the most useful pre-game info
   if (injuries.length > 0) {
@@ -20400,4 +20611,10 @@ or one per line — book shorthand + odds (+ optional line + ev%)" spellcheck="f
 </div>
 
 </body>
+
+// Clean up intervals on page unload
+window.addEventListener("beforeunload", () => {
+  _scheduleRefreshIntervals.forEach(intervalId => clearInterval(intervalId));
+  _scheduleRefreshIntervals.clear();
+});
 </html>
