@@ -2496,29 +2496,122 @@ function renderCalChart(weekFilter){
     }
   });
 
-  // Hover tooltip
-  canvas.onmousemove = function(e){
+  // ── Scrub tooltip: works with both mouse and finger ──────────────────
+  // Vertical scroll still works over the chart; only horizontal drag is ours.
+  canvas.style.touchAction = 'pan-y';
+  canvas.parentElement.style.position = 'relative';
+
+  function chartEl(id, css){
+    let el = document.getElementById(id);
+    if(!el){
+      el = document.createElement('div');
+      el.id = id;
+      el.style.cssText = css;
+      canvas.parentElement.appendChild(el);
+    }
+    return el;
+  }
+
+  function scrubTo(clientX){
     const rect = canvas.getBoundingClientRect();
-    const mx = e.clientX - rect.left;
-    const idx = Math.round((mx - pad.l)/cw * (points.length-1));
-    if(idx<0||idx>=points.length) return;
+    // Canvas is drawn at a device-pixel scale; map CSS px back to chart px.
+    const mx = (clientX - rect.left) * (W / rect.width);
+    let idx = Math.round((mx - pad.l)/cw * (points.length-1));
+    idx = Math.max(0, Math.min(points.length - 1, idx));
     _chartHoverIdx = idx;
-    // Redraw with tooltip (simple approach: just overlay)
     const p = points[idx];
     renderCalChart._tooltip = p;
-    // quick tooltip via separate overlay div
-    let tip = document.getElementById('calChartTip');
-    if(!tip){ tip=document.createElement('div'); tip.id='calChartTip'; tip.style.cssText='position:absolute;pointer-events:none;background:var(--surface);border:1px solid var(--border2);border-radius:7px;padding:6px 10px;font-family:var(--body);font-size:11px;color:var(--text);z-index:50;white-space:nowrap'; canvas.parentElement.style.position='relative'; canvas.parentElement.appendChild(tip); }
-    const u=(p.cum/100);
-    tip.innerHTML=`<b>${p.k}</b>  ${p.wins}W-${p.losses}L  <span style="color:${u>=0?'var(--teal)':'var(--red)'};font-weight:700">${u>=0?'+':''}${u.toFixed(2)}u</span>`;
-    tip.style.left=Math.min(mx+10, W-130)+'px';
-    tip.style.top=(toY(p.cum)-28)+'px';
-    tip.style.display='block';
+
+    const tip = chartEl('calChartTip','position:absolute;pointer-events:none;background:var(--surface);border:1px solid var(--border2);border-radius:7px;padding:6px 10px;font-family:var(--body);font-size:11px;color:var(--text);z-index:50;white-space:nowrap;box-shadow:0 2px 10px rgba(0,0,0,.5)');
+    const line = chartEl('calChartLine','position:absolute;pointer-events:none;width:1px;background:rgba(192,132,252,0.75);z-index:49;top:0');
+    const dot  = chartEl('calChartDot','position:absolute;pointer-events:none;width:9px;height:9px;margin:-5px 0 0 -5px;border-radius:50%;background:#fff;border:2px solid var(--purple);z-index:51');
+
+    // Convert chart coords back to CSS px for the overlay elements
+    const sx = rect.width / W, sy = rect.height / H;
+    const px = toX(idx) * sx, py = toY(p.cum) * sy;
+
+    const u = (p.cum/100);
+    tip.innerHTML = `<b>${p.k}</b>&nbsp; ${p.wins}W-${p.losses}L&nbsp; <span style="color:${u>=0?'var(--teal)':'var(--red)'};font-weight:700">${u>=0?'+':''}${u.toFixed(2)}u</span>`;
+    tip.style.display = 'block';
+    // Keep the tooltip inside the canvas on narrow screens
+    const tw = tip.offsetWidth || 130;
+    tip.style.left = Math.max(0, Math.min(px - tw/2, rect.width - tw)) + 'px';
+    tip.style.top  = Math.max(0, py - 40) + 'px';
+
+    line.style.left = px + 'px';
+    line.style.height = (pad.b ? rect.height - (pad.b * sy) : rect.height) + 'px';
+    line.style.display = 'block';
+
+    dot.style.left = px + 'px';
+    dot.style.top  = py + 'px';
+    dot.style.display = 'block';
+  }
+
+  function scrubEnd(){
+    ['calChartTip','calChartLine','calChartDot'].forEach(id => {
+      const el = document.getElementById(id);
+      if(el) el.style.display = 'none';
+    });
+  }
+
+  // Pointer Events cover mouse + finger in one path. Property handlers
+  // (canvas.ontouchmove = ...) can be treated as passive by Safari, which makes
+  // preventDefault() a no-op and lets the page scroll instead of scrubbing —
+  // so these are attached with addEventListener({passive:false}) instead.
+  if(canvas._scrubCleanup) canvas._scrubCleanup();
+
+  let scrubbing = false;
+
+  const onDown = function(e){
+    scrubbing = true;
+    try { canvas.setPointerCapture(e.pointerId); } catch(err){}
+    scrubTo(e.clientX);
   };
-  canvas.onmouseleave=()=>{ const t=document.getElementById('calChartTip'); if(t) t.style.display='none'; };
+  const onMove = function(e){
+    if(e.pointerType === 'mouse' && !scrubbing){ scrubTo(e.clientX); return; }
+    if(!scrubbing) return;
+    e.preventDefault();          // stop the page scrolling mid-drag
+    scrubTo(e.clientX);
+  };
+  const onUp = function(e){
+    if(!scrubbing) return;
+    scrubbing = false;
+    try { canvas.releasePointerCapture(e.pointerId); } catch(err){}
+    if(e.pointerType !== 'mouse') setTimeout(scrubEnd, 1800);
+  };
+
+  canvas.addEventListener('pointerdown',   onDown, {passive:false});
+  canvas.addEventListener('pointermove',   onMove, {passive:false});
+  canvas.addEventListener('pointerup',     onUp,   {passive:false});
+  canvas.addEventListener('pointercancel', onUp,   {passive:false});
+  canvas.addEventListener('mouseleave', scrubEnd);
+
+  // Fallback for any browser without Pointer Events
+  const onTouchMove = function(e){
+    if(!e.touches.length) return;
+    e.preventDefault();
+    scrubTo(e.touches[0].clientX);
+  };
+  if(!window.PointerEvent){
+    canvas.addEventListener('touchstart', e => e.touches.length && scrubTo(e.touches[0].clientX), {passive:false});
+    canvas.addEventListener('touchmove', onTouchMove, {passive:false});
+    canvas.addEventListener('touchend', () => setTimeout(scrubEnd, 1800), {passive:false});
+  }
+
+  // Re-rendering the chart re-runs this block; drop the old listeners first
+  // so they don't stack up on every redraw.
+  canvas._scrubCleanup = function(){
+    canvas.removeEventListener('pointerdown',   onDown);
+    canvas.removeEventListener('pointermove',   onMove);
+    canvas.removeEventListener('pointerup',     onUp);
+    canvas.removeEventListener('pointercancel', onUp);
+    canvas.removeEventListener('mouseleave', scrubEnd);
+    canvas.removeEventListener('touchmove', onTouchMove);
+  };
+
   canvas.onclick=function(e){
     const rect=canvas.getBoundingClientRect();
-    const mx=e.clientX-rect.left;
+    const mx=(e.clientX-rect.left) * (W / rect.width);
     const idx=Math.round((mx-pad.l)/cw*(points.length-1));
     if(idx<0||idx>=points.length) return;
     calSelectDay(points[idx].k);
