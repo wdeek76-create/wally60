@@ -1290,51 +1290,138 @@ function ufcFightRow(f, evIdx, fIdx) {
   </div>`;
 }
 
-// Cache fight detail so we don't refetch
+// Cache event competition data
 const _ufcDetailCache = {};
 
 async function toggleFightDetail(fightId, detailId, rowEl) {
   const el = document.getElementById(detailId);
   if (!el) return;
   const isOpen = el.classList.contains('open');
-  // close others
   document.querySelectorAll('.ufc-fdetail.open').forEach(d => { d.classList.remove('open'); d.innerHTML=''; });
   document.querySelectorAll('.ufc-fight.expanded').forEach(r => r.classList.remove('expanded'));
   if (isOpen) return;
 
   rowEl.classList.add('expanded');
   el.classList.add('open');
-  el.innerHTML = `<div class="ufc-fd-loading">Loading fight details…</div>`;
+  el.innerHTML = `<div class="ufc-fd-loading">Loading fight stats…</div>`;
 
   try {
     const evId = ufcEvents[ufcEventIdx]?.id;
-    let data = _ufcDetailCache[evId];
-    if (!data) {
-      const tries = [
-        `https://site.api.espn.com/apis/site/v2/sports/mma/ufc/summary?event=${evId}`,
-        `https://site.api.espn.com/apis/site/v2/sports/mma/ufc/fightcenter?event=${evId}`,
-        `https://sports.core.api.espn.com/v2/sports/mma/leagues/ufc/events/${evId}/competitions/${fightId}/statistics`,
-        `https://site.web.api.espn.com/apis/site/v2/sports/mma/ufc/summary?event=${evId}`,
-      ];
-      let got = null, log = [];
-      for (const u of tries) {
-        try {
-          const r = await fetch(u);
-          log.push(`${r.status} ${u.includes('core')?'core':u.includes('fightcenter')?'fc':u.includes('web')?'web':'site'}`);
-          if (r.ok) { got = await r.json(); break; }
-        } catch(err) { log.push(`err:${err.message.slice(0,20)}`); }
-      }
-      if (!got) {
-        el.innerHTML = `<div class="ufc-debug"><div class="ufc-debug-t">DEBUG — all failed</div><div>${log.join(' · ')}</div><div>event ${evId} · fight ${fightId}</div></div>`;
-        return;
-      }
-      data = got;
-      _ufcDetailCache[evId] = data;
-    }
-    el.innerHTML = renderFightDetail(data, fightId);
+    const stats = await getFightStats(evId, fightId);
+    el.innerHTML = renderFightStats(stats);
   } catch(e) {
-    el.innerHTML = `<div class="ufc-debug"><div class="ufc-debug-t">DEBUG — error</div><div>${e.message}</div></div>`;
+    el.innerHTML = `<div class="ufc-fd-loading">Stats not posted for this fight.</div>`;
   }
+}
+
+// Walk core API: event → competitions → competitors → statistics ($ref links)
+async function getFightStats(eventId, fightId) {
+  const cacheKey = `${eventId}:${fightId}`;
+  if (_ufcDetailCache[cacheKey]) return _ufcDetailCache[cacheKey];
+
+  const base = 'https://sports.core.api.espn.com/v2/sports/mma/leagues/ufc';
+  // 1. Get the event, which lists competitions
+  const evRes = await fetch(`${base}/events/${eventId}?lang=en&region=us`);
+  const evData = await evRes.json();
+
+  // competitions is either inline array or a $ref collection
+  let comps = evData.competitions;
+  if (comps && comps.$ref) {
+    const cr = await fetch(fixUrl(comps.$ref));
+    comps = (await cr.json()).items || [];
+  }
+  comps = comps || [];
+
+  // 2. Find our fight (competition)
+  let comp = comps.find(c => String(c.id) === String(fightId));
+  if (!comp && comps[0]?.$ref) {
+    // competitions came as refs — fetch each to find the id
+    for (const ref of comps) {
+      const cr = await fetch(fixUrl(ref.$ref));
+      const cd = await cr.json();
+      if (String(cd.id) === String(fightId)) { comp = cd; break; }
+    }
+  }
+  if (!comp) throw new Error('fight not found');
+
+  // 3. Competitors → statistics
+  let competitors = comp.competitors || [];
+  const out = [];
+  for (const cptr of competitors) {
+    const c = cptr.$ref ? await (await fetch(fixUrl(cptr.$ref))).json() : cptr;
+    const name = c.athlete?.$ref
+      ? (await (await fetch(fixUrl(c.athlete.$ref))).json()).displayName
+      : (c.athlete?.displayName || 'Fighter');
+    let stats = {};
+    if (c.statistics?.$ref) {
+      const sd = await (await fetch(fixUrl(c.statistics.$ref))).json();
+      stats = flattenStats(sd);
+    } else if (c.statistics) {
+      stats = flattenStats(c.statistics);
+    }
+    out.push({ name, winner: !!c.winner, stats });
+  }
+
+  const result = { competitors: out };
+  _ufcDetailCache[cacheKey] = result;
+  return result;
+}
+
+function fixUrl(u) { return u.replace(/^http:/, 'https:'); }
+
+// Flatten ESPN statistics splits/categories into { statName: displayValue }
+function flattenStats(sd) {
+  const flat = {};
+  const cats = sd.splits?.categories || sd.categories || [];
+  cats.forEach(cat => {
+    (cat.stats || []).forEach(s => {
+      if (s.name) flat[s.name] = s.displayValue ?? s.value;
+    });
+  });
+  return flat;
+}
+
+function renderFightStats(data) {
+  const c = data.competitors || [];
+  if (c.length < 2) return `<div class="ufc-fd-loading">No stats posted yet.</div>`;
+  const [a, b] = c;
+
+  const statMap = [
+    ['sigStrikesLanded', 'Sig. Strikes'],
+    ['totalStrikesLanded', 'Total Strikes'],
+    ['takedowns', 'Takedowns'],
+    ['takedownsLanded', 'Takedowns'],
+    ['submissions', 'Sub. Attempts'],
+    ['knockDowns', 'Knockdowns'],
+    ['takedownControlTime', 'Control Time'],
+  ];
+  const seen = new Set();
+  const rows = [];
+  statMap.forEach(([key,label]) => {
+    if (seen.has(label)) return;
+    const av = a.stats[key], bv = b.stats[key];
+    if (av != null || bv != null) {
+      seen.add(label);
+      rows.push(`<div class="ufc-stat-row">
+        <span class="ufc-stat-a">${av ?? '—'}</span>
+        <span class="ufc-stat-label">${label}</span>
+        <span class="ufc-stat-b">${bv ?? '—'}</span>
+      </div>`);
+    }
+  });
+
+  if (!rows.length) {
+    const keys = Object.keys(a.stats).slice(0,12).join(', ') || '(none)';
+    return `<div class="ufc-debug"><div class="ufc-debug-t">stat keys</div><div>${keys}</div></div>`;
+  }
+
+  return `
+    <div class="ufc-fd-head">
+      <span class="ufc-fd-name">${a.name}</span>
+      <span class="ufc-fd-vs">vs</span>
+      <span class="ufc-fd-name">${b.name}</span>
+    </div>
+    ${rows.join('')}`;
 }
 
 function renderFightDetail(data, fightId) {
