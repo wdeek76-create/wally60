@@ -964,6 +964,22 @@ function independentTotal(awayAbbr, homeAbbr, season) {
 let modalPlayer = "";
 let modalPos = "";
 
+// Local-calendar YYYY-MM-DD. Bets are saved with the LOCAL date, so every
+// day-comparison must use local time too: UTC rolls over mid-evening, which
+// would silently drop the current night's bets partway through the slate.
+function localYMD(d) {
+  const x = (d instanceof Date) ? d : new Date(d);
+  if (isNaN(x.getTime())) return "";
+  return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, "0")}-${String(x.getDate()).padStart(2, "0")}`;
+}
+// A bet's day as local YYYY-MM-DD. Returns "" when the bet carries no usable
+// date — those are treated as stale and excluded from live displays.
+function betDayLocal(b) {
+  const d = (b && (b.gameDate || b.date)) || "";
+  if (!d) return "";
+  if (/^\d{4}-\d{2}-\d{2}$/.test(d)) return d;
+  return localYMD(d);
+}
 function norm(s) {
   if (!s) return "";
   return s.toLowerCase()
@@ -17898,11 +17914,9 @@ function renderScoreboardTicker(events) {
   // Bet cards: tracked bets + their current stat value (rounded — ignore decimals
   // of decimals that may flicker)
   if (typeof bets !== "undefined" && Array.isArray(bets)) {
-    const todayISO = new Date().toISOString().slice(0, 10);
+    const todayISO = localYMD(new Date());
     bets.filter(b => {
-      const d = b?.gameDate || b?.date || "";
-      if (d === todayISO) return true;
-      try { return new Date(d).toISOString().slice(0, 10) === todayISO; } catch { return false; }
+      return betDayLocal(b) === todayISO;
     }).forEach(b => {
       const info = (typeof tickerGetStatFor === "function") ? tickerGetStatFor(b.player, b.stat) : null;
       sigParts.push(`bet:${b.player || ""}:${b.stat || ""}:${b.line || ""}:${info ? info.value : "—"}`);
@@ -18105,12 +18119,10 @@ function tickerGetStatFor(playerName, stat) {
 // Surgical ticker update: only update the score values for bets, keep animation intact
 function updateTickerBetScoresOnly() {
   if (typeof bets === "undefined" || !Array.isArray(bets) || bets.length === 0) return;
-  const todayISO = new Date().toISOString().slice(0, 10);
+  const todayISO = localYMD(new Date());
   const todayBets = bets.filter(b => {
     if (!b || b.stat === "GAME_TOTAL") return false;
-    const d = b.gameDate || b.date || "";
-    if (d === todayISO) return true;
-    try { return new Date(d).toISOString().slice(0, 10) === todayISO; } catch { return false; }
+    return betDayLocal(b) === todayISO;
   });
   if (todayBets.length === 0) return;
   
@@ -18147,14 +18159,10 @@ function updateTickerBetScoresOnly() {
 function buildTickerBetCards() {
   if (typeof bets === "undefined" || !Array.isArray(bets) || bets.length === 0) return [];
   // Today's bets only (gameDate or saved date matching today's ISO)
-  const todayISO = new Date().toISOString().slice(0, 10);
+  const todayISO = localYMD(new Date());
   const todayBets = bets.filter(b => {
     if (!b || b.stat === "GAME_TOTAL") return false;  // skip totals — ticker is player-focused
-    const d = b.gameDate || b.date || "";
-    // gameDate is ISO; date is locale-string fallback. Try ISO match first.
-    if (d === todayISO) return true;
-    // Fall back: parse locale date and compare
-    try { return new Date(d).toISOString().slice(0, 10) === todayISO; } catch { return false; }
+    return betDayLocal(b) === todayISO;
   });
   if (todayBets.length === 0) return [];
   return todayBets.map(b => {
@@ -18353,6 +18361,60 @@ function renderScheduleSection(date, events) {
     </div>
     ${rows}`;
 }
+// Project this game's bet result from cached live/final player stats. Wins and
+// losses use the same pace logic as the box-score pills; units follow the
+// tracker convention (win = +toWin, loss = -stake). Returns null when no
+// tracked bets resolve to this game yet.
+function scheduleGameBetProjection(ev, comp, awayAbbr, homeAbbr, state) {
+  try {
+    try { loadBets(); } catch (e) {}
+    if (typeof bets === "undefined" || !Array.isArray(bets) || !bets.length) return null;
+    if (!_tickerPlayerStats || _tickerPlayerStats.size === 0) return null;
+    const gameIso = comp?.date || ev?.date || null;
+    const gameDay = gameIso ? localYMD(new Date(gameIso)) : null;
+    const st = comp?.status || {};
+    const period = Number(st.period) || 0;
+    const clockSec = Number(st.clock);
+    const PER_SEC = 600, REG_PER = 4;
+    let frac = 0;
+    if (state === "post") frac = 1;
+    else if (period > REG_PER) frac = 1;
+    else if (period > 0) {
+      const el = (period - 1) * PER_SEC + (PER_SEC - (isFinite(clockSec) ? clockSec : 0));
+      frac = Math.max(0, Math.min(1, el / (REG_PER * PER_SEC)));
+    }
+    let w = 0, l = 0, units = 0, seen = {};
+    for (const b of bets) {
+      if (!b || !b.player || !b.stat || b.line == null) continue;
+      if (b.stat === "GAME_TOTAL" || b.stat === "GAME_SPREAD") continue;
+      if (gameDay && betDayLocal(b) !== gameDay) continue;  // stale / undated bets excluded
+      const key = (typeof norm === "function") ? norm(b.player) : String(b.player).toLowerCase();
+      const rec = _tickerPlayerStats.get(key);
+      if (!rec) continue;
+      const tAbbr = (rec.teamAbbr || "").toUpperCase();
+      if (tAbbr !== awayAbbr && tAbbr !== homeAbbr) continue;
+      const sig = key + "|" + (b.stat || "").toUpperCase() + "|" + (b.ou || "").toLowerCase() + "|" + b.line;
+      if (seen[sig]) continue;
+      seen[sig] = true;
+      const info = tickerGetStatFor(b.player, b.stat);
+      if (!info || info.value == null) continue;
+      const v = info.value, line = Number(b.line);
+      const isUnder = (b.ou || "").toLowerCase() === "under";
+      let win;
+      if (state === "post") win = isUnder ? v < line : v > line;
+      else if (!isUnder && v > line) win = true;
+      else if (isUnder && v > line) win = false;
+      else if (frac <= 0.05) continue;
+      else { const proj = v / frac; win = isUnder ? proj < line : proj > line; }
+      const stake = Number(b.stake) || 1;
+      const toWin = Number(b.toWin);
+      if (win) { w++; units += Number.isFinite(toWin) ? toWin : stake; }
+      else { l++; units -= stake; }
+    }
+    if (w + l === 0) return null;
+    return { w, l, units, settled: state === "post" };
+  } catch (e) { return null; }
+}
 function renderScheduleRow(ev, isToday) {
   try {
     const comp = ev?.competitions?.[0];
@@ -18365,6 +18427,10 @@ function renderScheduleRow(ev, isToday) {
     const completed = status.completed === true;
     const awayAbbr = (away.team?.abbreviation || "").toUpperCase();
     const homeAbbr = (home.team?.abbreviation || "").toUpperCase();
+    const _proj = scheduleGameBetProjection(ev, comp, awayAbbr, homeAbbr, state);
+    const projBadge = _proj
+      ? `<div style="font-size:8px;font-weight:800;letter-spacing:0.3px;white-space:nowrap;color:${_proj.units > 0 ? "#4ade80" : (_proj.units < 0 ? "#f87171" : "#a8b0bb")};">${_proj.settled ? "" : "PROJ "}${_proj.w}-${_proj.l} ${_proj.units >= 0 ? "+" : ""}${_proj.units.toFixed(2)}u</div>`
+      : "";
     const awayName = away.team?.displayName || away.team?.shortDisplayName || awayAbbr;
     const homeName = home.team?.displayName || home.team?.shortDisplayName || homeAbbr;
     const awayLogo = away.team?.logo || "";
@@ -18407,6 +18473,7 @@ function renderScheduleRow(ev, isToday) {
           <div style="display:flex;flex-direction:column;align-items:flex-end;gap:2px;">
             <span style="font-size:9px;font-weight:700;letter-spacing:0.8px;color:#4ade80;display:inline-flex;align-items:center;gap:4px;"><span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:#4ade80;box-shadow:0 0 6px rgba(74,222,128,0.8);"></span>LIVE</span>
             <span style="font-size:10px;color:#a8b0bb;font-weight:600;">${escapeHtmlBasic(detail)}</span>
+            ${projBadge}
           </div>
         </div>`;
     } else if (state === "post" || completed) {
@@ -18418,7 +18485,10 @@ function renderScheduleRow(ev, isToday) {
             <div style="font-family:'JetBrains Mono',monospace;font-weight:800;font-size:16px;color:${awayWin?'#fff':'#8b93a0'};line-height:1;">${awayScore}</div>
             <div style="font-family:'JetBrains Mono',monospace;font-weight:800;font-size:16px;color:${!awayWin?'#fff':'#8b93a0'};line-height:1;margin-top:4px;">${homeScore}</div>
           </div>
-          <span style="font-size:9px;font-weight:700;letter-spacing:0.8px;color:#a8b0bb;background:rgba(139,147,160,0.12);padding:3px 7px;border-radius:4px;">FINAL</span>
+          <div style="display:flex;flex-direction:column;align-items:flex-end;gap:3px;">
+            <span style="font-size:9px;font-weight:700;letter-spacing:0.8px;color:#a8b0bb;background:rgba(139,147,160,0.12);padding:3px 7px;border-radius:4px;">FINAL</span>
+            ${projBadge}
+          </div>
         </div>`;
     } else {
       leftAccent = "#1e40af";
@@ -18572,13 +18642,22 @@ async function toggleScheduleExpand(eventId) {
 // Render only the box score sections (for live updates without disrupting scroll/state)
 function renderScheduleBoxscoreOnly(summary) {
   const state = summary?.header?.competitions?.[0]?.status?.type?.state;
+  // Fraction of regulation elapsed, used to judge whether a live bet is on pace.
+  const _status = summary?.header?.competitions?.[0]?.status || {};
+  const _period = Number(_status.period) || 0;
+  const _clock = Number(_status.clock);
+  const PER_SEC = 600, REG_PER = 4;
+  let gameFrac = 0;
+  if (state === "post") gameFrac = 1;
+  else if (_period > REG_PER) gameFrac = 1;
+  else if (_period > 0) {
+    const elapsed = (_period - 1) * PER_SEC + (PER_SEC - (isFinite(_clock) ? _clock : 0));
+    gameFrac = Math.max(0, Math.min(1, elapsed / (REG_PER * PER_SEC)));
+  }
   const teams = summary?.boxscore?.players || [];
   const _gameIso = summary?.header?.competitions?.[0]?.date || summary?.header?.competitions?.[0]?.startDate || null;
-  const _gameDay = _gameIso ? String(_gameIso).slice(0,10) : null;
-  const _betDay = (b) => {
-    const d = b.gameDate || b.date || "";
-    return String(d).slice(0,10);
-  };
+  const _gameDay = _gameIso ? localYMD(new Date(_gameIso)) : null;
+  const _betDay = (b) => betDayLocal(b);
   let betsByPlayer = {};
   try {
     loadBets();
@@ -18587,7 +18666,7 @@ function renderScheduleBoxscoreOnly(summary) {
       bets.forEach(b => {
         if (!b.player || !b.stat || b.line == null) return;
         if (b.stat === "GAME_TOTAL" || b.stat === "GAME_SPREAD") return;
-        if (_gameDay && _betDay(b) && _betDay(b) !== _gameDay) return;
+        if (_gameDay && _betDay(b) !== _gameDay) return;  // stale / undated bets excluded
         const k = norm(b.player);
         const sig = `${k}|${(b.stat||"").toUpperCase()}|${(b.ou||"").toLowerCase()}|${b.line}`;
         if (seenBet[sig]) return;
@@ -18652,15 +18731,30 @@ function renderScheduleBoxscoreOnly(summary) {
         
         // Build bet pills without dots, just info
         const betPills = myBets.map(b => {
-          const actual = betActual(b, { pts: p.pts, reb: p.reb, ast: p.ast, tpm: p.tpm });
+          const actual = betActual(b, { pts: p.pts, reb: p.reb, ast: p.ast, tpm: p.tpm, pra: p.pra });
           const _statRaw = (b.stat || "").toUpperCase();
           const statLbl = (_statRaw === "THREEPM" || _statRaw === "3P") ? "3PM" : _statRaw;
           const ouLbl = (b.ou || "").toLowerCase() === "under" ? "u" : "o";
+          const isUnder = (b.ou || "").toLowerCase() === "under";
           let barColor = "#fb923c", mark = "";
           if (actual != null) {
-            const hitting = (b.ou || "").toLowerCase() === "under" ? actual < b.line : actual > b.line;
-            barColor = hitting ? "#4ade80" : "#f87171";
-            mark = state === "post" ? (hitting ? " ✓" : " ✗") : ` (${actual})`;
+            const won = isUnder ? actual < b.line : actual > b.line;
+            if (state === "post") {
+              // Settled: green = win, red = loss.
+              barColor = won ? "#4ade80" : "#f87171";
+              mark = ` ${actual}` + (won ? " ✓" : " ✗");
+            } else {
+              // Live: green = on pace / already clinched, orange = iffy, red = trending bust.
+              mark = ` ${actual}`;
+              if (isUnder && actual > b.line) barColor = "#f87171";        // under already busted
+              else if (!isUnder && actual > b.line) barColor = "#4ade80";  // over already cleared
+              else if (gameFrac <= 0.05) barColor = "#fb923c";             // too early to judge
+              else {
+                const proj = actual / gameFrac;
+                if (isUnder) barColor = proj <= b.line * 0.85 ? "#4ade80" : (proj <= b.line * 1.15 ? "#fb923c" : "#f87171");
+                else         barColor = proj >= b.line * 1.15 ? "#4ade80" : (proj >= b.line * 0.85 ? "#fb923c" : "#f87171");
+              }
+            }
           }
           return `<span style="display:inline-flex;align-items:center;font-size:8px;font-weight:700;color:#fff;background:rgba(125,211,252,0.10);border:1px solid rgba(125,211,252,0.20);border-left:3px solid ${barColor};border-radius:3px;padding:1px 5px;letter-spacing:0.2px;">${ouLbl}${b.line} ${statLbl}${mark}</span>`;
         }).join(" ");
@@ -18718,16 +18812,25 @@ function renderScheduleBoxscoreOnly(summary) {
 
 function renderScheduleExpandContent(summary) {
   const state = summary?.header?.competitions?.[0]?.status?.type?.state;
+  // Fraction of regulation elapsed, used to judge whether a live bet is on pace.
+  const _status = summary?.header?.competitions?.[0]?.status || {};
+  const _period = Number(_status.period) || 0;
+  const _clock = Number(_status.clock);
+  const PER_SEC = 600, REG_PER = 4;
+  let gameFrac = 0;
+  if (state === "post") gameFrac = 1;
+  else if (_period > REG_PER) gameFrac = 1;
+  else if (_period > 0) {
+    const elapsed = (_period - 1) * PER_SEC + (PER_SEC - (isFinite(_clock) ? _clock : 0));
+    gameFrac = Math.max(0, Math.min(1, elapsed / (REG_PER * PER_SEC)));
+  }
   const teams = summary?.boxscore?.players || [];
   const injuries = summary?.injuries || [];
   // This game's date (YYYY-MM-DD) so we only surface bets for THIS game, not
   // every bet ever tracked on a player.
   const _gameIso = summary?.header?.competitions?.[0]?.date || summary?.header?.competitions?.[0]?.startDate || null;
-  const _gameDay = _gameIso ? String(_gameIso).slice(0,10) : null;
-  const _betDay = (b) => {
-    const d = b.gameDate || b.date || "";
-    return String(d).slice(0,10);
-  };
+  const _gameDay = _gameIso ? localYMD(new Date(_gameIso)) : null;
+  const _betDay = (b) => betDayLocal(b);
   // Build a map of YOUR tracked bets by normalized player name, so we can
   // surface them right on the box score (highlight the player + show the line
   // and whether it's currently hitting based on live/final stats).
@@ -18740,7 +18843,7 @@ function renderScheduleExpandContent(summary) {
         if (!b.player || !b.stat || b.line == null) return;
         if (b.stat === "GAME_TOTAL" || b.stat === "GAME_SPREAD") return;
         // Scope to THIS game's date so a player's other-day bets don't show here.
-        if (_gameDay && _betDay(b) && _betDay(b) !== _gameDay) return;
+        if (_gameDay && _betDay(b) !== _gameDay) return;  // stale / undated bets excluded
         const k = norm(b.player);
         // Dedup identical props (same player+stat+side+line) so a prop tracked
         // more than once shows a single pill, matching the share-card behavior.
@@ -18815,15 +18918,30 @@ function renderScheduleExpandContent(summary) {
         const hasBet = myBets.length > 0;
         // Build bet pills: each shows "ou line STAT" + a colored bar indicator.
         const betPills = myBets.map(b => {
-          const actual = betActual(b, { pts: p.pts, reb: p.reb, ast: p.ast, tpm: p.tpm });
+          const actual = betActual(b, { pts: p.pts, reb: p.reb, ast: p.ast, tpm: p.tpm, pra: p.pra });
           const _statRaw = (b.stat || "").toUpperCase();
           const statLbl = (_statRaw === "THREEPM" || _statRaw === "3P") ? "3PM" : _statRaw;
           const ouLbl = (b.ou || "").toLowerCase() === "under" ? "u" : "o";
+          const isUnder = (b.ou || "").toLowerCase() === "under";
           let barColor = "#fb923c", mark = "";
           if (actual != null) {
-            const hitting = (b.ou || "").toLowerCase() === "under" ? actual < b.line : actual > b.line;
-            barColor = hitting ? "#4ade80" : "#f87171";
-            mark = state === "post" ? (hitting ? " ✓" : " ✗") : ` (${actual})`;
+            const won = isUnder ? actual < b.line : actual > b.line;
+            if (state === "post") {
+              // Settled: green = win, red = loss.
+              barColor = won ? "#4ade80" : "#f87171";
+              mark = ` ${actual}` + (won ? " ✓" : " ✗");
+            } else {
+              // Live: green = on pace / already clinched, orange = iffy, red = trending bust.
+              mark = ` ${actual}`;
+              if (isUnder && actual > b.line) barColor = "#f87171";        // under already busted
+              else if (!isUnder && actual > b.line) barColor = "#4ade80";  // over already cleared
+              else if (gameFrac <= 0.05) barColor = "#fb923c";             // too early to judge
+              else {
+                const proj = actual / gameFrac;
+                if (isUnder) barColor = proj <= b.line * 0.85 ? "#4ade80" : (proj <= b.line * 1.15 ? "#fb923c" : "#f87171");
+                else         barColor = proj >= b.line * 1.15 ? "#4ade80" : (proj >= b.line * 0.85 ? "#fb923c" : "#f87171");
+              }
+            }
           }
           return `<span style="display:inline-flex;align-items:center;font-size:8px;font-weight:700;color:#fff;background:rgba(125,211,252,0.10);border:1px solid rgba(125,211,252,0.20);border-left:3px solid ${barColor};border-radius:3px;padding:1px 5px;letter-spacing:0.2px;">${ouLbl}${b.line} ${statLbl}${mark}</span>`;
         }).join("");
