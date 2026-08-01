@@ -3270,12 +3270,15 @@ function buildStatsText(allBets, sourceLabel){
   if(!allBets.length) return '';
   const isW = b => typeof b.result === 'string' && b.result.trim().toLowerCase() === 'win';
   const isL = b => typeof b.result === 'string' && b.result.trim().toLowerCase() === 'loss';
-  const settled = allBets.filter(b => isW(b) || isL(b));
+  // Settled must also have a play date, matching renderSummary() — otherwise
+  // these totals drift from what the dashboard shows.
+  const isSettledB = b => (isW(b) || isL(b)) && betPlayDate(b);
+  const settled = allBets.filter(isSettledB);
   const wins = settled.filter(isW).length;
   const losses = settled.length - wins;
 
   function pnlOfArr(arr){
-    return arr.reduce((acc, b) => isW(b) ? acc + amerPayout(b.mktOdds, 100) : isL(b) ? acc - actualStake(b.mktOdds, 100) : acc, 0);
+    return arr.filter(isSettledB).reduce((acc, b) => isW(b) ? acc + amerPayout(b.mktOdds, 100) : acc - actualStake(b.mktOdds, 100), 0);
   }
   function avgEVof(arr){
     if(!arr.length) return 0;
@@ -3297,7 +3300,7 @@ function buildStatsText(allBets, sourceLabel){
   }
   function statLine(label, arr){
     if(!arr.length) return null;
-    const s = arr.filter(b => isW(b) || isL(b));
+    const s = arr.filter(isSettledB);
     const w = s.filter(isW).length;
     const l = s.length - w;
     const ev = avgEVof(arr);
@@ -3335,7 +3338,7 @@ function buildStatsText(allBets, sourceLabel){
   lines.push('$100 bettor (1u underdogs, to win 1u favorites)');
   lines.push('');
 
-  // Mens vs Womens
+  // Mens vs Womens — headline comparison
   const womens = allBets.filter(b => getGenderForBet(b) === 'womens');
   const mens = allBets.filter(b => getGenderForBet(b) === 'mens');
   if(mens.length || womens.length){
@@ -3347,12 +3350,61 @@ function buildStatsText(allBets, sourceLabel){
     lines.push('');
   }
 
-  // Surface
+  // Bucket definitions, shared so the per-gender sections match the overall ones
+  function surfaceBuckets(arr){
+    return ['Clay','Hard','Grass','Carpet','Indoor']
+      .map(sf => statLine(sf, arr.filter(b => getSurfaceL(b) === sf))).filter(Boolean);
+  }
+  function evBuckets(arr){
+    return [
+      ['3 to 5% EV', b => b.evPct >= 3 && b.evPct < 5],
+      ['5 to 8% EV', b => b.evPct >= 5 && b.evPct < 8],
+      ['8%+ EV',     b => b.evPct >= 8],
+    ].map(([lbl,f]) => statLine(lbl, arr.filter(f))).filter(Boolean);
+  }
+  function impliedBuckets(arr){
+    return [
+      ['30-40% (+150 to +233)', b => b.winPct >= 30 && b.winPct < 40],
+      ['40-50% (+100 to +150)', b => b.winPct >= 40 && b.winPct < 50],
+      ['50-60% (-100 to -150)', b => b.winPct >= 50 && b.winPct < 60],
+      ['60-70% (-150 to -200)', b => b.winPct >= 60 && b.winPct < 70],
+      ['70-80% (-233 to -400)', b => b.winPct >= 70 && b.winPct < 80],
+      ['80%+ (-400+)',          b => b.winPct >= 80],
+    ].map(([lbl,f]) => statLine(lbl, arr.filter(f))).filter(Boolean);
+  }
+
+  // Full breakdown within each tour
+  [['Mens', mens], ['Womens', womens]].forEach(([label, arr]) => {
+    if(!arr.length) return;
+    lines.push(label.toUpperCase()+' BREAKDOWN');
+    const o = statLine('Overall', arr);
+    if(o) lines.push(o);
+    const sf = surfaceBuckets(arr);
+    if(sf.length){ lines.push('  Surface'); sf.forEach(l => lines.push('  '+l)); }
+    const ev = evBuckets(arr);
+    if(ev.length){ lines.push('  EV Distribution'); ev.forEach(l => lines.push('  '+l)); }
+    const im = impliedBuckets(arr);
+    if(im.length){ lines.push('  Model Implied %'); im.forEach(l => lines.push('  '+l)); }
+    lines.push('');
+  });
+
+  // Surface — each surface split into Mens / Womens beneath its total
   const surfaces = ['Clay','Hard','Grass','Carpet','Indoor'];
-  const surfaceLines = surfaces.map(s => statLine(s, allBets.filter(b => getSurfaceL(b) === s))).filter(Boolean);
-  if(surfaceLines.length){
+  const surfaceBlocks = surfaces.map(sf => {
+    const arr = allBets.filter(b => getSurfaceL(b) === sf);
+    if(!arr.length) return null;
+    const block = [];
+    const tot = statLine(sf, arr);
+    if(tot) block.push(tot);
+    const m = statLine('Mens', arr.filter(b => getGenderForBet(b) === 'mens'));
+    const w = statLine('Womens', arr.filter(b => getGenderForBet(b) === 'womens'));
+    if(m) block.push('  '+m);
+    if(w) block.push('  '+w);
+    return block;
+  }).filter(Boolean);
+  if(surfaceBlocks.length){
     lines.push('Surface');
-    surfaceLines.forEach(l => lines.push(l));
+    surfaceBlocks.forEach(block => block.forEach(l => lines.push(l)));
     lines.push('');
   }
 
@@ -3399,38 +3451,10 @@ function buildStatsText(allBets, sourceLabel){
     lines.push('');
   }
 
-  // Odds buckets — granular split (favorites + dogs)
-  const oddsBands = [
-    { lbl:'-601 or worse',  a: allBets.filter(b => b.mktOdds <= -601) },
-    { lbl:'-401 to -600',   a: allBets.filter(b => b.mktOdds <= -401 && b.mktOdds >= -600) },
-    { lbl:'-301 to -400',   a: allBets.filter(b => b.mktOdds <= -301 && b.mktOdds >= -400) },
-    { lbl:'-221 to -300',   a: allBets.filter(b => b.mktOdds <= -221 && b.mktOdds >= -300) },
-    { lbl:'-181 to -220',   a: allBets.filter(b => b.mktOdds <= -181 && b.mktOdds >= -220) },
-    { lbl:'-151 to -180',   a: allBets.filter(b => b.mktOdds <= -151 && b.mktOdds >= -180) },
-    { lbl:'-121 to -150',   a: allBets.filter(b => b.mktOdds <= -121 && b.mktOdds >= -150) },
-    { lbl:'-101 to -120',   a: allBets.filter(b => b.mktOdds <= -101 && b.mktOdds >= -120) },
-    { lbl:'Even to -100',   a: allBets.filter(b => b.mktOdds < 0 && b.mktOdds >= -100) },
-    { lbl:'+100 to even',   a: allBets.filter(b => b.mktOdds >= 0 && b.mktOdds <= 100) },
-    { lbl:'+101 to +130',   a: allBets.filter(b => b.mktOdds > 100 && b.mktOdds <= 130) },
-    { lbl:'+131 to +160',   a: allBets.filter(b => b.mktOdds > 130 && b.mktOdds <= 160) },
-    { lbl:'+161 to +200',   a: allBets.filter(b => b.mktOdds > 160 && b.mktOdds <= 200) },
-    { lbl:'+201 to +250',   a: allBets.filter(b => b.mktOdds > 200 && b.mktOdds <= 250) },
-    { lbl:'+251 to +300',   a: allBets.filter(b => b.mktOdds > 250 && b.mktOdds <= 300) },
-    { lbl:'+301 to +400',   a: allBets.filter(b => b.mktOdds > 300 && b.mktOdds <= 400) },
-    { lbl:'+401 to +600',   a: allBets.filter(b => b.mktOdds > 400 && b.mktOdds <= 600) },
-    { lbl:'+601 or higher', a: allBets.filter(b => b.mktOdds > 600) },
-  ];
-  const oddsLines = oddsBands.map(bk => statLine(bk.lbl, bk.a)).filter(Boolean);
-  if(oddsLines.length){
-    lines.push('Odds Buckets');
-    oddsLines.forEach(l => lines.push(l));
-    lines.push('');
-  }
-
   // By Book
   const byBook = {};
   allBets.forEach(b => {
-    const lbl = getBetMktBook(b);
+    const lbl = getBetPlacedBook(b);
     if(!lbl) return;
     if(!byBook[lbl]) byBook[lbl] = [];
     byBook[lbl].push(b);
