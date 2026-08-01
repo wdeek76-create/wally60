@@ -974,12 +974,22 @@ async function fetchAll() {
     }
     // else: leave the DOM completely alone so scroll + open card are preserved.
   } else {
-    buildChips();
-    render();
-    requestAnimationFrame(() => {
-      window.scrollTo(0, scrollY);
-      requestAnimationFrame(() => window.scrollTo(0, scrollY));
-    });
+    // Only rebuild the Live page when the games actually changed (score,
+    // clock, status, bucket) — otherwise leave the DOM alone so the user's
+    // scroll and interactions aren't reset every 30s.
+    const f = allGames.filter(g => activeLeagues.has(g.league));
+    const sig = f.map(g => `${g.id}:${g.bucket}:${g.stateDesc}:${g.home.score}:${g.away.score}`).join('|')
+              + '#' + [...activeLeagues].sort().join(',') + '#' + viewingDate;
+    if (sig !== window._liveSig) {
+      window._liveSig = sig;
+      buildChips();
+      render();
+      requestAnimationFrame(() => {
+        window.scrollTo(0, scrollY);
+        requestAnimationFrame(() => window.scrollTo(0, scrollY));
+      });
+    }
+    // else: nothing changed — don't touch the DOM at all.
   }
   startCd();
   startLiveClock();
@@ -1011,12 +1021,23 @@ async function fetchUFC() {
       const d2 = await r2.json();
       events = (d2.events || []).map(parseUFCEvent);
     }
+    // Preserve the user's current event selection across refreshes.
+    // Remember which event they're viewing by its id, re-find it after refetch.
+    const prevId = (ufcEvents[ufcEventIdx] && ufcEventIdx != null) ? ufcEvents[ufcEventIdx].id : null;
     ufcEvents = events.sort((a,b) => a.date - b.date);
     const nowMs = Date.now();
-    let idx = ufcEvents.findIndex(e => e.state === 'in');
-    if (idx < 0) idx = ufcEvents.findIndex(e => e.date.getTime() > nowMs);
-    if (idx < 0) idx = ufcEvents.length - 1;
-    ufcEventIdx = Math.max(0, idx);
+    if (prevId != null && window._ufcInit) {
+      // Keep them on the same event they were viewing
+      const keep = ufcEvents.findIndex(e => e.id === prevId);
+      ufcEventIdx = keep >= 0 ? keep : Math.max(0, ufcEvents.length - 1);
+    } else {
+      // First load — default to live, else next upcoming, else most recent
+      let idx = ufcEvents.findIndex(e => e.state === 'in');
+      if (idx < 0) idx = ufcEvents.findIndex(e => e.date.getTime() > nowMs);
+      if (idx < 0) idx = ufcEvents.length - 1;
+      ufcEventIdx = Math.max(0, idx);
+      window._ufcInit = true;
+    }
   } catch(e) { console.warn('UFC', e); ufcEvents = []; }
 }
 
@@ -1033,6 +1054,8 @@ function parseUFCEvent(ev) {
     const fName = (x) => x.athlete?.displayName || x.athlete?.shortName || '?';
     const fRec  = (x) => x.records?.[0]?.summary || '';
     const fCountry = (x) => x.athlete?.flag?.alt || x.athlete?.citizenship || x.athlete?.birthPlace?.country || '';
+    const fShot = (x) => x.athlete?.headshot?.href || x.athlete?.headshot ||
+      (x.athlete?.id ? `https://a.espncdn.com/i/headshots/mma/players/full/${x.athlete.id}.png` : '');
     const winner = competitors.find(x => x.winner);
     // ESPN sometimes tags the segment in c.type.text or c.cardSegment
     const rawSeg = (c.type?.text || c.cardSegment || c.notes?.[0]?.headline || '').toLowerCase();
@@ -1071,8 +1094,8 @@ function parseUFCEvent(ev) {
       round:  cs.period || 0,
       clock:  cs.displayClock || '',
       aId: a.athlete?.id || '', bId: b.athlete?.id || '',
-      aName: fName(a), aRec: fRec(a), aWin: !!a.winner, aCountry: fCountry(a),
-      bName: fName(b), bRec: fRec(b), bWin: !!b.winner, bCountry: fCountry(b),
+      aName: fName(a), aRec: fRec(a), aWin: !!a.winner, aCountry: fCountry(a), aShot: fShot(a),
+      bName: fName(b), bRec: fRec(b), bWin: !!b.winner, bCountry: fCountry(b), bShot: fShot(b),
       method, resultRound, resultClock,
       result: winner ? (method || 'Final') : '',
     };
@@ -1186,12 +1209,14 @@ function toggleLeague(el) {
     activeLeagues.has(l) ? activeLeagues.delete(l) : activeLeagues.add(l);
   }
   buildChips();
+  window._liveSig = null;
   render();
 }
 
 // Leave the standalone UFC view, back to the Live page
 function exitUFC() {
   ufcMode = false;
+  window._liveSig = null;
   buildChips();
   render();
 }
@@ -1457,7 +1482,7 @@ function ufcFightRow(f, evIdx, fIdx) {
       <div class="ufc-f-fighters">
         <div class="ufc-f-block">
           <div class="ufc-f-line${aWin?' win':''}${done&&!aWin?' loss':''}">
-            ${f.aId?`<img class="ufc-f-shot" src="https://a.espncdn.com/combiner/i?img=/i/headshots/mma/players/full/${f.aId}.png&w=80&h=80" alt="" loading="lazy" onerror="this.style.display='none'">`:''}
+            ${f.aShot?`<img class="ufc-f-shot" src="${f.aShot}" alt="" loading="lazy" onerror="this.style.display='none'">`:''}
             <span class="ufc-f-name">${f.aName}</span>
             ${f.aRec?`<span class="ufc-f-rec">${f.aRec}</span>`:''}
             ${aWin?`<span class="ufc-f-w">W</span>`:''}
@@ -1470,7 +1495,7 @@ function ufcFightRow(f, evIdx, fIdx) {
         <div class="ufc-f-vs">vs</div>
         <div class="ufc-f-block">
           <div class="ufc-f-line${bWin?' win':''}${done&&!bWin?' loss':''}">
-            ${f.bId?`<img class="ufc-f-shot" src="https://a.espncdn.com/combiner/i?img=/i/headshots/mma/players/full/${f.bId}.png&w=80&h=80" alt="" loading="lazy" onerror="this.style.display='none'">`:''}
+            ${f.bShot?`<img class="ufc-f-shot" src="${f.bShot}" alt="" loading="lazy" onerror="this.style.display='none'">`:''}
             <span class="ufc-f-name">${f.bName}</span>
             ${f.bRec?`<span class="ufc-f-rec">${f.bRec}</span>`:''}
             ${bWin?`<span class="ufc-f-w">W</span>`:''}
