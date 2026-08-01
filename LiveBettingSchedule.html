@@ -706,7 +706,7 @@
   }
   .ufc-stat-label {
     flex: 1; text-align: center; font-size: 10px; font-weight: 800;
-    color: var(--ufc); text-transform: uppercase; letter-spacing: 0.5px;
+    color: rgba(255,255,255,0.85); text-transform: uppercase; letter-spacing: 0.5px;
   }
 
   @keyframes blink  { 0%,100%{opacity:1} 50%{opacity:.25} }
@@ -917,12 +917,26 @@ async function fetchAll() {
   document.getElementById('content').style.display='block';
   const scrollY = window.scrollY;
   buildChips();
-  if (ufcMode) renderUFC(); else render();
-  // Restore scroll after the browser lays out the new content
-  requestAnimationFrame(() => {
-    window.scrollTo(0, scrollY);
-    requestAnimationFrame(() => window.scrollTo(0, scrollY));
-  });
+  if (ufcMode) {
+    // Only rebuild the UFC card if something material changed (a fight went
+    // live/final), otherwise leave the DOM alone so scrolling isn't disturbed.
+    const ev = ufcEvents[ufcEventIdx];
+    const sig = ev ? ev.fights.map(f => f.state).join(',') + '|' + ev.fights.filter(f=>f.state==='in').map(f=>f.round+f.clock).join(',') : '';
+    if (sig !== window._ufcSig) {
+      window._ufcSig = sig;
+      renderUFC();
+      requestAnimationFrame(() => {
+        window.scrollTo(0, scrollY);
+        requestAnimationFrame(() => window.scrollTo(0, scrollY));
+      });
+    }
+  } else {
+    render();
+    requestAnimationFrame(() => {
+      window.scrollTo(0, scrollY);
+      requestAnimationFrame(() => window.scrollTo(0, scrollY));
+    });
+  }
   startCd();
   startLiveClock();
 
@@ -1112,6 +1126,8 @@ function toggleLeague(el) {
   const l = el.dataset.league;
   if (l === 'UFC') {
     ufcMode = true;
+    const ev = ufcEvents[ufcEventIdx];
+    window._ufcSig = ev ? ev.fights.map(f => f.state).join(',') + '|' + ev.fights.filter(f=>f.state==='in').map(f=>f.round+f.clock).join(',') : '';
     buildChips();
     renderUFC();
     return;
@@ -1282,9 +1298,13 @@ function renderUFC() {
       const el = document.getElementById(detId);
       if (el) {
         el.classList.add('open');
-        getFightStats(ev.id, window._ufcOpenFight)
-          .then(s => { el.innerHTML = renderFightStats(s); })
-          .catch(() => { el.innerHTML = `<div class="ufc-fd-loading">Stats not posted.</div>`; });
+        const isDone = row.classList.contains('done');
+        const isLive = row.classList.contains('live');
+        const p = (!isDone && !isLive)
+          ? getTaleOfTape(ev.id, window._ufcOpenFight).then(t => renderTaleOfTape(t))
+          : getFightStats(ev.id, window._ufcOpenFight).then(s => renderFightStats(s));
+        p.then(html => { el.innerHTML = html; })
+         .catch(() => { el.innerHTML = `<div class="ufc-fd-loading">Details not available.</div>`; });
       }
     }
   }
@@ -1363,7 +1383,7 @@ function ufcFightRow(f, evIdx, fIdx) {
     statusHtml = '';
   }
 
-  const canExpand = f.id && (done || live);
+  const canExpand = !!f.id; // live/done → stats; upcoming → tale of the tape
   const detailId = `ufcd-${evIdx}-${fIdx}`;
 
   return `<div class="ufc-fight${live?' live':''}${done?' done':''}${canExpand?' tappable':''}"
@@ -1409,15 +1429,117 @@ async function toggleFightDetail(fightId, detailId, rowEl) {
   window._ufcOpenFight = fightId;
   rowEl.classList.add('expanded');
   el.classList.add('open');
-  el.innerHTML = `<div class="ufc-fd-loading">Loading fight stats…</div>`;
+
+  // Upcoming fight (no stats yet) → show tale of the tape
+  const isDone = rowEl.classList.contains('done');
+  const isLive = rowEl.classList.contains('live');
+  const upcoming = !isDone && !isLive;
+
+  el.innerHTML = `<div class="ufc-fd-loading">${upcoming?'Loading tale of the tape…':'Loading fight stats…'}</div>`;
 
   try {
     const evId = ufcEvents[ufcEventIdx]?.id;
-    const stats = await getFightStats(evId, fightId);
-    el.innerHTML = renderFightStats(stats);
+    if (upcoming) {
+      const tape = await getTaleOfTape(evId, fightId);
+      el.innerHTML = renderTaleOfTape(tape);
+    } else {
+      const stats = await getFightStats(evId, fightId);
+      el.innerHTML = renderFightStats(stats);
+    }
   } catch(e) {
-    el.innerHTML = `<div class="ufc-fd-loading">Stats not posted for this fight.</div>`;
+    el.innerHTML = `<div class="ufc-fd-loading">Details not available for this fight.</div>`;
   }
+}
+
+// Fetch each fighter's physical attributes (age, height, reach, stance)
+async function getTaleOfTape(eventId, fightId) {
+  const cacheKey = `tape:${eventId}:${fightId}`;
+  if (_ufcDetailCache[cacheKey]) return _ufcDetailCache[cacheKey];
+
+  const base = 'https://sports.core.api.espn.com/v2/sports/mma/leagues/ufc';
+  const evData = await (await fetch(`${base}/events/${eventId}?lang=en&region=us`)).json();
+  let comps = evData.competitions;
+  if (comps && comps.$ref) comps = (await (await fetch(fixUrl(comps.$ref))).json()).items || [];
+  comps = comps || [];
+
+  let comp = comps.find(c => String(c.id) === String(fightId));
+  if (!comp && comps[0]?.$ref) {
+    for (const ref of comps) {
+      const cd = await (await fetch(fixUrl(ref.$ref))).json();
+      if (String(cd.id) === String(fightId)) { comp = cd; break; }
+    }
+  }
+  if (!comp) throw new Error('fight not found');
+
+  const out = [];
+  for (const cptr of (comp.competitors || [])) {
+    const c = cptr.$ref ? await (await fetch(fixUrl(cptr.$ref))).json() : cptr;
+    let ath = c.athlete;
+    if (ath?.$ref) ath = await (await fetch(fixUrl(ath.$ref))).json();
+    out.push({
+      name: ath?.displayName || 'Fighter',
+      age: ath?.age ?? null,
+      height: ath?.displayHeight || (ath?.height ? `${ath.height}"` : null),
+      reach: ath?.displayReach || (ath?.reach ? `${ath.reach}"` : null),
+      weight: ath?.displayWeight || null,
+      stance: ath?.stance?.text || ath?.stance?.name || null,
+      record: ath?.records?.items?.[0]?.summary || null,
+    });
+  }
+  const result = { competitors: out };
+  _ufcDetailCache[cacheKey] = result;
+  return result;
+}
+
+function renderTaleOfTape(data) {
+  const c = data.competitors || [];
+  if (c.length < 2) return `<div class="ufc-fd-loading">Fighter details not posted yet.</div>`;
+  const [a, b] = c;
+
+  const parseNum = v => {
+    if (v == null) return -1;
+    const s = String(v);
+    // height like 6' 2" → inches; reach like 76" → 76
+    const ft = s.match(/(\d+)'\s*(\d+)?/);
+    if (ft) return (+ft[1])*12 + (+(ft[2]||0));
+    const n = parseFloat(s.replace(/[^\d.]/g,''));
+    return isNaN(n) ? -1 : n;
+  };
+
+  const rows = [];
+  const addRow = (label, av, bv, higherBetter=true) => {
+    if (av == null && bv == null) return;
+    const na = parseNum(av), nb = parseNum(bv);
+    let aHi=false, bHi=false;
+    if (na>=0 && nb>=0 && na!==nb) {
+      if (higherBetter) { aHi = na>nb; bHi = nb>na; }
+      else { aHi = na<nb; bHi = nb<na; }
+    }
+    rows.push(`<div class="ufc-stat-row">
+      <span class="ufc-stat-a"><span class="sv${aHi?' hi':''}">${av ?? '—'}</span></span>
+      <span class="ufc-stat-label">${label}</span>
+      <span class="ufc-stat-b"><span class="sv${bHi?' hi':''}">${bv ?? '—'}</span></span>
+    </div>`);
+  };
+
+  addRow('Record', a.record, b.record, false);   // no better/worse
+  addRow('Age', a.age, b.age, false);            // younger highlighted
+  addRow('Height', a.height, b.height, true);
+  addRow('Reach', a.reach, b.reach, true);
+  addRow('Stance', a.stance, b.stance, false);
+
+  // Record & Stance shouldn't compare numerically — strip their hi flags
+  // (handled by parseNum returning -1 for non-numeric, so they stay plain)
+
+  if (!rows.length) return `<div class="ufc-fd-loading">Fighter details not posted yet.</div>`;
+
+  return `
+    <div class="ufc-fd-head">
+      <span class="ufc-fd-name">${a.name}</span>
+      <span class="ufc-fd-vs">tale of the tape</span>
+      <span class="ufc-fd-name">${b.name}</span>
+    </div>
+    ${rows.join('')}`;
 }
 
 // Walk core API: event → competitions → competitors → statistics ($ref links)
@@ -1571,6 +1693,8 @@ function ufcNav(dir) {
   ufcEventIdx = Math.max(0, Math.min(ufcEvents.length-1, ufcEventIdx + dir));
   window._ufcSearch = '';
   window._ufcOpenFight = null;
+  const ev = ufcEvents[ufcEventIdx];
+  window._ufcSig = ev ? ev.fights.map(f => f.state).join(',') + '|' + ev.fights.filter(f=>f.state==='in').map(f=>f.round+f.clock).join(',') : '';
   renderUFC();
 }
 
