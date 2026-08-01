@@ -4897,6 +4897,93 @@ const INTERNAL_TO_ESPN_ABBR = {
   // logos, and groupings work uniformly.
   "PHO":"PHX"
 };
+// --- Player headshots (share cards) -----------------------------------------
+// Same approach as team logos: html2canvas can't reliably capture cross-origin
+// images, so headshots are fetched and converted to data URIs before capture.
+// Roster responses are cached per team so one slate costs at most a handful of
+// requests. Headshot URLs come from athlete.headshot.href — never hand-built,
+// since not every player has one and ESPN's paths change.
+const _rosterHeadshotCache = new Map();   // ESPN team abbr -> Map(normName -> href)
+const _headshotDataUriCache = new Map();  // href -> data URI (or null)
+
+async function _fetchTeamHeadshots(abbr) {
+  if (!abbr) return new Map();
+  const espnAbbr = (INTERNAL_TO_ESPN_ABBR[abbr.toUpperCase()] || abbr.toUpperCase()).toLowerCase();
+  if (_rosterHeadshotCache.has(espnAbbr)) return _rosterHeadshotCache.get(espnAbbr);
+  const out = new Map();
+  try {
+    const resp = await fetch(`https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/teams/${espnAbbr}/roster`);
+    if (resp.ok) {
+      const data = await resp.json();
+      const list = Array.isArray(data?.athletes) ? data.athletes : [];
+      // ESPN returns either a flat athlete array or groups keyed by position.
+      const flat = [];
+      for (const entry of list) {
+        if (entry && Array.isArray(entry.items)) flat.push(...entry.items);
+        else if (entry) flat.push(entry);
+      }
+      for (const a of flat) {
+        const who = a?.athlete || a;
+        const nm = who?.displayName || who?.fullName;
+        const href = who?.headshot?.href || a?.headshot?.href || null;
+        if (nm && href) out.set(norm(nm), href);
+      }
+    }
+  } catch (e) { /* offline or blocked — cards fall back to initials */ }
+  _rosterHeadshotCache.set(espnAbbr, out);
+  return out;
+}
+
+async function _headshotAsDataUri(href) {
+  if (!href) return null;
+  if (_headshotDataUriCache.has(href)) return _headshotDataUriCache.get(href);
+  try {
+    const resp = await fetch(href, { mode: "cors" });
+    if (!resp.ok) { _headshotDataUriCache.set(href, null); return null; }
+    const blob = await resp.blob();
+    const uri = await new Promise((res, rej) => {
+      const r = new FileReader();
+      r.onload = () => res(r.result);
+      r.onerror = rej;
+      r.readAsDataURL(blob);
+    });
+    _headshotDataUriCache.set(href, uri);
+    return uri;
+  } catch (e) {
+    _headshotDataUriCache.set(href, null);
+    return null;
+  }
+}
+
+// Build { normName -> dataUri } for the players in a slate. Never throws and
+// never blocks the card: anything that fails is simply omitted.
+async function buildHeadshotMap(entries) {
+  const map = {};
+  try {
+    const byTeam = new Map();
+    for (const e of entries) {
+      const player = e?.bet?.player || e?.player;
+      const team = e?.bet?.team || e?.team;
+      if (!player || !team) continue;
+      if (!byTeam.has(team)) byTeam.set(team, []);
+      byTeam.get(team).push(player);
+    }
+    const pairs = [];
+    await Promise.all(Array.from(byTeam.entries()).map(async ([team, players]) => {
+      const roster = await _fetchTeamHeadshots(team);
+      for (const pl of players) {
+        const href = roster.get(norm(pl));
+        if (href) pairs.push([norm(pl), href]);
+      }
+    }));
+    await Promise.all(pairs.map(async ([key, href]) => {
+      const uri = await _headshotAsDataUri(href);
+      if (uri) map[key] = uri;
+    }));
+  } catch (e) { /* fall back to initials */ }
+  return map;
+}
+
 function teamLogoUrl(abbr) {
   if (!abbr) return null;
   const espnAbbr = INTERNAL_TO_ESPN_ABBR[abbr.toUpperCase()] || abbr.toUpperCase();
@@ -9162,6 +9249,18 @@ async function shareOpenPropsAsImageExclusive() {
     const uri = await _teamLogoAsDataUri(abbr);
     if (uri) teamLogosMap[abbr] = uri;
   }));
+  // Player headshots, fetched in parallel with logos. Failures are silent —
+  // any player without one falls back to an initials badge.
+  const headshotsMap = await buildHeadshotMap(enriched);
+  const headshotHtml = (player, size) => {
+    const sz = size || 34;
+    const uri = headshotsMap[norm(player || "")];
+    if (uri) {
+      return `<img src="${uri}" alt="${esc(player)}" style="width:${sz}px;height:${sz}px;border-radius:50%;object-fit:cover;object-position:top center;background:#12141a;border:1.5px solid rgba(125,211,252,0.35);flex-shrink:0;display:inline-block;"/>`;
+    }
+    const initials = String(player || "").split(/\s+/).filter(Boolean).slice(0, 2).map(w => w[0]).join("").toUpperCase();
+    return `<span style="width:${sz}px;height:${sz}px;border-radius:50%;background:#12141a;border:1.5px solid rgba(125,211,252,0.35);color:#7dd3fc;font-size:${Math.round(sz*0.38)}px;font-weight:800;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;letter-spacing:-0.5px;font-family:'Plus Jakarta Sans',sans-serif;">${esc(initials)}</span>`;
+  };
   // Book logo: returns inline <img> using BOOK_LOGOS data URI, or a small
   // 2-letter abbreviation badge for books without a stored logo (Caesars, etc.)
   const bookLogoHtml = (book, size) => {
@@ -9286,6 +9385,7 @@ async function shareOpenPropsAsImageExclusive() {
         const tLogo = teamLogoHtml(bet.team, 16);
         h += `<div style="margin-bottom:10px;">`;
         h += `<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">`;
+        h += headshotHtml(bet.player, 34);
         h += `<span style="font-size:14px;font-weight:800;color:#fff;letter-spacing:-0.1px;">${esc(bet.player)}</span>`;
         if (teamStr) {
           const tPillLogo = teamLogoHtml(bet.team, 14);
