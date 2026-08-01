@@ -3521,22 +3521,47 @@ async function getEventCompetitors(eventId) {
 }
 
 // Find UFC event ID for a given date (ESPN scoreboard)
+// Cache: iso date → { eventId, eventName, eventIso }
+// So multiple entries logged on the same day only trigger ONE scan
+const _eventCache = {};
+
 async function findEventForDate(iso) {
+  if(_eventCache[iso] !== undefined) return _eventCache[iso];
+
+  // Try the exact date first
   const espnDate = isoToESPNDate(iso);
-  const sb = await fetchJSON(ESPN_SCOREBOARD + espnDate);
-  if(!sb.events || !sb.events.length) {
-    // Some events span two dates (fights start Sat night US time, end Sunday UTC).
-    // Retry with the day before and after.
-    for(const delta of [-1, 1]) {
-      const alt = new Date(iso);
-      alt.setDate(alt.getDate() + delta);
-      const altIso = alt.toISOString().slice(0, 10);
-      const altSb = await fetchJSON(ESPN_SCOREBOARD + isoToESPNDate(altIso));
-      if(altSb.events && altSb.events.length) return altSb.events[0].id;
+  try {
+    const sb = await fetchJSON(ESPN_SCOREBOARD + espnDate);
+    if(sb.events && sb.events.length) {
+      const ev = sb.events[0];
+      const info = { eventId: ev.id, eventName: ev.name || ev.shortName || 'UFC event', eventIso: iso };
+      _eventCache[iso] = info;
+      return info;
     }
-    return null;
+  } catch(e) { /* fall through */ }
+
+  // Scan ±14 days for the closest UFC card. Prefer forward-in-time (upcoming from log date).
+  const base = new Date(iso);
+  const deltas = [];
+  for(let d = 1; d <= 14; d++) deltas.push(d);   // forward first
+  for(let d = 1; d <= 3; d++) deltas.push(-d);   // then a few days back
+
+  for(const delta of deltas) {
+    const alt = new Date(base);
+    alt.setDate(alt.getDate() + delta);
+    const altIso = alt.toISOString().slice(0, 10);
+    try {
+      const altSb = await fetchJSON(ESPN_SCOREBOARD + isoToESPNDate(altIso));
+      if(altSb.events && altSb.events.length) {
+        const ev = altSb.events[0];
+        const info = { eventId: ev.id, eventName: ev.name || ev.shortName || 'UFC event', eventIso: altIso };
+        _eventCache[iso] = info;
+        return info;
+      }
+    } catch(e) { /* keep scanning */ }
   }
-  return sb.events[0].id;
+  _eventCache[iso] = null;
+  return null;
 }
 
 async function autoGradeFromESPN() {
@@ -3569,18 +3594,21 @@ async function autoGradeFromESPN() {
   for(const iso of Object.keys(byDate)) {
     const bets = byDate[iso];
     try {
-      const eventId = await findEventForDate(iso);
-      if(!eventId) {
+      const eventInfo = await findEventForDate(iso);
+      if(!eventInfo) {
         results.noEvent += bets.length;
-        changeLog.push(`<div style="color:var(--amber);">— No UFC event found on ${iso}</div>`);
+        changeLog.push(`<div style="color:var(--amber);">— No UFC event within 14 days of ${iso}</div>`);
         continue;
       }
+      const { eventId, eventName, eventIso } = eventInfo;
+      const dateNote = eventIso !== iso ? ` (found on ${eventIso})` : '';
       const competitors = await getEventCompetitors(eventId);
       if(!competitors.length) {
         results.noEvent += bets.length;
-        changeLog.push(`<div style="color:var(--amber);">— Event ${eventId} on ${iso}: no fighters returned</div>`);
+        changeLog.push(`<div style="color:var(--amber);">— ${escHTML(eventName)}${dateNote}: no fighters returned</div>`);
         continue;
       }
+      changeLog.push(`<div style="color:var(--accent);font-weight:700;margin-top:6px;">▸ ${escHTML(eventName)}${dateNote}</div>`);
 
       // For each bet, match fighter name to a competitor
       for(const bet of bets) {
@@ -4353,12 +4381,15 @@ async function autoGradeBacktestFromESPN() {
   for(const iso of Object.keys(byDate)) {
     const entries = byDate[iso];
     try {
-      const eventId = await findEventForDate(iso);
-      if(!eventId) {
+      const eventInfo = await findEventForDate(iso);
+      if(!eventInfo) {
         noEvent += entries.length;
-        changeLog.push(`<div style="color:var(--amber);">— No UFC event on ${iso}</div>`);
+        changeLog.push(`<div style="color:var(--amber);">— No UFC event within 14 days of ${iso}</div>`);
         continue;
       }
+      const { eventId, eventName, eventIso } = eventInfo;
+      const dateNote = eventIso !== iso ? ` (found on ${eventIso})` : '';
+      changeLog.push(`<div style="color:var(--accent);font-weight:700;margin-top:6px;">▸ ${escHTML(eventName)}${dateNote}</div>`);
       const competitors = await getEventCompetitors(eventId);
       for(const entry of entries) {
         const nn = normName(entry.fighter);
