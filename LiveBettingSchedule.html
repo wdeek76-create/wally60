@@ -1283,6 +1283,37 @@ function renderUFC() {
   }
   // Re-apply any active search filter
   if (window._ufcSearch) filterFights(window._ufcSearch);
+
+  // Enrich finished fights with the real method (R1 KO etc.) from the core API
+  enrichUFCMethods(ev);
+}
+
+async function enrichUFCMethods(ev) {
+  const done = ev.fights.filter(f => f.state === 'post' && f.id);
+  for (const f of done) {
+    const badge = document.getElementById(`method-${f.id}`);
+    if (!badge) continue;
+    // Skip if we already have a good method (not just "Final")
+    if (badge.textContent && badge.textContent !== 'Final' && /KO|TKO|Sub|Dec|DQ/i.test(badge.textContent)) continue;
+    try {
+      const data = await getFightStats(ev.id, f.id);
+      const bits = [];
+      let m = (data.method || '').replace(/^Final[:\s-]*/i,'').replace(/\bvia\b/i,'').trim();
+      // Normalize common phrasings
+      m = m.replace(/Knockout|Technical Knockout/i, 'KO/TKO')
+           .replace(/Submission/i, 'Submission')
+           .replace(/Decision - Unanimous/i,'Decision (U)')
+           .replace(/Decision - Split/i,'Decision (S)')
+           .replace(/Decision - Majority/i,'Decision (M)');
+      if (m) bits.push(m);
+      if (data.mRound) bits.push(`R${data.mRound}`);
+      if (data.mClock && data.mClock !== '0:00') bits.push(data.mClock);
+      if (bits.length) {
+        const el = document.getElementById(`method-${f.id}`);
+        if (el) el.textContent = bits.join(' · ');
+      }
+    } catch(_) {}
+  }
 }
 
 function filterFights(q) {
@@ -1306,13 +1337,13 @@ function ufcFightRow(f, evIdx, fIdx) {
     const liveDetail = rc.trim() || f.statusDetail || 'In progress';
     statusHtml = `<div class="ufc-fstatus"><span class="ufc-fstatus-live">● LIVE</span><span class="ufc-fstatus-detail">${liveDetail}</span></div>`;
   } else if (done) {
-    // Show method + round + time if we have it
+    // Show method + round + time if we have it (from scoreboard; enriched later from core API)
     const methodBits = [];
     if (f.method && f.method !== 'Final') methodBits.push(f.method);
     if (f.resultRound) methodBits.push(`R${f.resultRound}`);
     if (f.resultClock) methodBits.push(f.resultClock);
     const methodStr = methodBits.length ? methodBits.join(' · ') : 'Final';
-    statusHtml = `<div class="ufc-fstatus"><span class="ufc-fstatus-done">${methodStr}</span></div>`;
+    statusHtml = `<div class="ufc-fstatus"><span class="ufc-fstatus-done" id="method-${f.id}">${methodStr}</span></div>`;
   } else {
     statusHtml = '';
   }
@@ -1404,6 +1435,26 @@ async function getFightStats(eventId, fightId) {
   }
   if (!comp) throw new Error('fight not found');
 
+  // Pull the fight result method (KO/Sub/Decision) + round + time from the status ref
+  let method = '', mRound = 0, mClock = '';
+  try {
+    let status = comp.status;
+    if (status?.$ref) status = await (await fetch(fixUrl(status.$ref))).json();
+    if (status) {
+      mRound = status.period || 0;
+      mClock = status.displayClock || '';
+      // result can be inline or a ref
+      let res = status.result || comp.result;
+      if (res?.$ref) res = await (await fetch(fixUrl(res.$ref))).json();
+      if (res) {
+        method = res.name || res.displayName || res.description
+              || res.type?.displayName || res.type?.description || '';
+        mRound = res.period || mRound;
+        mClock = res.displayClock || res.clock || mClock;
+      }
+    }
+  } catch(_) {}
+
   // 3. Competitors → statistics
   let competitors = comp.competitors || [];
   const out = [];
@@ -1422,7 +1473,7 @@ async function getFightStats(eventId, fightId) {
     out.push({ name, winner: !!c.winner, stats });
   }
 
-  const result = { competitors: out };
+  const result = { competitors: out, method, mRound, mClock };
   _ufcDetailCache[cacheKey] = result;
   return result;
 }
@@ -1491,21 +1542,13 @@ function renderFightStats(data) {
     return `<div class="ufc-debug"><div class="ufc-debug-t">stat keys</div><div>${keys}</div></div>`;
   }
 
-  // TEMP: show any stat keys we didn't map, so we can find control time etc.
-  const mapped = new Set(statMap.map(m => m[0]));
-  const extraKeys = Object.keys(a.stats).filter(k => !mapped.has(k));
-  const keyDump = extraKeys.length
-    ? `<div class="ufc-debug" style="margin-top:8px"><div class="ufc-debug-t">other keys</div><div>${extraKeys.join(', ')}</div></div>`
-    : '';
-
   return `
     <div class="ufc-fd-head">
       <span class="ufc-fd-name">${a.name}</span>
       <span class="ufc-fd-vs">vs</span>
       <span class="ufc-fd-name">${b.name}</span>
     </div>
-    ${rows.join('')}
-    ${keyDump}`;
+    ${rows.join('')}`;
 }
 
 
