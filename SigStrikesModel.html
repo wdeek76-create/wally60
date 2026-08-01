@@ -1664,6 +1664,7 @@ body { line-height: 1.4; }
     <input type="text" id="btFilt_search" placeholder="Search fighter..." oninput="renderBacktest()" style="width:180px;"/>
     <div style="margin-left:auto;display:flex;gap:6px;">
       <button class="copy-btn" onclick="autoGradeBacktestFromESPN()" id="btGradeBtn" style="font-size:11px;padding:6px 12px;background:var(--accent);color:#fff;border-color:var(--accent);">⚡ Grade from ESPN</button>
+      <button class="copy-btn" onclick="openBacktestPasteGrade()" style="font-size:11px;padding:6px 12px;">📋 Grade from paste</button>
       <button class="copy-btn" onclick="exportBacktestCSV()" style="font-size:11px;padding:6px 12px;">Export CSV</button>
       <button class="copy-btn" onclick="clearAllBacktest()" style="font-size:11px;padding:6px 12px;color:var(--red);border-color:var(--red-border);">Clear All</button>
     </div>
@@ -3641,15 +3642,14 @@ async function autoGradeFromESPN() {
       }
       changeLog.push(`<div style="color:var(--accent);font-weight:700;margin-top:6px;">▸ ${escHTML(eventName)}${dateNote}</div>`);
 
+      // Build competitor lookup map by normalized name (for fuzzy matcher)
+      const compMap = {};
+      competitors.forEach(c => { compMap[normName(c.name)] = c; });
+
       // For each bet, match fighter name to a competitor
       for(const bet of bets) {
-        const betNorm = normName(bet.fighter);
-        // Try exact match first, then contains-either-direction
-        let match = competitors.find(c => normName(c.name) === betNorm);
-        if(!match) match = competitors.find(c => {
-          const cn = normName(c.name);
-          return cn.includes(betNorm) || betNorm.includes(cn);
-        });
+        const hit = fuzzyFindKey(bet.fighter, compMap);
+        const match = hit ? compMap[hit.key] : null;
         if(!match) {
           results.unmatched++;
           changeLog.push(`<div style="color:var(--amber);">— No match for <strong>${escHTML(bet.fighter)}</strong> on ${iso}</div>`);
@@ -3740,6 +3740,72 @@ function newBacktestId() {
 // Format: fighter name → blank/tab → 7 numeric lines (PP, UD, P6, BETR, SL, DB, DFTR)
 // → SLPM row (tab-separated numbers with a time). Next fighter follows.
 // We only care about the first two numeric values (PP + UD).
+/* -- Global fuzzy name matcher — used by backtest parser, paste-grader, and ESPN grader --
+   Returns { key, method } or null. Methods: 'exact', 'tokens', 'typo'.
+   The matcher is strict: bad matches are worse than no matches. */
+function levenshtein(a, b) {
+  if(a === b) return 0;
+  if(!a.length) return b.length;
+  if(!b.length) return a.length;
+  const dp = Array(b.length + 1).fill(0).map((_, i) => i);
+  for(let i = 1; i <= a.length; i++) {
+    let prev = i;
+    for(let j = 1; j <= b.length; j++) {
+      const cur = a[i-1] === b[j-1] ? dp[j-1] : 1 + Math.min(dp[j-1], dp[j], prev);
+      dp[j-1] = prev;
+      prev = cur;
+    }
+    dp[b.length] = prev;
+  }
+  return dp[b.length];
+}
+
+function fuzzyFindKey(targetName, mapObj) {
+  const target = normName(targetName);
+  if(!target) return null;
+  // 1. Exact match
+  if(mapObj[target] !== undefined) return { key: target, method: 'exact' };
+  const keys = Object.keys(mapObj);
+  if(!keys.length) return null;
+
+  // Break target into significant tokens (≥3 chars, no diacritics)
+  const targetRaw = targetName.normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+  const targetTokens = targetRaw.split(/[\s\-']+/).filter(t => t.length >= 3);
+
+  // 2. Token-overlap scoring: for each candidate key, count how many target tokens it contains.
+  //    Score higher for longer tokens (surname bias) and unique matches.
+  //    The last token (surname) is required to be present, since first names are common.
+  if(targetTokens.length >= 1) {
+    const targetLast = targetTokens[targetTokens.length - 1];
+    let bestKey = null, bestScore = 0;
+    for(const k of keys) {
+      if(!k.includes(targetLast)) continue; // must have surname
+      let score = targetLast.length; // weight surname by its length
+      for(let i = 0; i < targetTokens.length - 1; i++) {
+        if(k.includes(targetTokens[i])) score += targetTokens[i].length;
+      }
+      // Also require single-token matches only if targetTokens.length === 1
+      if(targetTokens.length === 1 && k.includes(targetLast)) {
+        // Single-token: only accept if key length is close to target's (otherwise "Li" would match everything)
+        if(Math.abs(k.length - target.length) > 4) continue;
+      }
+      if(score > bestScore) {
+        bestScore = score;
+        bestKey = k;
+      }
+    }
+    if(bestKey) return { key: bestKey, method: 'tokens' };
+  }
+
+  // 3. Levenshtein typo tolerance — strict; only for close-length names
+  for(const k of keys) {
+    if(k.length < 6 || target.length < 6) continue;
+    if(Math.abs(k.length - target.length) > 2) continue;
+    if(levenshtein(k, target) <= 2) return { key: k, method: 'typo' };
+  }
+  return null;
+}
+
 function parseBacktest() {
   const text = document.getElementById('backtestPaste').value;
   const statusEl = document.getElementById('backtestParseStatus');
@@ -3831,65 +3897,6 @@ function parseBacktest() {
   }
 
   // Merge with existing RG/Saber data to compute projection deltas
-  // Helper: find a matching key in an object using fuzzy name matching
-  // Returns { key, method } or null. Methods: 'exact', 'lastname', 'tokens', 'typo'
-  function fuzzyFindKey(targetName, mapObj) {
-    const target = normName(targetName);
-    if(!target) return null;
-    // 1. exact
-    if(mapObj[target]) return { key: target, method: 'exact' };
-    const keys = Object.keys(mapObj);
-    const targetRaw = targetName.normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
-    const targetTokens = targetRaw.split(/\s+/).filter(t => t.length >= 3);
-    // 2. Token match — require MOST tokens to overlap.
-    //    Rule: If target has N tokens ≥3 chars, need ≥ min(N, keyTokens) - 0 shared,
-    //    AND require at least the last token (surname) to match.
-    if(targetTokens.length >= 1) {
-      const targetLast = targetTokens[targetTokens.length - 1]; // surname
-      let bestKey = null;
-      let bestOverlap = 0;
-      for(const k of keys) {
-        // k is normalized (no spaces). Need to rebuild key tokens by finding original.
-        // Simplest: check if k contains the target's LAST NAME + at least one other token from target.
-        if(!k.includes(targetLast)) continue; // surname must be present
-        let overlap = 1; // last name counted
-        for(let i = 0; i < targetTokens.length - 1; i++) {
-          if(k.includes(targetTokens[i])) overlap++;
-        }
-        // Require ≥2 tokens overlap (surname + 1 other), OR if target only has 1 token, allow direct match on that
-        const minRequired = targetTokens.length === 1 ? 1 : 2;
-        if(overlap >= minRequired && overlap > bestOverlap) {
-          bestOverlap = overlap;
-          bestKey = k;
-        }
-      }
-      if(bestKey) return { key: bestKey, method: 'tokens' };
-    }
-    // 3. Levenshtein typo tolerance — must be VERY close AND both strings not tiny
-    for(const k of keys) {
-      if(k.length < 6 || target.length < 6) continue;   // Skip short strings — too risky
-      if(Math.abs(k.length - target.length) > 2) continue;
-      if(levenshtein(k, target) <= 2) return { key: k, method: 'typo' };
-    }
-    return null;
-  }
-  function levenshtein(a, b) {
-    if(a === b) return 0;
-    if(!a.length) return b.length;
-    if(!b.length) return a.length;
-    const dp = Array(b.length + 1).fill(0).map((_, i) => i);
-    for(let i = 1; i <= a.length; i++) {
-      let prev = i;
-      for(let j = 1; j <= b.length; j++) {
-        const cur = a[i-1] === b[j-1] ? dp[j-1] : 1 + Math.min(dp[j-1], dp[j], prev);
-        dp[j-1] = prev;
-        prev = cur;
-      }
-      dp[b.length] = prev;
-    }
-    return dp[b.length];
-  }
-
   let added = 0, updated = 0, skipped = 0;
   const unmatchedNames = []; // for status message
   parsed.forEach(row => {
@@ -4311,39 +4318,72 @@ function renderBacktest() {
     </td>`;
   };
 
-  // Group entries by matchupId (fall back to solo group if no matchupId)
-  const groups = [];
-  const groupMap = {};
+  // Group entries by matchupId first
+  const matchupGroups = [];
+  const matchupMap = {};
   list.forEach(e => {
     const gid = e.matchupId || ('solo_' + e.id);
-    if(!groupMap[gid]) {
-      groupMap[gid] = { id: gid, entries: [] };
-      groups.push(groupMap[gid]);
+    if(!matchupMap[gid]) {
+      matchupMap[gid] = { id: gid, entries: [], iso: e.iso, date: e.date };
+      matchupGroups.push(matchupMap[gid]);
     }
-    groupMap[gid].entries.push(e);
+    matchupMap[gid].entries.push(e);
   });
 
-  // Render each matchup as a visual group: header stripe + pair of rows
-  tbody.innerHTML = groups.map((g, gIdx) => {
+  // Now group matchups by CARD (iso date) — one card per calendar day of entries
+  const cardMap = {};
+  const cardList = [];
+  matchupGroups.forEach(mg => {
+    const cardKey = mg.iso || 'unknown';
+    if(!cardMap[cardKey]) {
+      cardMap[cardKey] = { key: cardKey, date: mg.date, iso: mg.iso, matchups: [] };
+      cardList.push(cardMap[cardKey]);
+    }
+    cardMap[cardKey].matchups.push(mg);
+  });
+  // Sort cards newest first
+  cardList.sort((a, b) => (b.iso || '').localeCompare(a.iso || ''));
+
+  // Render each card as its own section with a card header, then its matchups inside
+  tbody.innerHTML = cardList.map(card => {
+    // Card header — spans all columns, distinct from matchup header
+    const totalFights = card.matchups.reduce((n, m) => n + (m.entries.length === 2 ? 1 : 0), 0);
+    const totalEntries = card.matchups.reduce((n, m) => n + m.entries.length, 0);
+    const graded = card.matchups.reduce((n, m) => n + m.entries.filter(e => e.actual !== null && e.actual !== undefined).length, 0);
+    const cardHeader = `<tr class="card-header">
+      <td colspan="11" style="padding:14px 18px;background:linear-gradient(180deg, #eef7f9 0%, #ffffff 100%);border-top:3px solid var(--accent);border-bottom:1px solid #e4e4e7;">
+        <div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+          <div>
+            <div style="font-family:'Inter',sans-serif;font-size:10px;font-weight:700;color:var(--accent);letter-spacing:0.10em;text-transform:uppercase;margin-bottom:2px;">Card</div>
+            <div style="font-family:'Inter',sans-serif;font-size:15px;font-weight:800;color:#0a0a0a;letter-spacing:-0.005em;">${card.date || card.iso || 'Unknown date'}</div>
+          </div>
+          <div style="font-family:'Inter',sans-serif;font-size:11px;color:#0a0a0a;text-align:right;">
+            <span style="color:#6b6b78;">${totalEntries} entries · ${totalFights} matchups</span>
+            &nbsp;·&nbsp;
+            <span style="color:var(--accent);font-weight:700;">${graded} graded</span>
+          </div>
+        </div>
+      </td>
+    </tr>`;
+
+    // Now render each matchup inside this card
+    const matchupsHtml = card.matchups.map((g, gIdx) => {
     const isMatchup = g.entries.length === 2;
     const header = isMatchup
       ? `<tr class="matchup-header">
-          <td colspan="11" style="padding:10px 16px;background:#f7f7f8;border-top:2px solid #e4e4e7;border-bottom:1px solid #e4e4e7;">
+          <td colspan="11" style="padding:10px 16px;background:#f7f7f8;border-top:1px solid #e4e4e7;border-bottom:1px solid #e4e4e7;">
             <div style="display:flex;align-items:center;justify-content:space-between;">
               <div style="font-size:12px;font-weight:700;color:#0a0a0a;letter-spacing:-0.005em;">
                 ${escHTML(g.entries[0].fighter)}<span style="color:var(--accent);margin:0 8px;font-weight:400;">vs</span>${escHTML(g.entries[1].fighter)}
-              </div>
-              <div style="font-family:'Inter', system-ui, sans-serif;font-size:10px;color:#6b6b78;letter-spacing:0.06em;">
-                ${g.entries[0].date}
               </div>
             </div>
           </td>
         </tr>`
       : `<tr class="matchup-header">
-          <td colspan="11" style="padding:8px 16px;background:#f7f7f8;border-top:2px solid #e4e4e7;border-bottom:1px solid #e4e4e7;">
+          <td colspan="11" style="padding:8px 16px;background:#f7f7f8;border-top:1px solid #e4e4e7;border-bottom:1px solid #e4e4e7;">
             <div style="font-size:11px;font-weight:700;color:#0a0a0a;letter-spacing:-0.005em;">
               ${escHTML(g.entries[0].fighter)}
-              <span style="color:#8a8a8a;font-weight:400;font-family:'Inter', system-ui, sans-serif;font-size:10px;margin-left:8px;">solo · ${g.entries[0].date}</span>
+              <span style="color:#8a8a8a;font-weight:400;font-family:'Inter', system-ui, sans-serif;font-size:10px;margin-left:8px;">solo</span>
             </div>
           </td>
         </tr>`;
@@ -4389,6 +4429,9 @@ function renderBacktest() {
     }).join('');
 
     return header + rows;
+    }).join('');
+
+    return cardHeader + matchupsHtml;
   }).join('');
 }
 
@@ -4461,13 +4504,11 @@ async function autoGradeBacktestFromESPN() {
       const dateNote = eventIso !== iso ? ` (found on ${eventIso})` : '';
       changeLog.push(`<div style="color:var(--accent);font-weight:700;margin-top:6px;">▸ ${escHTML(eventName)}${dateNote}</div>`);
       const competitors = await getEventCompetitors(eventId);
+      const compMap = {};
+      competitors.forEach(c => { compMap[normName(c.name)] = c; });
       for(const entry of entries) {
-        const nn = normName(entry.fighter);
-        let match = competitors.find(c => normName(c.name) === nn);
-        if(!match) match = competitors.find(c => {
-          const cn = normName(c.name);
-          return cn.includes(nn) || nn.includes(cn);
-        });
+        const hit = fuzzyFindKey(entry.fighter, compMap);
+        const match = hit ? compMap[hit.key] : null;
         if(!match) { unmatched++; changeLog.push(`<div style="color:var(--amber);">— No match: <strong>${escHTML(entry.fighter)}</strong></div>`); continue; }
         if(match.sigStrikes === null || match.sigStrikes === undefined) { unmatched++; changeLog.push(`<div style="color:var(--amber);">— No stats: <strong>${escHTML(entry.fighter)}</strong></div>`); continue; }
         entry.actual = match.sigStrikes;
@@ -4492,6 +4533,118 @@ async function autoGradeBacktestFromESPN() {
 
   btn.textContent = orig;
   btn.style.pointerEvents = '';
+}
+
+/* ─────────────────────────────────────────────────
+   ── GRADE FROM FIGHTODDS PASTE ──
+   Parse the "Result" column from FightOdds Pick'em text.
+   Each fighter has an integer result (actual sig strikes) between name and projections.
+   ───────────────────────────────────────────────── */
+
+function openBacktestPasteGrade() {
+  // Build modal
+  const existing = document.getElementById('btPasteGradeModal');
+  if(existing) existing.remove();
+  const overlay = document.createElement('div');
+  overlay.id = 'btPasteGradeModal';
+  overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.4);z-index:9999;display:flex;align-items:center;justify-content:center;padding:24px;';
+  overlay.innerHTML = `
+    <div style="background:#fff;border-radius:14px;padding:22px;max-width:640px;width:100%;box-shadow:0 20px 60px rgba(0,0,0,0.25);">
+      <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:12px;">
+        <div style="font-family:'Inter',sans-serif;font-size:16px;font-weight:800;color:#0a0a0a;">Grade from FightOdds paste</div>
+        <button onclick="document.getElementById('btPasteGradeModal').remove()" style="background:transparent;border:none;color:#0a0a0a;font-size:20px;font-weight:700;cursor:pointer;padding:0 4px;">✕</button>
+      </div>
+      <div style="font-family:'Inter',sans-serif;font-size:12px;color:#0a0a0a;margin-bottom:12px;">
+        Paste the POST-fight FightOdds Pick'em text (with the Result column filled in). Each fighter's actual sig strikes will be applied to their backtest entry.
+      </div>
+      <textarea id="btPasteGradeText" placeholder="Paste the FightOdds Pick'em section here..." style="width:100%;min-height:180px;background:#f7f7f8;color:#0a0a0a;border:1px solid #d0d0d8;border-radius:8px;padding:12px;font-family:'Inter',sans-serif;font-size:12px;line-height:1.5;outline:none;resize:vertical;font-variant-numeric:tabular-nums;"></textarea>
+      <div id="btPasteGradeStatus" style="margin-top:10px;font-family:'Inter',sans-serif;font-size:11px;color:#0a0a0a;min-height:16px;line-height:1.6;"></div>
+      <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px;">
+        <button onclick="document.getElementById('btPasteGradeModal').remove()" class="copy-btn" style="font-size:11px;padding:8px 14px;">Cancel</button>
+        <button onclick="doBacktestPasteGrade()" class="copy-btn" style="font-size:11px;padding:8px 14px;background:var(--accent);color:#fff;border-color:var(--accent);">Grade entries</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  // Focus the textarea
+  setTimeout(() => document.getElementById('btPasteGradeText').focus(), 50);
+}
+
+function doBacktestPasteGrade() {
+  const text = document.getElementById('btPasteGradeText').value || '';
+  const statusEl = document.getElementById('btPasteGradeStatus');
+  if(!text.trim()) { statusEl.innerHTML = '<span style="color:var(--red);">Paste some text first.</span>'; return; }
+
+  // Parse
+  const isName = s => /[A-Za-zČĆŠŽĐłąęćńóśźż'\-\.]/.test(s) &&
+                       !/^[\-+\d]/.test(s) && !s.includes('\t') &&
+                       s.length > 2 && s.length < 60 &&
+                       !/(Fighters|Proj|Result|SLPM|Adj|Distance|Ground|Clinch|SApM|Striking|Time|Total|Most|BetOnline|PrizePicks|UD icon|PP icon|Pick'em|Fantasy|UFC|Projections|Saturday|Sunday|Friday|Poster)/i.test(s) &&
+                       (s.match(/[A-Za-zČĆŠŽĐłąęćńóśźż]/g) || []).length >= 2;
+  const isResult = s => /^\d+$/.test(s);
+  const isProjection = s => /^\d+\.\d+$/.test(s);
+  const isEventHeader = s => /^UFC\s+(Fight\s+Night|\d+|on\s+ESPN|on\s+ABC|Live)/i.test(s.trim());
+
+  // Normalize: strip tabs, filter blanks
+  const rawLines = text.split(/\r?\n/).map(l => l.replace(/\t/g, ' ').trim()).filter(Boolean);
+
+  const parsed = [];
+  let eventsSeen = 0;
+  for(let i = 0; i < rawLines.length; i++) {
+    const line = rawLines[i];
+    if(isEventHeader(line)) {
+      eventsSeen++;
+      if(parsed.length > 0) break; // stop at second event card
+      continue;
+    }
+    if(!isName(line)) continue;
+    const name = line;
+    // Look forward up to 3 lines for an integer Result (before any projection is seen)
+    let result = null;
+    for(let j = 1; j <= 3 && i + j < rawLines.length; j++) {
+      const l = rawLines[i + j];
+      if(isProjection(l)) break;      // Hit projections first — no result available
+      if(isName(l)) break;             // Hit next fighter — no result
+      if(isResult(l)) { result = parseInt(l, 10); break; }
+    }
+    if(result !== null) parsed.push({ name, result });
+  }
+
+  if(!parsed.length) {
+    statusEl.innerHTML = '<span style="color:var(--amber);">No Result values found. Make sure the paste has post-fight actuals in the Result column.</span>';
+    return;
+  }
+
+  // Match against ungraded (or all) backtest entries using the same fuzzy matcher
+  let updated = 0, skipped = 0;
+  const unmatched = [];
+  parsed.forEach(row => {
+    // Build a name-keyed map of backtest entries for fuzzy match
+    const entryMap = {};
+    backtestEntries.forEach(e => { entryMap[normName(e.fighter)] = e.id; });
+    const hit = fuzzyFindKey(row.name, entryMap);
+    if(!hit) { unmatched.push(row.name); return; }
+    const entry = backtestEntries.find(e => e.id === entryMap[hit.key]);
+    if(!entry) { unmatched.push(row.name); return; }
+    entry.actual = row.result;
+    recomputeBacktestResults(entry);
+    updated++;
+  });
+
+  if(updated > 0) saveBacktest();
+  renderBacktest();
+
+  let msg = `<span style="color:var(--accent);font-weight:700;">${updated} graded</span>` +
+            (unmatched.length ? ` · <span style="color:var(--amber);">${unmatched.length} unmatched: ${unmatched.map(escHTML).join(', ')}</span>` : '');
+  statusEl.innerHTML = msg;
+
+  // Auto-close if fully clean
+  if(updated > 0 && unmatched.length === 0) {
+    setTimeout(() => {
+      const m = document.getElementById('btPasteGradeModal');
+      if(m) m.remove();
+    }, 1500);
+  }
 }
 </script>
 </body>
