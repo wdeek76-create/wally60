@@ -1402,6 +1402,51 @@ function renderUFC() {
 
   // Enrich finished fights with the real method (R1 KO etc.) from the core API
   enrichUFCMethods(ev);
+  enrichUFCHeadshots(ev);
+}
+
+async function enrichUFCHeadshots(ev) {
+  if (!ev.id) return;
+  const base = 'https://sports.core.api.espn.com/v2/sports/mma/leagues/ufc';
+  let comps;
+  try {
+    const evData = await (await fetch(`${base}/events/${ev.id}?lang=en&region=us`)).json();
+    comps = evData.competitions;
+    if (comps && comps.$ref) comps = (await (await fetch(fixUrl(comps.$ref))).json()).items || [];
+  } catch(_) { return; }
+  if (!Array.isArray(comps)) return;
+
+  for (const cRef of comps) {
+    let comp = cRef.$ref ? null : cRef;
+    let fightId = comp?.id;
+    try {
+      if (!comp) { comp = await (await fetch(fixUrl(cRef.$ref))).json(); fightId = comp.id; }
+    } catch(_) { continue; }
+    const slotA = document.getElementById(`shot-${fightId}-a`);
+    const slotB = document.getElementById(`shot-${fightId}-b`);
+    if (!slotA && !slotB) continue;
+
+    const competitors = comp.competitors || [];
+    for (let i = 0; i < competitors.length; i++) {
+      const slot = document.getElementById(`shot-${fightId}-${i===0?'a':'b'}`);
+      if (!slot || slot.tagName === 'IMG') continue;
+      try {
+        let cc = competitors[i];
+        if (cc.$ref) cc = await (await fetch(fixUrl(cc.$ref))).json();
+        let ath = cc.athlete;
+        if (ath?.$ref) ath = await (await fetch(fixUrl(ath.$ref))).json();
+        const href = ath?.headshot?.href || (ath?.id ? `https://a.espncdn.com/i/headshots/mma/players/full/${ath.id}.png` : '');
+        if (href) {
+          const img = document.createElement('img');
+          img.className = 'ufc-f-shot';
+          img.src = href; img.alt = ''; img.loading = 'lazy';
+          const ph = slot;
+          img.onerror = function(){ this.replaceWith(ph); };
+          slot.replaceWith(img);
+        }
+      } catch(_) {}
+    }
+  }
 }
 
 async function enrichUFCMethods(ev) {
@@ -1482,7 +1527,7 @@ function ufcFightRow(f, evIdx, fIdx) {
       <div class="ufc-f-fighters">
         <div class="ufc-f-block">
           <div class="ufc-f-line${aWin?' win':''}${done&&!aWin?' loss':''}">
-            ${f.aShot?`<img class="ufc-f-shot" src="${f.aShot}" alt="IMG" loading="lazy">`:'<span class="ufc-f-shot" style="display:flex;align-items:center;justify-content:center;font-size:7px;color:#f5a623">NOID</span>'}
+            <span class="ufc-f-shot" id="shot-${f.id}-a" style="display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:800;color:rgba(255,255,255,0.3)">${f.aName.charAt(0)}</span>
             <span class="ufc-f-name">${f.aName}</span>
             ${f.aRec?`<span class="ufc-f-rec">${f.aRec}</span>`:''}
             ${aWin?`<span class="ufc-f-w">W</span>`:''}
@@ -1495,7 +1540,7 @@ function ufcFightRow(f, evIdx, fIdx) {
         <div class="ufc-f-vs">vs</div>
         <div class="ufc-f-block">
           <div class="ufc-f-line${bWin?' win':''}${done&&!bWin?' loss':''}">
-            ${f.bShot?`<img class="ufc-f-shot" src="${f.bShot}" alt="" loading="lazy" onerror="this.style.display='none'">`:''}
+            <span class="ufc-f-shot" id="shot-${f.id}-b" style="display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:800;color:rgba(255,255,255,0.3)">${f.bName.charAt(0)}</span>
             <span class="ufc-f-name">${f.bName}</span>
             ${f.bRec?`<span class="ufc-f-rec">${f.bRec}</span>`:''}
             ${bWin?`<span class="ufc-f-w">W</span>`:''}
@@ -1696,9 +1741,11 @@ async function getFightStats(eventId, fightId) {
   const out = [];
   for (const cptr of competitors) {
     const c = cptr.$ref ? await (await fetch(fixUrl(cptr.$ref))).json() : cptr;
-    const name = c.athlete?.$ref
-      ? (await (await fetch(fixUrl(c.athlete.$ref))).json()).displayName
-      : (c.athlete?.displayName || 'Fighter');
+    let ath = c.athlete;
+    if (ath?.$ref) ath = await (await fetch(fixUrl(ath.$ref))).json();
+    const name = ath?.displayName || 'Fighter';
+    const aid = ath?.id || '';
+    const shot = ath?.headshot?.href || (aid ? `https://a.espncdn.com/i/headshots/mma/players/full/${aid}.png` : '');
     let stats = {};
     if (c.statistics?.$ref) {
       const sd = await (await fetch(fixUrl(c.statistics.$ref))).json();
@@ -1706,7 +1753,7 @@ async function getFightStats(eventId, fightId) {
     } else if (c.statistics) {
       stats = flattenStats(c.statistics);
     }
-    out.push({ name, winner: !!c.winner, stats });
+    out.push({ name, winner: !!c.winner, stats, id: aid, shot });
   }
 
   const result = { competitors: out, method, mRound, mClock };
