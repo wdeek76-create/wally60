@@ -962,8 +962,9 @@
     <div class="input-row" style="margin-bottom:8px;flex-wrap:nowrap;align-items:flex-end;gap:8px">
       <div class="field" style="flex:0 0 180px;position:relative">
         <label>Book</label>
-        <input type="text" id="iBookCombo" value="FanDuel" autocomplete="off" style="font-size:14px;font-weight:600;padding:10px 28px 10px 12px;cursor:pointer;height:44px;box-sizing:border-box" placeholder="type or pick">
+        <input type="text" id="iBookCombo" value="FanDuel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" enterkeyhint="done" style="font-size:14px;font-weight:600;padding:10px 34px 10px 12px;cursor:pointer;height:44px;box-sizing:border-box" placeholder="type or pick">
         <span id="iBookComboArrow" style="position:absolute;right:10px;bottom:10px;pointer-events:none;color:var(--text2);font-size:10px">▾</span>
+        <button type="button" id="iBookComboClear" onclick="clearBookCombo(event)" title="Clear book" style="position:absolute;right:8px;top:8px;width:20px;height:20px;padding:0;line-height:1;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;border-radius:6px;border:1px solid rgba(192,132,252,0.45);background:rgba(192,132,252,0.14);color:var(--purple);text-transform:none;letter-spacing:0;z-index:5">×</button>
         <div id="iBookComboList" style="display:none;position:absolute;top:100%;left:0;right:0;margin-top:3px;background:#0a0f0c;border:1px solid rgba(192,132,252,0.35);border-radius:8px;padding:2px;z-index:40;max-height:190px;overflow-y:auto;box-shadow:0 6px 18px rgba(0,0,0,0.7)"></div>
         <select id="iMktBook" style="display:none">
           <option value="bFD">FanDuel</option>
@@ -7879,10 +7880,35 @@ function _formatOddsStr(raw){
   return n >= 0 ? '+'+n : String(n);
 }
 
-document.getElementById('iMktOdds').addEventListener('input', function(){
+// _mirrorBookId is the ONE cell that currently mirrors the top Odds field.
+// Both the odds input and the book-change handler maintain it, so the two can
+// never disagree about which cell to move or clear.
+let _mirrorBookId = null;
+
+function _syncOddsToBookCell(){
   const bookId = document.getElementById('iMktBook').value;
+  const val    = (document.getElementById('iMktOdds').value || '').trim();
+
+  // Drop the previous mirror if we've moved to a different book
+  if(_mirrorBookId && _mirrorBookId !== bookId){
+    const prevEl = document.getElementById(_mirrorBookId);
+    if(prevEl) prevEl.value = '';
+    _mirrorBookId = null;
+  }
+
   const bookEl = document.getElementById(bookId);
-  if(bookEl) bookEl.value = this.value !== '' ? _formatOddsStr(this.value) : '';
+  if(!bookEl) return;
+  if(val){
+    bookEl.value = _formatOddsStr(val);
+    _mirrorBookId = bookId;
+  } else if(_mirrorBookId === bookId){
+    bookEl.value = '';
+    _mirrorBookId = null;
+  }
+}
+
+document.getElementById('iMktOdds').addEventListener('input', function(){
+  _syncOddsToBookCell();
   liveCalc();
 });
 
@@ -7892,18 +7918,37 @@ document.getElementById('iMktBook').addEventListener('change', function(){
   // Instead: if the newly-selected book has its own odds in its cell, pull that into the main Odds field.
   const newBookEl = document.getElementById(this.value);
   const newBookVal = newBookEl ? (newBookEl.value || '').trim() : '';
+  const oddsEl = document.getElementById('iMktOdds');
+  const typed  = (oddsEl.value || '').trim();
+
   if(newBookVal){
     // New book has its own price — that wins
-    document.getElementById('iMktOdds').value = _formatOddsStr(newBookVal); syncOddsSignFromValue(_formatOddsStr(newBookVal));
+    oddsEl.value = _formatOddsStr(newBookVal); syncOddsSignFromValue(_formatOddsStr(newBookVal));
+  } else if(typed){
+    // New book has no price of its own: keep what you typed and MOVE it into
+    // the new book's cell, clearing whichever cell was mirroring it before.
+    _syncOddsToBookCell();
   }
-  // New book has no price of its own: KEEP whatever is already typed rather
-  // than clearing it. Wiping the field threw away odds entered before the book
-  // was picked. The typed price gets recorded against this book on log.
+  if(newBookVal){
+    // Adopting the new book's own price — it is now the mirrored cell
+    _mirrorBookId = this.value;
+  }
 
-  // Don't mirror main odds into the new book — leave blank until user fills it
   _prevBookId = this.value;
   liveCalc();
 });
+
+// Clear the book combo and drop straight into picking a new one.
+function clearBookCombo(e){
+  if(e){ e.preventDefault(); e.stopPropagation(); }
+  const combo = document.getElementById('iBookCombo');
+  if(!combo) return;
+  combo.value = '';
+  combo.dataset.confirmed = '';
+  combo.dataset.original = '';
+  combo.focus();
+  combo.dispatchEvent(new Event('input', {bubbles:true}));
+}
 
 // Typeahead shorthand -> Market Book select
 const BOOK_SHORTHAND = {
@@ -7995,6 +8040,11 @@ function matchBook(raw){
     openList('');
   });
   combo.addEventListener('input', function(){
+    // A trailing space means "commit what I typed" — e.g. "fd " -> FanDuel
+    if(/\s$/.test(combo.value)){
+      const sid = matchBook(combo.value.trim());
+      if(sid){ selectBookById(sid); return; }
+    }
     openList(combo.value);
     const q = combo.value.trim().toLowerCase();
     if(!q) return;
