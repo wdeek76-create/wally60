@@ -992,6 +992,29 @@ function betPaceStatus(b, actual, state, gameFrac) {
   }
   return { color, won: null, mark: ` ${actual}` };
 }
+// Minutes-tick animation. Live refresh replaces the box score wholesale, so we
+// remember each player's last-seen minutes and flash a "+N" when the number
+// goes up — a quick read on who is actually on the floor. The baseline is
+// seeded on first render so nothing flashes when you open the panel.
+const _boxMinSeen = new Map();   // gameKey|player -> minutes
+function _ensureBoxTickCss() {
+  if (typeof document === "undefined" || document.getElementById("box-tick-css")) return;
+  const st = document.createElement("style");
+  st.id = "box-tick-css";
+  st.textContent = "@keyframes boxTickPop{0%{opacity:0;transform:translateY(4px);}18%{opacity:1;transform:translateY(0);}70%{opacity:1;transform:translateY(-3px);}100%{opacity:0;transform:translateY(-9px);}}.box-tick{position:absolute;right:0;top:-9px;font-size:8px;font-weight:800;color:#4ade80;pointer-events:none;animation:boxTickPop 2.4s ease-out forwards;text-shadow:0 0 6px rgba(74,222,128,0.55);}";
+  (document.head || document.documentElement).appendChild(st);
+}
+// Returns the minutes gained since the previous render (0 when unchanged, and
+// 0 on the very first sighting so opening a panel is silent).
+function _boxMinDelta(gameKey, player, minStr, seedOnly) {
+  const n = parseInt(String(minStr).split(":")[0], 10);
+  if (!isFinite(n)) return 0;
+  const k = gameKey + "|" + player;
+  const prev = _boxMinSeen.get(k);
+  _boxMinSeen.set(k, n);
+  if (seedOnly || prev == null || n <= prev) return 0;
+  return n - prev;
+}
 function localYMD(d) {
   const x = (d instanceof Date) ? d : new Date(d);
   if (isNaN(x.getTime())) return "";
@@ -18835,6 +18858,8 @@ function renderScheduleBoxscoreOnly(summary) {
     const elapsed = (_period - 1) * PER_SEC + (PER_SEC - (isFinite(_clock) ? _clock : 0));
     gameFrac = Math.max(0, Math.min(1, elapsed / (REG_PER * PER_SEC)));
   }
+  _ensureBoxTickCss();
+  const _gameKey = String(summary?.header?.id || summary?.header?.competitions?.[0]?.id || summary?.header?.competitions?.[0]?.date || "g");
   const teams = summary?.boxscore?.players || [];
   const _gameIso = summary?.header?.competitions?.[0]?.date || summary?.header?.competitions?.[0]?.startDate || null;
   const _gameDay = _gameIso ? localYMD(new Date(_gameIso)) : null;
@@ -18940,11 +18965,13 @@ function renderScheduleBoxscoreOnly(summary) {
         const highlightTpm = (betStatColumn === "3PM" || betStatColumn === "3P" || betStatColumn === "THREEPM") ? `color:${statColor};` : "";
         const highlightPra = betStatColumn === "PRA" ? `color:${statColor};` : "";
         
+        const _minGain = _boxMinDelta(_gameKey, p.name, p.min, false);
+        const _minTick = _minGain > 0 ? `<span class="box-tick">+${_minGain}</span>` : "";
         return `
         <div style="display:flex;flex-direction:column;gap:2px;padding:4px 4px;${bgColor}border-radius:3px;">
           <div style="display:flex;align-items:center;gap:6px;text-shadow:-1px -1px 0 #000,1px -1px 0 #000,-1px 1px 0 #000,1px 1px 0 #000,0 -1px 0 #000,0 1px 0 #000,-1px 0 0 #000,1px 0 0 #000;">
             <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:${nameColor};font-weight:${hasBet ? 800 : 700};font-size:11px;">${escapeHtmlBasic(p.name)}</span>
-          <span style="flex:0 0 26px;text-align:right;font-variant-numeric:tabular-nums;color:#fff;font-weight:800;font-size:10px;">${escapeHtmlBasic(p.min)}</span>
+          <span style="flex:0 0 26px;text-align:right;font-variant-numeric:tabular-nums;color:#fff;font-weight:800;font-size:10px;position:relative;">${escapeHtmlBasic(p.min)}${_minTick}</span>
           <span style="flex:0 0 24px;text-align:right;font-variant-numeric:tabular-nums;color:#fff;font-weight:800;font-size:11px;${highlightPts}">${p.pts}</span>
           <span style="flex:0 0 24px;text-align:right;font-variant-numeric:tabular-nums;color:#fff;font-weight:800;font-size:10px;${highlightAst}">${p.ast}</span>
           <span style="flex:0 0 24px;text-align:right;font-variant-numeric:tabular-nums;color:#fff;font-weight:800;font-size:10px;${highlightReb}">${p.reb}</span>
@@ -18992,6 +19019,8 @@ function renderScheduleExpandContent(summary) {
     const elapsed = (_period - 1) * PER_SEC + (PER_SEC - (isFinite(_clock) ? _clock : 0));
     gameFrac = Math.max(0, Math.min(1, elapsed / (REG_PER * PER_SEC)));
   }
+  _ensureBoxTickCss();
+  const _gameKey = String(summary?.header?.id || summary?.header?.competitions?.[0]?.id || summary?.header?.competitions?.[0]?.date || "g");
   const teams = summary?.boxscore?.players || [];
   const injuries = summary?.injuries || [];
   // This game's date (YYYY-MM-DD) so we only surface bets for THIS game, not
@@ -19108,11 +19137,13 @@ function renderScheduleExpandContent(summary) {
         const highlightReb = betStatColumn === "REB" ? HL : "";
         const highlightPra = betStatColumn === "PRA" ? HL : "";
         const highlightTpm = (betStatColumn === "3PM" || betStatColumn === "3P" || betStatColumn === "THREEPM") ? HL : "";
+        _boxMinDelta(_gameKey, p.name, p.min, true);
+        const _minTick = "";
         return `
         <div style="display:flex;flex-direction:column;gap:2px;padding:4px 4px;${bgColor}border-radius:3px;">
           <div style="display:flex;align-items:center;gap:6px;text-shadow:-1px -1px 0 #000,1px -1px 0 #000,-1px 1px 0 #000,1px 1px 0 #000,0 -1px 0 #000,0 1px 0 #000,-1px 0 0 #000,1px 0 0 #000;">
             <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:${nameColor};font-weight:${hasBet ? 800 : 700};font-size:11px;">${escapeHtmlBasic(p.name)}</span>
-          <span style="flex:0 0 26px;text-align:right;font-variant-numeric:tabular-nums;color:#fff;font-weight:800;font-size:10px;">${escapeHtmlBasic(p.min)}</span>
+          <span style="flex:0 0 26px;text-align:right;font-variant-numeric:tabular-nums;color:#fff;font-weight:800;font-size:10px;position:relative;">${escapeHtmlBasic(p.min)}${_minTick}</span>
           <span style="flex:0 0 24px;text-align:right;font-variant-numeric:tabular-nums;color:#fff;font-weight:800;font-size:11px;${highlightPts}">${p.pts}</span>
           <span style="flex:0 0 24px;text-align:right;font-variant-numeric:tabular-nums;color:#fff;font-weight:800;font-size:10px;${highlightAst}">${p.ast}</span>
           <span style="flex:0 0 24px;text-align:right;font-variant-numeric:tabular-nums;color:#fff;font-weight:800;font-size:10px;${highlightReb}">${p.reb}</span>
