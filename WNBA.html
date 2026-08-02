@@ -973,7 +973,6 @@ let modalPos = "";
 //   green  = on pace or already clinched
 //   orange = within +/-15% of the line, or too early to judge
 //   red    = trending to bust, or already busted
-const BET_TINT = { "#4ade80": "rgba(74,222,128,0.30)", "#fb923c": "rgba(251,146,60,0.30)", "#f87171": "rgba(248,113,113,0.30)" };
 function betPaceStatus(b, actual, state, gameFrac) {
   const isUnder = (b && (b.ou || "")).toLowerCase() === "under";
   if (actual == null) return { color: "#fb923c", won: null, mark: "" };
@@ -18593,13 +18592,13 @@ function renderScheduleRow(ev, isToday) {
       rightCol = `
         <div style="display:flex;align-items:center;gap:10px;justify-content:flex-end;">
           <div style="text-align:right;">
-            <div style="font-family:'JetBrains Mono',monospace;font-weight:800;font-size:16px;color:${awayWin?'#fff':'#8b93a0'};line-height:1;">${awayScore}</div>
-            <div style="font-family:'JetBrains Mono',monospace;font-weight:800;font-size:16px;color:${!awayWin?'#fff':'#8b93a0'};line-height:1;margin-top:4px;">${homeScore}</div>
+            <div data-live-away="${escapeHtmlBasic(ev.id || "")}" style="font-family:'JetBrains Mono',monospace;font-weight:800;font-size:16px;color:${awayWin?'#fff':'#8b93a0'};line-height:1;">${awayScore}</div>
+            <div data-live-home="${escapeHtmlBasic(ev.id || "")}" style="font-family:'JetBrains Mono',monospace;font-weight:800;font-size:16px;color:${!awayWin?'#fff':'#8b93a0'};line-height:1;margin-top:4px;">${homeScore}</div>
           </div>
           <div style="display:flex;flex-direction:column;align-items:flex-end;gap:2px;">
             <span style="font-size:9px;font-weight:700;letter-spacing:0.8px;color:#4ade80;display:inline-flex;align-items:center;gap:4px;"><span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:#4ade80;box-shadow:0 0 6px rgba(74,222,128,0.8);"></span>LIVE</span>
-            <span style="font-size:10px;color:#a8b0bb;font-weight:600;">${escapeHtmlBasic(detail)}</span>
-            ${projBadge}
+            <span data-live-clock="${escapeHtmlBasic(ev.id || "")}" style="font-size:10px;color:#a8b0bb;font-weight:600;">${escapeHtmlBasic(detail)}</span>
+            <span data-live-proj="${escapeHtmlBasic(ev.id || "")}">${projBadge}</span>
           </div>
         </div>`;
     } else if (state === "post" || completed) {
@@ -18754,6 +18753,8 @@ async function toggleScheduleExpand(eventId) {
               }
             }
           }
+          // Score, clock and projection on the row above the panel
+          updateScheduleRowLive(eventId, updatedSummary);
           // Also update ticker scores (surgically, no rebuild)
           updateTickerBetScoresOnly();
         }
@@ -18765,6 +18766,46 @@ async function toggleScheduleExpand(eventId) {
   }
 }
 
+// Update the live score, clock and bet projection on a schedule row without
+// re-rendering it — a full re-render would collapse the open panel and reset
+// scroll. Mirrors how the ticker is updated during live refresh.
+function updateScheduleRowLive(eventId, summary) {
+  try {
+    const comp = summary?.header?.competitions?.[0];
+    if (!comp) return;
+    const st = comp.status || {};
+    const state = st.type?.state;
+    const cs = comp.competitors || [];
+    const away = cs.find(c => c.homeAway === "away") || cs[0];
+    const home = cs.find(c => c.homeAway === "home") || cs[1];
+    const aScore = Number(away?.score ?? 0), hScore = Number(home?.score ?? 0);
+    const setTxt = (sel, val) => {
+      const el = document.querySelector(sel);
+      if (el && val != null && el.textContent !== String(val)) el.textContent = String(val);
+    };
+    const esc = (typeof CSS !== "undefined" && CSS.escape) ? CSS.escape(String(eventId)) : String(eventId);
+    setTxt(`[data-live-away="${esc}"]`, aScore);
+    setTxt(`[data-live-home="${esc}"]`, hScore);
+    setTxt(`[data-live-clock="${esc}"]`, st.shortDetail || st.detail || "LIVE");
+    // leader colouring follows the score
+    const aEl = document.querySelector(`[data-live-away="${esc}"]`);
+    const hEl = document.querySelector(`[data-live-home="${esc}"]`);
+    if (aEl && hEl) {
+      aEl.style.color = aScore > hScore ? "#fff" : "#8b93a0";
+      hEl.style.color = hScore > aScore ? "#fff" : "#8b93a0";
+    }
+    // bet projection for this game
+    const projEl = document.querySelector(`[data-live-proj="${esc}"]`);
+    if (projEl) {
+      const aAbbr = (away?.team?.abbreviation || "").toUpperCase();
+      const hAbbr = (home?.team?.abbreviation || "").toUpperCase();
+      const pr = scheduleGameBetProjection({ id: eventId, date: comp.date }, comp, aAbbr, hAbbr, state);
+      projEl.innerHTML = pr
+        ? `<div style="font-size:8px;font-weight:800;letter-spacing:0.3px;white-space:nowrap;color:${pr.units > 0 ? "#4ade80" : (pr.units < 0 ? "#f87171" : "#a8b0bb")};">${pr.settled ? "" : "PROJ "}${pr.w}-${pr.l} ${pr.units >= 0 ? "+" : ""}${pr.units.toFixed(2)}u</div>`
+        : "";
+    }
+  } catch (e) { /* never break the refresh loop */ }
+}
 // Render only the box score sections (for live updates without disrupting scroll/state)
 function renderScheduleBoxscoreOnly(summary) {
   const state = summary?.header?.competitions?.[0]?.status?.type?.state;
@@ -18869,21 +18910,21 @@ function renderScheduleBoxscoreOnly(summary) {
         // Determine which stat is being bet on, and colour the cell by how that
         // bet is tracking — same status the pill shows.
         const betStatColumn = myBets.length > 0 ? (myBets[0].stat || "").toUpperCase() : null;
-        let statTint = "rgba(190,242,100,0.28)";
+        let statColor = "#bef264";
         if (myBets.length > 0) {
           const _pa = betActual(myBets[0], { pts: p.pts, reb: p.reb, ast: p.ast, tpm: p.tpm, pra: p.pra });
-          statTint = BET_TINT[betPaceStatus(myBets[0], _pa, state, gameFrac).color] || statTint;
+          statColor = betPaceStatus(myBets[0], _pa, state, gameFrac).color || statColor;
         }
         
         const bgColor = "";  // no row wash — only the name and the bet stat are highlighted
         const nameColor = hasBet ? "#bef264" : "#fff";
         
         // Highlight the specific stat column if there's a bet
-        const highlightPts = betStatColumn === "PTS" ? `background:${statTint};border-radius:2px;` : "";
-        const highlightAst = betStatColumn === "AST" ? `background:${statTint};border-radius:2px;` : "";
-        const highlightReb = betStatColumn === "REB" ? `background:${statTint};border-radius:2px;` : "";
-        const highlightTpm = (betStatColumn === "3PM" || betStatColumn === "3P" || betStatColumn === "THREEPM") ? `background:${statTint};border-radius:2px;` : "";
-        const highlightPra = betStatColumn === "PRA" ? `background:${statTint};border-radius:2px;` : "";
+        const highlightPts = betStatColumn === "PTS" ? `color:${statColor};` : "";
+        const highlightAst = betStatColumn === "AST" ? `color:${statColor};` : "";
+        const highlightReb = betStatColumn === "REB" ? `color:${statColor};` : "";
+        const highlightTpm = (betStatColumn === "3PM" || betStatColumn === "3P" || betStatColumn === "THREEPM") ? `color:${statColor};` : "";
+        const highlightPra = betStatColumn === "PRA" ? `color:${statColor};` : "";
         
         return `
         <div style="display:flex;flex-direction:column;gap:2px;padding:4px 4px;${bgColor}border-radius:3px;">
@@ -19042,12 +19083,12 @@ function renderScheduleExpandContent(summary) {
         const bgColor = "";  // no row wash — only the name and the bet stat are highlighted
         const nameColor = hasBet ? "#bef264" : "#fff";
         const betStatColumn = myBets.length > 0 ? (myBets[0].stat || "").toUpperCase() : null;
-        let statTint = "rgba(190,242,100,0.28)";
+        let statColor = "#bef264";
         if (myBets.length > 0) {
           const _pa = betActual(myBets[0], { pts: p.pts, reb: p.reb, ast: p.ast, tpm: p.tpm, pra: p.pra });
-          statTint = BET_TINT[betPaceStatus(myBets[0], _pa, state, gameFrac).color] || statTint;
+          statColor = betPaceStatus(myBets[0], _pa, state, gameFrac).color || statColor;
         }
-        const HL = `background:${statTint};border-radius:2px;`;
+        const HL = `color:${statColor};`;
         const highlightPts = betStatColumn === "PTS" ? HL : "";
         const highlightAst = betStatColumn === "AST" ? HL : "";
         const highlightReb = betStatColumn === "REB" ? HL : "";
