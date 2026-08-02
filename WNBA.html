@@ -967,6 +967,32 @@ let modalPos = "";
 // Local-calendar YYYY-MM-DD. Bets are saved with the LOCAL date, so every
 // day-comparison must use local time too: UTC rolls over mid-evening, which
 // would silently drop the current night's bets partway through the slate.
+// Pace/result colour for a tracked bet, shared by the box-score pills and the
+// highlighted stat cell so the two can never disagree. Settled games are a
+// straight win/loss; live games project the current rate onto full regulation.
+//   green  = on pace or already clinched
+//   orange = within +/-15% of the line, or too early to judge
+//   red    = trending to bust, or already busted
+const BET_TINT = { "#4ade80": "rgba(74,222,128,0.30)", "#fb923c": "rgba(251,146,60,0.30)", "#f87171": "rgba(248,113,113,0.30)" };
+function betPaceStatus(b, actual, state, gameFrac) {
+  const isUnder = (b && (b.ou || "")).toLowerCase() === "under";
+  if (actual == null) return { color: "#fb923c", won: null, mark: "" };
+  const line = Number(b.line);
+  const won = isUnder ? actual < line : actual > line;
+  if (state === "post") {
+    return { color: won ? "#4ade80" : "#f87171", won, mark: ` ${actual}` + (won ? " \u2713" : " \u2717") };
+  }
+  let color;
+  if (isUnder && actual > line) color = "#f87171";
+  else if (!isUnder && actual > line) color = "#4ade80";
+  else if (gameFrac <= 0.05) color = "#fb923c";
+  else {
+    const proj = actual / gameFrac;
+    if (isUnder) color = proj <= line * 0.85 ? "#4ade80" : (proj <= line * 1.15 ? "#fb923c" : "#f87171");
+    else         color = proj >= line * 1.15 ? "#4ade80" : (proj >= line * 0.85 ? "#fb923c" : "#f87171");
+  }
+  return { color, won: null, mark: ` ${actual}` };
+}
 function localYMD(d) {
   const x = (d instanceof Date) ? d : new Date(d);
   if (isNaN(x.getTime())) return "";
@@ -18835,42 +18861,29 @@ function renderScheduleBoxscoreOnly(summary) {
           const _statRaw = (b.stat || "").toUpperCase();
           const statLbl = (_statRaw === "THREEPM" || _statRaw === "3P") ? "3PM" : _statRaw;
           const ouLbl = (b.ou || "").toLowerCase() === "under" ? "u" : "o";
-          const isUnder = (b.ou || "").toLowerCase() === "under";
-          let barColor = "#fb923c", mark = "";
-          if (actual != null) {
-            const won = isUnder ? actual < b.line : actual > b.line;
-            if (state === "post") {
-              // Settled: green = win, red = loss.
-              barColor = won ? "#4ade80" : "#f87171";
-              mark = ` ${actual}` + (won ? " ✓" : " ✗");
-            } else {
-              // Live: green = on pace / already clinched, orange = iffy, red = trending bust.
-              mark = ` ${actual}`;
-              if (isUnder && actual > b.line) barColor = "#f87171";        // under already busted
-              else if (!isUnder && actual > b.line) barColor = "#4ade80";  // over already cleared
-              else if (gameFrac <= 0.05) barColor = "#fb923c";             // too early to judge
-              else {
-                const proj = actual / gameFrac;
-                if (isUnder) barColor = proj <= b.line * 0.85 ? "#4ade80" : (proj <= b.line * 1.15 ? "#fb923c" : "#f87171");
-                else         barColor = proj >= b.line * 1.15 ? "#4ade80" : (proj >= b.line * 0.85 ? "#fb923c" : "#f87171");
-              }
-            }
-          }
+          const _st = betPaceStatus(b, actual, state, gameFrac);
+          const barColor = _st.color, mark = _st.mark;
           return `<span style="display:inline-flex;align-items:center;font-size:8px;font-weight:700;color:#fff;background:rgba(125,211,252,0.10);border:1px solid rgba(125,211,252,0.20);border-left:3px solid ${barColor};border-radius:3px;padding:1px 5px;letter-spacing:0.2px;">${ouLbl}${b.line} ${statLbl}${mark}</span>`;
         }).join(" ");
         
-        // Determine which stat is being bet on for highlighting
+        // Determine which stat is being bet on, and colour the cell by how that
+        // bet is tracking — same status the pill shows.
         const betStatColumn = myBets.length > 0 ? (myBets[0].stat || "").toUpperCase() : null;
+        let statTint = "rgba(190,242,100,0.28)";
+        if (myBets.length > 0) {
+          const _pa = betActual(myBets[0], { pts: p.pts, reb: p.reb, ast: p.ast, tpm: p.tpm, pra: p.pra });
+          statTint = BET_TINT[betPaceStatus(myBets[0], _pa, state, gameFrac).color] || statTint;
+        }
         
-        const bgColor = hasBet ? "background:rgba(163,230,53,0.08);border-left:3px solid #a3e635;" : "";
-        const nameColor = hasBet ? "#a3e635" : "#fff";
+        const bgColor = "";  // no row wash — only the name and the bet stat are highlighted
+        const nameColor = hasBet ? "#bef264" : "#fff";
         
         // Highlight the specific stat column if there's a bet
-        const highlightPts = betStatColumn === "PTS" ? "background:rgba(163,230,53,0.18);border-radius:2px;" : "";
-        const highlightAst = betStatColumn === "AST" ? "background:rgba(163,230,53,0.18);border-radius:2px;" : "";
-        const highlightReb = betStatColumn === "REB" ? "background:rgba(163,230,53,0.18);border-radius:2px;" : "";
-        const highlightTpm = (betStatColumn === "3PM" || betStatColumn === "3P" || betStatColumn === "THREEPM") ? "background:rgba(163,230,53,0.18);border-radius:2px;" : "";
-        const highlightPra = betStatColumn === "PRA" ? "background:rgba(163,230,53,0.18);border-radius:2px;" : "";
+        const highlightPts = betStatColumn === "PTS" ? `background:${statTint};border-radius:2px;` : "";
+        const highlightAst = betStatColumn === "AST" ? `background:${statTint};border-radius:2px;` : "";
+        const highlightReb = betStatColumn === "REB" ? `background:${statTint};border-radius:2px;` : "";
+        const highlightTpm = (betStatColumn === "3PM" || betStatColumn === "3P" || betStatColumn === "THREEPM") ? `background:${statTint};border-radius:2px;` : "";
+        const highlightPra = betStatColumn === "PRA" ? `background:${statTint};border-radius:2px;` : "";
         
         return `
         <div style="display:flex;flex-direction:column;gap:2px;padding:4px 4px;${bgColor}border-radius:3px;">
@@ -19022,33 +19035,19 @@ function renderScheduleExpandContent(summary) {
           const _statRaw = (b.stat || "").toUpperCase();
           const statLbl = (_statRaw === "THREEPM" || _statRaw === "3P") ? "3PM" : _statRaw;
           const ouLbl = (b.ou || "").toLowerCase() === "under" ? "u" : "o";
-          const isUnder = (b.ou || "").toLowerCase() === "under";
-          let barColor = "#fb923c", mark = "";
-          if (actual != null) {
-            const won = isUnder ? actual < b.line : actual > b.line;
-            if (state === "post") {
-              // Settled: green = win, red = loss.
-              barColor = won ? "#4ade80" : "#f87171";
-              mark = ` ${actual}` + (won ? " ✓" : " ✗");
-            } else {
-              // Live: green = on pace / already clinched, orange = iffy, red = trending bust.
-              mark = ` ${actual}`;
-              if (isUnder && actual > b.line) barColor = "#f87171";        // under already busted
-              else if (!isUnder && actual > b.line) barColor = "#4ade80";  // over already cleared
-              else if (gameFrac <= 0.05) barColor = "#fb923c";             // too early to judge
-              else {
-                const proj = actual / gameFrac;
-                if (isUnder) barColor = proj <= b.line * 0.85 ? "#4ade80" : (proj <= b.line * 1.15 ? "#fb923c" : "#f87171");
-                else         barColor = proj >= b.line * 1.15 ? "#4ade80" : (proj >= b.line * 0.85 ? "#fb923c" : "#f87171");
-              }
-            }
-          }
+          const _st = betPaceStatus(b, actual, state, gameFrac);
+          const barColor = _st.color, mark = _st.mark;
           return `<span style="display:inline-flex;align-items:center;font-size:8px;font-weight:700;color:#fff;background:rgba(125,211,252,0.10);border:1px solid rgba(125,211,252,0.20);border-left:3px solid ${barColor};border-radius:3px;padding:1px 5px;letter-spacing:0.2px;">${ouLbl}${b.line} ${statLbl}${mark}</span>`;
         }).join("");
-        const bgColor = hasBet ? "background:rgba(163,230,53,0.08);border-left:3px solid #a3e635;" : "";
-        const nameColor = hasBet ? "#a3e635" : "#fff";
+        const bgColor = "";  // no row wash — only the name and the bet stat are highlighted
+        const nameColor = hasBet ? "#bef264" : "#fff";
         const betStatColumn = myBets.length > 0 ? (myBets[0].stat || "").toUpperCase() : null;
-        const HL = "background:rgba(163,230,53,0.18);border-radius:2px;";
+        let statTint = "rgba(190,242,100,0.28)";
+        if (myBets.length > 0) {
+          const _pa = betActual(myBets[0], { pts: p.pts, reb: p.reb, ast: p.ast, tpm: p.tpm, pra: p.pra });
+          statTint = BET_TINT[betPaceStatus(myBets[0], _pa, state, gameFrac).color] || statTint;
+        }
+        const HL = `background:${statTint};border-radius:2px;`;
         const highlightPts = betStatColumn === "PTS" ? HL : "";
         const highlightAst = betStatColumn === "AST" ? HL : "";
         const highlightReb = betStatColumn === "REB" ? HL : "";
