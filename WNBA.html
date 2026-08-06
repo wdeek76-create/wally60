@@ -6007,7 +6007,9 @@ async function fetchESPNStatsForDate(isoDate) {
           pts: labels.findIndex(l => l === "pts"),
           reb: labels.findIndex(l => l === "reb"),
           ast: labels.findIndex(l => l === "ast"),
-          tpt: labels.findIndex(l => l === "3pt" || l === "fg3" || l === "3p")
+          tpt: labels.findIndex(l => l === "3pt" || l === "fg3" || l === "3p"),
+          fg: labels.findIndex(l => l === "fg"),
+          ft: labels.findIndex(l => l === "ft")
         };
         const athletes = statGroup.athletes || [];
         for (const a of athletes) {
@@ -6033,10 +6035,25 @@ async function fetchESPNStatsForDate(isoDate) {
             }
           }
 
-          let fg3m = 0;
+          // ESPN gives FG and 3PT as "made-attempted", e.g. "3-7".
+          const _split = (raw) => {
+            const mm = String(raw || "").match(/^(\d+)\s*-\s*(\d+)$/);
+            return mm ? { m: parseInt(mm[1]), a: parseInt(mm[2]) } : null;
+          };
+          let fg3m = 0, fg3a = null, fgm = null, fga = null;
           if (idx.tpt >= 0 && stRow[idx.tpt]) {
-            const m = String(stRow[idx.tpt]).match(/^(\d+)/);
-            if (m) fg3m = parseInt(m[1]);
+            const s3 = _split(stRow[idx.tpt]);
+            if (s3) { fg3m = s3.m; fg3a = s3.a; }
+            else { const m = String(stRow[idx.tpt]).match(/^(\d+)/); if (m) fg3m = parseInt(m[1]); }
+          }
+          if (idx.fg >= 0 && stRow[idx.fg]) {
+            const sf = _split(stRow[idx.fg]);
+            if (sf) { fgm = sf.m; fga = sf.a; }
+          }
+          let ftm = null, fta = null;
+          if (idx.ft >= 0 && stRow[idx.ft]) {
+            const sft = _split(stRow[idx.ft]);
+            if (sft) { ftm = sft.m; fta = sft.a; }
           }
           allRows.push({
             playerNorm: norm(fullName),
@@ -6048,6 +6065,11 @@ async function fetchESPNStatsForDate(isoDate) {
               reb: idx.reb >= 0 ? parseInt0(stRow[idx.reb]) : 0,
               ast: idx.ast >= 0 ? parseInt0(stRow[idx.ast]) : 0,
               fg3m: fg3m,
+              fg3a: fg3a,
+              fgm: fgm,
+              fga: fga,
+              ftm: ftm,
+              fta: fta,
             }
           });
         }
@@ -7816,7 +7838,22 @@ async function gradeBet(b) {
   if (Math.abs(total - line) < 0.001) result = "void";
   else if (ou === "over") result = total > line ? "hit" : "miss";
   else result = total < line ? "hit" : "miss";
-  return { ok: true, result, total, actualMin };
+  // Compact supporting stat line for the recap ("3/7 FG", "12p 6r 5a").
+  let statLine = null;
+  if (playedMatches.length) {
+    const sum = (f) => playedMatches.reduce((s, m) => s + (Number(m.stats?.[f]) || 0), 0);
+    const has = (f) => playedMatches.some(m => m.stats?.[f] != null);
+    statLine = {
+      pts: sum("pts"), reb: sum("reb"), ast: sum("ast"), min: sum("min"),
+      fg3m: sum("fg3m"),
+      fg3a: has("fg3a") ? sum("fg3a") : null,
+      fgm: has("fgm") ? sum("fgm") : null,
+      fga: has("fga") ? sum("fga") : null,
+      ftm: has("ftm") ? sum("ftm") : null,
+      fta: has("fta") ? sum("fta") : null,
+    };
+  }
+  return { ok: true, result, total, actualMin, statLine };
 }
 
 function logGrade(msg, kind) {
@@ -7868,6 +7905,7 @@ async function gradeAllPending(mode) {
           target.coverMargin = r.coverMargin;
         }
         if (r.actualMin != null) target.actualMin = r.actualMin;
+        if (r.statLine) target.statLine = r.statLine;
         graded++;
         if (didChange) changed++;
         if (r.result === "hit") hit++;
@@ -8348,6 +8386,7 @@ async function gradeOneBet(id) {
     // Actual minutes played — powers the minutes-accuracy comparison
     // (which source's pre-game projection was closest).
     if (r.actualMin != null) b.actualMin = r.actualMin;
+    if (r.statLine) b.statLine = r.statLine;
     saveBets();
     renderTracker();
     showToast(`${b.player} ${b.stat}: ${r.total} → ${r.result.toUpperCase()}`);
@@ -8506,25 +8545,63 @@ function _copyDailyRecapFiltered(kind) {
     const statLbl = isTotal(b) ? "" : ` ${titleCaseStat(b.stat)}`;
     const lineStr = `${dirChar}${b.line}${statLbl}`;
     const teamStr = b.team ? ` (${b.team})` : "";
-    let actualStr = "";
-    if (b.actual != null && b.result !== "void") {
-      const a = b.actual;
-      actualStr = ` (${Number.isInteger(a) ? a : a.toFixed(1)})`;
+    const actualBare = (b.actual != null && b.result !== "void")
+      ? (Number.isInteger(b.actual) ? b.actual : Number(b.actual.toFixed(1)))
+      : null;
+    // Supporting context for the stat that was bet. A component breakdown
+    // replaces the bare total (12p/6r/5a already says 23); shooting splits sit
+    // next to it. Minutes only when nothing more useful is available. Bets
+    // graded before this existed have no statLine and just show the total.
+    const ctxParts = [];
+    const sl = b.statLine;
+    if (sl && b.result !== "void" && !isTotal(b)) {
+      const st = (b.stat || "").toUpperCase();
+      if (st === "PRA") ctxParts.push(`${sl.pts}p/${sl.reb}r/${sl.ast}a`);
+      else if (st === "PR") ctxParts.push(`${sl.pts}p/${sl.reb}r`);
+      else if (st === "PA") ctxParts.push(`${sl.pts}p/${sl.ast}a`);
+      else if (st === "RA") ctxParts.push(`${sl.reb}r/${sl.ast}a`);
+      else if (st === "PTS") {
+        // ESPN's FG already includes threes, so 3PT is a subset, not a separate
+        // bucket. FT is what makes the points reconcile. Show 3PT/FT only when
+        // they were actually attempted, so quiet nights stay uncluttered.
+        if (sl.fgm != null && sl.fga != null) ctxParts.push(`${sl.fgm}/${sl.fga} FG`);
+        if (sl.fg3a != null && sl.fg3a > 0) ctxParts.push(`${sl.fg3m}/${sl.fg3a} 3PT`);
+        if (sl.fta != null && sl.fta > 0) ctxParts.push(`${sl.ftm}/${sl.fta} FT`);
+      } else if (st === "3PM" || st === "3P" || st === "THREEPM") {
+        if (sl.fg3a != null) ctxParts.push(`${sl.fg3m}/${sl.fg3a} 3PT`);
+      }
     }
-    let resultStr;
-    if (b.result === "hit") resultStr = `W${actualStr} +${b.toWin.toFixed(2)}u`;
-    else if (b.result === "miss") resultStr = `L${actualStr} -${b.stake.toFixed(2)}u`;
-    else resultStr = `V`;
-    return `${b.player}${teamStr}   ${lineStr}  ${oddsStr}  ${resultStr}`;
+    // Projected vs actual minutes — same blended Expected the tracker card uses.
+    if (b.actualMin != null && b.expMin != null && !isTotal(b) && b.result !== "void") {
+      const _dm = b.actualMin - b.expMin;
+      ctxParts.push(`${Math.round(b.actualMin)}min vs. p${b.expMin.toFixed(1)}(${_dm >= 0 ? "+" : ""}${_dm.toFixed(1)})`);
+    }
+    const mark = (b.result === "hit" ? "W" : b.result === "miss" ? "L" : "V")
+      + (actualBare != null && b.result !== "void" ? `(${actualBare})` : "");
+    const who = `${b.player}${teamStr}:`;
+    const pick = `${dirChar}${b.line}${statLbl ? " " + statLbl.trim().toUpperCase() : ""}`;
+    const ctx = ctxParts.join(" \u00b7 ");
+    const unit = b.result === "hit" ? `+${b.toWin.toFixed(2)}u`
+               : b.result === "miss" ? `-${b.stake.toFixed(2)}u` : "";
+    return { mark, who, pick, odds: oddsStr, ctx, unit };
   };
+  // No column padding: these get pasted into iPhone Messages, which renders a
+  // proportional font, so padding never aligns — it just adds ragged gaps.
+  const formatRows = (rows) => rows.map(r => {
+    const head = [`${r.mark} ${r.who} ${r.pick} ${r.odds}`, r.unit].filter(Boolean).join("  ");
+    return r.ctx ? `${head}\n   ${r.ctx}` : head;
+  });
   // Render hits, then misses, then voids — all flow continuously with no
   // separator between hits and misses groups. Only voids get a blank line
   // above them (when present) to set them apart from the win/loss list.
-  orderedHits.forEach(b => lines.push(renderBet(b)));
-  orderedMisses.forEach(b => lines.push(renderBet(b)));
+  // One width pass across every bet so hits, misses and voids share columns.
+  const _allRows = [...orderedHits, ...orderedMisses, ...voids].map(renderBet);
+  const _formatted = formatRows(_allRows);
+  const nH = orderedHits.length, nM = orderedMisses.length;
+  _formatted.slice(0, nH + nM).forEach(l => lines.push(l));
   if (voids.length) {
-    if (orderedHits.length || orderedMisses.length) lines.push("");
-    voids.forEach(b => lines.push(renderBet(b)));
+    if (nH || nM) lines.push("");
+    _formatted.slice(nH + nM).forEach(l => lines.push(l));
   }
 
   const text = lines.join("\n");
