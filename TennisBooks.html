@@ -341,15 +341,46 @@
             url.searchParams.set('regions', 'us');
             url.searchParams.set('markets', 'h2h,spreads');
             url.searchParams.set('bookmakers', BOOKMAKERS.join(','));
-            const data = await fetchPage(url.toString());
-            if (!data.events || !Array.isArray(data.events)) throw new Error('Invalid response');
+            let data = await fetchPage(url.toString());
+            
+            // If no events with filter, try without bookmakers filter to see what's available
+            if (!data.events || !data.events.length) {
+              setDebugInfo(`${sportKey}: retrying without book filter...`);
+              const url2 = new URL(`https://parlay-api.com/v1/sports/${sportKey}/odds`);
+              url2.searchParams.set('regions', 'us');
+              url2.searchParams.set('markets', 'h2h,spreads');
+              data = await fetchPage(url2.toString());
+              if (data.events && data.events.length) {
+                setDebugInfo(`${sportKey}: got ${data.events.length} events (all books). books in response: ${new Set(data.events.flatMap(e => e.bookmakers?.map(b => b.key) || [])).size}`);
+              }
+            }
+            
+            if (!data || !data.events) {
+              throw new Error('No events in response');
+            }
+            if (!Array.isArray(data.events)) throw new Error('Events not an array');
             return data.events;
           };
 
           let allEvents = [];
-          try { allEvents = allEvents.concat(await fetchTennisSport('tennis_atp')); } catch (e) { if (!silent) console.log('ATP fetch:', e.message); }
-          try { allEvents = allEvents.concat(await fetchTennisSport('tennis_wta')); } catch (e) { if (!silent) console.log('WTA fetch:', e.message); }
-          if (!allEvents.length) throw new Error('No tennis events from API');
+          let atpErr, wtaErr;
+          try { 
+            const atp = await fetchTennisSport('tennis_atp');
+            if (atp.length) allEvents = allEvents.concat(atp);
+          } catch (e) { 
+            atpErr = e.message;
+            if (!silent) console.log('ATP fetch:', e.message); 
+          }
+          try { 
+            const wta = await fetchTennisSport('tennis_wta');
+            if (wta.length) allEvents = allEvents.concat(wta);
+          } catch (e) { 
+            wtaErr = e.message;
+            if (!silent) console.log('WTA fetch:', e.message); 
+          }
+          if (!allEvents.length) {
+            throw new Error(`No tennis odds: ATP (${atpErr || 'no error'}), WTA (${wtaErr || 'no error'})`);
+          }
 
           // Flatten ParalayAPI response → odds-like shape for processing
           let allOdds = [];
