@@ -709,6 +709,9 @@ let bets = [];
 function setCardProjSource(cardKey, source) {
   window._cardProjSource = window._cardProjSource || {};
   window._cardProjSource[cardKey] = source;
+  // Mark as an explicit user choice so the auto-upgrade below never overrides it.
+  window._cardProjSourceUserSet = window._cardProjSourceUserSet || {};
+  window._cardProjSourceUserSet[cardKey] = true;
   renderTotals();
 }
 // Flip every game card that supports it to the Combined (50/50) model at once.
@@ -5904,9 +5907,16 @@ function copySingleBet(id) {
 // Multi-select state. Populated by checkbox toggles on each bet card. Cleared
 // on bulk-copy and on tab switches that re-render the tracker from scratch.
 const selectedBetIds = new Set();
+// Prop bets store id as a NUMBER (Date.now()) while totals/spreads store a
+// STRING. The checkbox handler always passed a string, so prop ids never
+// matched and selections silently came back empty. Everything is compared as
+// a string from here on.
+const betIdKey = (id) => String(id);
+function isBetSelected(id) { return selectedBetIds.has(betIdKey(id)); }
 function toggleBetSelected(id) {
-  if (selectedBetIds.has(id)) selectedBetIds.delete(id);
-  else selectedBetIds.add(id);
+  const k = betIdKey(id);
+  if (selectedBetIds.has(k)) selectedBetIds.delete(k);
+  else selectedBetIds.add(k);
   updateBulkCopyBar();
 }
 function clearSelectedBets() {
@@ -5914,10 +5924,22 @@ function clearSelectedBets() {
   document.querySelectorAll('input[type="checkbox"][data-bet-id]').forEach(cb => { cb.checked = false; });
   updateBulkCopyBar();
 }
+// Tick every bet currently visible in the tracker, so you can start from
+// "everything" and untick the few you don't want in the post.
+function selectAllVisibleBets() {
+  const boxes = document.querySelectorAll('input[type="checkbox"][data-bet-id]');
+  if (!boxes.length) { showToast("No bets shown"); return; }
+  boxes.forEach(cb => {
+    cb.checked = true;
+    selectedBetIds.add(betIdKey(cb.getAttribute("data-bet-id")));
+  });
+  updateBulkCopyBar();
+  showToast(`Selected ${boxes.length} bet${boxes.length === 1 ? "" : "s"}`);
+}
 function copySelectedBets() {
   if (selectedBetIds.size === 0) { showToast("No bets selected"); return; }
   // Preserve user's bet-history order (which is reverse-chronological).
-  const ordered = bets.filter(b => selectedBetIds.has(b.id));
+  const ordered = bets.filter(b => isBetSelected(b.id));
   const lines = ordered.map(formatBetCopyLine);
   const text = lines.join("\n\n");
   const count = ordered.length;
@@ -5926,6 +5948,22 @@ function copySelectedBets() {
     () => showToast("Copy blocked — text in console")
   );
 }
+// Share the checked bets as a card. The IMAGE button in the bulk bar has
+// always called this, but it was never defined — the click threw and nothing
+// happened. Reuses the same renderer as the Discord card.
+async function shareSelectedBetsAsImage() {
+  if (selectedBetIds.size === 0) { showToast("No bets selected"); return; }
+  const ordered = bets.filter(b => isBetSelected(b.id));
+  if (!ordered.length) { showToast("No bets selected"); return; }
+  try {
+    await shareOpenPropsAsImageDiscord(ordered);
+    clearSelectedBets();
+  } catch (e) {
+    showToast("Image failed — see console");
+    console.error("shareSelectedBetsAsImage:", e);
+  }
+}
+
 function updateBulkCopyBar() {
   const bar = document.getElementById("bulk-copy-bar");
   if (!bar) return;
@@ -8565,66 +8603,30 @@ function _copyDailyRecapFiltered(kind) {
   const renderBet = (b) => {
     const oddsStr = b.odds > 0 ? `+${b.odds}` : `${b.odds}`;
     const dirChar = (b.ou || "").toLowerCase().startsWith("u") ? "u" : "o";
-    const statLbl = isTotal(b) ? "" : ` ${titleCaseStat(b.stat)}`;
+    const statLbl = isTotal(b) ? "" : ` ${String(b.stat || "").toUpperCase()}`;
     const lineStr = `${dirChar}${b.line}${statLbl}`;
     const teamStr = b.team ? ` (${b.team})` : "";
-    const actualBare = (b.actual != null && b.result !== "void")
-      ? (Number.isInteger(b.actual) ? b.actual : Number(b.actual.toFixed(1)))
-      : null;
-    // Supporting context for the stat that was bet. A component breakdown
-    // replaces the bare total (12p/6r/5a already says 23); shooting splits sit
-    // next to it. Minutes only when nothing more useful is available. Bets
-    // graded before this existed have no statLine and just show the total.
-    const ctxParts = [];
-    const sl = b.statLine;
-    if (sl && b.result !== "void" && !isTotal(b)) {
-      const st = (b.stat || "").toUpperCase();
-      if (st === "PRA") ctxParts.push(`${sl.pts}p/${sl.reb}r/${sl.ast}a`);
-      else if (st === "PR") ctxParts.push(`${sl.pts}p/${sl.reb}r`);
-      else if (st === "PA") ctxParts.push(`${sl.pts}p/${sl.ast}a`);
-      else if (st === "RA") ctxParts.push(`${sl.reb}r/${sl.ast}a`);
-      else if (st === "PTS") {
-        // ESPN's FG already includes threes, so 3PT is a subset, not a separate
-        // bucket. FT is what makes the points reconcile. Show 3PT/FT only when
-        // they were actually attempted, so quiet nights stay uncluttered.
-        if (sl.fgm != null && sl.fga != null) ctxParts.push(`${sl.fgm}/${sl.fga} FG`);
-        if (sl.fg3a != null && sl.fg3a > 0) ctxParts.push(`${sl.fg3m}/${sl.fg3a} 3PT`);
-        if (sl.fta != null && sl.fta > 0) ctxParts.push(`${sl.ftm}/${sl.fta} FT`);
-      } else if (st === "3PM" || st === "3P" || st === "THREEPM") {
-        if (sl.fg3a != null) ctxParts.push(`${sl.fg3m}/${sl.fg3a} 3PT`);
-      }
+    let actualStr = "";
+    if (b.actual != null && b.result !== "void") {
+      const a = b.actual;
+      actualStr = ` (${Number.isInteger(a) ? a : a.toFixed(1)})`;
     }
-    // Projected vs actual minutes — same blended Expected the tracker card uses.
-    if (b.actualMin != null && b.expMin != null && !isTotal(b) && b.result !== "void") {
-      const _dm = b.actualMin - b.expMin;
-      ctxParts.push(`${Math.round(b.actualMin)}min vs. p${b.expMin.toFixed(1)}(${_dm >= 0 ? "+" : ""}${_dm.toFixed(1)})`);
-    }
-    const mark = (b.result === "hit" ? "W" : b.result === "miss" ? "L" : "V")
-      + (actualBare != null && b.result !== "void" ? `(${actualBare})` : "");
-    const who = `${b.player}${teamStr}:`;
-    const pick = `${dirChar}${b.line}${statLbl ? " " + statLbl.trim().toUpperCase() : ""}`;
-    const ctx = ctxParts.join(" \u00b7 ");
-    const unit = b.result === "hit" ? `+${b.toWin.toFixed(2)}u`
-               : b.result === "miss" ? `-${b.stake.toFixed(2)}u` : "";
-    return { mark, who, pick, odds: oddsStr, ctx, unit };
+    // Trim trailing zeros so 1.00u reads as 1u but 1.25u keeps its decimals.
+    const u = (n) => String(Number(n.toFixed(2)));
+    let resultStr;
+    if (b.result === "hit") resultStr = `WIN${actualStr} = +${u(b.toWin)}u`;
+    else if (b.result === "miss") resultStr = `LOSS${actualStr} = -${u(b.stake)}u`;
+    else resultStr = `VOID`;
+    return `${b.player}${teamStr}: ${lineStr} ${oddsStr} ${resultStr}`;
   };
-  // No column padding: these get pasted into iPhone Messages, which renders a
-  // proportional font, so padding never aligns — it just adds ragged gaps.
-  const formatRows = (rows) => rows.map(r => {
-    const head = [`${r.mark} ${r.who} ${r.pick} ${r.odds}`, r.unit].filter(Boolean).join("  ");
-    return r.ctx ? `${head}\n   ${r.ctx}` : head;
-  });
   // Render hits, then misses, then voids — all flow continuously with no
   // separator between hits and misses groups. Only voids get a blank line
   // above them (when present) to set them apart from the win/loss list.
-  // One width pass across every bet so hits, misses and voids share columns.
-  const _allRows = [...orderedHits, ...orderedMisses, ...voids].map(renderBet);
-  const _formatted = formatRows(_allRows);
-  const nH = orderedHits.length, nM = orderedMisses.length;
-  _formatted.slice(0, nH + nM).forEach(l => lines.push(l));
+  orderedHits.forEach(b => lines.push(renderBet(b)));
+  orderedMisses.forEach(b => lines.push(renderBet(b)));
   if (voids.length) {
-    if (nH || nM) lines.push("");
-    _formatted.slice(nH + nM).forEach(l => lines.push(l));
+    if (orderedHits.length || orderedMisses.length) lines.push("");
+    voids.forEach(b => lines.push(renderBet(b)));
   }
 
   const text = lines.join("\n");
@@ -8718,6 +8720,57 @@ function copyUA() {
   const text = lines.join("\n");
   copyVal(text);
   showToast(`Copied ${open.length} props · ${byPlayer.size} players`);
+}
+
+// Copy today's open totals AND spreads together, grouped by game: the total
+// line first, the spread line beneath it, a blank line between games. Reuses
+// formatBetCopyLine so both keep their existing formats.
+function copyOpenGameLines() {
+  const isTotal  = b => (b.stat || "").toUpperCase() === "GAME_TOTAL";
+  const isSpread = b => (b.stat || "").toUpperCase() === "GAME_SPREAD";
+  const todayISO = localYMD(new Date());
+  const open = bets.filter(b => b.result === "pending" && (isTotal(b) || isSpread(b)));
+  if (!open.length) { showToast("No open totals or spreads"); return; }
+
+  // Prefer today's slate; fall back to everything open if none are dated today.
+  const todays = open.filter(b => betDayLocal(b) === todayISO);
+  const use = todays.length ? todays : open;
+
+  // Group by matchup so a game's total and spread stay together. Team strings
+  // are stored as "AWAY/HOME"; normalise so either ordering lands in one group.
+  const keyFor = (b) => {
+    const t = String(b.team || "");
+    if (t.includes("/")) return t.split("/").map(s => s.trim().toUpperCase()).sort().join("/");
+    return t.toUpperCase();
+  };
+  const groups = new Map();
+  use.forEach(b => {
+    const k = keyFor(b);
+    if (!groups.has(k)) groups.set(k, { total: null, spread: null });
+    const g = groups.get(k);
+    if (isTotal(b) && !g.total) g.total = b;
+    else if (isSpread(b) && !g.spread) g.spread = b;
+  });
+
+  const blocks = [];
+  groups.forEach(g => {
+    const lines = [];
+    if (g.total) {
+      let t = formatBetCopyLine(g.total);
+      if (g.spread) t = t.replace(/^\d{1,2}\/\d{1,2}\s+/, "");
+      lines.push(t);
+    }
+    if (g.spread) lines.push(formatBetCopyLine(g.spread));
+    if (lines.length) blocks.push(lines.join("\n"));
+  });
+  if (!blocks.length) { showToast("No open totals or spreads"); return; }
+
+  const text = blocks.join("\n\n");
+  const n = blocks.length;
+  copyTextToClipboard(text,
+    () => showToast(`Copied ${n} game${n === 1 ? "" : "s"}`),
+    () => showToast("Copy blocked — text in console")
+  );
 }
 
 function _copyOpenFiltered(kind) {
@@ -9713,8 +9766,11 @@ async function shareOpenPropsAsImageExclusive() {
   showToast(totalPages > 1 ? `Saved ${totalPages}` : "Saved");
 }
 
-async function shareOpenPropsAsImageDiscord() {
-  const open = bets.filter(b => b.result === "pending");
+async function shareOpenPropsAsImageDiscord(betList) {
+  // Defaults to open props; pass an explicit list to share a hand-picked set.
+  const open = (Array.isArray(betList) && betList.length)
+    ? betList
+    : bets.filter(b => b.result === "pending");
   if (!open.length) { showToast("No open props to share"); return; }
   const isTotal = b => (b.stat || "").toUpperCase() === "GAME_TOTAL";
   const filtered = open.filter(b => !isTotal(b));
@@ -12700,7 +12756,7 @@ function renderTracker() {
       <!-- Top row: checkbox + player + bet headline + actions -->
       <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap;">
         <div style="display:flex;align-items:flex-start;gap:8px;min-width:0;flex:1;">
-          <input type="checkbox" data-bet-id="${b.id}" onchange="toggleBetSelected('${b.id}')" ${selectedBetIds.has(b.id) ? "checked" : ""} title="Select for bulk copy" style="margin-top:3px;width:14px;height:14px;cursor:pointer;accent-color:#1e40af;flex-shrink:0;"/>
+          <input type="checkbox" data-bet-id="${b.id}" onchange="toggleBetSelected('${b.id}')" ${isBetSelected(b.id) ? "checked" : ""} title="Select for bulk copy" style="margin-top:3px;width:14px;height:14px;cursor:pointer;accent-color:#1e40af;flex-shrink:0;"/>
           <div style="display:flex;flex-direction:column;gap:1px;min-width:0;flex:1;">
             <div style="font-size:14px;font-weight:700;color:#fff;line-height:1.2;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
               ${(() => {
@@ -12912,6 +12968,7 @@ function renderTracker() {
     <div id="bulk-copy-bar" style="display:none;position:sticky;top:0;z-index:50;background:#1e40af;border-radius:8px;padding:10px 14px;margin-bottom:12px;align-items:center;gap:12px;box-shadow:0 4px 12px rgba(30,64,175,0.4);">
       <span style="color:#fff;font-size:13px;font-weight:700;letter-spacing:0.3px;"><span id="bulk-copy-count">0</span> selected</span>
       <span style="margin-left:auto;display:flex;gap:8px;">
+
         <button onclick="copySelectedBets()" style="background:#7dd3fc;border:none;color:#050507;border-radius:6px;padding:6px 14px;font-size:12px;font-weight:700;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;">COPY</button>
         <button onclick="shareSelectedBetsAsImage()" style="background:#a78bfa;border:none;color:#050507;border-radius:6px;padding:6px 14px;font-size:12px;font-weight:700;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;">📸 IMAGE</button>
         <button onclick="clearSelectedBets()" style="background:transparent;border:1px solid #fff;color:#fff;border-radius:6px;padding:6px 12px;font-size:12px;font-weight:600;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;">Clear</button>
@@ -12928,6 +12985,8 @@ function renderTracker() {
         <button onclick="copyOpenPlays()" style="background:linear-gradient(135deg, #0c0d10 0%, #0a0d12 50%, #0c0d10 100%);border:1px solid #a855f7;color:#a855f7;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:600;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;">Copy Open Props</button>
         <button onclick="copyDailyRecapProps()" style="background:linear-gradient(135deg, #0c0d10 0%, #0a0d12 50%, #0c0d10 100%);border:1px solid #a855f7;color:#a855f7;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:600;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;">Props Recap</button>
         <button onclick="copyOpenTotals()" style="background:linear-gradient(135deg, #0c0d10 0%, #0a0d12 50%, #0c0d10 100%);border:1px solid #1e40af;color:#7dd3fc;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:600;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;">Copy Totals</button>
+        <button onclick="selectAllVisibleBets()" style="background:linear-gradient(135deg, #0c0d10 0%, #0a0d12 50%, #0c0d10 100%);border:1px solid #a78bfa;color:#a78bfa;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:600;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;">Select All</button>
+        <button onclick="copyOpenGameLines()" style="background:linear-gradient(135deg, #0c0d10 0%, #0a0d12 50%, #0c0d10 100%);border:1px solid #1e40af;color:#7dd3fc;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:600;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;">Copy Games</button>
         <button onclick="copyDailyRecapTotals()" style="background:linear-gradient(135deg, #0c0d10 0%, #0a0d12 50%, #0c0d10 100%);border:1px solid #1e40af;color:#7dd3fc;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:600;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;">Totals Recap</button>
         <button onclick="exportBets()" style="background:linear-gradient(135deg, #0c0d10 0%, #0a0d12 50%, #0c0d10 100%);border:1px solid #1a1d22;color:#7dd3fc;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:600;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;">Backup</button>
         <button onclick="importBets()" style="background:linear-gradient(135deg, #0c0d10 0%, #0a0d12 50%, #0c0d10 100%);border:1px solid #1a1d22;color:#d4dae3;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:600;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;">Restore</button>
@@ -16890,10 +16949,18 @@ function renderTotals() {
     // if only one exists, rather than defaulting to nothing / a narrower
     // mode. User can still tap PLAYER or COMBINED bars to switch per card.
     window._cardProjSource = window._cardProjSource || {};
-    if (!window._cardProjSource[cardKey]) {
+    window._cardProjSourceUserSet = window._cardProjSourceUserSet || {};
+    const _userSet = !!window._cardProjSourceUserSet[cardKey];
+    const _cur = window._cardProjSource[cardKey];
+    if (!_cur) {
       if (paceEffTotal != null && blendedTotal != null) window._cardProjSource[cardKey] = "both";
       else if (paceEffTotal != null) window._cardProjSource[cardKey] = "paceeff";
       else if (blendedTotal != null) window._cardProjSource[cardKey] = "blended";
+    } else if (!_userSet && _cur !== "both" && paceEffTotal != null && blendedTotal != null) {
+      // A card that auto-defaulted to a single model (because the other source
+      // hadn't loaded yet) upgrades to Combined once both are available. Cards
+      // the user picked by hand are left alone.
+      window._cardProjSource[cardKey] = "both";
     }
     const projSource = window._cardProjSource[cardKey];
 
