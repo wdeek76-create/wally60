@@ -322,11 +322,9 @@
             let lastErr;
             for (let attempt = 0; attempt < 3; attempt++) {
               try {
-                // Use query param instead of header for auth
-                const urlObj = new URL(url);
-                urlObj.searchParams.set('apiKey', trimmedKey);
-                console.log(`[fetch] attempt ${attempt + 1}: ${urlObj.toString().slice(0, 80)}...`);
-                const response = await fetch(urlObj.toString());
+                // URL already has apiKey from caller, don't re-add it
+                console.log(`[fetch] attempt ${attempt + 1}: ${url.slice(0, 80)}...`);
+                const response = await fetch(url);
                 console.log(`[fetch] status ${response.status}`);
                 if (response.status === 429) { await sleep(1200); lastErr = new Error('Rate limited'); continue; }
                 if (!response.ok && response.status >= 500) { await sleep(500 * (attempt + 1)); lastErr = new Error(`HTTP ${response.status}`); continue; }
@@ -350,72 +348,55 @@
             const url = new URL(`https://parlay-api.com/v1/sports/${sportKey}/odds`);
             url.searchParams.set('regions', 'us');
             url.searchParams.set('markets', 'h2h,spreads');
-            url.searchParams.set('bookmakers', BOOKMAKERS.join(','));
-            console.log(`[${sportKey}] fetching with book filter...`);
-            setDebugInfo(`fetching ${sportKey} with book filter...`);
+            // Don't filter by bookmakers - get all books
+            console.log(`[${sportKey}] fetching all books...`);
+            setDebugInfo(`fetching ${sportKey}...`);
             let data = await fetchPage(url.toString());
-            
-            // If no events with filter, try without bookmakers filter to see what's available
-            if (!data.events || !data.events.length) {
-              console.log(`[${sportKey}] no events with filter, retrying without bookmakers`);
-              setDebugInfo(`${sportKey}: no events, retrying without book filter...`);
-              const url2 = new URL(`https://parlay-api.com/v1/sports/${sportKey}/odds`);
-              url2.searchParams.set('regions', 'us');
-              url2.searchParams.set('markets', 'h2h,spreads');
-              data = await fetchPage(url2.toString());
-              if (data.events && data.events.length) {
-                const books = Array.from(new Set(data.events.flatMap(e => e.bookmakers?.map(b => b.key) || [])));
-                console.log(`[${sportKey}] got ${data.events.length} events: ${books.join(',')}`);
-                setDebugInfo(`${sportKey}: ${data.events.length} events (${books.join(',')})`);
-              }
-            } else {
-              console.log(`[${sportKey}] got ${data.events.length} events with filter`);
-            }
             
             if (!data || !data.events) {
               throw new Error(`${sportKey}: no events in response`);
             }
             if (!Array.isArray(data.events)) throw new Error(`${sportKey}: events not an array`);
+            
+            // Log what books are actually in the response
+            const booksInResponse = Array.from(new Set(data.events.flatMap(e => e.bookmakers?.map(b => b.key) || [])));
+            console.log(`[${sportKey}] got ${data.events.length} events from ${booksInResponse.length} books: ${booksInResponse.join(',')}`);
             return data.events;
           };
 
           let allEvents = [];
+          const tennisSportKeys = ['tennis_atp', 'tennis_wta', 'tennis_atp_challenger', 'tennis_itf'];
+          
           try {
-            // Fetch available sports to find all tennis_* keys
-            console.log('[sports] fetching sport list...');
-            const sportsResp = await fetchPage('https://parlay-api.com/v1/sports');
-            if (!sportsResp || !Array.isArray(sportsResp)) throw new Error('Invalid sports response');
+            console.log('[tennis] fetching with rollup keys (EU region for Pinnacle)...');
+            setDebugInfo('Fetching tennis odds with rollup keys...');
             
-            const tennisSports = sportsResp.filter(s => s.key && s.key.startsWith('tennis_'));
-            console.log(`[sports] found ${tennisSports.length} tennis sports:`, tennisSports.map(s => s.key).join(', '));
-            setDebugInfo(`Found ${tennisSports.length} tennis sports, fetching odds...`);
-            
-            // Query each tennis sport
-            for (const sport of tennisSports) {
+            // Query each tennis rollup key
+            for (const sportKey of tennisSportKeys) {
               try {
-                const events = await fetchTennisSport(sport.key);
-                if (events && events.length) {
-                  console.log(`[${sport.key}] got ${events.length} events`);
-                  allEvents = allEvents.concat(events);
+                const oddUrl = new URL(`https://parlay-api.com/v1/sports/${sportKey}/odds`);
+                oddUrl.searchParams.set('regions', 'eu');  // Pinnacle is in EU region
+                oddUrl.searchParams.set('markets', 'h2h,spreads');
+                oddUrl.searchParams.set('apiKey', trimmedKey);
+                console.log(`[${sportKey}] fetching odds...`);
+                const data = await fetchPage(oddUrl.toString());
+                console.log(`[${sportKey}] raw response:`, data);
+                if (data && data.events && Array.isArray(data.events) && data.events.length > 0) {
+                  console.log(`[${sportKey}] got ${data.events.length} events`);
+                  console.log(`[${sportKey}] books in response:`, Array.from(new Set(data.events.flatMap(e => e.bookmakers?.map(b => b.key) || []))).join(','));
+                  allEvents = allEvents.concat(data.events);
+                } else {
+                  console.log(`[${sportKey}] no events found`);
                 }
               } catch (err) {
-                console.log(`[${sport.key}] failed: ${err.message}`);
+                console.log(`[${sportKey}] failed: ${err.message}`);
               }
             }
           } catch (err) {
-            console.log('[sports] failed to fetch sport list:', err.message);
-            // Fallback to just ATP/WTA if sports list fails
-            try { 
-              const atp = await fetchTennisSport('tennis_atp');
-              if (atp && atp.length) allEvents = allEvents.concat(atp);
-            } catch (e) { console.log('ATP fallback failed:', e.message); }
-            try { 
-              const wta = await fetchTennisSport('tennis_wta');
-              if (wta && wta.length) allEvents = allEvents.concat(wta);
-            } catch (e) { console.log('WTA fallback failed:', e.message); }
+            console.log('[tennis] failed:', err.message);
           }
           
-          if (!allEvents.length) throw new Error('No tennis odds from any sport key');
+          if (!allEvents.length) throw new Error('No tennis odds found');
 
           // Flatten ParalayAPI response → odds-like shape for processing
           let allOdds = [];
