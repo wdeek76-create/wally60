@@ -336,12 +336,11 @@
 <!-- ============ INGEST ============ -->
 <section id="tab-ingest" class="hidden">
   <div class="panel">
-    <h2>The Odds API · optional live-odds fetch</h2>
+    <h2>ParlayAPI · optional live-odds fetch</h2>
     <p class="meta" style="margin:0 0 12px 0;">
-      Paste your <a href="https://the-odds-api.com" target="_blank" style="color:var(--green);">the-odds-api.com</a> key to enable auto-fetch buttons on the Cards tab.
-      Fetches best-price across FanDuel, DraftKings, BetOnline, Pinnacle etc for each fighter.
+      Paste your <a href="https://parlay-api.com" target="_blank" style="color:var(--green);">parlay-api.com</a> key to enable auto-fetch buttons on the Cards tab.
+      Live odds: best price across FanDuel + Pinnacle. Closing lines: Pinnacle (sharp closer).
       Your logged bet prices are NEVER overwritten — only <b>card.ml</b> (Model tab market column) updates.
-      Free tier: 500 requests/month.
     </p>
     <div class="row two">
       <div>
@@ -438,7 +437,7 @@
       <button class="ghost" onclick="applyClosingLines()">Apply closing odds</button>
       <span class="meta" id="closingStatus"></span>
     </div>
-    <div class="meta" style="margin-top:6px; font-size:11px;">CLV% = BetOnline closing implied − your-bet-line implied. Positive = beat the close.</div>
+    <div class="meta" style="margin-top:6px; font-size:11px;">CLV% = Pinnacle closing implied − your-bet-line implied. Positive = beat the close.</div>
   </div>
 
   <div class="panel">
@@ -1052,18 +1051,26 @@ function isFullAgree(b) {
 // closingMap  = the full parsed closing paste (kept for compatibility)
 // betOdds     = the American odds you actually got
 // Returns { clv, closeOdds, closeBook } or null if no usable BetOnline close.
+// Returns { clv, closeOdds, closeBook } or null if no usable closing line.
 function computeCLV(closeEntry, closingMap, betOdds) {
-  const CLV_BOOK = 'BetOnline';
   const myImplied = americanToImplied(betOdds);
   if (myImplied == null) return null;
+  if (!closeEntry || !closeEntry.byBook) return null;
 
-  // Use BetOnline's closing line on YOUR fighter, raw (vigged) implied %.
-  const fOdds = closeEntry.byBook ? closeEntry.byBook[CLV_BOOK] : null;
-  if (fOdds == null) return null;       // no BetOnline close → don't stamp
+  // Try Pinnacle first (new CLV benchmark — sharpest closer, industry standard).
+  // Fall back to BetOnline for legacy data pasted before the switch, so old
+  // FightOdds-imported closes still produce a CLV number instead of null.
+  let fOdds = closeEntry.byBook['Pinnacle'];
+  let usedBook = 'Pinnacle';
+  if (fOdds == null) {
+    fOdds = closeEntry.byBook['BetOnline'];
+    usedBook = 'BetOnline';
+  }
+  if (fOdds == null) return null;
   const closeImplied = americanToImplied(fOdds);
   if (closeImplied == null) return null;
 
-  return { clv: closeImplied - myImplied, closeOdds: fOdds, closeBook: CLV_BOOK };
+  return { clv: closeImplied - myImplied, closeOdds: fOdds, closeBook: usedBook };
 }
 function fmtPct(n, d=1) { return n === null || n === undefined || isNaN(n) ? '—' : n.toFixed(d) + '%'; }
 function fmtNum(n, d=1) { return n === null || isNaN(n) ? '—' : (n >= 0 ? '+' : '') + n.toFixed(d); }
@@ -3285,8 +3292,8 @@ function renderBetsTable(target, bets, opts={}) {
       : '';
     html += `<tr class="${rowCls}"${rowExtraStyle}>
       ${showStream ? `<td>${streamPill(b.stream)}</td>` : ''}
-      <td><span class="rd-trigger"><b>${b.fighter}</b><div class="rd-card">${buildBetRundown(b)}</div></span>${agreeBadge}${newPill}${comboTag}</td>
-      <td class="meta">${b.opponent || ''}</td>
+      <td><div style="display:flex; align-items:center;">${renderFighterAvatar(b.fighter, 26)}<span class="rd-trigger"><b>${b.fighter}</b><div class="rd-card">${buildBetRundown(b)}</div></span>${agreeBadge}${newPill}${comboTag}</div></td>
+      <td class="meta"><div style="display:flex; align-items:center;">${b.opponent ? renderFighterAvatar(b.opponent, 24) : ''}${b.opponent || ''}</div></td>
       ${marketCell}
       ${splitCells}
       ${eyeCell}
@@ -3620,6 +3627,13 @@ function renderModel() {
     ? STATE.cards
     : STATE.cards.filter(c => c.id === cardId);
 
+  // Kick off headshot enrichment in the background for the selected card if
+  // any fighters don't have photos cached yet. Silent — no toast, no UI flash.
+  // Function skips its own work if everyone's already enriched.
+  if (cardId && cardId !== 'all' && typeof enrichCardHeadshots === 'function') {
+    enrichCardHeadshots(cardId, { silent: true }).catch(() => {});
+  }
+
   const wSaber  = +document.getElementById('modelWSaber').value;
   const wEye    = +document.getElementById('modelWEye').value;
   const wAction = +document.getElementById('modelWAction').value;
@@ -3848,9 +3862,9 @@ function renderModel() {
       : `<td class="num" style="color:${edgeColor}; font-weight:700;">${r.edge >= 0 ? '+' : ''}${r.edge.toFixed(1)}%</td>`;
     const rowStyle = (r.edge != null && r.edge >= 1) ? 'box-shadow: inset 3px 0 0 0 var(--green);' : '';
     html += `<tr style="${rowStyle}">
-      <td><b>${r.fighter}</b><div style="margin-top:2px; color:var(--text); font-weight:700; font-size:11px;">${r.sourceCount} sources</div></td>
+      <td><div style="display:flex; align-items:center;">${renderFighterAvatar(r.fighter, 28)}<div><b>${r.fighter}</b><div style="margin-top:2px; color:var(--text); font-weight:700; font-size:11px;">${r.sourceCount} sources</div></div></div></td>
       <td>
-        <div style="color:var(--text); font-weight:700;">${r.opponent || '—'}</div>
+        <div style="display:flex; align-items:center;">${renderFighterAvatar(r.opponent, 28)}<div style="color:var(--text); font-weight:700;">${r.opponent || '—'}</div></div>
         ${(() => {
           // Show opponent's MODEL Win % if we have their blended number; fall
           // back to raw market implied % (with a tiny "mkt" tag so you know
@@ -4222,11 +4236,18 @@ function renderModelBacktest() {
 // of fights (both sides w/ Model Win % + market odds + edge), then a Top Edge
 // Plays box at the bottom highlighting picks ≥5% edge. Sources are NOT
 // exposed so partners just see the model output.
-function exportModelCardImage() {
+async function exportModelCardImage() {
   const cardSel = document.getElementById('modelCardFilter');
   const cardId = cardSel ? cardSel.value : '';
   const card = STATE.cards.find(c => c.id === cardId);
   if (!card) { toast('Pick a card first', 'error'); return; }
+
+  // Kick off headshot enrichment first — waits up to a few seconds for photos
+  // to resolve so the export includes them if available. If enrich has already
+  // run for this card, this is a no-op.
+  if (typeof enrichCardHeadshots === 'function') {
+    try { await enrichCardHeadshots(cardId, { silent: true }); } catch (e) {}
+  }
 
   const wSaber  = +document.getElementById('modelWSaber').value;
   const wEye    = +document.getElementById('modelWEye').value;
@@ -4352,6 +4373,8 @@ function exportModelCardImage() {
   const dotSize        = 7;
   const dotGap         = 6;
   const rankW          = 24;
+  const avatarSize     = 36;
+  const avatarGap      = 8;   // gap between avatar and rank number
   const chipW          = 72;
   const chipH          = 44;
 
@@ -4362,7 +4385,8 @@ function exportModelCardImage() {
   const tableW = W - paddingSides * 2;
   const cardInnerW = tableW - cardPadX * 2;
   // Extra padding between fighter text and chip so nothing feels crowded.
-  const bodyContentW = cardInnerW - rankW - chipW - 24;
+  // Also reserve room for the avatar + gap on the left.
+  const bodyContentW = cardInnerW - avatarSize - avatarGap - rankW - chipW - 24;
 
   const measureCanvas = document.createElement('canvas');
   const mctx = measureCanvas.getContext('2d');
@@ -4415,6 +4439,26 @@ function exportModelCardImage() {
       modelPct, fairAm, marketAm, pickName,
     };
   });
+
+  // Preload pick fighter headshot images so we can draw them on canvas. Use
+  // Image() with a 3s timeout — if a photo doesn't load in time, we fall back
+  // to a placeholder circle with the fighter's initial. Runs in parallel.
+  const headshotMap = {};  // pickName → HTMLImageElement or null
+  {
+    const uniquePicks = [...new Set(rowLayouts.map(rl => rl.pickName))];
+    await Promise.all(uniquePicks.map(name => new Promise(resolve => {
+      // Look up headshot URL from card.ml
+      const mlKey = findMatchKey(card.ml || {}, name);
+      const url = mlKey ? card.ml[mlKey].headshotUrl : null;
+      if (!url) { headshotMap[name] = null; resolve(); return; }
+      const img = new Image();
+      img.crossOrigin = 'anonymous';   // needed for canvas draw without taint
+      const timer = setTimeout(() => { headshotMap[name] = null; resolve(); }, 3000);
+      img.onload = () => { clearTimeout(timer); headshotMap[name] = img; resolve(); };
+      img.onerror = () => { clearTimeout(timer); headshotMap[name] = null; resolve(); };
+      img.src = url;
+    })));
+  }
 
   // Row height budget: pill (14) + gap (4) + fighter lines * 18 + gap (6)
   //                  + line1 (16) + line2 (16) + line3 (16) + bottom pad (10)
@@ -4486,14 +4530,47 @@ function exportModelCardImage() {
     const bodyH = fighterLines.length * 18 + 6 + 16 * 3;
     const bodyMidY = bodyTop + bodyH / 2;
 
-    // Rank
+    // Avatar (pick's headshot as a circle, or initial placeholder if no image)
+    const avatarCX = rowX + avatarSize / 2;
+    const avatarCY = bodyMidY;
+    const img = headshotMap[pickName];
+    // Clip to circle then draw
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(avatarCX, avatarCY, avatarSize / 2, 0, Math.PI * 2);
+    ctx.closePath();
+    ctx.clip();
+    if (img) {
+      // Cover-fit the image to fill the circle
+      ctx.drawImage(img, rowX, avatarCY - avatarSize / 2, avatarSize, avatarSize);
+    } else {
+      // Placeholder — dark grey circle with fighter's initial
+      ctx.fillStyle = '#1a2432';
+      ctx.fillRect(rowX, avatarCY - avatarSize / 2, avatarSize, avatarSize);
+      ctx.fillStyle = '#94a3b8';
+      ctx.font = `700 16px ${FONT_STACK}`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText((pickName || '?').charAt(0).toUpperCase(), avatarCX, avatarCY);
+    }
+    ctx.restore();
+    // Subtle ring around the avatar
+    ctx.strokeStyle = CARD_BORDER;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(avatarCX, avatarCY, avatarSize / 2, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // Rank — shifted right of avatar
+    const rankX = rowX + avatarSize + avatarGap;
     ctx.font = FONT_RANK;
     ctx.fillStyle = RANK;
     ctx.textAlign = 'left';
-    ctx.fillText(String(rank).padStart(2, '0'), rowX, bodyMidY);
+    ctx.textBaseline = 'middle';
+    ctx.fillText(String(rank).padStart(2, '0'), rankX, bodyMidY);
 
-    // Fighter matchup (wraps)
-    const midX = rowX + rankW;
+    // Fighter matchup (wraps) — shifted right of rank
+    const midX = rankX + rankW;
     ctx.font = FONT_FIGHT;
     ctx.fillStyle = TEXT;
     let fy = bodyTop + 9;
@@ -4712,6 +4789,11 @@ function renderConsensus() {
   const status = document.getElementById('consStatusFilter').value;
   const qualOnly = document.getElementById('consQualifiedOnly').checked;
 
+  // Background headshot enrichment for the selected card (no-op if cached).
+  if (cardId && cardId !== 'all' && typeof enrichCardHeadshots === 'function') {
+    enrichCardHeadshots(cardId, { silent: true }).catch(() => {});
+  }
+
   let bets = getAllBets().filter(b => b.stream === 'consensus');
   if (cardId !== 'all') bets = bets.filter(b => b.cardId === cardId);
   if (status === 'graded') bets = bets.filter(b => b.status === 'win' || b.status === 'loss');
@@ -4727,6 +4809,10 @@ function renderConsensus() {
 function renderSolo(stream) {
   const cardId = document.getElementById(stream+'CardFilter').value;
   const status = document.getElementById(stream+'StatusFilter').value;
+  // Background headshot enrichment (silent, no-op if cached).
+  if (cardId && cardId !== 'all' && typeof enrichCardHeadshots === 'function') {
+    enrichCardHeadshots(cardId, { silent: true }).catch(() => {});
+  }
   let bets = getAllBets().filter(b => b.stream === stream);
   if (cardId !== 'all') bets = bets.filter(b => b.cardId === cardId);
   if (status === 'graded') bets = bets.filter(b => b.status === 'win' || b.status === 'loss');
@@ -4892,8 +4978,9 @@ function renderCards() {
       </div>
       <div class="actions">
         <button class="primary green" onclick="autoGradeFromESPN('${c.id}')" style="margin-right:6px;">🤖 Auto-grade</button>
-        <button class="primary" onclick="autoFetchOdds('${c.id}')" style="margin-right:6px;" title="Fetch best-price live odds from FanDuel/DK/BetOnline/Pinnacle etc. Updates card.ml only — your logged bet prices stay locked.">🎯 Fetch odds</button>
-        <button class="primary" onclick="autoFetchClosingLines('${c.id}')" style="margin-right:6px;" title="Fetch closing lines (prefers BetOnline, Pikkit standard). Populates card.closing + re-stamps CLV on every bet. Run day-of after lines settle.">🎯 Fetch closing</button>
+        <button class="primary" onclick="autoFetchOdds('${c.id}')" style="margin-right:6px;" title="Fetch best-price live odds across FanDuel + Pinnacle via ParlayAPI. Updates card.ml only — your logged bet prices stay locked.">🎯 Fetch odds</button>
+        <button class="primary" onclick="autoFetchClosingLines('${c.id}')" style="margin-right:6px;" title="Fetch closing lines from Pinnacle (sharp CLV benchmark). Populates card.closing + re-stamps CLV on every bet. Run day-of after lines settle.">🎯 Fetch closing</button>
+        <button class="primary" onclick="enrichCardHeadshots('${c.id}', {force:true})" style="margin-right:6px;" title="Fetch fighter photos from ESPN. Cached per fighter after first fetch. Runs automatically when you load a card too.">📸 Fetch faces</button>
         <button class="ghost" onclick="renameCard('${c.id}')" style="margin-right:6px;">Rename</button>
         <button class="danger" onclick="deleteCard('${c.id}')">Delete</button>
       </div>
@@ -5179,34 +5266,35 @@ function parseGradePaste(text) {
 }
 
 // ============================================================================
-// The Odds API integration — optional live-odds fetch.
-// User pastes a key on the Ingest tab; it saves to localStorage. Buttons on the
-// Cards tab (and Model tab dropdown area) call autoFetchOdds() which pulls
-// current lines from FanDuel/DraftKings/BetOnline/Pinnacle etc for every
-// fighter on the card, picks the BEST PRICE per fighter across all books, and
+// ParlayAPI integration — optional live-odds fetch.
+// User pastes a key on the Ingest tab; it saves to localStorage. Buttons on
+// the Cards tab call autoFetchOdds() which pulls current lines from
+// FanDuel + Pinnacle, picks the BEST PRICE per fighter across those two, and
 // stamps card.ml. Bet.ml is NEVER touched — logged prices stay locked so CLV
-// remains honest. A line-movement badge shows up on Model tab when card.ml
-// (current market) differs from bet.ml (what you actually bet at).
+// remains honest. Closing lines auto-fetch uses Pinnacle only (industry
+// standard CLV benchmark). A line-movement badge shows up on Model tab when
+// card.ml (current market) differs from bet.ml (what you actually bet at).
 // ============================================================================
 
 const ODDS_API_KEY_STORAGE = 'mma_edge_tracker_oddsapi_key';
 
-// Books allowed for LIVE ODDS fetches — best price wins across these six.
-// Book IDs come from The Odds API's `bookmakers[].key` field. Any book not in
-// this set is ignored even if the API returns it.
+// ParlayAPI base URL. Response shape is drop-in compatible with the-odds-api
+// so all downstream parsing works without changes.
+const ODDS_API_BASE = 'https://parlay-api.com/v1';
+
+// Books allowed for LIVE ODDS fetches — best price wins across these.
+// Book IDs are ParlayAPI's `bookmakers[].key` field. Any book not in this set
+// is ignored even if the API returns it.
 const ODDS_LIVE_ALLOWED_KEYS = new Set([
-  'betonlineag',   // BetOnline
   'fanduel',       // FanDuel
   'pinnacle',      // Pinnacle
-  'bookmaker',     // Bookmaker.eu
-  'novig',         // Novig exchange
-  'prophetx',      // ProphetX exchange
 ]);
 
-// Books allowed for CLOSING LINES — BetOnline only (Pikkit CLV benchmark).
-// If BetOnline isn't quoting a fighter's line, we skip that fighter rather
-// than falling back to another book — closing must be apples-to-apples.
-const ODDS_CLOSING_ALLOWED_KEYS = new Set(['betonlineag']);
+// Book allowed for CLOSING LINES — Pinnacle only (industry-standard sharpest
+// closer, replaces BetOnline/Pikkit benchmark). If Pinnacle isn't quoting a
+// fighter's line, we skip that fighter rather than falling back to another
+// book — closing must be apples-to-apples.
+const ODDS_CLOSING_ALLOWED_KEYS = new Set(['pinnacle']);
 
 function getOddsApiKey() {
   try { return localStorage.getItem(ODDS_API_KEY_STORAGE) || ''; } catch { return ''; }
@@ -5254,9 +5342,10 @@ async function autoFetchOdds(cardId) {
 
   toast('Fetching live odds…');
 
-  // Regions: us (BetOnline, FanDuel, Bookmaker), eu (Pinnacle), us_ex (Novig, ProphetX).
-  // us_ex may require paid tier — that's fine, we just ignore books we can't get.
-  const url = `https://api.the-odds-api.com/v4/sports/mma_mixed_martial_arts/odds/?apiKey=${encodeURIComponent(key)}&regions=us,eu,us_ex&markets=h2h&oddsFormat=american`;
+  // Regions: us (FanDuel) + eu (Pinnacle). Charges 2 credits per fetch
+  // (markets × regions = 1 × 2). Server-side `bookmakers=` filter would
+  // narrow the response but doesn't reduce credit cost.
+  const url = `${ODDS_API_BASE}/sports/mma_mixed_martial_arts/odds?apiKey=${encodeURIComponent(key)}&regions=us,eu&markets=h2h&oddsFormat=american&bookmakers=fanduel,pinnacle`;
   let data, remainingReqs;
   try {
     const res = await fetch(url);
@@ -5379,11 +5468,10 @@ async function autoFetchClosingLines(cardId) {
 
   toast('Fetching closing lines…');
 
-  // Closing lines request. We used to server-side filter with `bookmakers=`
-  // but that param is a paid-tier feature — free tier silently returns
-  // nothing. Instead: request all US books (BetOnline lives in the `us`
-  // region) and filter to BetOnline client-side. Costs 1 credit either way.
-  const url = `https://api.the-odds-api.com/v4/sports/mma_mixed_martial_arts/odds/?apiKey=${encodeURIComponent(key)}&regions=us&markets=h2h&oddsFormat=american`;
+  // Closing lines request — Pinnacle only (industry-standard sharp closer,
+  // replaces BetOnline as CLV benchmark). Server-side `bookmakers=pinnacle`
+  // filter narrows the response. Pinnacle lives in the `eu` region.
+  const url = `${ODDS_API_BASE}/sports/mma_mixed_martial_arts/odds?apiKey=${encodeURIComponent(key)}&regions=eu&markets=h2h&oddsFormat=american&bookmakers=pinnacle`;
   let data, remainingReqs;
   try {
     const res = await fetch(url);
@@ -5393,55 +5481,56 @@ async function autoFetchClosingLines(cardId) {
   } catch (err) { toast(`Fetch failed: ${err.message}`, 'error'); return; }
 
   if (!Array.isArray(data) || !data.length) {
-    toast('Odds API returned no events (may be no upcoming MMA cards)', 'error');
+    toast('ParlayAPI returned no events (may be no upcoming MMA cards)', 'error');
     return;
   }
 
-  // Count books seen for diagnostics — if BetOnline never appears, the user
+  // Count books seen for diagnostics — if Pinnacle never appears, the user
   // should know why fighters got skipped.
-  let betonlineEvents = 0;
+  let pinnacleEvents = 0;
   let totalOutcomes = 0;
 
-  // Build a fighter → BetOnline price lookup. Filter client-side to BetOnline
-  // only. computeCLV reads byBook.BetOnline literally, so we key it that way.
-  const closingByFighter = {}; // norm → { name, byBook: { BetOnline: odds } }
+  // Build fighter → Pinnacle price lookup. Filter client-side to Pinnacle as
+  // a safety net in case the API returns extra books. computeCLV reads
+  // byBook.Pinnacle literally, so we key it that way.
+  const closingByFighter = {}; // norm → { name, byBook: { Pinnacle: odds } }
   data.forEach(ev => {
-    let evHasBetOnline = false;
+    let evHasPinnacle = false;
     (ev.bookmakers || []).forEach(bm => {
-      // Only BetOnline contributes to closing lines
+      // Only Pinnacle contributes to closing lines
       if (!ODDS_CLOSING_ALLOWED_KEYS.has(bm.key)) return;
-      evHasBetOnline = true;
+      evHasPinnacle = true;
       (bm.markets || []).forEach(mk => {
         if (mk.key !== 'h2h') return;
         (mk.outcomes || []).forEach(oc => {
           if (typeof oc.price !== 'number') return;
           const norm = normalizeName(oc.name);
           if (!closingByFighter[norm]) closingByFighter[norm] = { name: oc.name, byBook: {} };
-          closingByFighter[norm].byBook['BetOnline'] = oc.price;
+          closingByFighter[norm].byBook['Pinnacle'] = oc.price;
           totalOutcomes++;
         });
       });
     });
-    if (evHasBetOnline) betonlineEvents++;
+    if (evHasPinnacle) pinnacleEvents++;
   });
 
   // Init card.closing if missing
   card.closing = card.closing || {};
   let updated = 0;
-  let skippedNoBetOnline = 0;
+  let skippedNoPinnacle = 0;
   Object.entries(card.ml || {}).forEach(([fighterKey, fighterMl]) => {
     const norm = normalizeName(fighterMl.name);
     const entry = closingByFighter[norm];
-    // Skip if fighter isn't in the API response OR BetOnline isn't quoting
-    if (!entry || entry.byBook['BetOnline'] == null) {
-      if (entry) skippedNoBetOnline++;
+    // Skip if fighter isn't in the API response OR Pinnacle isn't quoting
+    if (!entry || entry.byBook['Pinnacle'] == null) {
+      if (entry) skippedNoPinnacle++;
       return;
     }
     card.closing[norm] = {
       name: fighterMl.name,
-      odds: entry.byBook['BetOnline'],
-      book: 'BetOnline',
-      byBook: entry.byBook,          // computeCLV reads .BetOnline off this
+      odds: entry.byBook['Pinnacle'],
+      book: 'Pinnacle',
+      byBook: entry.byBook,          // computeCLV reads .Pinnacle off this
       autoFetched: true,
       fetchedAt: Date.now(),
     };
@@ -5468,17 +5557,17 @@ async function autoFetchClosingLines(cardId) {
   rerenderCurrentTab();
   const remStr = remainingReqs ? ` · ${remainingReqs} req remaining` : '';
   const clvStr = clvStamped ? ` · CLV stamped on ${clvStamped} bet${clvStamped === 1 ? '' : 's'}` : '';
-  const skipStr = skippedNoBetOnline ? ` · ${skippedNoBetOnline} skipped (no BetOnline)` : '';
+  const skipStr = skippedNoPinnacle ? ` · ${skippedNoPinnacle} skipped (no Pinnacle)` : '';
 
-  // Diagnostic: if the API returned events but NONE of them had BetOnline
-  // (past card, BOL took the market down early, or free tier restrictions),
-  // the user needs to know why nothing got stamped.
+  // Diagnostic: if the API returned events but NONE had Pinnacle data (past
+  // card, ParlayAPI didn't capture Pinnacle for this event, etc.) the user
+  // needs to know why nothing got stamped.
   if (updated === 0 && totalOutcomes === 0) {
-    toast(`No BetOnline lines in API response (${data.length} events checked${remStr}). BOL may have closed the market — try earlier or use manual paste.`, 'error');
+    toast(`No Pinnacle lines in response (${data.length} events checked${remStr}). May be a past card or Pinnacle didn't cover — try manual paste.`, 'error');
     return;
   }
   if (updated === 0) {
-    toast(`No fighter name matches. API had ${totalOutcomes} BOL prices but none matched card fighters${remStr}.`, 'error');
+    toast(`No fighter name matches. API had ${totalOutcomes} Pinnacle prices but none matched card fighters${remStr}.`, 'error');
     return;
   }
 
@@ -5493,6 +5582,144 @@ async function autoFetchClosingLines(cardId) {
 // ESPN has a winner marked. Name matches use findMatchKey; on mismatch the
 // user gets a picker prompt with ESPN's fighter list for that fight so they
 // can confirm the pairing manually.
+// ============================================================================
+// ESPN headshot resolver — walks the $ref chain to pull real fighter photos.
+// ESPN's scoreboard call is thin (no athlete IDs inline), so we have to hit
+// the core API per event and follow competitors[].athlete.$ref to get each
+// athlete object's `headshot.href`. Results are cached on card.ml[fighter]
+// .headshotUrl so subsequent renders are instant. Called in the background
+// after card render; UI shows a placeholder circle first, then swaps in the
+// real image via id-targeted DOM update.
+// ============================================================================
+
+function fixEspnUrl(url) {
+  // ESPN's $ref links come back as http on some endpoints. Force https so
+  // they load cleanly on GitHub Pages (mixed-content blocks would otherwise
+  // silently drop the image).
+  if (!url) return url;
+  return url.replace(/^http:/, 'https:');
+}
+
+async function enrichCardHeadshots(cardId, opts = {}) {
+  const { silent = false, force = false } = opts;
+  const card = STATE.cards.find(c => c.id === cardId);
+  if (!card || !card.date) { if (!silent) toast('Card has no date', 'error'); return; }
+
+  // Skip if fully enriched already (unless force). If EVERY fighter has a
+  // headshot cached, no fetch needed — save API calls.
+  const fighters = Object.values(card.ml || {});
+  if (!fighters.length) { if (!silent) toast('No fighters on card', 'error'); return; }
+  const needsAny = force || fighters.some(m => !m.headshotUrl);
+  if (!needsAny) return;
+
+  if (!silent) toast('Fetching fighter photos…');
+
+  // Query ESPN scoreboard for card date + next day (cards span midnight)
+  const d0 = card.date.replace(/-/g, '');
+  const d1 = (() => {
+    const t = new Date(card.date + 'T12:00:00Z');
+    t.setUTCDate(t.getUTCDate() + 1);
+    return t.toISOString().slice(0, 10).replace(/-/g, '');
+  })();
+
+  const scoreboardBase = 'https://site.api.espn.com/apis/site/v2/sports/mma/ufc/scoreboard';
+  const scoreboardEventIds = new Set();
+  for (const d of [d0, d1]) {
+    try {
+      const res = await fetch(`${scoreboardBase}?dates=${d}`);
+      if (!res.ok) continue;
+      const data = await res.json();
+      (data.events || []).forEach(ev => { if (ev.id) scoreboardEventIds.add(ev.id); });
+    } catch (e) {}
+  }
+
+  if (!scoreboardEventIds.size) {
+    if (!silent) toast('No ESPN events found for this card date', 'error');
+    return;
+  }
+
+  // For each event, walk competitions[].competitors[].athlete.$ref to get the
+  // headshot. Match ESPN athlete names to card.ml fighter names by normalize.
+  const nameToHeadshot = {}; // normalizedName → { url, athleteId }
+  const coreBase = 'https://sports.core.api.espn.com/v2/sports/mma/leagues/ufc/events';
+
+  for (const eventId of scoreboardEventIds) {
+    try {
+      const evRes = await fetch(`${coreBase}/${eventId}`);
+      if (!evRes.ok) continue;
+      const ev = await evRes.json();
+      const competitions = ev.competitions || [];
+      for (const comp of competitions) {
+        const competitors = comp.competitors || [];
+        for (const c of competitors) {
+          if (!c.athlete || !c.athlete.$ref) continue;
+          try {
+            const athRes = await fetch(fixEspnUrl(c.athlete.$ref));
+            if (!athRes.ok) continue;
+            const ath = await athRes.json();
+            const name = ath.fullName || ath.displayName || '';
+            const url = ath.headshot?.href || (ath.id ? `https://a.espncdn.com/i/headshots/mma/players/full/${ath.id}.png` : null);
+            if (name && url) {
+              nameToHeadshot[normalizeName(name)] = { url: fixEspnUrl(url), athleteId: ath.id };
+            }
+          } catch (e) {}
+        }
+      }
+    } catch (e) {}
+  }
+
+  // Match card fighters to resolved headshots
+  let resolved = 0;
+  Object.entries(card.ml).forEach(([key, m]) => {
+    const norm = normalizeName(m.name);
+    const hit = nameToHeadshot[norm];
+    if (hit) {
+      m.headshotUrl = hit.url;
+      m.espnAthleteId = hit.athleteId;
+      resolved++;
+    }
+  });
+
+  saveState(STATE);
+  rerenderCurrentTab();
+  if (!silent) {
+    const total = fighters.length;
+    toast(`Fetched ${resolved} / ${total} headshots`);
+  }
+}
+
+// Render a small avatar chip for a fighter. If a headshot URL is cached in
+// STATE, render it directly. Otherwise show a placeholder circle with the
+// fighter's first initial. Both are the same size so layout doesn't shift
+// when photos load in.
+function renderFighterAvatar(fighterName, size = 24) {
+  const initial = (fighterName || '?').trim().charAt(0).toUpperCase();
+  // Look up headshot URL from any card.ml entry across all cards. Names are
+  // normalized so an ingested fighter matches regardless of casing/spacing.
+  const norm = normalizeName(fighterName || '');
+  let url = null;
+  for (const c of STATE.cards) {
+    for (const k in (c.ml || {})) {
+      const m = c.ml[k];
+      if (m.headshotUrl && normalizeName(m.name) === norm) {
+        url = m.headshotUrl;
+        break;
+      }
+    }
+    if (url) break;
+  }
+  const px = size + 'px';
+  const styleBase = `width:${px}; height:${px}; border-radius:50%; display:inline-block; vertical-align:middle; margin-right:6px; flex-shrink:0;`;
+  if (url) {
+    // <img> with onerror fallback to placeholder circle if image doesn't load
+    const fallback = `this.outerHTML='<span style=&quot;${styleBase} background:var(--bg2); border:1px solid var(--border); text-align:center; line-height:${px}; font-size:${Math.floor(size*0.45)}px; font-weight:700; color:var(--muted);&quot;>${initial}</span>'`;
+    return `<img src="${url}" alt="${fighterName}" style="${styleBase} object-fit:cover; background:var(--bg2);" onerror="${fallback}">`;
+  }
+  return `<span style="${styleBase} background:var(--bg2); border:1px solid var(--border); text-align:center; line-height:${px}; font-size:${Math.floor(size*0.45)}px; font-weight:700; color:var(--muted);">${initial}</span>`;
+}
+
+
+// Auto-grade a card by fetching results from ESPN's undocumented MMA/UFC API.
 async function autoGradeFromESPN(cardId) {
   const card = STATE.cards.find(c => c.id === cardId);
   if (!card) { toast('Card not found', 'error'); return; }
