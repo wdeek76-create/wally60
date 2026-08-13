@@ -3463,7 +3463,11 @@ function updateEvPreview() {
   if (ev == null || isNaN(ev)) { el.textContent = ""; return; }
   const color = ev >= 5 ? "#22c55e" : ev > 0 ? "#7dd3fc" : "#f87171";
   const decimals = (window._modalEvTyped != null && Math.abs(ev*10 - Math.round(ev*10)) > 0.01) ? 2 : 1;
-  el.innerHTML = `EV: <span style="color:${color}">${ev>0?'+':''}${ev.toFixed(decimals)}%</span>`;
+  // Worst price still worth taking at the 5% rule — so you can see at a glance
+  // how much room is left before a book stops qualifying.
+  const pt = playToOdds(fair, 5);
+  const ptStr = pt != null ? `  <span style="color:#7a8390;">play to ${pt > 0 ? "+" : ""}${pt}</span>` : "";
+  el.innerHTML = `EV: <span style="color:${color}">${ev>0?'+':''}${ev.toFixed(decimals)}%</span>${ptStr}`;
 }
 
 // ── ALT BOOKS ──────────────────────────────────────────────────────
@@ -3504,6 +3508,179 @@ function toggleBookVisibility(book) {
   buildAltBookList();
   renderBookSettings();
 }
+// ── PARLAY API: optional book auto-fill ───────────────────────
+// Fills alt-book odds from ParlayAPI, but ONLY where the price clears the
+// 5% EV rule — so anything it writes is already worth taking.
+//
+// The API key lives in localStorage, never in this file: the tool is served
+// publicly, so a committed key would be readable by anyone (ParlayAPI's own
+// docs say never commit it). Entered once via the Parlay button.
+const PARLAY_KEY_STORAGE = "wnba_parlay_api_key";
+function getParlayKey() { try { return localStorage.getItem(PARLAY_KEY_STORAGE) || ""; } catch (e) { return ""; } }
+function setParlayKey(k) { try { localStorage.setItem(PARLAY_KEY_STORAGE, String(k || "").trim()); } catch (e) {} }
+function promptParlayKey() {
+  const cur = getParlayKey();
+  const k = prompt("ParlayAPI key (stored only in this browser):", cur);
+  if (k == null) return false;
+  setParlayKey(k);
+  showToast(k.trim() ? "Parlay key saved" : "Parlay key cleared");
+  return !!k.trim();
+}
+
+// modal stat -> ParlayAPI market key
+const PARLAY_MARKET_BY_STAT = {
+  PTS: "player_points", REB: "player_rebounds", AST: "player_assists",
+  "3PM": "player_threes", PRA: "player_pra", PR: "player_pts_rebs",
+  PA: "player_pts_asts", RA: "player_rebs_asts",
+  STL: "player_steals", BLK: "player_blocks", TOV: "player_turnovers"
+};
+// ParlayAPI bookmaker key -> this tool's book label
+const PARLAY_BOOK_MAP = {
+  fanduel: "FanDuel", draftkings: "DraftKings", pinnacle: "Pinnacle",
+  betrivers: "Kambi", fliff: "Fliff", bovada: "Prop Builder", novig: "Novig"
+};
+
+let _parlayCache = { at: 0, rows: [] };
+async function fetchParlayProps(force) {
+  const key = getParlayKey();
+  if (!key) throw new Error("no-key");
+  // One /props call returns every book and market for the sport (3 credits),
+  // so cache for 3 minutes rather than calling per player.
+  if (!force && _parlayCache.rows.length && (Date.now() - _parlayCache.at) < 180000) return _parlayCache.rows;
+  const url = "https://parlay-api.com/v1/sports/basketball_wnba/props?limit=10000";
+  const res = await fetch(url, { headers: { "X-API-Key": key } });
+  if (res.status === 401) throw new Error("bad-key");
+  if (res.status === 403) throw new Error("credits");
+  if (!res.ok) throw new Error("http-" + res.status);
+  const rows = await res.json();
+  _parlayCache = { at: Date.now(), rows: Array.isArray(rows) ? rows : [] };
+  return _parlayCache.rows;
+}
+
+// Fill the alt-book inputs for the player/stat/side currently in the modal.
+// Only writes a book when that price is >= 5% EV against the modal's fair.
+async function fillBooksFromParlay() {
+  try {
+    if (!getParlayKey() && !promptParlayKey()) return;
+    const player = (window._modalPlayer || document.getElementById("modal-player-name")?.textContent || "").trim();
+    const stat = (document.getElementById("modal-stat")?.value || "").toUpperCase();
+    const ou = (window._modalOU || "under").toLowerCase();
+    const line = window._modalLine;
+    const fair = parseInt(document.getElementById("modal-fair")?.value);
+    if (!player) { showToast("No player in modal"); return; }
+    if (line == null || isNaN(line)) { showToast("Enter a line first"); return; }
+    if (isNaN(fair)) { showToast("Need a fair price first"); return; }
+    const market = PARLAY_MARKET_BY_STAT[stat];
+    if (!market) { showToast(`No Parlay market for ${stat}`); return; }
+
+    showToast("Fetching odds…");
+    let rows;
+    try { rows = await fetchParlayProps(false); }
+    catch (e) {
+      if (e.message === "bad-key") { showToast("Parlay key rejected"); promptParlayKey(); return; }
+      if (e.message === "credits") { showToast("Parlay credit limit reached"); return; }
+      showToast("Parlay fetch failed — see console");
+      console.error("fillBooksFromParlay:", e);
+      return;
+    }
+
+    const want = resolveNorm(player);
+
+
+    // Every row for this player+market — unmapped books and alt lines stay
+    // visible rather than being silently dropped.
+    const allForPlayer = rows.filter(r =>
+      r && r.market_key === market && resolveNorm(r.player || "") === want);
+    // Which books did the feed carry at all? A book absent here isn't being
+    // filtered by us — it simply wasn't in the response.
+    const booksInFeed = [...new Set(rows.map(r => r && r.bookmaker).filter(Boolean))].sort();
+    console.log(`[Parlay] ${rows.length} rows · books in feed: ${booksInFeed.join(", ") || "(none)"}`);
+    if (!allForPlayer.length) {
+      // Work out WHY there's no match, so the toast says something actionable
+      // instead of a bare "no rows".
+      const sameMarket = rows.filter(r => r && r.market_key === market);
+      const samePlayer = rows.filter(r => r && resolveNorm(r.player || "") === want);
+      console.log(`[Parlay] no match for "${player}" / ${stat} (${market})`);
+      console.log(`  rows returned: ${rows.length}`);
+      console.log(`  rows for this market: ${sameMarket.length}`);
+      console.log(`  rows for this player (any market): ${samePlayer.length}`);
+      if (samePlayer.length) {
+        console.log("  markets this player DOES have:", [...new Set(samePlayer.map(r => r.market_key))].join(", "));
+      } else if (sameMarket.length) {
+        // Name mismatch is the usual culprit — show near matches to eyeball it.
+        const last = String(player).trim().split(/\s+/).pop().toLowerCase();
+        const near = [...new Set(sameMarket.map(r => r.player))].filter(n => String(n).toLowerCase().includes(last));
+        console.log("  players in this market matching last name:", near.length ? near.join(", ") : "(none)");
+        console.log("  sample of players returned:", [...new Set(sameMarket.map(r => r.player))].slice(0, 12).join(", "));
+      }
+      if (!rows.length) { showToast("Parlay returned 0 rows — no WNBA props posted yet?"); return; }
+      if (!sameMarket.length) { showToast(`No ${stat} market in feed (${rows.length} rows) — see console`); return; }
+      if (samePlayer.length) { showToast(`${player} has no ${stat} — see console for their markets`); return; }
+      showToast(`"${player}" not found in feed — see console`);
+      return;
+    }
+    console.log(`[Parlay] ${player} ${stat} — ${allForPlayer.length} rows (line ${line} requested):`);
+    // Both sides shown: if the modal is on the under but a book's good number
+    // is the over (or the feed labels sides differently), that's visible here
+    // rather than looking like a missing book.
+    console.log(`[Parlay] side=${ou.toUpperCase()} · fair=${fair} · line=${line}`);
+    console.table(allForPlayer.map(r => {
+      const used = ou === "over" ? r.over_price : r.under_price;
+      const other = ou === "over" ? r.under_price : r.over_price;
+      const evOf = (p) => (p == null || isNaN(p)) ? "—" : calcEdge(Number(p), fair).toFixed(1) + "%";
+      const slot = PARLAY_BOOK_MAP[r.bookmaker];
+      const inp = slot ? document.querySelector(`input.alt-input[data-book="${slot}"]`) : null;
+      return {
+        book: r.bookmaker,
+        slot: slot || "— UNMAPPED —",
+        line: r.line,
+        over: r.over_price,
+        under: r.under_price,
+        usedPrice: used,
+        ev: evOf(used),
+        evOtherSide: evOf(other),
+        wouldFill: slot ? (used != null && !isNaN(used) && calcEdge(Number(used), fair) >= 5) : false,
+        fieldBusy: inp ? !!inp.value.trim() : "no-field",
+        age: r.age_seconds
+      };
+    }));
+
+    // Consider EVERY line a book offers, not just the modal's. Books routinely
+    // hang a different number, and dropping those was hiding real 5%+ prices.
+    // A book at a different line is written as an alt line so it stays explicit.
+    let filled = 0, skipped = 0, altLine = 0, offLine = 0, unmapped = [];
+    allForPlayer.forEach(r => {
+      const label = PARLAY_BOOK_MAP[r.bookmaker];
+      if (!label) { unmapped.push(r.bookmaker); return; }
+      const price = ou === "over" ? r.over_price : r.under_price;
+      if (price == null || isNaN(price)) return;
+      // Sanity: ignore rows miles from the modal's line. The feed occasionally
+      // carries a mispaired row (e.g. line 24.5 at -3471 on a 15.5 player) and
+      // filling from it would be worse than leaving the field blank.
+      const lineGap = Math.abs(Number(r.line) - Number(line));
+      if (!isFinite(lineGap) || lineGap > 2) { offLine++; return; }
+      const ev = calcEdge(Number(price), fair);
+      if (ev == null || ev < 5) { skipped++; return; }   // the 5% rule
+      const inp = document.querySelector(`input.alt-input[data-book="${label}"]`);
+      if (!inp || inp.value.trim()) return;              // never overwrite what you typed
+      const sameLine = Number(r.line) === Number(line);
+      inp.value = sameLine ? String(price)
+                           : `${ou === "over" ? "o" : "u"}${r.line} ${price}`;
+      if (!sameLine) altLine++;
+      filled++;
+    });
+    const uniq = [...new Set(unmapped)];
+    const extra = uniq.length ? ` · unmapped: ${uniq.join(", ")}` : "";
+    const altStr = (altLine ? ` · ${altLine} alt-line` : "") + (offLine ? ` · ${offLine} off-line` : "");
+    showToast(filled
+      ? `Filled ${filled} book${filled===1?"":"s"}${altStr} (${skipped} under 5%${extra})`
+      : `No books at 5%+ (${skipped} checked${extra})`);
+  } catch (e) {
+    showToast("Fill failed — see console");
+    console.error("fillBooksFromParlay:", e);
+  }
+}
+
 function getVisibleAltBooks() {
   return ALT_BOOKS_ORDER.filter(b => !hiddenBooks.has(b));
 }
@@ -21044,6 +21221,10 @@ function evCalcUpdateEvPanel() {
 or one per line — book shorthand + odds (+ optional line + ev%)" spellcheck="false"
           style="width:100%;min-height:70px;background:#050507;border:1px solid #1e40af77;color:#e2e8f0;border-radius:5px;padding:6px 8px;font-size:12px;font-family:'JetBrains Mono','Menlo',monospace;outline:none;resize:vertical;"></textarea>
         <button type="button" onclick="applyAltBulk()" style="margin-top:4px;background:#1e40af;border:none;color:#050507;border-radius:4px;padding:5px 12px;font-size:11px;font-weight:700;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;letter-spacing:0.5px;">APPLY</button>
+      </div>
+      <div style="margin-top:4px;display:flex;gap:6px;align-items:center;">
+        <button type="button" onclick="fillBooksFromParlay()" title="Fill books from ParlayAPI — only prices at 5%+ EV, never overwrites what you typed" style="background:#0c0d10;border:1px solid #22c55e77;color:#22c55e;border-radius:5px;padding:5px 12px;font-size:11px;font-weight:600;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;">Fill 5%+ from Parlay</button>
+        <button type="button" onclick="promptParlayKey()" title="Set or change your ParlayAPI key (stored only in this browser)" style="background:transparent;border:1px solid #1a1d22;color:#7a8390;border-radius:5px;padding:5px 10px;font-size:11px;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;">key</button>
       </div>
       <div id="modal-altbooks-list" style="margin-top:4px;display:flex;flex-direction:column;gap:3px;"></div>
     </div>
