@@ -574,6 +574,7 @@ table colgroup col.avg-col{width:16%;}
               <div style="display:flex;gap:6px;margin-top:6px;">
                 <button onclick="parseRotoWireInjuriesPaste()" style="background:#93c5fd;border:none;color:#050507;border-radius:5px;padding:5px 12px;font-size:11px;font-weight:700;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;letter-spacing:0.3px;">PARSE</button>
                 <button onclick="document.getElementById('rw-injury-paste').value='';document.getElementById('rw-injury-status').textContent='';" style="background:transparent;border:1px solid #1a1d22;color:#d4dae3;border-radius:5px;padding:5px 12px;font-size:11px;font-weight:600;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;letter-spacing:0.3px;">CLEAR</button>
+                <button onclick="clearStoredInjuries()" title="Wipe the saved injury report. Otherwise it persists until you clear it." style="background:transparent;border:1px solid #f8717155;color:#f87171;border-radius:5px;padding:5px 12px;font-size:11px;font-weight:600;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;letter-spacing:0.3px;">CLEAR SAVED</button>
               </div>
             </div>
           </details>
@@ -1520,6 +1521,17 @@ function renderTable() {
   const lookups = getSlotLookups();
   const rows = getRowsForRender();
 
+  // Kick off headshot loading for whichever teams are on screen. Fires once per
+  // team, re-renders when done, and is a no-op on repeat calls.
+  try {
+    const teamsShown = [...new Set(rows.map(r => r && r.team).filter(Boolean))];
+    const missing = teamsShown.some(t => {
+      const espn = (INTERNAL_TO_ESPN_ABBR[String(t).toUpperCase()] || String(t).toUpperCase()).toLowerCase();
+      return !_rosterHeadshotCache.has(espn);
+    });
+    if (missing && typeof loadTableHeadshots === "function") loadTableHeadshots(teamsShown);
+  } catch (e) {}
+
   document.getElementById("shown-count").textContent = `${rows.length} shown`;
   // Live-update the "N Props Tracked" counter next to the search bar — this
   // fires on every renderTable() call, which includes right after a bet is
@@ -1642,6 +1654,7 @@ function renderTable() {
     return `<tr class="${i%2===0?'even':'odd'}">
       <td style="padding:7px 10px;">
         <div style="display:flex;align-items:center;gap:8px;">
+          ${tableHeadshotHtml(r.rawName, 22)}
           <span style="font-size:14px;font-weight:700;color:${tc};white-space:nowrap;">${displayPlayerName(r.rawName)}</span>
           <span style="display:inline-flex;align-items:center;gap:4px;flex:0 0 auto;">${r.team ? `${teamLogoImg(r.team, 16)}<span style="background:#7dd3fc1a;border:1px solid #7dd3fc55;color:#7dd3fc;font-size:9px;font-weight:800;letter-spacing:0.4px;border-radius:4px;padding:1px 6px;">${displayTeamAbbr(r.team)}</span>` : ''}${r.pos ? `<span style="background:#93c5fd1a;border:1px solid #93c5fd55;color:#93c5fd;font-size:9px;font-weight:800;letter-spacing:0.4px;border-radius:4px;padding:1px 6px;">${r.pos}</span>` : ''}${(() => {
             const inj = getInjuryForPlayer(r.rawName, r.team);
@@ -3679,6 +3692,36 @@ async function fillBooksFromParlay() {
     showToast("Fill failed — see console");
     console.error("fillBooksFromParlay:", e);
   }
+}
+
+// ── Projections-table headshots ───────────────────────────────
+// Small circular face before each player name. Rosters are fetched once per
+// team and cached; the <img> points straight at ESPN (no canvas involved), so
+// failures just fall back to an initials badge.
+const _tableHeadshots = new Map();     // resolveNorm(name) -> href
+let _tableHeadshotsLoading = false;
+async function loadTableHeadshots(teams) {
+  if (_tableHeadshotsLoading) return;
+  _tableHeadshotsLoading = true;
+  try {
+    const want = [...new Set((teams || []).filter(Boolean))];
+    await Promise.all(want.map(async (t) => {
+      const roster = await _fetchTeamHeadshots(t);
+      roster.forEach((href, key) => { if (!_tableHeadshots.has(key)) _tableHeadshots.set(key, href); });
+    }));
+    if (typeof renderTable === "function") renderTable();
+  } catch (e) { /* offline — initials fallback */ }
+  finally { _tableHeadshotsLoading = false; }
+}
+function tableHeadshotHtml(nameRaw, size) {
+  const name = (nameRaw == null) ? "" : String(nameRaw);
+  const sz = size || 22;
+  const uri = _tableHeadshots.get(resolveNorm(name));
+  if (uri) {
+    return `<span style="width:${sz}px;height:${sz}px;border-radius:50%;background:#0d0f13;border:1px solid #000;overflow:hidden;position:relative;display:inline-block;flex:0 0 auto;vertical-align:middle;"><img src="${uri}" alt="" loading="lazy" style="position:absolute;top:0;left:50%;width:${Math.round(sz*1.62)}px;height:auto;transform:translateX(-50%);display:block;"/></span>`;
+  }
+  const initials = String(displayPlayerName(name) || "").split(/\s+/).filter(Boolean).slice(0, 2).map(w => w[0]).join("").toUpperCase();
+  return `<span style="width:${sz}px;height:${sz}px;border-radius:50%;background:#12141a;border:1px solid #000;color:#7dd3fc;font-size:${Math.round(sz*0.36)}px;font-weight:800;display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;letter-spacing:-0.3px;vertical-align:middle;">${escapeHtmlBasic(initials)}</span>`;
 }
 
 function getVisibleAltBooks() {
@@ -6150,8 +6193,24 @@ function updateBulkCopyBar() {
   if (countEl) countEl.textContent = String(selectedBetIds.size);
 }
 
+// Full backup: bets plus the app state worth carrying between machines.
+// Keys are copied verbatim from localStorage so this keeps working as new
+// settings are added.
+const BACKUP_KEYS = [
+  "wnba_injuries_cache", "wnba_injuries_show_all", "wnba_blender_hidden_books",
+  "wnba_totals_page_dimers_v1"
+];
 function exportBets() {
-  const json = JSON.stringify(bets, null, 2);
+  const extras = {};
+  BACKUP_KEYS.forEach(k => {
+    try { const v = localStorage.getItem(k); if (v != null) extras[k] = v; } catch (e) {}
+  });
+  const json = JSON.stringify({
+    __format: "wnba-blender-backup-v1",
+    exportedAt: new Date().toISOString(),
+    bets,
+    storage: extras
+  }, null, 2);
   const blob = new Blob([json], {type:"application/json"});
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
@@ -6168,7 +6227,28 @@ function importBets() {
     if (!file) return;
     const reader = new FileReader();
     reader.onload = ev => {
-      try { bets = JSON.parse(ev.target.result); saveBets(); renderTracker(); }
+      try {
+        const parsed = JSON.parse(ev.target.result);
+        if (Array.isArray(parsed)) {
+          bets = parsed;                       // legacy bets-only backup
+        } else if (parsed && parsed.__format === "wnba-blender-backup-v1") {
+          bets = Array.isArray(parsed.bets) ? parsed.bets : [];
+          if (parsed.storage) {
+            Object.entries(parsed.storage).forEach(([k, v]) => {
+              try { localStorage.setItem(k, v); } catch (e) {}
+            });
+          }
+          try {
+            const raw = localStorage.getItem("wnba_injuries_cache");
+            if (raw) {
+              const d = JSON.parse(raw);
+              if (d && d.records) { injuriesCache = null; _ingestInjuryRecords(d.records); injuriesLastFetched = d.fetchedAt || Date.now(); }
+            }
+          } catch (e) {}
+          if (typeof updateInjuryPanel === "function") updateInjuryPanel();
+        } else { throw new Error("unrecognised backup"); }
+        saveBets(); renderTracker();
+      }
       catch { alert("Invalid file."); }
     };
     reader.readAsText(file);
@@ -10267,7 +10347,18 @@ async function shareOpenPropsAsImageDiscord(betList) {
     const uniqueMatchups = [...new Set(enriched.map(e => e.matchup))];
     let h = `<style>.discordpic-outlined, .discordpic-outlined * { text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 -1px 0 #000, 0 1px 0 #000, -1px 0 0 #000, 1px 0 0 #000; }</style>`;
     h += `<div class="discordpic-outlined" style="font-family:'Plus Jakarta Sans','Helvetica Neue',sans-serif;background:linear-gradient(135deg, #0c0d10 0%, #0a0d12 50%, #0c0d10 100%);border:1px solid #1a1d22;border-radius:18px;padding:24px;width:${totalW}px;box-sizing:border-box;text-transform:uppercase;">`;
-    h += `<div style="text-align:center;margin-bottom:12px;display:flex;gap:12px;justify-content:center;align-items:center;flex-wrap:wrap;"><div style="display:inline-block;background:rgba(125,211,252,0.08);border:1px solid rgba(125,211,252,0.20);padding:4px 10px;border-radius:12px;font-size:8px;font-weight:700;color:#fff;letter-spacing:0.3px;text-transform:uppercase;">${uniqueMatchups.length} GAME${uniqueMatchups.length!==1?"S":""}</div>${uniqueMatchups.map(m => `<div style="display:inline-block;background:rgba(125,211,252,0.08);border:1px solid rgba(125,211,252,0.20);padding:4px 10px;border-radius:12px;font-size:9px;font-weight:700;color:#fff;letter-spacing:0.3px;text-transform:uppercase;">${String(m).replace(/\bPDX\b/gi, "POR")}</div>`).join("")}</div>`;
+    h += `<div style="text-align:center;margin-bottom:12px;display:flex;gap:12px;justify-content:center;align-items:center;flex-wrap:wrap;"><div style="display:inline-block;background:rgba(125,211,252,0.08);border:1px solid rgba(125,211,252,0.20);padding:4px 10px;border-radius:12px;font-size:8px;font-weight:700;color:#fff;letter-spacing:0.3px;text-transform:uppercase;">${uniqueMatchups.length} GAME${uniqueMatchups.length!==1?"S":""}</div>${uniqueMatchups.map(m => {
+      // Styled like the live ticker's .tk-game chip (logos + dim @), just static.
+      const parts = String(m).replace(/\bPDX\b/gi, "POR").split(/\s*(?:@|vs\.?|\/)\s*/i).filter(Boolean);
+      const away = (parts[0] || "").toUpperCase();
+      const home = (parts[1] || "").toUpperCase();
+      const inner = home
+        ? `${teamLogoHtml(away, 14)}<span style="font-weight:700;color:#fff;">${esc(away)}</span>` +
+          `<span style="color:#525a64;font-size:11px;">@</span>` +
+          `${teamLogoHtml(home, 14)}<span style="font-weight:700;color:#fff;">${esc(home)}</span>`
+        : `<span style="font-weight:700;color:#fff;">${esc(away)}</span>`;
+      return `<div style="display:inline-flex;align-items:center;gap:8px;background:rgba(125,211,252,0.04);border:1px solid rgba(125,211,252,0.10);border-radius:8px;padding:6px 12px;font-size:12px;font-weight:500;color:#d4dae3;letter-spacing:0.2px;">${inner}</div>`;
+    }).join("")}</div>`;
     h += `<div style="text-align:center;margin-bottom:20px;padding-bottom:16px;border-bottom:1px solid #1a1d22;">`;
     h += `<div style="font-size:18px;font-weight:800;color:#fff;letter-spacing:-0.2px;">${niceDate}</div><div style="font-size:12px;font-weight:700;color:#fff;margin-top:9px;">${enriched.length} ${enriched.length===1?"prop":"props"} &nbsp;·&nbsp; ${overCount} over &nbsp;·&nbsp; ${underCount} under</div>`;
     h += `</div>`;
@@ -12645,7 +12736,23 @@ function updateEosCalc(plPerBet, currentPL) {
   const end = new Date(2026, 8, 24); // Sep is month index 8
   const now = new Date();
   const msPerDay = 86400000;
-  const daysLeft = Math.max(0, Math.ceil((end - new Date(now.getFullYear(), now.getMonth(), now.getDate())) / msPerDay));
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const calDaysLeft = Math.max(0, Math.ceil((end - today) / msPerDay));
+  // FIBA World Cup break — no WNBA games Aug 31 through Sep 16 inclusive, play
+  // resumes Sep 17 (wnba.com key dates). Counting those as betting days would
+  // inflate both bets remaining and the projected final.
+  const breakStart = new Date(2026, 7, 31);   // Aug 31
+  const breakEnd   = new Date(2026, 8, 16);   // Sep 16, last dark day
+  const overlapFrom = new Date(Math.max(today.getTime(), breakStart.getTime()));
+  const overlapTo   = new Date(Math.min(end.getTime(), breakEnd.getTime()));
+  const breakDaysLeft = overlapTo >= overlapFrom
+    ? Math.round((overlapTo - overlapFrom) / msPerDay) + 1
+    : 0;
+  const daysLeft = Math.max(0, calDaysLeft - breakDaysLeft);
+  const inBreak = today >= breakStart && today <= breakEnd;
+  // Days until play resumes, for the countdown.
+  const resumeDate = new Date(2026, 8, 17);   // Sep 17
+  const daysToResume = Math.max(0, Math.ceil((resumeDate - today) / msPerDay));
   const remBets = Math.round(daysLeft * bpd);
   const addUnits = plPerBet * remBets;
   const finalUnits = currentPL + addUnits;
@@ -12658,8 +12765,14 @@ function updateEosCalc(plPerBet, currentPL) {
       ${sub?`<div style="font-size:10px;font-weight:600;color:#d4dae3;margin-top:4px;">${sub}</div>`:""}
     </div>`;
   out.innerHTML =
-    card("Days left", String(daysLeft), "#fff", "through Sep 24") +
+    card("Playing days left", String(daysLeft), "#fff",
+      breakDaysLeft ? `through Sep 24 · ${breakDaysLeft} FIBA days excluded` : "through Sep 24") +
     card("Bets remaining", String(remBets), "#fff", `${bpd}/day`) +
+    (breakDaysLeft
+      ? card("FIBA break", inBreak ? `${daysToResume}d` : `${breakDaysLeft}d`,
+             inBreak ? "#f59e0b" : "#a8b0bb",
+             inBreak ? "until play resumes Sep 17" : "Aug 31 – Sep 16, no games")
+      : "") +
     card("Projected added", fmtU(addUnits), col(addUnits), "from here") +
     card("Projected final", fmtU(finalUnits), col(finalUnits), "season total");
 }
@@ -13865,6 +13978,9 @@ let injuriesCache = null;     // Map<normalizedPlayerName, injuryRecord>
 let injuriesByTeam = null;    // Map<internalTeamAbbr, [injuryRecord, ...]>
 let injuriesLastFetched = 0;
 const INJURIES_TTL_MS = 15 * 60 * 1000;
+// Set to "rotowire" once a report is pasted. ESPN's feed is a fallback only —
+// it must never overwrite a pasted RotoWire report for the same day.
+let _injurySource = null;
 
 // Reverse map ESPN short abbrs to our internal abbrs. Adds entries for teams
 // where ESPN and our abbrev are identical (passthrough).
@@ -13899,10 +14015,61 @@ function _injuryStatusColor(status, blurb) {
 }
 
 async function fetchInjuries(force) {
-  // Use cache if fresh and caller didn't force refresh
+  // ESPN is NOT an injury source — RotoWire paste is the only one. This used to
+  // hit 15 ESPN endpoints and would overwrite or resurrect a cleared report.
+  // Kept as a function so existing callers keep working; it now only ever
+  // re-seeds from a stored RotoWire paste.
+  if (injuriesCache && injuriesCache.size > 0 && !force) {
+    return { cached: true, count: injuriesCache.size, source: "rotowire" };
+  }
+  try {
+    if (localStorage.getItem("wnba_injuries_cleared")) {
+      return { cached: true, count: 0, cleared: true };
+    }
+    const raw = localStorage.getItem("wnba_injuries_cache");
+    if (raw) {
+      const d = JSON.parse(raw);
+      if (d && d.records) {
+        injuriesCache = null;
+        _ingestInjuryRecords(d.records);
+        injuriesLastFetched = d.fetchedAt || Date.now();
+        _injurySource = "rotowire";
+        return { cached: true, count: injuriesCache ? injuriesCache.size : 0, source: "rotowire" };
+      }
+    }
+  } catch (e) {}
+  return { cached: true, count: injuriesCache ? injuriesCache.size : 0, source: "rotowire" };
+}
+
+// Retained only so nothing that referenced it breaks; ESPN is not used.
+async function _fetchInjuriesFromEspnDisabled(force) {
   if (!force && injuriesCache && (Date.now() - injuriesLastFetched) < INJURIES_TTL_MS) {
     return { cached: true, count: injuriesCache.size };
   }
+  // Injuries were cleared on purpose — stay empty until a new paste or an
+  // explicit REFRESH. Passive calls must not quietly refill from ESPN.
+  if (!force) {
+    try {
+      if (localStorage.getItem("wnba_injuries_cleared")) {
+        return { cached: true, count: 0, cleared: true };
+      }
+    } catch (e) {}
+  }
+  // A RotoWire report pasted today wins outright — never replace it with ESPN.
+  try {
+    const rawRw = localStorage.getItem("wnba_injuries_cache");
+    if (rawRw) {
+      const d = JSON.parse(rawRw);
+      if (d && d.source === "rotowire-paste" && d.records) {
+        if (!injuriesCache || injuriesCache.size === 0) {
+          _ingestInjuryRecords(d.records);
+          injuriesLastFetched = d.fetchedAt || Date.now();
+        }
+        _injurySource = "rotowire";
+        return { cached: true, count: injuriesCache ? injuriesCache.size : 0, source: "rotowire" };
+      }
+    }
+  } catch (e) {}
   // Try to seed from localStorage on first call (so reloads keep recent data)
   if (!injuriesCache && !force) {
     try {
@@ -13980,6 +14147,7 @@ async function fetchInjuries(force) {
 }
 
 function _ingestInjuryRecords(records) {
+  try { localStorage.removeItem("wnba_injuries_cleared"); } catch (e) {}
   injuriesCache = new Map();
   injuriesByTeam = new Map();
   records.forEach(rec => {
@@ -14405,6 +14573,8 @@ function _injuryExplicitlyToday(rec) {
 async function refreshInjuries() {
   const summaryEl = document.getElementById("injury-panel-summary");
   if (summaryEl) summaryEl.textContent = "Refreshing…";
+  // Re-reads the stored RotoWire paste. Does not contact ESPN.
+  try { localStorage.removeItem("wnba_injuries_cleared"); } catch (e) {}
   const res = await fetchInjuries(true);
   if (res && res.error) {
     showToast(`Injury fetch failed: ${res.error}`);
@@ -14798,6 +14968,27 @@ try { const r = localStorage.getItem(BBREF_SH_KEY); if (r) _bbrefSHCache = JSON.
 
 
 
+// Wipe the stored RotoWire report. Only ever called from the Clear button —
+// the paste otherwise persists indefinitely so it's there the next morning.
+function clearStoredInjuries() {
+  if (!confirm("Clear the stored injury report?")) return;
+  try {
+    localStorage.removeItem("wnba_injuries_cache");
+    // Remember the clear. Without this the next fetchInjuries() — fired on any
+    // page load or refresh — repopulates from ESPN and the clear silently undoes
+    // itself. Lifted by a new RotoWire paste or an explicit REFRESH.
+    localStorage.setItem("wnba_injuries_cleared", String(Date.now()));
+  } catch (e) {}
+  injuriesCache = null;
+  injuriesLastFetched = 0;
+  _injurySource = null;
+  const status = document.getElementById("rw-injury-status");
+  if (status) { status.textContent = "Injury report cleared"; status.style.color = "#8b93a0"; }
+  if (typeof updateInjuryPanel === "function") updateInjuryPanel();
+  if (typeof renderTable === "function") renderTable();
+  showToast("Injury report cleared");
+}
+
 function parseRotoWireInjuriesPaste() {
   const ta = document.getElementById("rw-injury-paste");
   const status = document.getElementById("rw-injury-status");
@@ -14841,6 +15032,22 @@ function parseRotoWireInjuriesPaste() {
   });
   _ingestInjuryRecords(mergedRecords);
   injuriesLastFetched = Date.now();
+  // Persist to the same cache the ESPN fetch uses, so a pasted RotoWire report
+  // survives a reload instead of living only in memory. Stored under the
+  // current local day; a new day starts clean rather than resurfacing stale
+  // designations. Cleared by the existing injury reset.
+  try {
+    localStorage.setItem("wnba_injuries_cache", JSON.stringify({
+      fetchedAt: Date.now(),
+      day: localYMD(new Date()),
+      source: "rotowire-paste",
+      records: mergedRecords
+    }));
+    localStorage.removeItem("wnba_injuries_cleared");  // new data supersedes a clear
+  } catch (e) { /* quota or private mode — in-memory copy still works */ }
+  // RotoWire is the source of truth for injuries; mark it so the ESPN
+  // auto-fetch doesn't overwrite a hand-pasted report.
+  _injurySource = "rotowire";
   const msg = `${mergedRecords.length} entries loaded · ${injuriesCache.size} total`;
   if (status) { status.textContent = msg; status.style.color = "#22c55e"; }
   showToast(`Parsed ${records.length} RotoWire entries`);
