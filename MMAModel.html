@@ -3330,8 +3330,8 @@ function renderBetsTable(target, bets, opts={}) {
       : '';
     html += `<tr class="${rowCls}"${rowExtraStyle}>
       ${showStream ? `<td>${streamPill(b.stream)}</td>` : ''}
-      <td><div style="display:flex; align-items:center;">${renderFighterAvatar(b.fighter, 26)}<span class="rd-trigger"><b>${b.fighter}</b><div class="rd-card">${buildBetRundown(b)}</div></span>${agreeBadge}${newPill}${comboTag}</div></td>
-      <td class="meta"><div style="display:flex; align-items:center;">${b.opponent ? renderFighterAvatar(b.opponent, 24) : ''}${b.opponent || ''}</div></td>
+      <td><div style="display:flex; align-items:center;">${renderFighterAvatar(b.fighter, 40)}<span class="rd-trigger"><b>${b.fighter}</b><div class="rd-card">${buildBetRundown(b)}</div></span>${agreeBadge}${newPill}${comboTag}</div></td>
+      <td class="meta"><div style="display:flex; align-items:center;">${b.opponent ? renderFighterAvatar(b.opponent, 34) : ''}${b.opponent || ''}</div></td>
       ${marketCell}
       ${splitCells}
       ${eyeCell}
@@ -3899,9 +3899,9 @@ function renderModel() {
       : `<td class="num" style="color:${edgeColor}; font-weight:700;">${r.edge >= 0 ? '+' : ''}${r.edge.toFixed(1)}%</td>`;
     const rowStyle = (r.edge != null && r.edge >= 1) ? 'box-shadow: inset 3px 0 0 0 var(--green);' : '';
     html += `<tr style="${rowStyle}">
-      <td><div style="display:flex; align-items:center;">${renderFighterAvatar(r.fighter, 28)}<div><b>${r.fighter}</b><div style="margin-top:2px; color:var(--text); font-weight:700; font-size:11px;">${r.sourceCount} sources</div></div></div></td>
+      <td><div style="display:flex; align-items:center;">${renderFighterAvatar(r.fighter, 42)}<div><b>${r.fighter}</b><div style="margin-top:2px; color:var(--text); font-weight:700; font-size:11px;">${r.sourceCount} sources</div></div></div></td>
       <td>
-        <div style="display:flex; align-items:center;">${renderFighterAvatar(r.opponent, 28)}<div style="color:var(--text); font-weight:700;">${r.opponent || '—'}</div></div>
+        <div style="display:flex; align-items:center;">${renderFighterAvatar(r.opponent, 42)}<div style="color:var(--text); font-weight:700;">${r.opponent || '—'}</div></div>
         ${(() => {
           // Show opponent's MODEL Win % if we have their blended number; fall
           // back to raw market implied % (with a tiny "mkt" tag so you know
@@ -4541,26 +4541,40 @@ async function exportModelCardImage() {
   // Preload pick fighter headshot images so we can draw them on canvas. Use
   // Image() with a 3s timeout — if a photo doesn't load in time, we fall back
   // to a placeholder circle with the fighter's initial. Runs in parallel.
-  const headshotMap = {};  // pickName → HTMLImageElement or null
+  // Also preloads country flags and captures record/country meta for each pick
+  // so the export can decorate with all three.
+  const headshotMap = {};   // pickName → HTMLImageElement or null
+  const flagMap = {};       // pickName → HTMLImageElement or null
+  const metaMap = {};       // pickName → { country, record }
   {
     const uniquePicks = [...new Set(rowLayouts.map(rl => rl.pickName))];
-    await Promise.all(uniquePicks.map(name => new Promise(resolve => {
-      // Look up headshot URL from card.ml
-      const mlKey = findMatchKey(card.ml || {}, name);
-      const url = mlKey ? card.ml[mlKey].headshotUrl : null;
-      if (!url) { headshotMap[name] = null; resolve(); return; }
+    const loadImg = (url) => new Promise(resolve => {
+      if (!url) return resolve(null);
       const img = new Image();
-      img.crossOrigin = 'anonymous';   // needed for canvas draw without taint
-      const timer = setTimeout(() => { headshotMap[name] = null; resolve(); }, 3000);
-      img.onload = () => { clearTimeout(timer); headshotMap[name] = img; resolve(); };
-      img.onerror = () => { clearTimeout(timer); headshotMap[name] = null; resolve(); };
+      img.crossOrigin = 'anonymous';
+      const timer = setTimeout(() => resolve(null), 3000);
+      img.onload = () => { clearTimeout(timer); resolve(img); };
+      img.onerror = () => { clearTimeout(timer); resolve(null); };
       img.src = url;
-    })));
+    });
+    await Promise.all(uniquePicks.map(async name => {
+      const mlKey = findMatchKey(card.ml || {}, name);
+      const meta = mlKey ? card.ml[mlKey] : null;
+      metaMap[name] = { country: meta?.country || null, record: meta?.record || null };
+      // Load headshot + flag in parallel per fighter
+      const [headshot, flag] = await Promise.all([
+        loadImg(meta?.headshotUrl || null),
+        loadImg(meta?.flagUrl || null),
+      ]);
+      headshotMap[name] = headshot;
+      flagMap[name] = flag;
+    }));
   }
 
-  // Row height budget: pill (14) + gap (4) + fighter lines * 18 + gap (6)
-  //                  + line1 (16) + line2 (16) + line3 (16) + bottom pad (10)
-  const rowH = (r) => 8 + r.fighterLines.length * 18 + 6 + 16 * 3 + 10;
+  // Row height budget: fighter lines + Model/Fair + Market + record/country.
+  // "Pick" line was removed (pick is now highlighted in the matchup line
+  // itself). Record + country render on a single trailing muted line, ~14px.
+  const rowH = (r) => 8 + r.fighterLines.length * 18 + 6 + 16 * 2 + 14 + 10;
 
   const rowsH = rowLayouts.reduce((s, r) => s + rowH(r), 0)
              + (rowLayouts.length - 1);  // 1px dividers between rows
@@ -4606,15 +4620,15 @@ async function exportModelCardImage() {
   ctx.lineWidth = 1;
   ctx.stroke();
 
-  // Header
+  // Header — uppercase + centered across the card
   ctx.textBaseline = 'middle';
-  ctx.textAlign = 'left';
+  ctx.textAlign = 'center';
   ctx.fillStyle = TEXT;
   ctx.font = FONT_TITLE;
   const topX = cardX + cardPadX;
   const topY = cardY + cardPadY;
-  const cleanLabel = (card.label || '').replace(/\s*[•·]\s*/g, ' ').replace(/\s+/g, ' ').trim();
-  ctx.fillText(cleanLabel, topX, topY + 14);
+  const cleanLabel = (card.label || '').replace(/\s*[•·]\s*/g, ' ').replace(/\s+/g, ' ').trim().toUpperCase();
+  ctx.fillText(cleanLabel, cardX + tableW / 2, topY + 14);
   ctx.fillStyle = ROW_DIVIDER;
   ctx.fillRect(topX, cardY + cardPadY + cardTopH + 2, tableW - cardPadX * 2, 1);
 
@@ -4680,6 +4694,38 @@ async function exportModelCardImage() {
     ctx.arc(avatarCX, avatarCY, avatarSize / 2, 0, Math.PI * 2);
     ctx.stroke();
 
+    // Country flag corner — small circle at bottom-right of avatar overlapping
+    // the ring slightly. Only drawn if we have the flag image cached.
+    const flagImg = flagMap[pickName];
+    if (flagImg) {
+      const flagSize = Math.round(avatarSize * 0.42);
+      const flagCX = avatarCX + avatarSize / 2 - flagSize / 3;
+      const flagCY = avatarCY + avatarSize / 2 - flagSize / 3;
+      // Clip flag to circle and draw
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(flagCX, flagCY, flagSize / 2, 0, Math.PI * 2);
+      ctx.closePath();
+      ctx.clip();
+      // White fill behind in case flag has transparency
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(flagCX - flagSize / 2, flagCY - flagSize / 2, flagSize, flagSize);
+      // Cover-fit
+      const iw = flagImg.naturalWidth || flagImg.width;
+      const ih = flagImg.naturalHeight || flagImg.height;
+      let fsx, fsy, fss;
+      if (iw >= ih) { fss = ih; fsx = (iw - ih) / 2; fsy = 0; }
+      else { fss = iw; fsx = 0; fsy = (ih - iw) / 2; }
+      ctx.drawImage(flagImg, fsx, fsy, fss, fss, flagCX - flagSize / 2, flagCY - flagSize / 2, flagSize, flagSize);
+      ctx.restore();
+      // Dark ring around the flag so it pops off the dark card background
+      ctx.strokeStyle = '#0b0f14';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(flagCX, flagCY, flagSize / 2, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
     // Rank — shifted right of avatar
     const rankX = rowX + avatarSize + avatarGap;
     ctx.font = FONT_RANK;
@@ -4688,13 +4734,59 @@ async function exportModelCardImage() {
     ctx.textBaseline = 'middle';
     ctx.fillText(String(rank).padStart(2, '0'), rankX, bodyMidY);
 
-    // Fighter matchup (wraps) — shifted right of rank
+    // Fighter matchup (wraps) — shifted right of rank. The pick's name is
+    // highlighted with a green pill (rounded rect background + green text)
+    // so it stands out at a glance without needing a separate "Pick:" line.
     const midX = rankX + rankW;
     ctx.font = FONT_FIGHT;
-    ctx.fillStyle = TEXT;
     let fy = bodyTop + 9;
+    // Track pick name in the line so we can split each rendered line into
+    // segments [before_pick, pick, after_pick] and draw them independently.
     fighterLines.forEach(line => {
-      ctx.fillText(line, midX, fy);
+      const pickIdx = pickName ? line.indexOf(pickName) : -1;
+      if (pickIdx < 0) {
+        // No pick in this line — plain white text
+        ctx.fillStyle = TEXT;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'top';
+        ctx.fillText(line, midX, fy);
+      } else {
+        const before = line.slice(0, pickIdx);
+        const after  = line.slice(pickIdx + pickName.length);
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'top';
+
+        // Draw the "before" chunk (normal text)
+        let cursorX = midX;
+        if (before) {
+          ctx.fillStyle = TEXT;
+          ctx.fillText(before, cursorX, fy);
+          cursorX += measureText(before, FONT_FIGHT);
+        }
+        // Green pill background for the pick name
+        const pickW = measureText(pickName, FONT_FIGHT);
+        const padX = 6;
+        const padY = 2;
+        const pillH = 18;
+        const pillY = fy - padY;
+        ctx.fillStyle = CHIP_GREEN_BG;
+        roundRect(cursorX - padX, pillY, pickW + padX * 2, pillH, 4);
+        ctx.fill();
+        ctx.strokeStyle = CHIP_GREEN_BR;
+        ctx.lineWidth = 1;
+        roundRect(cursorX - padX, pillY, pickW + padX * 2, pillH, 4);
+        ctx.stroke();
+        // Pick name in green
+        ctx.fillStyle = GREEN;
+        ctx.fillText(pickName, cursorX, fy);
+        cursorX += pickW;
+
+        // "After" chunk (normal text — usually " vs Opponent")
+        if (after) {
+          ctx.fillStyle = TEXT;
+          ctx.fillText(after, cursorX, fy);
+        }
+      }
       fy += 18;
     });
     fy += 4;
@@ -4733,7 +4825,19 @@ async function exportModelCardImage() {
     fy += 16;
     drawKV('Market', marketAm + (pickBook ? `  @ ${pickBook}` : ''), TEXT, fy);
     fy += 16;
-    drawKV('Pick', pickName, TEXT, fy);
+    // No more "Pick <name>" line — the pick is now highlighted in the fighter
+    // matchup line above. Just show the record + country as the trailing info.
+    const meta = metaMap[pickName] || {};
+    if (meta.record || meta.country) {
+      const parts = [];
+      if (meta.record) parts.push(meta.record);
+      if (meta.country) parts.push(meta.country);
+      ctx.font = FONT_KEY;
+      ctx.fillStyle = MUTED;
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      ctx.fillText(parts.join('  ·  '), midX, fy);
+    }
 
     // Edge chip on the right, vertically centered
     const isGreen = f.edge >= 5;
@@ -5769,9 +5873,47 @@ async function enrichCardHeadshots(cardId, opts = {}) {
             const ath = await athRes.json();
             const name = ath.fullName || ath.displayName || '';
             const url = ath.headshot?.href || (ath.id ? `https://a.espncdn.com/i/headshots/mma/players/full/${ath.id}.png` : null);
-            if (name && url) {
-              nameToHeadshot[normalizeName(name)] = { url: fixEspnUrl(url), athleteId: ath.id, name };
+            if (!name || !url) continue;
+
+            // Extract flag + country from the athlete object — these are inline
+            // in the ESPN response so no extra fetch needed. ESPN sometimes
+            // returns .flag.href with country code path (e.g. .../countries/500/usa.png)
+            const flagUrl = ath.flag?.href ? fixEspnUrl(ath.flag.href) : null;
+            const country = ath.citizenship || ath.birthPlace?.country || null;
+
+            // Record needs a separate fetch — ESPN keeps W-L-D under
+            // /athletes/{id}/records. Kick it off but don't block on it if it
+            // fails (this athlete just won't have a record cached).
+            let record = null;
+            if (ath.id) {
+              try {
+                const recRes = await fetch(`https://sports.core.api.espn.com/v2/sports/mma/leagues/ufc/athletes/${ath.id}/records`);
+                if (recRes.ok) {
+                  const recData = await recRes.json();
+                  // Records shape: { items: [{ stats: [{name:'wins', value:13}, ...] }] }
+                  const items = recData.items || [];
+                  const overall = items.find(it => (it.name || '').toLowerCase() === 'overall') || items[0];
+                  if (overall) {
+                    const stats = overall.stats || [];
+                    const getStat = (n) => {
+                      const s = stats.find(x => (x.name || '').toLowerCase() === n);
+                      return s && typeof s.value === 'number' ? s.value : null;
+                    };
+                    const w = getStat('wins');
+                    const l = getStat('losses');
+                    const d = getStat('draws');
+                    if (w != null && l != null) {
+                      record = d && d > 0 ? `${w}-${l}-${d}` : `${w}-${l}`;
+                    }
+                  }
+                }
+              } catch (e) {}
             }
+
+            nameToHeadshot[normalizeName(name)] = {
+              url: fixEspnUrl(url), athleteId: ath.id, name,
+              flagUrl, country, record,
+            };
           } catch (e) {}
         }
       }
@@ -5794,6 +5936,9 @@ async function enrichCardHeadshots(cardId, opts = {}) {
     if (hit) {
       m.headshotUrl = hit.url;
       m.espnAthleteId = hit.athleteId;
+      if (hit.flagUrl) m.flagUrl = hit.flagUrl;
+      if (hit.country) m.country = hit.country;
+      if (hit.record) m.record = hit.record;
       resolved++;
     }
   });
@@ -5848,11 +5993,14 @@ function renderFighterAvatar(fighterName, size = 24) {
     if (url) break;
   }
   const px = size + 'px';
-  const styleBase = `width:${px}; height:${px}; border-radius:50%; display:inline-block; vertical-align:middle; margin-right:6px; flex-shrink:0;`;
+  const styleBase = `width:${px}; height:${px}; border-radius:50%; display:inline-block; vertical-align:middle; margin-right:8px; flex-shrink:0;`;
   if (url) {
-    // <img> with onerror fallback to placeholder circle if image doesn't load
+    // <img> with onerror fallback to placeholder circle if image doesn't load.
+    // object-fit:cover + object-position center 15% keeps faces in-frame when
+    // the source photo is portrait (ESPN's usually are — heads sit high).
+    const imgStyle = `${styleBase} object-fit:cover; object-position:center 15%; background:var(--bg2); border:1px solid var(--border);`;
     const fallback = `this.outerHTML='<span style=&quot;${styleBase} background:var(--bg2); border:1px solid var(--border); text-align:center; line-height:${px}; font-size:${Math.floor(size*0.45)}px; font-weight:700; color:var(--muted);&quot;>${initial}</span>'`;
-    return `<img src="${url}" alt="${fighterName}" style="${styleBase} object-fit:cover; background:var(--bg2);" onerror="${fallback}">`;
+    return `<img src="${url}" alt="${fighterName}" style="${imgStyle}" onerror="${fallback}">`;
   }
   return `<span style="${styleBase} background:var(--bg2); border:1px solid var(--border); text-align:center; line-height:${px}; font-size:${Math.floor(size*0.45)}px; font-weight:700; color:var(--muted);">${initial}</span>`;
 }
