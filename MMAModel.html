@@ -334,7 +334,7 @@
   </div>
 </header>
 <div class="tabs">
-  <button class="tab active" data-tab="results">Results</button>
+  <button class="tab" data-tab="results">Results</button>
   <button class="tab" data-tab="dashboard">Dashboard</button>
   <button class="tab" data-tab="ingest">Ingest</button>
   <button class="tab" data-tab="grade">Grade</button>
@@ -343,12 +343,12 @@
   <button class="tab" data-tab="arena">Arena Solo</button>
   <button class="tab" data-tab="saber">Saber Solo</button>
   <button class="tab" data-tab="action">Action Solo</button>
-  <button class="tab" data-tab="model">UFC Model</button>
+  <button class="tab active" data-tab="model">UFC Model</button>
   <button class="tab" data-tab="cards">Cards</button>
 </div>
 
 <!-- ============ RESULTS (fighter comparison grid) ============ -->
-<section id="tab-results">
+<section id="tab-results" class="hidden">
   <div class="panel">
     <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:14px; gap:10px; flex-wrap:wrap;">
       <h2 style="margin:0;">Fighter comparison · win% by source vs market</h2>
@@ -778,7 +778,7 @@
 </section>
 
 <!-- ============ UFC MODEL (weighted blend across sources) ============ -->
-<section id="tab-model" class="hidden">
+<section id="tab-model">
   <div class="panel">
     <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:14px; gap:10px; flex-wrap:wrap;">
       <div>
@@ -4141,7 +4141,8 @@ function renderModelBacktest() {
     totalEdge += edge;
     flaggedEdgeSum += edge;
     rows.push({
-      fighter: b.fighter, opp: b.opponent, ml: b.ml, status: b.status, blended, edge, cardLabel: b.cardLabel,
+      fighter: b.fighter, opp: b.opponent, ml: b.ml, status: b.status, blended, edge,
+      cardId: b.cardId, cardLabel: b.cardLabel,
       mkt,
       eyeProb: b.eyeProb, arenaProb: b.arenaProb, saberProb: b.saberProb, stokProb: b.stokProb,
       actionFair: b.actionFair,
@@ -4275,6 +4276,8 @@ function renderModelBacktest() {
   // Weight class buckets — same shape as edge buckets but grouped by fight
   // weight class. Uses the same graded-bet set as edge buckets.
   html += renderWeightClassTable(rows, 'Weight class');
+  // Men's vs Women's — 2-row breakdown from the same set
+  html += renderGenderSplitTable(rows, 'Men\u2019s vs Women\u2019s');
 
   if (cardEntries.length > 1) {
     html += `<div style="margin-bottom:16px;">
@@ -4741,10 +4744,17 @@ async function exportModelCardImage() {
         country: meta?.country || null,
         record: meta?.record || null,
         weightClass: meta?.weightClass || null,
+        // Tale-of-the-tape stats (for the featured matchup card at top)
+        age:    meta?.age    != null ? meta.age    : null,
+        height: meta?.height || null,
+        reach:  meta?.reach  || null,
+        stance: meta?.stance || null,
       };
     });
-    // Load headshot + flag images only for picks (opponents don't render photos)
-    await Promise.all(uniquePicks.map(async name => {
+    // Every fight renders as a matchup card that shows both fighters, so we
+    // need to preload headshot + flag for BOTH pick AND opp of every fight.
+    const namesToLoad = new Set([...uniquePicks, ...uniqueOpps]);
+    await Promise.all([...namesToLoad].map(async name => {
       const mlKey = findMatchKey(card.ml || {}, name);
       const meta = mlKey ? card.ml[mlKey] : null;
       const [headshot, flag] = await Promise.all([
@@ -4769,9 +4779,12 @@ async function exportModelCardImage() {
   // record/country line, only when meta exists for that pick).
   const rowH = (r) => 8 + r.fighterLines.length * 18 + 6 + 16 * 2 + (r.hasMeta ? 14 : 0) + 10;
 
-  const rowsH = rowLayouts.reduce((s, r) => s + rowH(r), 0)
-             + (rowLayouts.length - 1);  // 1px dividers between rows
-  // Reserve extra height if we have an event subtitle (venue + time).
+  // Every fight renders as a full matchup card (photos of both fighters,
+  // weight class pill, tale of the tape, model/market, edge chip). Each card
+  // uses a fixed ~300px budget so canvas height is predictable.
+  const matchupH = 300;
+  const rowsH = rowLayouts.length * matchupH
+             + Math.max(0, rowLayouts.length - 1) * 8;  // 8px gap between matchup cards
   const subtitleReserve = card.espnEventMeta ? 20 : 0;
   const cardH = cardPadY * 2 + cardTopH + subtitleReserve + 10 + rowsH;
   const H = paddingTop + cardH + paddingBottom;
@@ -4897,298 +4910,219 @@ async function exportModelCardImage() {
   ctx.fillStyle = ROW_DIVIDER;
   ctx.fillRect(topX, cardY + cardPadY + headerH + 2, tableW - cardPadX * 2, 1);
 
-  // Rows
+  // Draw every fight as a full matchup card (photos of both fighters, weight
+  // class pill, tale of the tape, model/market, edge chip). Uses fixed height
+  // matchupH so canvas layout math is predictable.
   let ry = cardY + cardPadY + headerH + 10;
-  rowLayouts.forEach((rl, idx) => {
-    const { fight: f, rank, fighterLines, modelPct, fairAm, marketAm, marketPct, pickBook, pickName, oppName } = rl;
-    const rowX = cardX + cardPadX;
-    const height = rowH(rl);
+  const drawMatchupCard = (rl, atY) => {
+    const fx = cardX + cardPadX;
+    const fy0 = atY;
+    const fw = tableW - cardPadX * 2;
+    const f = rl.fight;
+    const pickName = rl.pickName;
+    const oppName  = rl.oppName;
+    const isPickF1 = f.predictedWinner === f.fighter1;
+    const f1Name = f.fighter1;
+    const f2Name = f.fighter2;
+    const f1Meta = metaMap[f1Name] || {};
+    const f2Meta = metaMap[f2Name] || {};
+    const f1Img  = headshotMap[f1Name] || null;
+    const f2Img  = headshotMap[f2Name] || null;
+    const f1Flag = flagMap[f1Name] || null;
+    const f2Flag = flagMap[f2Name] || null;
 
-    // No pill — user removed the "Fight NN" label. Row starts with the
-    // fighter matchup directly. Rank number on the left keeps the ordering
-    // visible.
-    const bodyTop = ry + 8;  // small top pad only
-    // Body content: fighter lines + 6px gap + 2 KV rows (Model/Fair, Market)
-    // + optional 14px muted record/country line (only when meta present).
-    // Must match rowH() minus top(8)+bottom(10) padding — otherwise chip drifts.
-    const bodyH = fighterLines.length * 18 + 6 + 16 * 2 + (rl.hasMeta ? 14 : 0);
-    const bodyMidY = bodyTop + bodyH / 2;
-
-    // Avatar (pick's headshot as a circle, or initial placeholder if no image)
-    const avatarCX = rowX + avatarSize / 2;
-    const avatarCY = bodyMidY;
-    const img = headshotMap[pickName];
-    // Clip to circle then draw
-    ctx.save();
-    ctx.beginPath();
-    ctx.arc(avatarCX, avatarCY, avatarSize / 2, 0, Math.PI * 2);
-    ctx.closePath();
-    ctx.clip();
-    if (img) {
-      // Cover-fit: source images are usually taller than wide (headshots), so
-      // naive drawImage(img, x, y, w, h) would squash. Use the 9-arg form to
-      // crop the source to a square (center-aligned, biased slightly upward
-      // to keep the face in-frame) before scaling into the circle.
-      const iw = img.naturalWidth || img.width;
-      const ih = img.naturalHeight || img.height;
-      let sx, sy, sSize;
-      if (iw >= ih) {
-        sSize = ih;
-        sx = (iw - ih) / 2;
-        sy = 0;
-      } else {
-        sSize = iw;
-        sx = 0;
-        // Bias the crop upward — heads sit in the top portion of most photos
-        sy = Math.max(0, (ih - iw) * 0.15);
-      }
-      ctx.drawImage(img, sx, sy, sSize, sSize, rowX, avatarCY - avatarSize / 2, avatarSize, avatarSize);
-    } else {
-      // Placeholder — light grey circle with fighter's initial. Font size
-      // scales with avatarSize so it stays proportional if we change size.
-      ctx.fillStyle = '#e2e8f0';   // slate-200
-      ctx.fillRect(rowX, avatarCY - avatarSize / 2, avatarSize, avatarSize);
-      ctx.fillStyle = '#64748b';   // slate-500 initial
-      ctx.font = `700 ${Math.round(avatarSize * 0.45)}px ${FONT_STACK}`;
+    // Weight class pill, centered at top
+    const wcRaw = f1Meta.weightClass || f2Meta.weightClass || '';
+    const wc = wcRaw ? wcRaw.replace(/\s*(bout|championship|title\s*fight)\s*$/i, '').trim().toUpperCase() : '';
+    let wcCursorY = fy0 + 4;
+    if (wc) {
+      ctx.font = `700 11px ${FONT_STACK}`;
+      const wcW = measureText(wc, ctx.font);
+      const wcPadX = 12, wcH = 22;
+      const wcBoxW = wcW + wcPadX * 2;
+      const wcX = fx + (fw - wcBoxW) / 2;
+      ctx.fillStyle = 'rgba(0,214,143,0.12)';
+      roundRect(wcX, wcCursorY, wcBoxW, wcH, 11);
+      ctx.fill();
+      ctx.fillStyle = GREEN;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillText((pickName || '?').charAt(0).toUpperCase(), avatarCX, avatarCY);
+      ctx.fillText(wc, fx + fw / 2, wcCursorY + wcH / 2);
+      wcCursorY += wcH + 12;
+    } else {
+      wcCursorY += 4;
     }
-    ctx.restore();
-    // Subtle ring around the avatar — light grey on white card so it defines
-    // the circle without competing with the green frame.
-    ctx.strokeStyle = '#cbd5e1';   // slate-300
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.arc(avatarCX, avatarCY, avatarSize / 2, 0, Math.PI * 2);
-    ctx.stroke();
 
-    // Country flag corner — small circle at bottom-right of avatar overlapping
-    // the ring slightly. Only drawn if we have the flag image cached.
-    const flagImg = flagMap[pickName];
-    if (flagImg) {
-      const flagSize = Math.round(avatarSize * 0.42);
-      const flagCX = avatarCX + avatarSize / 2 - flagSize / 3;
-      const flagCY = avatarCY + avatarSize / 2 - flagSize / 3;
-      // Clip flag to circle and draw
+    // Helper — draw one fighter row (photo + name + record + country flag)
+    // isPick = highlight name in green + pill background.
+    const drawFighterRow = (name, meta, img, flag, isPick, atY) => {
+      const avSize = 54;
+      const avX = fx + 4;
+      const avCX = avX + avSize / 2;
+      const avCY = atY + avSize / 2;
+      // Avatar circle
       ctx.save();
       ctx.beginPath();
-      ctx.arc(flagCX, flagCY, flagSize / 2, 0, Math.PI * 2);
+      ctx.arc(avCX, avCY, avSize / 2, 0, Math.PI * 2);
       ctx.closePath();
       ctx.clip();
-      // White fill behind in case flag has transparency
-      ctx.fillStyle = '#ffffff';
-      ctx.fillRect(flagCX - flagSize / 2, flagCY - flagSize / 2, flagSize, flagSize);
-      // Cover-fit
-      const iw = flagImg.naturalWidth || flagImg.width;
-      const ih = flagImg.naturalHeight || flagImg.height;
-      let fsx, fsy, fss;
-      if (iw >= ih) { fss = ih; fsx = (iw - ih) / 2; fsy = 0; }
-      else { fss = iw; fsx = 0; fsy = (ih - iw) / 2; }
-      ctx.drawImage(flagImg, fsx, fsy, fss, fss, flagCX - flagSize / 2, flagCY - flagSize / 2, flagSize, flagSize);
-      ctx.restore();
-      // Dark ring around the flag so it pops off the dark card background
-      // White ring around the flag so it pops off the light card background
-      ctx.strokeStyle = '#ffffff';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.arc(flagCX, flagCY, flagSize / 2, 0, Math.PI * 2);
-      ctx.stroke();
-    }
-
-    // Rank — shifted right of avatar
-    const rankX = rowX + avatarSize + avatarGap;
-    ctx.font = FONT_RANK;
-    ctx.fillStyle = RANK;
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(String(rank).padStart(2, '0'), rankX, bodyMidY);
-
-    // Fighter matchup (wraps) — shifted right of rank. The pick's name is
-    // highlighted with a green pill (rounded rect background + green text)
-    // so it stands out at a glance without needing a separate "Pick:" line.
-    const midX = rankX + rankW;
-    ctx.font = FONT_FIGHT;
-    let fy = bodyTop + 9;
-    // Track pick name in the line so we can split each rendered line into
-    // segments [before_pick, pick, after_pick] and draw them independently.
-    fighterLines.forEach(line => {
-      const pickIdx = pickName ? line.indexOf(pickName) : -1;
-      if (pickIdx < 0) {
-        // No pick in this line — plain white text
-        ctx.fillStyle = TEXT;
-        ctx.textAlign = 'left';
-        ctx.textBaseline = 'top';
-        ctx.fillText(line, midX, fy);
+      if (img) {
+        const iw = img.naturalWidth || img.width;
+        const ih = img.naturalHeight || img.height;
+        let sx, sy, sSize;
+        if (iw >= ih) { sSize = ih; sx = (iw - ih) / 2; sy = 0; }
+        else          { sSize = iw; sx = 0; sy = Math.max(0, (ih - iw) * 0.15); }
+        ctx.drawImage(img, sx, sy, sSize, sSize, avX, atY, avSize, avSize);
       } else {
-        const before = line.slice(0, pickIdx);
-        const after  = line.slice(pickIdx + pickName.length);
-        ctx.textAlign = 'left';
-        ctx.textBaseline = 'top';
-
-        // Draw the "before" chunk (normal text). Trim trailing whitespace so
-        // it doesn't run under the pill's left padding.
-        let cursorX = midX;
-        if (before) {
-          const trimmedBefore = before.replace(/\s+$/, '');
-          if (trimmedBefore) {
-            ctx.fillStyle = TEXT;
-            ctx.fillText(trimmedBefore, cursorX, fy);
-            cursorX += measureText(trimmedBefore, FONT_FIGHT) + 4;  // small gap before pill
-          }
-        }
-        // Green pill background for the pick name
-        const pickW = measureText(pickName, FONT_FIGHT);
-        const padX = 6;
-        const padY = 2;
-        const pillH = 18;
-        const pillY = fy - padY;
-        ctx.fillStyle = CHIP_GREEN_BG;
-        roundRect(cursorX - padX, pillY, pickW + padX * 2, pillH, 4);
-        ctx.fill();
-        ctx.strokeStyle = CHIP_GREEN_BR;
-        ctx.lineWidth = 1;
-        roundRect(cursorX - padX, pillY, pickW + padX * 2, pillH, 4);
-        ctx.stroke();
-        // Pick name in green
-        ctx.fillStyle = GREEN;
-        ctx.fillText(pickName, cursorX, fy);
-        // Advance past pill's right edge + small gap so "after" text doesn't
-        // overlap the pill border. Pill right = cursorX + pickW + padX.
-        cursorX += pickW + padX + 4;
-
-        // "After" chunk (usually " vs Opponent"). Strip leading whitespace
-        // since the pill's right padding + our 4px gap already provides the
-        // visual separation.
-        const trimmedAfter = after.replace(/^\s+/, '');
-        if (trimmedAfter) {
-          ctx.fillStyle = TEXT;
-          ctx.fillText(trimmedAfter, cursorX, fy);
-        }
+        ctx.fillStyle = '#e2e8f0';
+        ctx.fillRect(avX, atY, avSize, avSize);
+        ctx.fillStyle = '#64748b';
+        ctx.font = `700 22px ${FONT_STACK}`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText((name || '?').charAt(0).toUpperCase(), avCX, avCY);
       }
-      fy += 18;
-    });
-    fy += 4;
-
-    // Data lines: [Model X% · Fair Y] / [Market Z] / [Pick <name>]
-    // Draw as key/value inline w/ small gap.
-    const drawKV = (key, val, valColor, y) => {
-      ctx.font = FONT_KEY;
-      ctx.fillStyle = LABEL;
-      ctx.fillText(key, midX, y);
-      const kw = measureText(key, FONT_KEY);
-      ctx.font = FONT_VAL;
-      ctx.fillStyle = valColor;
-      ctx.fillText(val, midX + kw + 4, y);
-    };
-    const drawTwoKV = (k1, v1, c1, k2, v2, c2, y) => {
-      ctx.font = FONT_KEY;
-      ctx.fillStyle = LABEL;
-      ctx.fillText(k1, midX, y);
-      const k1w = measureText(k1, FONT_KEY);
-      ctx.font = FONT_VAL;
-      ctx.fillStyle = c1;
-      ctx.fillText(v1, midX + k1w + 4, y);
-      const v1w = measureText(v1, FONT_VAL);
-      const secondX = midX + k1w + 4 + v1w + 14;
-      ctx.font = FONT_KEY;
-      ctx.fillStyle = LABEL;
-      ctx.fillText(k2, secondX, y);
-      const k2w = measureText(k2, FONT_KEY);
-      ctx.font = FONT_VAL;
-      ctx.fillStyle = c2;
-      ctx.fillText(v2, secondX + k2w + 4, y);
-    };
-    fy += 4;
-    // Model line: "Model 78.1% (-356)" — win % first, fair odds in parens
-    drawKV('Model', `${modelPct} (${fairAm})`, TEXT, fy);
-    fy += 16;
-    // Market line: "Market 75.4% (-326) @ FanDuel" — implied % first, odds
-    // in parens, then book if we have it
-    drawKV('Market', `${marketPct} (${marketAm})${pickBook ? `  @ ${pickBook}` : ''}`, TEXT, fy);
-    fy += 16;
-    // Trailing line — mirrors the top matchup: "<pick meta>  vs  <opp meta>"
-    // where each side is "record country" joined with a space. Whichever
-    // side is missing meta gets omitted entirely (line only renders if at
-    // least one side has data, since hasMeta guarded the row height above).
-    const pMeta = metaMap[pickName] || {};
-    const oMeta = metaMap[oppName] || {};
-    const fmtSide = (m) => {
-      const parts = [];
-      if (m.record) parts.push(m.record);
-      if (m.country) parts.push(m.country);
-      return parts.join(' ');
-    };
-    const pStr = fmtSide(pMeta);
-    const oStr = fmtSide(oMeta);
-    if (pStr || oStr) {
-      ctx.font = FONT_KEY;
+      ctx.restore();
+      ctx.strokeStyle = '#cbd5e1';
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.arc(avCX, avCY, avSize / 2, 0, Math.PI * 2); ctx.stroke();
+      // Flag corner
+      if (flag) {
+        const fs = Math.round(avSize * 0.4);
+        const fCX = avCX + avSize / 2 - fs / 3;
+        const fCY = avCY + avSize / 2 - fs / 3;
+        ctx.save();
+        ctx.beginPath(); ctx.arc(fCX, fCY, fs / 2, 0, Math.PI * 2); ctx.closePath(); ctx.clip();
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(fCX - fs/2, fCY - fs/2, fs, fs);
+        const iw = flag.naturalWidth || flag.width;
+        const ih = flag.naturalHeight || flag.height;
+        let sx, sy, sSize;
+        if (iw >= ih) { sSize = ih; sx = (iw - ih) / 2; sy = 0; }
+        else          { sSize = iw; sx = 0; sy = (ih - iw) / 2; }
+        ctx.drawImage(flag, sx, sy, sSize, sSize, fCX - fs/2, fCY - fs/2, fs, fs);
+        ctx.restore();
+        ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(fCX, fCY, fs / 2, 0, Math.PI * 2); ctx.stroke();
+      }
+      // Name + record to the right of avatar
+      const nx = avX + avSize + 12;
+      const upperName = (name || '').toUpperCase();
+      ctx.font = `800 18px ${FONT_STACK}`;
       ctx.textAlign = 'left';
-      ctx.textBaseline = 'top';
-      // Pick side in lime green (matches pill + frame) so you can see at a
-      // glance which side of the trailing line is our pick's info. Opponent
-      // side stays white. Divider "vs" also white so it doesn't fight for
-      // attention.
-      let cx = midX;
-      if (pStr) {
-        // Pick side in green (matches pill + frame)
+      ctx.textBaseline = 'middle';
+      const nameW = measureText(upperName, ctx.font);
+      if (isPick) {
+        // Green pill background behind the pick's name
+        const padX = 6, padY = 3, pillH = 24;
+        ctx.fillStyle = CHIP_GREEN_BG;
+        roundRect(nx - padX, avCY - pillH / 2, nameW + padX * 2, pillH, 5);
+        ctx.fill();
+        ctx.strokeStyle = CHIP_GREEN_BR; ctx.lineWidth = 1;
+        roundRect(nx - padX, avCY - pillH / 2, nameW + padX * 2, pillH, 5);
+        ctx.stroke();
         ctx.fillStyle = GREEN;
-        ctx.fillText(pStr, cx, fy);
-        cx += measureText(pStr, FONT_KEY);
-      }
-      if (pStr && oStr) {
-        const sep = '  vs  ';
+      } else {
         ctx.fillStyle = TEXT;
-        ctx.fillText(sep, cx, fy);
-        cx += measureText(sep, FONT_KEY);
       }
-      if (oStr) {
-        ctx.fillStyle = TEXT;
-        ctx.fillText(oStr, cx, fy);
-        cx += measureText(oStr, FONT_KEY);
-      }
-      // Weight class in parens at the end — muted so it feels like a footnote.
-      // Both fighters share the same class; pick's is usually populated. Fall
-      // back to opp's if pick's is missing.
-      const weightClass = pMeta.weightClass || oMeta.weightClass;
-      if (weightClass) {
-        const wcStr = `  (${weightClass})`;
+      ctx.fillText(upperName, nx, avCY - 8);
+      // Record + country under the name
+      const parts = [];
+      if (meta.record) parts.push(meta.record);
+      if (meta.country) parts.push(meta.country);
+      if (parts.length) {
+        ctx.font = `600 12px ${FONT_STACK}`;
         ctx.fillStyle = MUTED;
-        ctx.fillText(wcStr, cx, fy);
+        ctx.fillText(parts.join(' · '), nx, avCY + 12);
       }
-    }
+    };
 
-    // Edge chip on the right, vertically centered
-    const isGreen = f.edge >= 5;
-    const isAmber = f.edge >= 1 && f.edge < 5;
-    const isRed = f.edge < 0;
-    const chipBg = isGreen ? CHIP_GREEN_BG : isAmber ? CHIP_AMBER_BG : isRed ? CHIP_RED_BG : CHIP_AMBER_BG;
-    const chipBr = isGreen ? CHIP_GREEN_BR : isAmber ? CHIP_AMBER_BR : isRed ? CHIP_RED_BR : CHIP_AMBER_BR;
-    const chipTx = isGreen ? GREEN : isAmber ? AMBER : isRed ? RED : AMBER;
-    const chipX = cardX + tableW - cardPadX - chipW;
-    const chipY = bodyMidY - chipH / 2;
-    ctx.fillStyle = chipBg;
-    roundRect(chipX, chipY, chipW, chipH, 8);
-    ctx.fill();
-    ctx.strokeStyle = chipBr;
-    ctx.lineWidth = 1;
-    ctx.stroke();
-    ctx.font = FONT_CHIP_N;
+    // Fighter 1 (top)
+    drawFighterRow(f1Name, f1Meta, f1Img, f1Flag, isPickF1, wcCursorY);
+    let y = wcCursorY + 62;
+    // "vs" divider
+    ctx.font = `700 12px ${FONT_STACK}`;
+    ctx.fillStyle = MUTED;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    // Two-line chip content — number (15px) on top, "PP" label (10px) below.
-    ctx.fillStyle = chipTx;
-    ctx.fillText((f.edge >= 0 ? '+' : '') + f.edge.toFixed(1), chipX + chipW / 2, chipY + 15);
-    ctx.font = FONT_CHIP_L;
-    ctx.fillText('PP', chipX + chipW / 2, chipY + 32);
+    ctx.fillText('vs', fx + fw / 2, y);
+    y += 12;
+    // Fighter 2
+    drawFighterRow(f2Name, f2Meta, f2Img, f2Flag, !isPickF1, y);
+    y += 62;
 
-    ry += height;
-    if (idx < rowLayouts.length - 1) {
-      ctx.fillStyle = ROW_DIVIDER;
-      ctx.fillRect(rowX, ry, tableW - cardPadX * 2, 1);
-      ry += 1;
+    // Tale of the tape (compact 2-column) — only render if we have at least
+    // one stat for either fighter. Show fighter 1 on the left, fighter 2 on right.
+    const tapeRows = [
+      ['Age',    f1Meta.age    != null ? f1Meta.age    : null, f2Meta.age    != null ? f2Meta.age    : null],
+      ['Height', f1Meta.height, f2Meta.height],
+      ['Reach',  f1Meta.reach,  f2Meta.reach],
+      ['Stance', f1Meta.stance, f2Meta.stance],
+    ].filter(r => r[1] != null || r[2] != null);
+    if (tapeRows.length) {
+      const tapeStartY = y + 4;
+      const labelCX = fx + fw / 2;
+      const f1ValX  = fx + fw * 0.30;
+      const f2ValX  = fx + fw * 0.70;
+      tapeRows.forEach((r, i) => {
+        const ry2 = tapeStartY + i * 16;
+        ctx.textBaseline = 'middle';
+        ctx.font = `600 10px ${FONT_STACK}`;
+        ctx.fillStyle = MUTED;
+        ctx.textAlign = 'center';
+        ctx.fillText(r[0].toUpperCase(), labelCX, ry2);
+        ctx.font = `700 12px ${FONT_STACK}`;
+        ctx.fillStyle = TEXT;
+        ctx.textAlign = 'right';
+        ctx.fillText(r[1] != null ? String(r[1]) : '—', f1ValX + 30, ry2);
+        ctx.textAlign = 'left';
+        ctx.fillText(r[2] != null ? String(r[2]) : '—', f2ValX - 30, ry2);
+      });
+      y = tapeStartY + tapeRows.length * 16 + 6;
+    } else {
+      y += 4;
     }
+
+    // Model / Market lines centered
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = `700 12px ${FONT_STACK}`;
+    ctx.fillStyle = TEXT;
+    ctx.fillText(`Model ${rl.modelPct} (${rl.fairAm})   ·   Market ${rl.marketPct} (${rl.marketAm})${rl.pickBook ? '  @ ' + rl.pickBook : ''}`, fx + fw / 2, y + 8);
+    y += 22;
+
+    // Edge chip centered
+    const eg = f.edge;
+    const isGreen = eg >= 5, isAmber = eg >= 1 && eg < 5, isRed = eg < 0;
+    const chipBg2 = isGreen ? CHIP_GREEN_BG : isAmber ? CHIP_AMBER_BG : isRed ? CHIP_RED_BG : CHIP_AMBER_BG;
+    const chipBr2 = isGreen ? CHIP_GREEN_BR : isAmber ? CHIP_AMBER_BR : isRed ? CHIP_RED_BR : CHIP_AMBER_BR;
+    const chipTx2 = isGreen ? GREEN : isAmber ? AMBER : isRed ? RED : AMBER;
+    const chipTxt = (eg >= 0 ? '+' : '') + eg.toFixed(1) + ' PP';
+    ctx.font = `800 13px ${FONT_STACK}`;
+    const chipTxtW = measureText(chipTxt, ctx.font);
+    const chipPadX = 12, chipH2 = 26;
+    const chipBoxW = chipTxtW + chipPadX * 2;
+    const chipXc = fx + (fw - chipBoxW) / 2;
+    ctx.fillStyle = chipBg2;
+    roundRect(chipXc, y + 4, chipBoxW, chipH2, 6);
+    ctx.fill();
+    ctx.strokeStyle = chipBr2; ctx.lineWidth = 1;
+    roundRect(chipXc, y + 4, chipBoxW, chipH2, 6);
+    ctx.stroke();
+    ctx.fillStyle = chipTx2;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(chipTxt, fx + fw / 2, y + 4 + chipH2 / 2);
+    y += chipH2 + 10;
+
+  };  // end drawMatchupCard
+
+  // Loop every fight and stack matchup cards down the page with an 8px gap
+  rowLayouts.forEach((rl, idx) => {
+    drawMatchupCard(rl, ry);
+    ry += matchupH + 8;
   });
+
 
   // Download
   const filename = (card.label || 'model').replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').toLowerCase() + '-model.png';
@@ -5436,6 +5370,7 @@ function renderBreakdowns(targetId, bets, stream) {
   // Weight class buckets — appears on all Solo tabs + Consensus. Uses ESPN
   // weight class cached on card.ml. Empty string if no bets have weight data.
   html += renderWeightClassTable(bets, 'Weight class');
+  html += renderGenderSplitTable(bets, 'Men\u2019s vs Women\u2019s');
 
   // Eye-specific: Confidence + Trust score buckets — only show on Eye Solo
   // or Consensus tabs. Saber/Arena solos suppress these because the eye-side
@@ -5566,7 +5501,7 @@ function refreshCardFilters() {
   }
 }
 
-let CURRENT_TAB = 'results';
+let CURRENT_TAB = 'model';
 let LAST_INGESTED_CARD_ID = null;
 
 // Session-scoped: bets created or updated since page load show a NEW badge.
@@ -6144,7 +6079,7 @@ async function enrichCardHeadshots(cardId, opts = {}) {
   // record, event meta) haven't been backfilled yet. This way, existing cards
   // that were enriched before these fields were added still pick them up on
   // the next silent enrichment pass.
-  const needsAny = force || !card.espnEventMeta || fighters.some(m => !m.headshotUrl || !m.record || !m.flagUrl || !m.weightClass);
+  const needsAny = force || !card.espnEventMeta || fighters.some(m => !m.headshotUrl || !m.record || !m.flagUrl || !m.weightClass || m.age == null || !m.height || !m.reach || !m.stance);
   if (!needsAny) return;
 
   // Skip silent retries within the same session if we already tried and
@@ -6239,6 +6174,14 @@ async function enrichCardHeadshots(cardId, opts = {}) {
             const flagUrl = ath.flag?.href ? fixEspnUrl(ath.flag.href) : null;
             const country = ath.citizenship || ath.birthPlace?.country || null;
 
+            // Tale-of-the-tape fields — all inline in the athlete object, no
+            // extra fetches. Any that ESPN doesn't have just come through as
+            // null and downstream renders skip them.
+            const age    = ath.age != null ? ath.age : (ath.displayAge ? parseInt(ath.displayAge, 10) : null);
+            const height = ath.displayHeight || null;   // e.g. "5' 10\""
+            const reach  = ath.displayReach  || null;   // e.g. "70\""
+            const stance = ath.stance?.text || ath.stance?.name || null;
+
             // Record needs a separate fetch — ESPN keeps W-L-D under
             // /athletes/{id}/records. Kick it off but don't block on it if it
             // fails (this athlete just won't have a record cached).
@@ -6271,6 +6214,7 @@ async function enrichCardHeadshots(cardId, opts = {}) {
             nameToHeadshot[normalizeName(name)] = {
               url: fixEspnUrl(url), athleteId: ath.id, name,
               flagUrl, country, record, weightClass,
+              age, height, reach, stance,
             };
           } catch (e) {}
         }
@@ -6298,6 +6242,10 @@ async function enrichCardHeadshots(cardId, opts = {}) {
       if (hit.country) m.country = hit.country;
       if (hit.record) m.record = hit.record;
       if (hit.weightClass) m.weightClass = hit.weightClass;
+      if (hit.age    != null) m.age    = hit.age;
+      if (hit.height)         m.height = hit.height;
+      if (hit.reach)          m.reach  = hit.reach;
+      if (hit.stance)         m.stance = hit.stance;
       resolved++;
     }
   });
@@ -6434,6 +6382,59 @@ function renderWeightClassTable(bets, headingText = 'Weight class') {
       <td class="num" style="color:${wpColor}; font-weight:600;">${b.winPct.toFixed(1)}%</td>
       <td class="num" style="color:${uColor}; font-weight:600;">${(b.units >= 0 ? '+' : '') + b.units.toFixed(2)}u</td>
       <td class="num" style="color:${roiColor}; font-weight:600;">${(b.roi >= 0 ? '+' : '') + b.roi.toFixed(1)}%</td>
+    </tr>`;
+  });
+  html += `</tbody></table></div>`;
+  return html;
+}
+
+// Splits graded bets into Men's vs Women's divisions and reports record/units/
+// ROI for each. Detection is name-based on the ESPN weight class string:
+// entries starting with "Women's" are Women's, all others are Men's.
+function renderGenderSplitTable(bets, headingText = 'Men\u2019s vs Women\u2019s') {
+  const cardsById = {};
+  (STATE.cards || []).forEach(c => { cardsById[c.id] = c; });
+  const groups = { "Men's": { label: "Men's", n:0, wins:0, losses:0, units:0 },
+                   "Women's": { label: "Women's", n:0, wins:0, losses:0, units:0 } };
+  bets.forEach(b => {
+    if (b.status !== 'win' && b.status !== 'loss') return;
+    const card = cardsById[b.cardId];
+    if (!card) return;
+    const mlKey = findMatchKey(card.ml || {}, b.fighter);
+    const wc = mlKey ? card.ml[mlKey].weightClass : null;
+    if (!wc) return;   // skip if we don't know the class (no gender inference)
+    const key = /women/i.test(wc) ? "Women's" : "Men's";
+    groups[key].n++;
+    if (b.status === 'win') groups[key].wins++; else groups[key].losses++;
+    groups[key].units += unitProfit(b);
+  });
+  const rows = Object.values(groups).filter(g => g.n > 0);
+  if (!rows.length) return '';
+  rows.forEach(g => {
+    g.winPct = g.n ? g.wins / g.n * 100 : 0;
+    g.roi = g.n ? g.units / g.n * 100 : 0;
+  });
+  let html = `<div style="margin:14px 0;">
+    <h3 style="margin:0 0 10px 0; font-size:14px; color:var(--muted); letter-spacing:0.04em; text-transform:uppercase; font-weight:600;">${headingText}</h3>
+    <table><thead><tr>
+      <th>Division</th>
+      <th class="num" style="text-align:center;">Bets</th>
+      <th class="num" style="text-align:center;">Record</th>
+      <th class="num" style="text-align:center;">Win %</th>
+      <th class="num" style="text-align:center;">Units</th>
+      <th class="num" style="text-align:center;">ROI</th>
+    </tr></thead><tbody>`;
+  rows.forEach(g => {
+    const wpColor  = g.winPct >= 50 ? 'var(--green)' : g.winPct > 0 ? 'var(--amber)' : 'var(--red)';
+    const uColor   = g.units > 0 ? 'var(--green)' : g.units < 0 ? 'var(--red)' : 'var(--muted)';
+    const roiColor = g.roi > 0 ? 'var(--green)' : g.roi < 0 ? 'var(--red)' : 'var(--muted)';
+    html += `<tr>
+      <td style="font-weight:600;">${g.label}</td>
+      <td class="num">${g.n}</td>
+      <td class="num">${g.wins}-${g.losses}</td>
+      <td class="num" style="color:${wpColor}; font-weight:600;">${g.winPct.toFixed(1)}%</td>
+      <td class="num" style="color:${uColor}; font-weight:600;">${(g.units >= 0 ? '+' : '') + g.units.toFixed(2)}u</td>
+      <td class="num" style="color:${roiColor}; font-weight:600;">${(g.roi >= 0 ? '+' : '') + g.roi.toFixed(1)}%</td>
     </tr>`;
   });
   html += `</tbody></table></div>`;
@@ -6756,7 +6757,10 @@ applyArenaVisibility();
   ['modelWEyeLbl','modelWEyeLblB'].forEach(id => { const el = document.getElementById(id); if (el) el.textContent = saved.eye; });
 })();
 
+// Initial paint: default tab is UFC Model. Also renderResults so it's ready
+// to display without a blank flash when the user switches to it.
 renderResults();
+renderModel();
 
 // Pre-fill Odds API key input from localStorage + set the status pill
 (() => {
