@@ -3165,9 +3165,24 @@ function updateSourceAgreement() {
 function openTrackModal(player, pos, stat, proj, team, presetDate) {
   modalPlayer = player;
   modalPos = pos;
-  document.getElementById("modal-player-name").textContent = player;
+  document.getElementById("modal-player-name").textContent = displayPlayerName(player);
   window._modalPlayer = player;
   document.getElementById("modal-player-sub").textContent = (pos||"") + " · Add a bet";
+  // Player face. Uses whatever the projections table already cached; if this
+  // team's roster hasn't loaded yet, fetch it and fill in when it lands.
+  try {
+    const faceEl = document.getElementById("modal-player-face");
+    if (faceEl) {
+      faceEl.innerHTML = tableHeadshotHtml(player, 40);
+      if (team && !_tableHeadshots.has(resolveNorm(player))) {
+        loadTableHeadshots([team]).then(() => {
+          const el = document.getElementById("modal-player-face");
+          // Only repaint if the modal is still on this player.
+          if (el && window._modalPlayer === player) el.innerHTML = tableHeadshotHtml(player, 40);
+        }).catch(() => {});
+      }
+    }
+  } catch (e) {}
   // Reset shorthand and hidden fields
   window._modalPresetDate = presetDate || null;
   // Cache per-source projections for THIS player+stat so the agreement panel
@@ -5086,6 +5101,17 @@ function infoIconHtml(jsHandler) {
 // Each page shows a mini bar-chart illustrating the distribution shape, plus
 // the player's own values when on their current tier's page. Carousel pages
 // share the same definition + variance-source explanation at the top.
+// Volatility detail (MIN/RATE split) starts collapsed — the CV number and bar
+// are the at-a-glance read; the breakdown is a drill-down.
+function toggleVolDetail() {
+  const el = document.getElementById("vol-detail");
+  if (!el) return;
+  const open = el.style.display !== "none";
+  el.style.display = open ? "none" : "block";
+  const caret = document.getElementById("vol-caret");
+  if (caret) caret.textContent = open ? "\u25be" : "\u25b4";
+}
+
 function showVolatilityPopover() {
   const data = window._volatilityExplainer;
   if (!data) return;
@@ -6885,16 +6911,17 @@ function updateSplitsInModal() {
 
     volRow = `<div style="font-family:'Plus Jakarta Sans',sans-serif;font-variant-numeric:tabular-nums;background:rgba(255,255,255,0.025);border:1px solid rgba(255,255,255,0.06);border-radius:3px;padding:7px 10px;">
       <div style="display:grid;grid-template-columns:auto 1fr auto;gap:8px;align-items:center;font-size:10px;line-height:1;">
-        <span style="white-space:nowrap;">
+        <span style="white-space:nowrap;${sourceRow ? "cursor:pointer;" : ""}" ${sourceRow ? 'onclick="toggleVolDetail()"' : ""}>
           <span style="color:#fff;font-weight:700;letter-spacing:0.6px;font-size:9.5px;">VOLATILITY</span>
           <span style="color:${volColor};font-weight:800;margin-left:6px;">${cv.toFixed(2)}</span>
+          ${sourceRow ? `<span id="vol-caret" style="color:#525a64;margin-left:5px;font-size:8px;">\u25be</span>` : ""}
         </span>
         <div style="height:6px;background:#1a1d22;border-radius:3px;overflow:hidden;">
           <div style="height:100%;width:${volBarPct}%;background:linear-gradient(90deg, ${volColor} 0%, ${volColor}cc 100%);border-radius:3px;"></div>
         </div>
         ${infoIconHtml("showVolatilityPopover()")}
       </div>
-      ${sourceRow}
+      ${sourceRow ? `<div id="vol-detail" style="display:none;">${sourceRow}</div>` : ""}
     </div>`;
   }
 
@@ -7496,7 +7523,7 @@ function updateAdvBar() {
     if (color === "#4ade80" || color === "#22c55e") { bg = "rgba(74,222,128,0.12)"; border = "rgba(74,222,128,0.35)"; txt = "#4ade80"; }
     else if (color === "#f87171") { bg = "rgba(248,113,113,0.12)"; border = "rgba(248,113,113,0.35)"; txt = "#f87171"; }
     else { bg = "rgba(255,255,255,0.04)"; border = "#2a2f37"; txt = "#fff"; }
-    return `<span style="display:inline-flex;align-items:baseline;gap:5px;font-family:'JetBrains Mono','Menlo',monospace;font-size:11px;background:${bg};border:0.5px solid ${border};border-radius:6px;padding:3px 9px;white-space:nowrap;">
+    return `<span style="display:inline-flex;align-items:center;gap:5px;font-family:'JetBrains Mono','Menlo',monospace;font-size:11px;background:${bg};border:0.5px solid ${border};border-radius:6px;padding:3px 9px;white-space:nowrap;">
       <span style="color:#fff;font-weight:700;">${label}</span><span style="font-weight:800;color:${txt};">${valStr}</span></span>`;
   };
 
@@ -7631,7 +7658,8 @@ function updateAdvBar() {
         // defense should read green. No neutral middle for the rank itself.
         const fav = adj.favorable;
         const rankColor = fav > 0 ? "#4ade80" : fav < 0 ? "#f87171" : "#d4dae3";
-        const matchupSection = section("Matchup", [pill(`vs ${oppTeam}`, `${rankStr} allowed`, rankColor)]);
+        const oppLogo = (typeof teamLogoHtml === "function") ? teamLogoHtml(oppTeam, 14) : "";
+        const matchupSection = section("Matchup", [pill(`vs ${oppLogo}${oppTeam}`, `${rankStr} allowed`, rankColor)]);
         if (matchupSection) rows.push(matchupSection);
       }
     }
@@ -21345,8 +21373,13 @@ function evCalcUpdateEvPanel() {
   <div id="track-modal-box" onclick="event.stopPropagation()">
     <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;">
       <div style="flex:1;min-width:0;">
-        <h3 id="modal-player-name" style="margin:0;">Player Name</h3>
-        <div class="sub" id="modal-player-sub" style="margin-top:2px;">Add a bet</div>
+        <div style="display:flex;align-items:center;gap:10px;">
+          <span id="modal-player-face" style="flex:0 0 auto;"></span>
+          <div style="min-width:0;">
+            <h3 id="modal-player-name" style="margin:0;">Player Name</h3>
+            <div class="sub" id="modal-player-sub" style="margin-top:2px;">Add a bet</div>
+          </div>
+        </div>
       </div>
       <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;flex:0 0 auto;">
         <div style="display:flex;align-items:center;gap:6px;">
