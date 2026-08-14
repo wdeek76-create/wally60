@@ -848,6 +848,9 @@
 <section id="tab-cards" class="hidden">
   <div class="panel">
     <h2>Saved cards</h2>
+    <div style="margin:0 0 12px 0; display:flex; gap:8px; flex-wrap:wrap;">
+      <button class="ghost" onclick="pullAllWeightClasses()" title="Fetch weight class from ESPN for every card (bulk). Uses ~10-30s per card. Backfills flag, country, record + venue meta while at it.">📏 Pull weight classes (all cards)</button>
+    </div>
     <div id="cardsList"></div>
   </div>
   <div class="panel">
@@ -4269,6 +4272,10 @@ function renderModelBacktest() {
   html += `</tbody></table>
   </div>`;
 
+  // Weight class buckets — same shape as edge buckets but grouped by fight
+  // weight class. Uses the same graded-bet set as edge buckets.
+  html += renderWeightClassTable(rows, 'Weight class');
+
   if (cardEntries.length > 1) {
     html += `<div style="margin-bottom:16px;">
       <h3 style="margin:0 0 10px 0; font-size:14px; color:var(--muted); letter-spacing:0.04em; text-transform:uppercase; font-weight:600;">Per card · click a row to expand fights</h3>
@@ -4730,7 +4737,11 @@ async function exportModelCardImage() {
     uniqueAll.forEach(name => {
       const mlKey = findMatchKey(card.ml || {}, name);
       const meta = mlKey ? card.ml[mlKey] : null;
-      metaMap[name] = { country: meta?.country || null, record: meta?.record || null };
+      metaMap[name] = {
+        country: meta?.country || null,
+        record: meta?.record || null,
+        weightClass: meta?.weightClass || null,
+      };
     });
     // Load headshot + flag images only for picks (opponents don't render photos)
     await Promise.all(uniquePicks.map(async name => {
@@ -4837,12 +4848,7 @@ async function exportModelCardImage() {
   ctx.fillRect(cardX, cardY, tableW, cardH);
   ctx.restore();
 
-  // Lime green border — slightly thicker (1.5px) so the color reads clearly
-  // rather than dissolving into the dark background at 1px.
-  ctx.strokeStyle = CARD_BORDER;
-  ctx.lineWidth = 1.5;
-  roundRect(cardX, cardY, tableW, cardH, cardRadius);
-  ctx.stroke();
+  // Card border removed — clean edge, no frame
 
   // Header — uppercase + centered across the card
   ctx.textBaseline = 'middle';
@@ -5139,6 +5145,16 @@ async function exportModelCardImage() {
       if (oStr) {
         ctx.fillStyle = TEXT;
         ctx.fillText(oStr, cx, fy);
+        cx += measureText(oStr, FONT_KEY);
+      }
+      // Weight class in parens at the end — muted so it feels like a footnote.
+      // Both fighters share the same class; pick's is usually populated. Fall
+      // back to opp's if pick's is missing.
+      const weightClass = pMeta.weightClass || oMeta.weightClass;
+      if (weightClass) {
+        const wcStr = `  (${weightClass})`;
+        ctx.fillStyle = MUTED;
+        ctx.fillText(wcStr, cx, fy);
       }
     }
 
@@ -5417,6 +5433,9 @@ function renderBreakdowns(targetId, bets, stream) {
   html += bucketTable('Edge buckets', edgeRows);
   html += bucketTable('Odds buckets', oddsRows);
   html += bucketTable('Favorites vs underdogs', favDogRows);
+  // Weight class buckets — appears on all Solo tabs + Consensus. Uses ESPN
+  // weight class cached on card.ml. Empty string if no bets have weight data.
+  html += renderWeightClassTable(bets, 'Weight class');
 
   // Eye-specific: Confidence + Trust score buckets — only show on Eye Solo
   // or Consensus tabs. Saber/Arena solos suppress these because the eye-side
@@ -6125,7 +6144,7 @@ async function enrichCardHeadshots(cardId, opts = {}) {
   // record, event meta) haven't been backfilled yet. This way, existing cards
   // that were enriched before these fields were added still pick them up on
   // the next silent enrichment pass.
-  const needsAny = force || !card.espnEventMeta || fighters.some(m => !m.headshotUrl || !m.record || !m.flagUrl);
+  const needsAny = force || !card.espnEventMeta || fighters.some(m => !m.headshotUrl || !m.record || !m.flagUrl || !m.weightClass);
   if (!needsAny) return;
 
   // Skip silent retries within the same session if we already tried and
@@ -6193,6 +6212,16 @@ async function enrichCardHeadshots(cardId, opts = {}) {
       const ev = await evRes.json();
       const competitions = ev.competitions || [];
       for (const comp of competitions) {
+        // Weight class per fight — ESPN puts this in a few different spots
+        // depending on the event. Try each in order and use the first non-empty
+        // value. Common shapes: "Heavyweight Bout", "Middleweight Championship",
+        // "Women's Bantamweight", etc.
+        const weightClass =
+          comp?.note ||
+          (Array.isArray(comp?.notes) && comp.notes[0]?.headline) ||
+          comp?.type?.text ||
+          comp?.type?.abbreviation ||
+          null;
         const competitors = comp.competitors || [];
         for (const c of competitors) {
           if (!c.athlete || !c.athlete.$ref) continue;
@@ -6241,7 +6270,7 @@ async function enrichCardHeadshots(cardId, opts = {}) {
 
             nameToHeadshot[normalizeName(name)] = {
               url: fixEspnUrl(url), athleteId: ath.id, name,
-              flagUrl, country, record,
+              flagUrl, country, record, weightClass,
             };
           } catch (e) {}
         }
@@ -6268,6 +6297,7 @@ async function enrichCardHeadshots(cardId, opts = {}) {
       if (hit.flagUrl) m.flagUrl = hit.flagUrl;
       if (hit.country) m.country = hit.country;
       if (hit.record) m.record = hit.record;
+      if (hit.weightClass) m.weightClass = hit.weightClass;
       resolved++;
     }
   });
@@ -6312,6 +6342,104 @@ async function enrichCardHeadshots(cardId, opts = {}) {
 // STATE, render it directly. Otherwise show a placeholder circle with the
 // fighter's first initial. Both are the same size so layout doesn't shift
 // when photos load in.
+// Bulk-fetch weight class (and any other missing ESPN meta) for every card
+// in state. Runs enrichCardHeadshots sequentially with a small delay between
+// calls so ESPN doesn't rate-limit us. Reports progress via toasts.
+async function pullAllWeightClasses() {
+  const cards = (STATE.cards || []).filter(c => c.date);
+  if (!cards.length) { toast('No cards with dates to process', 'error'); return; }
+  if (!confirm(`Fetch weight class + meta for ${cards.length} cards? Takes ~10-30 seconds each.`)) return;
+
+  toast(`Starting bulk fetch — ${cards.length} cards…`);
+  let done = 0;
+  let failed = 0;
+  for (const card of cards) {
+    try {
+      // Force re-fetch so missing weight_class on already-tried cards backfills
+      await enrichCardHeadshots(card.id, { silent: true, force: true });
+      done++;
+      // Small pause between cards to be polite to ESPN
+      await new Promise(r => setTimeout(r, 250));
+    } catch (e) { failed++; }
+  }
+  saveState(STATE);
+  rerenderCurrentTab();
+  const failStr = failed ? ` · ${failed} failed` : '';
+  toast(`Weight class pull complete — ${done} cards enriched${failStr}`);
+}
+
+// Normalize an ESPN weight-class string into a clean bucket name. ESPN
+// returns things like "Heavyweight Bout", "Women's Bantamweight Championship",
+// "Light Heavyweight Title Fight" — we strip the trailing "Bout"/"Championship"
+// suffix so a card's Heavyweight Championship + a different card's Heavyweight
+// Bout roll up into a single "Heavyweight" bucket.
+function normalizeWeightClass(wc) {
+  if (!wc) return null;
+  return wc
+    .replace(/\s+(bout|championship|title\s*fight|title\s*bout|main\s*event|co-main\s*event)\s*$/i, '')
+    .trim() || wc;
+}
+
+// Group graded bets by weight class + compute record/units/ROI per bucket.
+// bets: array of graded bets (any stream). Returns array sorted by units desc.
+function computeWeightClassBuckets(bets) {
+  const cardsById = {};
+  (STATE.cards || []).forEach(c => { cardsById[c.id] = c; });
+  const buckets = {};
+  bets.forEach(b => {
+    const card = cardsById[b.cardId];
+    if (!card) return;
+    const mlKey = findMatchKey(card.ml || {}, b.fighter);
+    const wc = mlKey ? normalizeWeightClass(card.ml[mlKey].weightClass) : null;
+    const key = wc || 'Unknown';
+    if (!buckets[key]) buckets[key] = { weightClass: key, n: 0, wins: 0, losses: 0, units: 0 };
+    if (b.status === 'win') { buckets[key].wins++; buckets[key].n++; }
+    else if (b.status === 'loss') { buckets[key].losses++; buckets[key].n++; }
+    else return;
+    buckets[key].units += unitProfit(b);
+  });
+  return Object.values(buckets)
+    .filter(b => b.n > 0)
+    .map(b => ({
+      ...b,
+      winPct: b.wins / b.n * 100,
+      roi: b.units / b.n * 100,
+    }))
+    .sort((a, b) => b.units - a.units);
+}
+
+// Render an HTML table of weight-class buckets. Same shape as the edge-buckets
+// table on the model backtest. Returns HTML string (empty if no data).
+function renderWeightClassTable(bets, headingText = 'Weight class') {
+  const buckets = computeWeightClassBuckets(bets);
+  if (!buckets.length) return '';
+  let html = `<div style="margin:14px 0;">
+    <h3 style="margin:0 0 10px 0; font-size:14px; color:var(--muted); letter-spacing:0.04em; text-transform:uppercase; font-weight:600;">${headingText}</h3>
+    <table><thead><tr>
+      <th>Weight class</th>
+      <th class="num" style="text-align:center;">Bets</th>
+      <th class="num" style="text-align:center;">Record</th>
+      <th class="num" style="text-align:center;">Win %</th>
+      <th class="num" style="text-align:center;">Units</th>
+      <th class="num" style="text-align:center;">ROI</th>
+    </tr></thead><tbody>`;
+  buckets.forEach(b => {
+    const wpColor  = b.winPct >= 50 ? 'var(--green)' : b.winPct > 0 ? 'var(--amber)' : 'var(--red)';
+    const uColor   = b.units > 0 ? 'var(--green)' : b.units < 0 ? 'var(--red)' : 'var(--muted)';
+    const roiColor = b.roi > 0 ? 'var(--green)' : b.roi < 0 ? 'var(--red)' : 'var(--muted)';
+    html += `<tr>
+      <td style="font-weight:600;">${b.weightClass}</td>
+      <td class="num">${b.n}</td>
+      <td class="num">${b.wins}-${b.losses}</td>
+      <td class="num" style="color:${wpColor}; font-weight:600;">${b.winPct.toFixed(1)}%</td>
+      <td class="num" style="color:${uColor}; font-weight:600;">${(b.units >= 0 ? '+' : '') + b.units.toFixed(2)}u</td>
+      <td class="num" style="color:${roiColor}; font-weight:600;">${(b.roi >= 0 ? '+' : '') + b.roi.toFixed(1)}%</td>
+    </tr>`;
+  });
+  html += `</tbody></table></div>`;
+  return html;
+}
+
 function renderFighterAvatar(fighterName, size = 24) {
   const initial = (fighterName || '?').trim().charAt(0).toUpperCase();
   // Look up headshot URL from any card.ml entry across all cards. Names are
