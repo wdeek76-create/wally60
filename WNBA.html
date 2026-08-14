@@ -2640,6 +2640,185 @@ function trackTotal(payload, ...legacyArgs) {
 // over/under line, red when it disagrees. A "N/M Agree" badge to the right of
 // Blended Proj summarizes the count at a glance — green if all agree, gold for
 // a split, red if zero agree.
+// ── REBOUNDER PROFILE SIGNAL (track-bet modal) ────────────────
+// Mirrors the source-agreement panel: shows which TRB% bucket this player
+// falls in and YOUR historical record betting that bucket, so a glass-cleaner
+// REB bet reads as green the same way an agreeing source does.
+// Thresholds match the Rebounding analytics table exactly (>=12 / >=6 / <6).
+// Profile buckets per market. Thresholds mirror the analytics tabs exactly so
+// the modal signal and the tables can never disagree.
+//   REB/PRA  -> TRB%          (>=12 elite / >=6 avg / <6 low)
+//   AST      -> Self-created% (>=45 playmaker / >=25 mid / <25 finisher)
+//   PTS      -> USG%          (>=28 high / >=22 mid / <22 low)
+//   3PM      -> 3PA rate      (>=6 volume / >=3 moderate / <3 low)
+function _bucket(val, hi, mid, labels, key) {
+  if (val == null || isNaN(val)) return null;
+  if (val >= hi)  return { key: key + "-hi",  label: labels[0], color: "#22c55e", val };
+  if (val >= mid) return { key: key + "-mid", label: labels[1], color: "#7dd3fc", val };
+  return             { key: key + "-lo",  label: labels[2], color: "#f87171", val };
+}
+// Self-created % from the assisted-rate fields, same derivation as the table.
+function _selfCreatedPct(sh) {
+  if (!sh) return null;
+  const vals = [sh.pctAst2p, sh.pctAst3p].filter(v => v != null && !isNaN(v));
+  if (!vals.length) return null;
+  return (1 - vals.reduce((s, c) => s + c, 0) / vals.length) * 100;
+}
+// Returns { metric, bucket } for the stat being bet, or null when we have no
+// profile for that market.
+function profileBucketFor(stat, adv, sh) {
+  const s = (stat || "").toUpperCase();
+  if (!adv && !sh) return null;
+  if (["REB", "REBOUNDS", "PRA"].includes(s)) {
+    if (!adv) return null;
+    return { metric: "TRB%", bucket: _bucket(adv.trb, 12, 6,
+      ["TRB% Elite (\u226512%) \u00b7 glass-cleaner", "TRB% Average (6-12%)", "TRB% Low (<6%) \u00b7 perimeter"], "trb") };
+  }
+  if (["AST", "ASSISTS"].includes(s)) {
+    return { metric: "Self-Cr%", bucket: _bucket(_selfCreatedPct(sh), 45, 25,
+      ["Self-Created High (\u226545%) \u00b7 playmaker", "Self-Created Mid (25-45%)", "Self-Created Low (<25%) \u00b7 finisher"], "sc") };
+  }
+  if (["PTS", "POINTS"].includes(s)) {
+    if (!adv) return null;
+    return { metric: "USG%", bucket: _bucket(adv.usg, 28, 22,
+      ["USG% High (\u226528%) \u00b7 first option", "USG% Mid (22-28%)", "USG% Low (<22%) \u00b7 low usage"], "usg") };
+  }
+  if (["3PM", "3P", "THREEPM"].includes(s)) {
+    const pct = sh && sh.fg3pPct != null ? sh.fg3pPct * 100 : null;
+    return { metric: "3P%", bucket: _bucket(pct, 37, 30,
+      ["3P% Elite (\u226537%) \u00b7 sharpshooter", "3P% Average (30-37%)", "3P% Low (<30%)"], "3p") };
+  }
+  return null;
+}
+// Your settled record on bets matching the same stat family and bucket.
+function profileBucketRecord(stat, bucketKey) {
+  const rec = { w: 0, l: 0, staked: 0, pl: 0 };
+  try {
+    if (typeof bets === "undefined" || !Array.isArray(bets)) return rec;
+    const s = (stat || "").toUpperCase();
+    const family = ["REB", "REBOUNDS", "PRA"].includes(s) ? ["REB", "REBOUNDS", "PRA"]
+                 : ["AST", "ASSISTS"].includes(s)         ? ["AST", "ASSISTS", "PRA"]
+                 : ["PTS", "POINTS"].includes(s)          ? ["PTS", "POINTS", "PRA"]
+                 : ["3PM", "3P", "THREEPM"];
+    bets.forEach(b => {
+      if (!b || (b.result !== "hit" && b.result !== "miss")) return;
+      if (!family.includes((b.stat || "").toUpperCase())) return;
+      const a = b.advSnap || (typeof getBBRefAdvForPlayer === "function" ? getBBRefAdvForPlayer(b.player) : null);
+      const shSnap = b.shSnap || (typeof getBBRefSHForPlayer === "function" ? getBBRefSHForPlayer(b.player) : null);
+      const pb = profileBucketFor(s, a, shSnap);
+      if (!pb || !pb.bucket || pb.bucket.key !== bucketKey) return;
+      const stake = Number(b.stake) || 1;
+      const toWin = Number(b.toWin);
+      rec.staked += stake;
+      if (b.result === "hit") { rec.w++; rec.pl += Number.isFinite(toWin) ? toWin : stake; }
+      else { rec.l++; rec.pl -= stake; }
+    });
+  } catch (e) {}
+  return rec;
+}
+// Extra one-line tidbits: PER, ORtg and 3P% profiles, shown only when this
+// player sits in a bucket AND you have a decent sample there. Rebounds get the
+// full panel above; these are supporting notes, not the main signal.
+function _profileTidbits(stat, adv, sh) {
+  const out = [];
+  const s = (stat || "").toUpperCase();
+  const scoring = ["PTS", "POINTS", "3PM", "3P", "THREEPM", "PRA"].includes(s);
+  const push = (metric, val, bucket, family, thresholds, labels) => {
+    if (val == null || isNaN(val)) return;
+    const idx = val >= thresholds[0] ? 0 : (thresholds[1] != null && val >= thresholds[1] ? 1 : 2);
+    const key = bucket + "-" + idx;
+    const rec = _tidbitRecord(family, bucket, idx);
+    const n = rec.w + rec.l;
+    const roi = rec.staked > 0 ? (rec.pl / rec.staked) * 100 : null;
+    out.push({ metric, val, label: labels[idx], roi, n, w: rec.w, l: rec.l,
+               color: n === 0 ? "#8b93a0" : (roi > 0 ? "#22c55e" : roi < 0 ? "#f87171" : "#8b93a0") });
+  };
+  if (scoring && adv) {
+    push("PER", adv.per, "per", null, [22, 15],
+      ["Elite PER (\u226522)", "Average PER (15-22)", "Low PER (<15)"]);
+    push("ORtg", adv.ortg, "ortg", null, [115, 105],
+      ["Strong ORtg (\u2265115)", "Mid ORtg (105-115)", "Weak ORtg (<105)"]);
+  }
+  if (scoring && sh && sh.fg3pPct != null) {
+    push("3P%", sh.fg3pPct * 100, "3p", null, [37, 30],
+      ["3P% Elite (\u226537%)", "3P% Average (30-37%)", "3P% Low (<30%)"]);
+  }
+  return out;
+}
+// Your record for a tidbit bucket, over the same scoring-bet families the
+// analytics tables use.
+function _tidbitRecord(_family, bucket, idx) {
+  const rec = { w: 0, l: 0, staked: 0, pl: 0 };
+  try {
+    if (typeof bets === "undefined" || !Array.isArray(bets)) return rec;
+    bets.forEach(b => {
+      if (!b || (b.result !== "hit" && b.result !== "miss")) return;
+      const st = (b.stat || "").toUpperCase();
+      if (!["PTS", "POINTS", "3PM", "3P", "THREEPM", "PRA"].includes(st)) return;
+      const a = b.advSnap || (typeof getBBRefAdvForPlayer === "function" ? getBBRefAdvForPlayer(b.player) : null);
+      const sh = b.shSnap || (typeof getBBRefSHForPlayer === "function" ? getBBRefSHForPlayer(b.player) : null);
+      let v = null;
+      if (bucket === "per")  v = a ? a.per : null;
+      if (bucket === "ortg") v = a ? a.ortg : null;
+      if (bucket === "3p")   v = (sh && sh.fg3pPct != null) ? sh.fg3pPct * 100 : null;
+      if (v == null || isNaN(v)) return;
+      const th = bucket === "per" ? [22, 15] : bucket === "ortg" ? [115, 105] : [37, 30];
+      const bIdx = v >= th[0] ? 0 : (v >= th[1] ? 1 : 2);
+      if (bIdx !== idx) return;
+      const stake = Number(b.stake) || 1;
+      const toWin = Number(b.toWin);
+      rec.staked += stake;
+      if (b.result === "hit") { rec.w++; rec.pl += Number.isFinite(toWin) ? toWin : stake; }
+      else { rec.l++; rec.pl -= stake; }
+    });
+  } catch (e) {}
+  return rec;
+}
+function updateRebSignalInModal() {
+  const el = document.getElementById("modal-reb-signal");
+  if (!el) return;
+  try {
+    const statEl = document.getElementById("modal-stat");
+    const stat = (statEl ? statEl.value : "").toUpperCase();
+    const player = window._modalPlayer || "";
+    const adv = (typeof getBBRefAdvForPlayer === "function") ? getBBRefAdvForPlayer(player) : null;
+    const sh = (typeof getBBRefSHForPlayer === "function") ? getBBRefSHForPlayer(player) : null;
+    const pb = profileBucketFor(stat, adv, sh);
+    const tidbits = _profileTidbits(stat, adv, sh);
+    if ((!pb || !pb.bucket) && !tidbits.length) { el.style.display = "none"; return; }
+
+    let main = "";
+    if (pb && pb.bucket) {
+      const bucket = pb.bucket;
+      const r = profileBucketRecord(stat, bucket.key);
+      const n = r.w + r.l;
+      const roi = r.staked > 0 ? (r.pl / r.staked) * 100 : null;
+      const winPct = n > 0 ? Math.round((r.w / n) * 100) : null;
+      const recStr = n > 0
+        ? `${r.w}-${r.l} \u00b7 ${winPct}% \u00b7 ${r.pl >= 0 ? "+" : ""}${r.pl.toFixed(2)}u${roi != null ? ` \u00b7 ${roi >= 0 ? "+" : ""}${roi.toFixed(1)}% ROI` : ""}`
+        : "no settled bets yet";
+      const recColor = n === 0 ? "#8b93a0" : (r.pl > 0 ? "#22c55e" : r.pl < 0 ? "#f87171" : "#8b93a0");
+      main = `<div style="background:rgba(255,255,255,0.025);border:1px solid ${bucket.color}33;border-left:3px solid ${bucket.color};border-radius:6px;padding:6px 9px;font-family:'Plus Jakarta Sans',sans-serif;">
+        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:10px;line-height:1.4;">
+          <span style="color:#fff;font-weight:800;letter-spacing:0.5px;font-size:9px;text-transform:uppercase;font-family:'JetBrains Mono','Menlo',monospace;">Profile</span>
+          <span style="color:${bucket.color};font-weight:800;">${bucket.label}</span>
+          <span style="color:#525a64;">${pb.metric} ${Number(bucket.val).toFixed(1)}</span>
+        </div>
+        <div style="font-size:10px;color:${recColor};font-weight:700;margin-top:3px;font-variant-numeric:tabular-nums;">Your record: ${recStr}</div>
+      </div>`;
+    }
+    const notes = tidbits.length
+      ? `<div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:${main ? "4px" : "0"};">` +
+        tidbits.map(t => `<span style="font-size:9px;font-family:'JetBrains Mono','Menlo',monospace;background:${t.color}14;border:1px solid ${t.color}40;color:${t.color};border-radius:4px;padding:2px 6px;font-weight:700;white-space:nowrap;">${t.label} \u00b7 ${t.n ? `${t.w}-${t.l} \u00b7 ${t.roi >= 0 ? "+" : ""}${t.roi.toFixed(1)}%` : "no bets"}</span>`).join("") +
+        `</div>`
+      : "";
+    el.style.display = "block";
+    el.innerHTML = main + notes;
+  } catch (e) {
+    el.style.display = "none";
+  }
+}
+
 function computeSrcValsForModal(player, stat) {
   // GAME_TOTAL isn't a per-player stat — no source breakdown applies.
   if (!player || !stat || stat === "GAME_TOTAL") return {};
@@ -3185,6 +3364,7 @@ function openTrackModal(player, pos, stat, proj, team, presetDate) {
   } catch (e) {}
   // Reset shorthand and hidden fields
   window._modalPresetDate = presetDate || null;
+  try { setTimeout(updateRebSignalInModal, 0); } catch (e) {}
   // Cache per-source projections for THIS player+stat so the agreement panel
   // (rendered under Blended Proj) can compare them against whatever line the
   // user types. Key: source label (RG/RW/SABER/DMR). Value: number or null.
@@ -21396,7 +21576,7 @@ function evCalcUpdateEvPanel() {
       <div class="modal-field" style="flex:0 0 auto;">
         <label>Stat</label>
         <div id="modal-stat-display" style="background:#050507;border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:11px 16px;font-size:15px;color:#7dd3fc;font-weight:800;letter-spacing:0.5px;min-width:80px;text-align:center;">PTS</div>
-        <select id="modal-stat" style="display:none;" onchange="recomputeFairFromProj()">
+        <select id="modal-stat" style="display:none;" onchange="recomputeFairFromProj();updateRebSignalInModal()">
           <option value="PTS">PTS</option>
           <option value="REB">REB</option>
           <option value="AST">AST</option>
@@ -21494,6 +21674,7 @@ or one per line — book shorthand + odds (+ optional line + ev%)" spellcheck="f
       <div id="modal-src-pills" style="display:flex;gap:6px;flex-wrap:wrap;"></div>
       <div id="modal-src-records" style="display:none;"></div>
     </div>
+    <div id="modal-reb-signal" style="margin-top:6px;display:none;"></div>
     <!-- Matchup adjustment — pulls from uploaded opp-avg CSV (Rotowire defensive
          averages) and shows how favorable tonight's opponent is for this stat.
          Same visual treatment as the Volatility bar in Splits. -->
