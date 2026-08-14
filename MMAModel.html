@@ -4953,14 +4953,35 @@ async function exportModelCardImage() {
       wcCursorY += 4;
     }
 
-    // Helper — draw one fighter row (photo + name + record + country flag)
-    // isPick = highlight name in green + pill background.
-    const drawFighterRow = (name, meta, img, flag, isPick, atY) => {
-      const avSize = 54;
-      const avX = fx + 4;
-      const avCX = avX + avSize / 2;
-      const avCY = atY + avSize / 2;
-      // Avatar circle
+    // Draw one fighter centered on cx: photo on top with optional green glow
+    // if this is the pick, then name + record + country stacked below.
+    const drawFighterCentered = (name, meta, img, flag, isPick, cx, topY, avSize) => {
+      const avCX = cx;
+      const avCY = topY + avSize / 2;
+
+      // Green glow behind the pick's photo — soft outer ring using shadowBlur.
+      // Rendered before the avatar so it sits behind. Two-pass draw gives a
+      // richer glow: an inner bright ring + a wider softer bloom.
+      if (isPick) {
+        ctx.save();
+        ctx.shadowColor = 'rgba(0,214,143,0.9)';
+        ctx.shadowBlur = 22;
+        ctx.strokeStyle = GREEN;
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.arc(avCX, avCY, avSize / 2 + 3, 0, Math.PI * 2);
+        ctx.stroke();
+        // Second pass for a softer, wider bloom
+        ctx.shadowBlur = 40;
+        ctx.strokeStyle = 'rgba(0,214,143,0.35)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.arc(avCX, avCY, avSize / 2 + 6, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      // Photo (clipped to circle) or initial placeholder
       ctx.save();
       ctx.beginPath();
       ctx.arc(avCX, avCY, avSize / 2, 0, Math.PI * 2);
@@ -4972,20 +4993,24 @@ async function exportModelCardImage() {
         let sx, sy, sSize;
         if (iw >= ih) { sSize = ih; sx = (iw - ih) / 2; sy = 0; }
         else          { sSize = iw; sx = 0; sy = Math.max(0, (ih - iw) * 0.15); }
-        ctx.drawImage(img, sx, sy, sSize, sSize, avX, atY, avSize, avSize);
+        ctx.drawImage(img, sx, sy, sSize, sSize, avCX - avSize / 2, avCY - avSize / 2, avSize, avSize);
       } else {
         ctx.fillStyle = '#e2e8f0';
-        ctx.fillRect(avX, atY, avSize, avSize);
+        ctx.fillRect(avCX - avSize / 2, avCY - avSize / 2, avSize, avSize);
         ctx.fillStyle = '#64748b';
-        ctx.font = `700 22px ${FONT_STACK}`;
+        ctx.font = `700 ${Math.round(avSize * 0.42)}px ${FONT_STACK}`;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.fillText((name || '?').charAt(0).toUpperCase(), avCX, avCY);
       }
       ctx.restore();
-      ctx.strokeStyle = '#cbd5e1';
-      ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.arc(avCX, avCY, avSize / 2, 0, Math.PI * 2); ctx.stroke();
+      // Thin ring — only draw for non-picks (pick already has green ring)
+      if (!isPick) {
+        ctx.strokeStyle = '#cbd5e1';
+        ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.arc(avCX, avCY, avSize / 2, 0, Math.PI * 2); ctx.stroke();
+      }
+
       // Flag corner
       if (flag) {
         const fs = Math.round(avSize * 0.4);
@@ -5005,60 +5030,74 @@ async function exportModelCardImage() {
         ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
         ctx.beginPath(); ctx.arc(fCX, fCY, fs / 2, 0, Math.PI * 2); ctx.stroke();
       }
-      // Name + record to the right of avatar
-      const nx = avX + avSize + 12;
+
+      // Name centered below photo (uppercase, no pill highlight — the glow
+      // marks the pick now)
       const upperName = (name || '').toUpperCase();
-      ctx.font = `800 18px ${FONT_STACK}`;
-      ctx.textAlign = 'left';
-      ctx.textBaseline = 'middle';
-      const nameW = measureText(upperName, ctx.font);
-      if (isPick) {
-        // Green pill background behind the pick's name
-        const padX = 6, padY = 3, pillH = 24;
-        ctx.fillStyle = CHIP_GREEN_BG;
-        roundRect(nx - padX, avCY - pillH / 2, nameW + padX * 2, pillH, 5);
-        ctx.fill();
-        ctx.strokeStyle = CHIP_GREEN_BR; ctx.lineWidth = 1;
-        roundRect(nx - padX, avCY - pillH / 2, nameW + padX * 2, pillH, 5);
-        ctx.stroke();
-        ctx.fillStyle = GREEN;
-      } else {
-        ctx.fillStyle = TEXT;
-      }
-      ctx.fillText(upperName, nx, avCY - 8);
+      ctx.font = `800 16px ${FONT_STACK}`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+      ctx.fillStyle = TEXT;
+      ctx.fillText(upperName, cx, topY + avSize + 10);
+
       // Record + country under the name
       const parts = [];
       if (meta.record) parts.push(meta.record);
       if (meta.country) parts.push(meta.country);
       if (parts.length) {
-        ctx.font = `600 12px ${FONT_STACK}`;
+        ctx.font = `600 11px ${FONT_STACK}`;
         ctx.fillStyle = MUTED;
-        ctx.fillText(parts.join(' · '), nx, avCY + 12);
+        ctx.fillText(parts.join(' · '), cx, topY + avSize + 30);
       }
     };
 
-    // Fighter 1 (top)
-    drawFighterRow(f1Name, f1Meta, f1Img, f1Flag, isPickF1, wcCursorY);
-    let y = wcCursorY + 62;
-    // "vs" divider
-    ctx.font = `700 12px ${FONT_STACK}`;
-    ctx.fillStyle = MUTED;
+    // Draw both fighters side-by-side. Centers positioned at 22% / 78% of the
+    // card width so they sit comfortably apart with room for the "vs" and the
+    // tale of the tape between them below.
+    const avSize = 68;
+    const cx1 = fx + fw * 0.22;
+    const cx2 = fx + fw * 0.78;
+    drawFighterCentered(f1Name, f1Meta, f1Img, f1Flag, isPickF1,   cx1, wcCursorY, avSize);
+    drawFighterCentered(f2Name, f2Meta, f2Img, f2Flag, !isPickF1,  cx2, wcCursorY, avSize);
+
+    // Small "vs" pill between the two photos, vertically centered on the avatars
+    ctx.font = `700 11px ${FONT_STACK}`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText('vs', fx + fw / 2, y);
-    y += 12;
-    // Fighter 2
-    drawFighterRow(f2Name, f2Meta, f2Img, f2Flag, !isPickF1, y);
-    y += 62;
+    ctx.fillStyle = MUTED;
+    ctx.fillText('vs', fx + fw / 2, wcCursorY + avSize / 2);
+
+    // Advance past the fighter block: avatar + 10 gap + name(16) + 4 gap + record(11) + bottom pad
+    let y = wcCursorY + avSize + 10 + 16 + 4 + 11 + 12;
 
     // Tale of the tape (compact 2-column) — only render if we have at least
-    // one stat for either fighter. Show fighter 1 on the left, fighter 2 on right.
+    // one stat for either fighter. Show fighter 1 on the left, fighter 2 on
+    // right. A small green arrow points to the fighter with the advantage on
+    // that stat: younger age wins, taller/longer wins for height + reach.
+    // Stance is categorical so no arrow.
+    const parseHeight = (s) => {
+      // "5' 10\"" / "5'10\"" / "5' 10 in" → total inches. Returns null if unparseable.
+      if (!s) return null;
+      const m1 = String(s).match(/(\d+)\s*'\s*(\d+(?:\.\d+)?)/);
+      if (m1) return parseInt(m1[1], 10) * 12 + parseFloat(m1[2]);
+      const m2 = String(s).match(/(\d+(?:\.\d+)?)\s*(?:in|")/);
+      if (m2) return parseFloat(m2[1]);
+      const n = parseFloat(s);
+      return isNaN(n) ? null : n;
+    };
+    const parseReach = (s) => {
+      if (!s) return null;
+      const m1 = String(s).match(/(\d+(?:\.\d+)?)/);
+      return m1 ? parseFloat(m1[1]) : null;
+    };
+    // Advantage direction: 'lower' means smaller number wins (age); 'higher'
+    // means bigger number wins (height, reach). null = no comparison.
     const tapeRows = [
-      ['Age',    f1Meta.age    != null ? f1Meta.age    : null, f2Meta.age    != null ? f2Meta.age    : null],
-      ['Height', f1Meta.height, f2Meta.height],
-      ['Reach',  f1Meta.reach,  f2Meta.reach],
-      ['Stance', f1Meta.stance, f2Meta.stance],
-    ].filter(r => r[1] != null || r[2] != null);
+      { label: 'Age',    v1: f1Meta.age, v2: f2Meta.age, dir: 'lower',  parse: (x) => x },
+      { label: 'Height', v1: f1Meta.height, v2: f2Meta.height, dir: 'higher', parse: parseHeight },
+      { label: 'Reach',  v1: f1Meta.reach,  v2: f2Meta.reach,  dir: 'higher', parse: parseReach },
+      { label: 'Stance', v1: f1Meta.stance, v2: f2Meta.stance, dir: null,      parse: () => null },
+    ].filter(r => r.v1 != null || r.v2 != null);
     if (tapeRows.length) {
       const tapeStartY = y + 4;
       const labelCX = fx + fw / 2;
@@ -5067,16 +5106,52 @@ async function exportModelCardImage() {
       tapeRows.forEach((r, i) => {
         const ry2 = tapeStartY + i * 16;
         ctx.textBaseline = 'middle';
+        // LABEL centered
         ctx.font = `600 10px ${FONT_STACK}`;
         ctx.fillStyle = MUTED;
         ctx.textAlign = 'center';
-        ctx.fillText(r[0].toUpperCase(), labelCX, ry2);
+        ctx.fillText(r.label.toUpperCase(), labelCX, ry2);
+
+        // Determine which side has the advantage (if any)
+        let advSide = null;  // 'f1' or 'f2' or null
+        if (r.dir && r.v1 != null && r.v2 != null) {
+          const p1 = r.parse(r.v1);
+          const p2 = r.parse(r.v2);
+          if (p1 != null && p2 != null && p1 !== p2) {
+            if (r.dir === 'lower') advSide = p1 < p2 ? 'f1' : 'f2';
+            else                    advSide = p1 > p2 ? 'f1' : 'f2';
+          }
+        }
+
+        // F1 value (right-aligned toward center)
         ctx.font = `700 12px ${FONT_STACK}`;
-        ctx.fillStyle = TEXT;
+        ctx.fillStyle = advSide === 'f1' ? GREEN : TEXT;
         ctx.textAlign = 'right';
-        ctx.fillText(r[1] != null ? String(r[1]) : '—', f1ValX + 30, ry2);
+        const v1Str = r.v1 != null ? String(r.v1) : '—';
+        ctx.fillText(v1Str, f1ValX + 30, ry2);
+        // Arrow to the LEFT of f1 value if f1 wins
+        if (advSide === 'f1') {
+          ctx.font = `800 12px ${FONT_STACK}`;
+          ctx.fillStyle = GREEN;
+          ctx.textAlign = 'right';
+          const v1w = measureText(v1Str, `700 12px ${FONT_STACK}`);
+          ctx.fillText('▲', f1ValX + 30 - v1w - 4, ry2);
+        }
+
+        // F2 value (left-aligned toward center)
+        ctx.font = `700 12px ${FONT_STACK}`;
+        ctx.fillStyle = advSide === 'f2' ? GREEN : TEXT;
         ctx.textAlign = 'left';
-        ctx.fillText(r[2] != null ? String(r[2]) : '—', f2ValX - 30, ry2);
+        const v2Str = r.v2 != null ? String(r.v2) : '—';
+        ctx.fillText(v2Str, f2ValX - 30, ry2);
+        // Arrow to the RIGHT of f2 value if f2 wins
+        if (advSide === 'f2') {
+          ctx.font = `800 12px ${FONT_STACK}`;
+          ctx.fillStyle = GREEN;
+          ctx.textAlign = 'left';
+          const v2w = measureText(v2Str, `700 12px ${FONT_STACK}`);
+          ctx.fillText('▲', f2ValX - 30 + v2w + 4, ry2);
+        }
       });
       y = tapeStartY + tapeRows.length * 16 + 6;
     } else {
