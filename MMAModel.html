@@ -4690,12 +4690,15 @@ async function exportModelCardImage() {
     }
     const modelPct  = fmtPct(f.predictedWinner === f.fighter1 ? f.f1Prob : f.f2Prob, 1);
     const fairAm    = fmtAm(f.predictedWinner === f.fighter1 ? f.f1Fair : f.f2Fair);
-    const marketAm  = fmtAm(f.predictedWinner === f.fighter1 ? f.f1Ml   : f.f2Ml);
+    const pickMl    = f.predictedWinner === f.fighter1 ? f.f1Ml : f.f2Ml;
+    const marketAm  = fmtAm(pickMl);
+    const marketImp = americanToImplied(pickMl);
+    const marketPct = marketImp != null ? fmtPct(marketImp, 1) : '—';
     const pickBook  = f.predictedWinner === f.fighter1 ? f.f1Book : f.f2Book;
     return {
       fight: f, rank: i + 1,
       fighterLines: fLines,
-      modelPct, fairAm, marketAm, pickBook, pickName,
+      modelPct, fairAm, marketAm, marketPct, pickBook, pickName, oppName,
     };
   });
 
@@ -4704,11 +4707,16 @@ async function exportModelCardImage() {
   // to a placeholder circle with the fighter's initial. Runs in parallel.
   // Also preloads country flags and captures record/country meta for each pick
   // so the export can decorate with all three.
-  const headshotMap = {};   // pickName → HTMLImageElement or null
-  const flagMap = {};       // pickName → HTMLImageElement or null
-  const metaMap = {};       // pickName → { country, record }
+  const headshotMap = {};   // fighterName → HTMLImageElement or null (picks only)
+  const flagMap = {};       // fighterName → HTMLImageElement or null (picks only)
+  const metaMap = {};       // fighterName → { country, record } (picks + opponents)
   {
+    // Preload metadata for picks AND opponents so the trailing line can show
+    // "pick record country  vs  opp record country". Headshots + flags still
+    // only preload for picks — no need to load opponent photos on canvas.
     const uniquePicks = [...new Set(rowLayouts.map(rl => rl.pickName))];
+    const uniqueOpps  = [...new Set(rowLayouts.map(rl => rl.oppName).filter(Boolean))];
+    const uniqueAll   = [...new Set([...uniquePicks, ...uniqueOpps])];
     const loadImg = (url) => new Promise(resolve => {
       if (!url) return resolve(null);
       const img = new Image();
@@ -4718,11 +4726,16 @@ async function exportModelCardImage() {
       img.onerror = () => { clearTimeout(timer); resolve(null); };
       img.src = url;
     });
-    await Promise.all(uniquePicks.map(async name => {
+    // Populate metaMap for every fighter (pick + opp) — cheap, no network calls
+    uniqueAll.forEach(name => {
       const mlKey = findMatchKey(card.ml || {}, name);
       const meta = mlKey ? card.ml[mlKey] : null;
       metaMap[name] = { country: meta?.country || null, record: meta?.record || null };
-      // Load headshot + flag in parallel per fighter
+    });
+    // Load headshot + flag images only for picks (opponents don't render photos)
+    await Promise.all(uniquePicks.map(async name => {
+      const mlKey = findMatchKey(card.ml || {}, name);
+      const meta = mlKey ? card.ml[mlKey] : null;
       const [headshot, flag] = await Promise.all([
         loadImg(meta?.headshotUrl || null),
         loadImg(meta?.flagUrl || null),
@@ -4732,13 +4745,13 @@ async function exportModelCardImage() {
     }));
   }
 
-  // Backfill hasMeta on each row so rowH() knows whether to reserve the
-  // trailing 14px record/country line. If no meta, the space would just be
-  // empty — and centering the edge chip against that empty band puts it
-  // visibly above the actual content.
+  // Backfill hasMeta on each row — true if EITHER pick or opp has record/country
+  // data. Row height reserves 14px for the trailing line when hasMeta, so chip
+  // stays centered on visible content.
   rowLayouts.forEach(rl => {
-    const meta = metaMap[rl.pickName] || {};
-    rl.hasMeta = !!(meta.record || meta.country);
+    const pMeta = metaMap[rl.pickName] || {};
+    const oMeta = metaMap[rl.oppName] || {};
+    rl.hasMeta = !!(pMeta.record || pMeta.country || oMeta.record || oMeta.country);
   });
 
   // Row height budget: fighter lines + Model/Fair + Market (+ optional
@@ -4859,7 +4872,7 @@ async function exportModelCardImage() {
   // Rows
   let ry = cardY + cardPadY + headerH + 10;
   rowLayouts.forEach((rl, idx) => {
-    const { fight: f, rank, fighterLines, modelPct, fairAm, marketAm, pickBook, pickName } = rl;
+    const { fight: f, rank, fighterLines, modelPct, fairAm, marketAm, marketPct, pickBook, pickName, oppName } = rl;
     const rowX = cardX + cardPadX;
     const height = rowH(rl);
 
@@ -5058,23 +5071,34 @@ async function exportModelCardImage() {
       ctx.fillText(v2, secondX + k2w + 4, y);
     };
     fy += 4;
-    drawTwoKV('Model', modelPct, TEXT, 'Fair', fairAm, GREEN, fy);
+    // Model line: "Model 78.1% (-356)" — win % first, fair odds in parens
+    drawKV('Model', `${modelPct} (${fairAm})`, TEXT, fy);
     fy += 16;
-    drawKV('Market', marketAm + (pickBook ? `  @ ${pickBook}` : ''), TEXT, fy);
+    // Market line: "Market 75.4% (-326) @ FanDuel" — implied % first, odds
+    // in parens, then book if we have it
+    drawKV('Market', `${marketPct} (${marketAm})${pickBook ? `  @ ${pickBook}` : ''}`, TEXT, fy);
     fy += 16;
-    // No more "Pick <name>" line — the pick is now highlighted in the fighter
-    // matchup line above. Just show the record + country as the trailing info,
-    // in white with a plain space separator (no bullet).
-    const meta = metaMap[pickName] || {};
-    if (meta.record || meta.country) {
+    // Trailing line — mirrors the top matchup: "<pick meta>  vs  <opp meta>"
+    // where each side is "record country" joined with a space. Whichever
+    // side is missing meta gets omitted entirely (line only renders if at
+    // least one side has data, since hasMeta guarded the row height above).
+    const pMeta = metaMap[pickName] || {};
+    const oMeta = metaMap[oppName] || {};
+    const fmtSide = (m) => {
       const parts = [];
-      if (meta.record) parts.push(meta.record);
-      if (meta.country) parts.push(meta.country);
+      if (m.record) parts.push(m.record);
+      if (m.country) parts.push(m.country);
+      return parts.join(' ');
+    };
+    const pStr = fmtSide(pMeta);
+    const oStr = fmtSide(oMeta);
+    if (pStr || oStr) {
       ctx.font = FONT_KEY;
       ctx.fillStyle = TEXT;
       ctx.textAlign = 'left';
       ctx.textBaseline = 'top';
-      ctx.fillText(parts.join(' '), midX, fy);
+      const trailing = pStr && oStr ? `${pStr}  vs  ${oStr}` : (pStr || oStr);
+      ctx.fillText(trailing, midX, fy);
     }
 
     // Edge chip on the right, vertically centered
