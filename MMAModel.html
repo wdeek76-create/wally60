@@ -344,6 +344,7 @@
   <button class="tab" data-tab="saber">Saber Solo</button>
   <button class="tab" data-tab="action">Action Solo</button>
   <button class="tab active" data-tab="model">UFC Model</button>
+  <button class="tab" data-tab="breakdown">Card Breakdown</button>
   <button class="tab" data-tab="cards">Cards</button>
 </div>
 
@@ -844,7 +845,39 @@
   </div>
 </section>
 
-<!-- ============ CARDS ============ -->
+<!-- ============ CARD BREAKDOWN (AI-powered fight analysis) ============ -->
+<section id="tab-breakdown" class="hidden">
+  <div class="panel">
+    <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:16px; margin-bottom:12px; flex-wrap:wrap;">
+      <div>
+        <h2 style="margin:0;">Card breakdown</h2>
+        <p class="meta" style="margin:6px 0 0 0;">Short AI-generated read on every fight — pick's path, opp's threat, verdict. Free via Google Gemini.</p>
+      </div>
+      <div style="display:flex; gap:8px; align-items:center;">
+        <button onclick="generateCardBreakdown()" class="primary" id="breakdownGenBtn">🧠 Generate breakdown</button>
+        <select id="breakdownCardFilter" style="background:var(--bg2); border:1px solid var(--border); border-radius:6px; padding:7px 10px; color:var(--text); font-size:13px; min-width:280px;"></select>
+      </div>
+    </div>
+
+    <!-- Gemini API key setup -->
+    <div id="geminiKeySetup" style="background:var(--bg2); border:1px solid var(--border); border-radius:8px; padding:14px; margin-bottom:14px;">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+        <div style="font-weight:600;">Google Gemini API key <span id="geminiStatus" class="meta"></span></div>
+        <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener" class="meta" style="font-size:12px;">Get a free key →</a>
+      </div>
+      <div style="display:flex; gap:8px;">
+        <input type="password" id="geminiKeyInput" placeholder="Paste your Gemini API key (AIza...)" style="flex:1; background:var(--bg); border:1px solid var(--border); border-radius:6px; padding:8px 10px; color:var(--text); font-size:13px; font-family:var(--mono);">
+        <button class="ghost" onclick="saveGeminiKey()">Save</button>
+        <button class="ghost" onclick="clearGeminiKey()" style="color:var(--red);">Clear</button>
+      </div>
+      <div class="meta" style="margin-top:8px; font-size:11px;">Free tier: 1M tokens/day. Key stored in your browser only; sent to Google's API when you generate a breakdown.</div>
+    </div>
+
+    <div id="breakdownStatus" class="meta" style="margin-bottom:12px;"></div>
+    <div id="breakdownResults"></div>
+  </div>
+</section>
+
 <section id="tab-cards" class="hidden">
   <div class="panel">
     <h2>Saved cards</h2>
@@ -5565,6 +5598,16 @@ function refreshCardFilters() {
     else if (LAST_INGESTED_CARD_ID && [...modelSel.options].some(o => o.value === LAST_INGESTED_CARD_ID)) modelSel.value = LAST_INGESTED_CARD_ID;
     else if (sortedCards.length) modelSel.value = sortedCards[0].id;
   }
+  // Card Breakdown tab: same behavior as model — one card at a time.
+  const bdSel = document.getElementById('breakdownCardFilter');
+  if (bdSel) {
+    const cur = bdSel.value;
+    const sortedCards = [...STATE.cards].sort((a,b) => (b.date||'').localeCompare(a.date||''));
+    bdSel.innerHTML = sortedCards.map(c => `<option value="${c.id}">${c.label}${c.date ? ' · '+c.date : ''}</option>`).join('');
+    if (cur && cur !== 'all' && [...bdSel.options].some(o => o.value === cur)) bdSel.value = cur;
+    else if (LAST_INGESTED_CARD_ID && [...bdSel.options].some(o => o.value === LAST_INGESTED_CARD_ID)) bdSel.value = LAST_INGESTED_CARD_ID;
+    else if (sortedCards.length) bdSel.value = sortedCards[0].id;
+  }
   // CLV picker: independent, no "all cards" option (CLV is always per-card).
   // Default-selects the most recently ingested card so the common case is one click.
   const clv = document.getElementById('clvCardTarget');
@@ -5591,6 +5634,7 @@ function rerenderCurrentTab() {
   else if (CURRENT_TAB === 'saber') renderSolo('saber');
   else if (CURRENT_TAB === 'action') { refreshAddActionCard(); renderSolo('action'); }
   else if (CURRENT_TAB === 'model') renderModel();
+  else if (CURRENT_TAB === 'breakdown') renderCardBreakdown();
   else if (CURRENT_TAB === 'cards') renderCards();
 }
 document.querySelectorAll('.tabs .tab').forEach(t => {
@@ -5640,6 +5684,16 @@ document.getElementById('consQualifiedOnly').addEventListener('change', renderCo
 ['actionCardFilter','actionStatusFilter'].forEach(id => document.getElementById(id).addEventListener('change', () => renderSolo('action')));
 const _modelCF = document.getElementById('modelCardFilter');
 if (_modelCF) _modelCF.addEventListener('change', renderModel);
+const _bdCF = document.getElementById('breakdownCardFilter');
+if (_bdCF) _bdCF.addEventListener('change', renderCardBreakdown);
+
+// Initialize Gemini key input + status pill so the user sees whether a key
+// is saved as soon as they land on the Card Breakdown tab.
+(() => {
+  const el = document.getElementById('geminiKeyInput');
+  if (el) el.value = getGeminiKey();
+  refreshGeminiStatus();
+})();
 ['resCardFilter','resQualOnly','resSearch'].forEach(id => {
   const elx = document.getElementById(id);
   if (elx) elx.addEventListener(id === 'resSearch' ? 'input' : 'change', renderResults);
@@ -6368,6 +6422,257 @@ async function enrichCardHeadshots(cardId, opts = {}) {
 // Bulk-fetch weight class (and any other missing ESPN meta) for every card
 // in state. Runs enrichCardHeadshots sequentially with a small delay between
 // calls so ESPN doesn't rate-limit us. Reports progress via toasts.
+// ============================================================
+// CARD BREAKDOWN — AI-generated fight analysis (Google Gemini free API)
+// ============================================================
+const GEMINI_KEY_STORAGE = 'mma_edge_tracker_gemini_key';
+function getGeminiKey() {
+  try { return localStorage.getItem(GEMINI_KEY_STORAGE) || ''; } catch { return ''; }
+}
+function saveGeminiKey() {
+  const el = document.getElementById('geminiKeyInput');
+  if (!el) return;
+  const k = (el.value || '').trim();
+  if (!k) { toast('Paste a key first', 'error'); return; }
+  try { localStorage.setItem(GEMINI_KEY_STORAGE, k); } catch {}
+  refreshGeminiStatus();
+  toast('Gemini key saved');
+}
+function clearGeminiKey() {
+  try { localStorage.removeItem(GEMINI_KEY_STORAGE); } catch {}
+  const el = document.getElementById('geminiKeyInput');
+  if (el) el.value = '';
+  refreshGeminiStatus();
+  toast('Gemini key cleared');
+}
+function refreshGeminiStatus() {
+  const el = document.getElementById('geminiStatus');
+  if (!el) return;
+  const k = getGeminiKey();
+  if (k) {
+    el.textContent = ` · ✓ ${k.slice(0, 6)}…${k.slice(-4)}`;
+    el.style.color = 'var(--green)';
+  } else {
+    el.textContent = ' · no key saved';
+    el.style.color = 'var(--muted)';
+  }
+}
+
+// Call Gemini API for one fight. Returns the analysis text.
+async function generateFightAnalysis(fight, pickMeta, oppMeta, weightClass) {
+  const key = getGeminiKey();
+  if (!key) throw new Error('No Gemini API key set — paste one and click Save.');
+
+  const pickName = fight.predictedWinner;
+  const oppName = fight.predictedWinner === fight.fighter1 ? fight.fighter2 : fight.fighter1;
+  const pickWinPct = fight.predictedWinner === fight.fighter1 ? fight.f1Prob : fight.f2Prob;
+  const pickMl = fight.predictedWinner === fight.fighter1 ? fight.f1Ml : fight.f2Ml;
+
+  const fmtStat = (v) => v != null && v !== '' ? String(v) : '—';
+  const prompt = `You're a UFC betting analyst. Give a MINIMAL breakdown for this fight — 3 short bullet lines, each under 15 words. No headers, no fluff.
+
+MATCHUP: ${pickName} vs ${oppName}${weightClass ? ` — ${weightClass}` : ''}
+
+OUR PICK: ${pickName}
+- Record: ${fmtStat(pickMeta?.record)}, Age ${fmtStat(pickMeta?.age)}, Height ${fmtStat(pickMeta?.height)}, Reach ${fmtStat(pickMeta?.reach)}, ${fmtStat(pickMeta?.stance)}${pickMeta?.country ? ` (${pickMeta.country})` : ''}
+
+OPP: ${oppName}
+- Record: ${fmtStat(oppMeta?.record)}, Age ${fmtStat(oppMeta?.age)}, Height ${fmtStat(oppMeta?.height)}, Reach ${fmtStat(oppMeta?.reach)}, ${fmtStat(oppMeta?.stance)}${oppMeta?.country ? ` (${oppMeta.country})` : ''}
+
+MODEL: ${(pickWinPct * 100).toFixed(1)}% win prob for ${pickName}, market ${pickMl > 0 ? '+' + pickMl : pickMl}, edge ${fight.edge.toFixed(1)} PP
+
+Format your response EXACTLY like this (3 lines, no other text):
+• Pick's edge: [reason]
+• Opp's shot: [reason]
+• Verdict: [confidence take]`;
+
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(key)}`;
+  const body = {
+    contents: [{ parts: [{ text: prompt }] }],
+    generationConfig: { temperature: 0.6, maxOutputTokens: 200 },
+  };
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const errTxt = await res.text().catch(() => '');
+    throw new Error(`Gemini API ${res.status}: ${errTxt.slice(0, 200)}`);
+  }
+  const data = await res.json();
+  const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+  if (!text) throw new Error('Empty response from Gemini');
+  return text.trim();
+}
+
+// Generate breakdown for all fights on the selected card, sequentially with
+// small pauses. Progress reported via status text + re-render after each fight.
+async function generateCardBreakdown() {
+  const cardSel = document.getElementById('breakdownCardFilter');
+  const cardId = cardSel ? cardSel.value : '';
+  const card = STATE.cards.find(c => c.id === cardId);
+  if (!card) { toast('Pick a card first', 'error'); return; }
+  if (!getGeminiKey()) { toast('Save a Gemini API key first', 'error'); return; }
+
+  // Build the fights list using same logic as the model tab (fighter-blend
+  // sorted by edge desc, both fighters must have min sources).
+  const wSaber = +document.getElementById('modelWSaber').value;
+  const wEye   = +document.getElementById('modelWEye').value;
+  const wAction = 0;
+  const fighterBlend = {};
+  Object.values(card.ml || {}).forEach(m => {
+    const eyeK   = findMatchKey(card.eye   || {}, m.name);
+    const saberK = findMatchKey(card.saber || {}, m.name);
+    const eP = eyeK   ? card.eye[eyeK].prob     : null;
+    const sP = saberK ? card.saber[saberK].prob : null;
+    const parts = [];
+    if (sP != null) parts.push({ p: sP, w: wSaber });
+    if (eP != null) parts.push({ p: eP, w: wEye });
+    if (parts.length < 2) return;
+    const totalW = parts.reduce((s, p) => s + p.w, 0);
+    if (totalW <= 0) return;
+    const prob = parts.reduce((s, p) => s + (p.w / totalW) * p.p, 0) / 100;
+    fighterBlend[normalizeName(m.name)] = { name: m.name, prob, ml: m.odds, book: m.book || null, opp: m.opponent };
+  });
+  const seen = new Set();
+  const fights = [];
+  Object.values(fighterBlend).forEach(f => {
+    if (!f.opp) return;
+    const oppEntry = fighterBlend[normalizeName(f.opp)];
+    if (!oppEntry) return;
+    const key = [normalizeName(f.name), normalizeName(f.opp)].sort().join('|');
+    if (seen.has(key)) return;
+    seen.add(key);
+    const mkt1 = americanToImplied(f.ml);
+    const mkt2 = americanToImplied(oppEntry.ml);
+    const edge1 = mkt1 != null ? (f.prob - mkt1) * 100 : 0;
+    const edge2 = mkt2 != null ? (oppEntry.prob - mkt2) * 100 : 0;
+    let winner, edge;
+    if (f.prob >= oppEntry.prob) { winner = f.name; edge = edge1; }
+    else { winner = oppEntry.name; edge = edge2; }
+    fights.push({
+      fighter1: f.name, fighter2: oppEntry.name,
+      f1Prob: f.prob, f2Prob: oppEntry.prob,
+      f1Ml: f.ml, f2Ml: oppEntry.ml,
+      predictedWinner: winner, edge,
+    });
+  });
+  fights.sort((a, b) => b.edge - a.edge);
+
+  if (!fights.length) { toast('No fights on this card have enough sources', 'error'); return; }
+
+  card.aiBreakdown = card.aiBreakdown || {};
+  const btn = document.getElementById('breakdownGenBtn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Generating…'; }
+  const statusEl = document.getElementById('breakdownStatus');
+
+  let done = 0;
+  let failed = 0;
+  for (const f of fights) {
+    const fightKey = [normalizeName(f.fighter1), normalizeName(f.fighter2)].sort().join('|');
+    if (statusEl) statusEl.textContent = `Generating ${done + 1}/${fights.length}: ${f.predictedWinner}…`;
+    try {
+      const pickMlKey = findMatchKey(card.ml || {}, f.predictedWinner);
+      const oppName = f.predictedWinner === f.fighter1 ? f.fighter2 : f.fighter1;
+      const oppMlKey = findMatchKey(card.ml || {}, oppName);
+      const pickMeta = pickMlKey ? card.ml[pickMlKey] : {};
+      const oppMeta  = oppMlKey  ? card.ml[oppMlKey]  : {};
+      const weightClass = pickMeta.weightClass || oppMeta.weightClass || '';
+      const analysis = await generateFightAnalysis(f, pickMeta, oppMeta, weightClass);
+      card.aiBreakdown[fightKey] = { analysis, generatedAt: Date.now(), pick: f.predictedWinner, opp: oppName, edge: f.edge };
+      done++;
+      saveState(STATE);
+      renderCardBreakdown();
+      await new Promise(r => setTimeout(r, 400));  // gentle rate limit
+    } catch (e) {
+      failed++;
+      if (statusEl) statusEl.textContent = `Error on ${f.predictedWinner}: ${e.message}`;
+      // Keep going for remaining fights
+      await new Promise(r => setTimeout(r, 800));
+    }
+  }
+  if (btn) { btn.disabled = false; btn.textContent = '🧠 Generate breakdown'; }
+  if (statusEl) statusEl.textContent = `Done — ${done} generated${failed ? `, ${failed} failed` : ''}`;
+  saveState(STATE);
+  renderCardBreakdown();
+}
+
+// Regenerate a single fight (used for retry / refresh per row)
+async function regenerateFightBreakdown(cardId, fightKey) {
+  const card = STATE.cards.find(c => c.id === cardId);
+  if (!card || !card.aiBreakdown || !card.aiBreakdown[fightKey]) return;
+  const existing = card.aiBreakdown[fightKey];
+  // Rebuild fight object from existing data + look up meta fresh
+  const pickMlKey = findMatchKey(card.ml || {}, existing.pick);
+  const oppMlKey = findMatchKey(card.ml || {}, existing.opp);
+  const pickMeta = pickMlKey ? card.ml[pickMlKey] : {};
+  const oppMeta  = oppMlKey  ? card.ml[oppMlKey]  : {};
+  const weightClass = pickMeta.weightClass || oppMeta.weightClass || '';
+  // Fabricate a fight object with enough fields for the prompt
+  const f = {
+    fighter1: existing.pick, fighter2: existing.opp,
+    f1Prob: 0.5, f2Prob: 0.5,  // rough — the prompt uses this for context only
+    f1Ml: pickMeta?.odds ?? 0, f2Ml: oppMeta?.odds ?? 0,
+    predictedWinner: existing.pick, edge: existing.edge,
+  };
+  toast(`Regenerating ${existing.pick}…`);
+  try {
+    const analysis = await generateFightAnalysis(f, pickMeta, oppMeta, weightClass);
+    card.aiBreakdown[fightKey] = { ...existing, analysis, generatedAt: Date.now() };
+    saveState(STATE);
+    renderCardBreakdown();
+    toast('Regenerated');
+  } catch (e) { toast(`Regen failed: ${e.message}`, 'error'); }
+}
+
+function renderCardBreakdown() {
+  const cardSel = document.getElementById('breakdownCardFilter');
+  const results = document.getElementById('breakdownResults');
+  if (!cardSel || !results) return;
+  const cardId = cardSel.value;
+  const card = STATE.cards.find(c => c.id === cardId);
+  if (!card) {
+    results.innerHTML = '<div class="empty">Pick a card to see breakdowns.</div>';
+    return;
+  }
+  const breakdowns = card.aiBreakdown || {};
+  const entries = Object.entries(breakdowns);
+  if (!entries.length) {
+    results.innerHTML = `<div class="empty">No breakdowns yet for "${card.label}". Hit <b>Generate breakdown</b> to create them.</div>`;
+    return;
+  }
+  // Sort by edge desc so the strongest picks come first
+  entries.sort((a, b) => (b[1].edge || 0) - (a[1].edge || 0));
+
+  let html = '<div style="display:grid; gap:12px;">';
+  entries.forEach(([fightKey, entry]) => {
+    const edgeColor = entry.edge >= 5 ? 'var(--green)' : entry.edge >= 1 ? 'var(--amber)' : 'var(--red)';
+    // Turn the analysis bullets into HTML with line breaks preserved
+    const analysisHtml = (entry.analysis || '')
+      .split(/\n+/)
+      .map(l => l.trim())
+      .filter(Boolean)
+      .map(l => `<div style="margin:4px 0; line-height:1.4;">${l.replace(/</g, '&lt;')}</div>`)
+      .join('');
+    html += `<div style="background:var(--bg2); border:1px solid var(--border); border-radius:10px; padding:14px;">
+      <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:10px; padding-bottom:10px; border-bottom:1px solid var(--border);">
+        <div>
+          <div style="font-weight:700; font-size:15px;"><span style="color:var(--green);">${entry.pick}</span> vs ${entry.opp}</div>
+          <div class="meta" style="font-size:11px; margin-top:2px;">Generated ${new Date(entry.generatedAt).toLocaleString()}</div>
+        </div>
+        <div style="display:flex; gap:8px; align-items:center;">
+          <div style="color:${edgeColor}; font-weight:700; font-size:14px;">${entry.edge >= 0 ? '+' : ''}${entry.edge.toFixed(1)} PP</div>
+          <button class="ghost" onclick="regenerateFightBreakdown('${cardId}', '${fightKey}')" style="padding:4px 8px; font-size:11px;" title="Regenerate this fight">↻</button>
+        </div>
+      </div>
+      <div style="font-size:13px; color:var(--text);">${analysisHtml}</div>
+    </div>`;
+  });
+  html += '</div>';
+  results.innerHTML = html;
+}
+
 async function pullAllWeightClasses() {
   const cards = (STATE.cards || []).filter(c => c.date);
   if (!cards.length) { toast('No cards with dates to process', 'error'); return; }
