@@ -4746,7 +4746,9 @@ async function exportModelCardImage() {
 
   const rowsH = rowLayouts.reduce((s, r) => s + rowH(r), 0)
              + (rowLayouts.length - 1);  // 1px dividers between rows
-  const cardH = cardPadY * 2 + cardTopH + 10 + rowsH;
+  // Reserve extra height if we have an event subtitle (venue + time).
+  const subtitleReserve = card.espnEventMeta ? 20 : 0;
+  const cardH = cardPadY * 2 + cardTopH + subtitleReserve + 10 + rowsH;
   const H = paddingTop + cardH + paddingBottom;
 
   const canvas = document.createElement('canvas');
@@ -4796,12 +4798,47 @@ async function exportModelCardImage() {
   const topX = cardX + cardPadX;
   const topY = cardY + cardPadY;
   const cleanLabel = (card.label || '').replace(/\s*[•·]\s*/g, ' ').replace(/\s+/g, ' ').trim().toUpperCase();
+
+  // Build a subtitle from ESPN event meta: "Las Vegas, NV · Sat Aug 15 · 10:00 PM".
+  // Cached from enrichCardHeadshots. All fields are optional — subtitle omits
+  // anything missing rather than showing empty separators.
+  let subtitle = '';
+  const em = card.espnEventMeta;
+  if (em) {
+    const parts = [];
+    // Location (city, state OR city, country)
+    if (em.city) {
+      const region = em.state || em.country;
+      parts.push(region ? `${em.city}, ${region}` : em.city);
+    } else if (em.venueName) {
+      parts.push(em.venueName);
+    }
+    // Date + time in user's local zone
+    if (em.startISO) {
+      try {
+        const d = new Date(em.startISO);
+        const day = d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+        const time = d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+        parts.push(day);
+        parts.push(time);
+      } catch (e) {}
+    }
+    subtitle = parts.join('  ·  ');
+  }
+
+  // Draw title + optional subtitle both centered
   ctx.fillText(cleanLabel, cardX + tableW / 2, topY + 14);
+  if (subtitle) {
+    ctx.fillStyle = MUTED;
+    ctx.font = FONT_KEY;
+    ctx.fillText(subtitle, cardX + tableW / 2, topY + 34);
+  }
+  const headerH = subtitle ? cardTopH + 20 : cardTopH;
   ctx.fillStyle = ROW_DIVIDER;
-  ctx.fillRect(topX, cardY + cardPadY + cardTopH + 2, tableW - cardPadX * 2, 1);
+  ctx.fillRect(topX, cardY + cardPadY + headerH + 2, tableW - cardPadX * 2, 1);
 
   // Rows
-  let ry = cardY + cardPadY + cardTopH + 10;
+  let ry = cardY + cardPadY + headerH + 10;
   rowLayouts.forEach((rl, idx) => {
     const { fight: f, rank, fighterLines, modelPct, fairAm, marketAm, pickBook, pickName } = rl;
     const rowX = cardX + cardPadX;
@@ -5994,10 +6031,10 @@ async function enrichCardHeadshots(cardId, opts = {}) {
   const fighters = Object.values(card.ml || {});
   if (!fighters.length) { if (!silent) toast('No fighters on card', 'error'); return; }
   // Re-fetch if EITHER headshot is missing OR the newer meta fields (flag,
-  // record) haven't been backfilled yet. This way, existing cards that were
-  // enriched before flag/record were added still pick them up on the next
-  // silent enrichment pass.
-  const needsAny = force || fighters.some(m => !m.headshotUrl || !m.record || !m.flagUrl);
+  // record, event meta) haven't been backfilled yet. This way, existing cards
+  // that were enriched before these fields were added still pick them up on
+  // the next silent enrichment pass.
+  const needsAny = force || !card.espnEventMeta || fighters.some(m => !m.headshotUrl || !m.record || !m.flagUrl);
   if (!needsAny) return;
 
   // Skip silent retries within the same session if we already tried and
@@ -6018,12 +6055,33 @@ async function enrichCardHeadshots(cardId, opts = {}) {
 
   const scoreboardBase = 'https://site.api.espn.com/apis/site/v2/sports/mma/ufc/scoreboard';
   const scoreboardEventIds = new Set();
+  // Also collect the first matching event's venue + start time so the export
+  // can show "Las Vegas, NV · Sat Aug 15 · 10:00 PM" under the card title.
+  let scoreboardEventMeta = null;
   for (const d of [d0, d1]) {
     try {
       const res = await fetch(`${scoreboardBase}?dates=${d}`);
       if (!res.ok) continue;
       const data = await res.json();
-      (data.events || []).forEach(ev => { if (ev.id) scoreboardEventIds.add(ev.id); });
+      (data.events || []).forEach(ev => {
+        if (ev.id) scoreboardEventIds.add(ev.id);
+        // Capture meta from the first event that has both venue + date. ESPN's
+        // scoreboard `event` object has `.date` (ISO with time) and
+        // `.competitions[0].venue.{fullName, address:{city, state, country}}`.
+        if (!scoreboardEventMeta) {
+          const comp = (ev.competitions || [])[0];
+          const venue = comp?.venue;
+          if (ev.date && venue) {
+            scoreboardEventMeta = {
+              startISO: ev.date,
+              venueName: venue.fullName || null,
+              city: venue.address?.city || null,
+              state: venue.address?.state || null,
+              country: venue.address?.country || null,
+            };
+          }
+        }
+      });
     } catch (e) {}
   }
 
@@ -6138,6 +6196,13 @@ async function enrichCardHeadshots(cardId, opts = {}) {
   // "📸 Fetch faces" button on Cards tab uses {force:true} to bypass this
   // and re-fetch missing headshots (e.g. after ESPN adds a late-added fighter).
   card._headshotFetchTried = Date.now();  // in-memory only, not persisted
+
+  // Persist the event meta (venue + start time) if we grabbed it. The export
+  // renders this under the card label. Never overwrites with null so a
+  // partial re-fetch doesn't wipe good data.
+  if (scoreboardEventMeta) {
+    card.espnEventMeta = scoreboardEventMeta;
+  }
 
   if (resolved > 0) {
     saveState(STATE);
