@@ -1038,19 +1038,26 @@ function isFullAgree(b) {
 // betOdds     = the American odds you actually got
 // Returns { clv, closeOdds, closeBook } or null if no usable BetOnline close.
 // Returns { clv, closeOdds, closeBook } or null if no usable closing line.
+// Benchmark differs by ingest source:
+//   - Auto-fetched from ParlayAPI (closeEntry.autoFetched = true) → Pinnacle
+//   - Manual FightOdds paste (no autoFetched flag) → BetOnline
+// Either flow falls back to the other book if the preferred one is missing,
+// so nothing silently returns null just because one book is absent.
 function computeCLV(closeEntry, closingMap, betOdds) {
   const myImplied = americanToImplied(betOdds);
   if (myImplied == null) return null;
   if (!closeEntry || !closeEntry.byBook) return null;
 
-  // Try Pinnacle first (new CLV benchmark — sharpest closer, industry standard).
-  // Fall back to BetOnline for legacy data pasted before the switch, so old
-  // FightOdds-imported closes still produce a CLV number instead of null.
-  let fOdds = closeEntry.byBook['Pinnacle'];
-  let usedBook = 'Pinnacle';
+  // Preferred + fallback book, based on how this close was ingested
+  const isAuto = closeEntry.autoFetched === true;
+  const primary   = isAuto ? 'Pinnacle'  : 'BetOnline';
+  const secondary = isAuto ? 'BetOnline' : 'Pinnacle';
+
+  let fOdds = closeEntry.byBook[primary];
+  let usedBook = primary;
   if (fOdds == null) {
-    fOdds = closeEntry.byBook['BetOnline'];
-    usedBook = 'BetOnline';
+    fOdds = closeEntry.byBook[secondary];
+    usedBook = secondary;
   }
   if (fOdds == null) return null;
   const closeImplied = americanToImplied(fOdds);
@@ -1133,6 +1140,51 @@ function findMatchKey(map, name) {
   };
   const subsetMatches = Object.keys(map).filter(k => containsAll(key, k));
   if (subsetMatches.length === 1) return subsetMatches[0];
+
+  return null;
+}
+
+// Variant of findMatchKey that works on a list of candidate names (rather
+// than a map). Same 4-tier logic: exact → collapsed → subset → surname. Used
+// by the ESPN integrations (auto-grade + headshot enrichment) where the
+// candidates are pulled from ESPN's response as an array. Returns the original
+// candidate name (not the normalized form) so callers can reuse it as a key.
+function findFuzzyFighter(name, candidates) {
+  const key = normalizeName(name);
+  if (!key || !candidates || !candidates.length) return null;
+
+  // 1. Exact normalized match
+  for (const c of candidates) {
+    if (normalizeName(c) === key) return c;
+  }
+
+  const collapsed = key.replace(/\s+/g, '');
+  const tokens = key.split(' ').filter(Boolean);
+
+  // 2. Space-collapsed match ("su mudaerji" ↔ "sumudaerji")
+  const collapsedMatches = candidates.filter(c => normalizeName(c).replace(/\s+/g, '') === collapsed);
+  if (collapsedMatches.length === 1) return collapsedMatches[0];
+
+  if (tokens.length < 2) return null;
+  const surname = tokens[tokens.length - 1];
+
+  // 3. Subset match: every token of one contained in the other. This handles
+  //    "Ian Garry" ↔ "Ian Machado Garry" and other multi-name variants ESPN
+  //    uses for fighters with middle names or family names.
+  const containsAll = (a, b) => {
+    const at = a.split(' ').filter(Boolean);
+    const bt = b.split(' ').filter(Boolean);
+    return at.every(t => bt.includes(t)) || bt.every(t => at.includes(t));
+  };
+  const subsetMatches = candidates.filter(c => containsAll(key, normalizeName(c)));
+  if (subsetMatches.length === 1) return subsetMatches[0];
+
+  // 4. Surname match — last token unique across candidates
+  const surnameMatches = candidates.filter(c => {
+    const ct = normalizeName(c).split(' ');
+    return ct[ct.length - 1] === surname;
+  });
+  if (surnameMatches.length === 1) return surnameMatches[0];
 
   return null;
 }
@@ -2766,7 +2818,7 @@ function applyClosingLines() {
   refreshCardFilters();
   rerenderCurrentTab();
 
-  statusEl.textContent = `Applied to "${card.label}" · stamped CLV on ${stamped}/${card.bets.length} bets${missing ? ` (${missing} no match)` : ''}${noClose ? ` (${noClose} no BetOnline close)` : ''}`;
+  statusEl.textContent = `Applied to "${card.label}" · stamped CLV on ${stamped}/${card.bets.length} bets${missing ? ` (${missing} no match)` : ''}${noClose ? ` (${noClose} no close price)` : ''}`;
   toast(`CLV applied to ${stamped} bets on "${card.label}"`);
 }
 
@@ -4070,6 +4122,65 @@ function renderModelBacktest() {
     .map(([label, c]) => ({ label, ...c, n: c.wins + c.losses }))
     .sort((a, b) => b.units - a.units);
 
+  // --- Edge buckets ------------------------------------------------------
+  // Slice the flagged bets by edge percentage so the user can see which edge
+  // tiers actually produce ROI. Includes a "1%+" and "5%+" summary at the
+  // bottom for quick threshold comparisons.
+  const bucketDefs = [
+    { label: '1–2%',  min: 1, max: 2 },
+    { label: '2–3%',  min: 2, max: 3 },
+    { label: '3–4%',  min: 3, max: 4 },
+    { label: '4–5%',  min: 4, max: 5 },
+    { label: '5%+',   min: 5, max: Infinity },
+    { label: '1%+',   min: 1, max: Infinity, isSummary: true },
+    { label: '5%+ (summary)', min: 5, max: Infinity, isSummary: true, dedupe: '5%+' },
+  ];
+  const buckets = bucketDefs
+    .filter(b => !b.dedupe)  // drop duplicates
+    .map(def => {
+      const filtered = rows.filter(r => r.edge >= def.min && r.edge < def.max);
+      const bWins = filtered.filter(r => r.status === 'win').length;
+      const bLosses = filtered.filter(r => r.status === 'loss').length;
+      const bN = bWins + bLosses;
+      const bUnits = filtered.reduce((s, r) => s + unitProfit(r), 0);
+      const bWinPct = bN ? (bWins / bN * 100) : 0;
+      const bRoi = bN ? (bUnits / bN * 100) : 0;
+      const bAvgEdge = bN ? filtered.reduce((s, r) => s + r.edge, 0) / bN : 0;
+      return { ...def, n: bN, wins: bWins, losses: bLosses, units: bUnits, winPct: bWinPct, roi: bRoi, avgEdge: bAvgEdge };
+    });
+
+  html += `<div style="margin-bottom:16px;">
+    <h3 style="margin:0 0 10px 0; font-size:14px; color:var(--muted); letter-spacing:0.04em; text-transform:uppercase; font-weight:600;">Edge buckets</h3>
+    <table><thead><tr>
+      <th>Bucket</th>
+      <th class="num" style="text-align:center;">Bets</th>
+      <th class="num" style="text-align:center;">Record</th>
+      <th class="num" style="text-align:center;">Win %</th>
+      <th class="num" style="text-align:center;">Units</th>
+      <th class="num" style="text-align:center;">ROI</th>
+      <th class="num" style="text-align:center;">Avg edge</th>
+    </tr></thead><tbody>`;
+  buckets.forEach(b => {
+    const wpColor  = b.n === 0 ? 'var(--muted)' : (b.winPct >= 50 ? 'var(--green)' : b.winPct > 0 ? 'var(--amber)' : 'var(--red)');
+    const uColor   = b.units > 0 ? 'var(--green)' : b.units < 0 ? 'var(--red)' : 'var(--muted)';
+    const roiColor = b.roi > 0 ? 'var(--green)' : b.roi < 0 ? 'var(--red)' : 'var(--muted)';
+    const rowStyle = b.isSummary
+      ? ' style="background:rgba(148,163,184,0.05); border-top:1px solid var(--border);"'
+      : '';
+    const labelStyle = b.isSummary ? 'font-weight:700;' : 'font-weight:600;';
+    html += `<tr${rowStyle}>
+      <td style="${labelStyle}">${b.label}</td>
+      <td class="num">${b.n}</td>
+      <td class="num">${b.n ? `${b.wins}-${b.losses}` : '—'}</td>
+      <td class="num" style="color:${wpColor}; font-weight:600;">${b.n ? b.winPct.toFixed(1) + '%' : '—'}</td>
+      <td class="num" style="color:${uColor}; font-weight:600;">${b.n ? (b.units >= 0 ? '+' : '') + b.units.toFixed(2) + 'u' : '—'}</td>
+      <td class="num" style="color:${roiColor}; font-weight:600;">${b.n ? (b.roi >= 0 ? '+' : '') + b.roi.toFixed(1) + '%' : '—'}</td>
+      <td class="num">${b.n ? b.avgEdge.toFixed(2) + '%' : '—'}</td>
+    </tr>`;
+  });
+  html += `</tbody></table>
+  </div>`;
+
   if (cardEntries.length > 1) {
     html += `<div style="margin-bottom:16px;">
       <h3 style="margin:0 0 10px 0; font-size:14px; color:var(--muted); letter-spacing:0.04em; text-transform:uppercase; font-weight:600;">Per card · click a row to expand fights</h3>
@@ -4259,7 +4370,7 @@ async function exportModelCardImage() {
     const totalW = parts.reduce((s, p) => s + p.w, 0);
     if (totalW <= 0) return;
     const prob = parts.reduce((s, p) => s + (p.w / totalW) * p.p, 0);
-    fighterBlend[normalizeName(m.name)] = { name: m.name, prob, ml: m.odds, opp: m.opponent };
+    fighterBlend[normalizeName(m.name)] = { name: m.name, prob, ml: m.odds, book: m.book || null, opp: m.opponent };
   });
 
   // Pair fighters into fights (one row per fight, both fighters shown). Dedupe
@@ -4288,6 +4399,7 @@ async function exportModelCardImage() {
       fighter1: f.name, fighter2: oppEntry.name,
       f1Prob: f.prob, f2Prob: oppEntry.prob,
       f1Ml: f.ml, f2Ml: oppEntry.ml,
+      f1Book: f.book, f2Book: oppEntry.book,
       // Fair odds = the American line implied by the model's win % for that
       // side. Lets partners see "market has X, model says fair is Y" at a glance.
       f1Fair: impliedToAmerican(f.prob), f2Fair: impliedToAmerican(oppEntry.prob),
@@ -4317,7 +4429,7 @@ async function exportModelCardImage() {
   //   • Data line 3: Pick
   //   • Chip vertically centered on the right
   // All text full white or full color (green/amber/red). No greys, no summary line.
-  const DPI = 2;
+  const DPI = 3;   // 3x device pixels for a sharp result on retina + downloads
   const paddingSides = 24;
   const paddingBottom = 32;
   const paddingTop = 24;
@@ -4358,7 +4470,7 @@ async function exportModelCardImage() {
   const dotSize        = 7;
   const dotGap         = 6;
   const rankW          = 24;
-  const avatarSize     = 36;
+  const avatarSize     = 46;
   const avatarGap      = 8;   // gap between avatar and rank number
   const chipW          = 72;
   const chipH          = 44;
@@ -4415,13 +4527,14 @@ async function exportModelCardImage() {
         fLines = wrapText(fighterLine, bodyContentW, FONT_FIGHT);
       }
     }
-    const modelPct = fmtPct(f.predictedWinner === f.fighter1 ? f.f1Prob : f.f2Prob, 1);
-    const fairAm   = fmtAm(f.predictedWinner === f.fighter1 ? f.f1Fair : f.f2Fair);
-    const marketAm = fmtAm(f.predictedWinner === f.fighter1 ? f.f1Ml : f.f2Ml);
+    const modelPct  = fmtPct(f.predictedWinner === f.fighter1 ? f.f1Prob : f.f2Prob, 1);
+    const fairAm    = fmtAm(f.predictedWinner === f.fighter1 ? f.f1Fair : f.f2Fair);
+    const marketAm  = fmtAm(f.predictedWinner === f.fighter1 ? f.f1Ml   : f.f2Ml);
+    const pickBook  = f.predictedWinner === f.fighter1 ? f.f1Book : f.f2Book;
     return {
       fight: f, rank: i + 1,
       fighterLines: fLines,
-      modelPct, fairAm, marketAm, pickName,
+      modelPct, fairAm, marketAm, pickBook, pickName,
     };
   });
 
@@ -4461,6 +4574,10 @@ async function exportModelCardImage() {
   canvas.style.height = H + 'px';
   const ctx = canvas.getContext('2d');
   ctx.scale(DPI, DPI);
+  // High-quality image scaling so headshots stay crisp when drawn into the
+  // avatar circle. Browsers default to 'low' which looks blurry on downscale.
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
 
   // Page bg
   ctx.fillStyle = BG;
@@ -4504,7 +4621,7 @@ async function exportModelCardImage() {
   // Rows
   let ry = cardY + cardPadY + cardTopH + 10;
   rowLayouts.forEach((rl, idx) => {
-    const { fight: f, rank, fighterLines, modelPct, fairAm, marketAm, pickName } = rl;
+    const { fight: f, rank, fighterLines, modelPct, fairAm, marketAm, pickBook, pickName } = rl;
     const rowX = cardX + cardPadX;
     const height = rowH(rl);
 
@@ -4526,14 +4643,31 @@ async function exportModelCardImage() {
     ctx.closePath();
     ctx.clip();
     if (img) {
-      // Cover-fit the image to fill the circle
-      ctx.drawImage(img, rowX, avatarCY - avatarSize / 2, avatarSize, avatarSize);
+      // Cover-fit: source images are usually taller than wide (headshots), so
+      // naive drawImage(img, x, y, w, h) would squash. Use the 9-arg form to
+      // crop the source to a square (center-aligned, biased slightly upward
+      // to keep the face in-frame) before scaling into the circle.
+      const iw = img.naturalWidth || img.width;
+      const ih = img.naturalHeight || img.height;
+      let sx, sy, sSize;
+      if (iw >= ih) {
+        sSize = ih;
+        sx = (iw - ih) / 2;
+        sy = 0;
+      } else {
+        sSize = iw;
+        sx = 0;
+        // Bias the crop upward — heads sit in the top portion of most photos
+        sy = Math.max(0, (ih - iw) * 0.15);
+      }
+      ctx.drawImage(img, sx, sy, sSize, sSize, rowX, avatarCY - avatarSize / 2, avatarSize, avatarSize);
     } else {
-      // Placeholder — dark grey circle with fighter's initial
+      // Placeholder — dark grey circle with fighter's initial. Font size
+      // scales with avatarSize so it stays proportional if we change size.
       ctx.fillStyle = '#1a2432';
       ctx.fillRect(rowX, avatarCY - avatarSize / 2, avatarSize, avatarSize);
       ctx.fillStyle = '#94a3b8';
-      ctx.font = `700 16px ${FONT_STACK}`;
+      ctx.font = `700 ${Math.round(avatarSize * 0.45)}px ${FONT_STACK}`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillText((pickName || '?').charAt(0).toUpperCase(), avatarCX, avatarCY);
@@ -4597,7 +4731,7 @@ async function exportModelCardImage() {
     fy += 4;
     drawTwoKV('Model', modelPct, TEXT, 'Fair', fairAm, GREEN, fy);
     fy += 16;
-    drawKV('Market', marketAm, TEXT, fy);
+    drawKV('Market', marketAm + (pickBook ? `  @ ${pickBook}` : ''), TEXT, fy);
     fy += 16;
     drawKV('Pick', pickName, TEXT, fy);
 
@@ -5636,7 +5770,7 @@ async function enrichCardHeadshots(cardId, opts = {}) {
             const name = ath.fullName || ath.displayName || '';
             const url = ath.headshot?.href || (ath.id ? `https://a.espncdn.com/i/headshots/mma/players/full/${ath.id}.png` : null);
             if (name && url) {
-              nameToHeadshot[normalizeName(name)] = { url: fixEspnUrl(url), athleteId: ath.id };
+              nameToHeadshot[normalizeName(name)] = { url: fixEspnUrl(url), athleteId: ath.id, name };
             }
           } catch (e) {}
         }
@@ -5644,11 +5778,19 @@ async function enrichCardHeadshots(cardId, opts = {}) {
     } catch (e) {}
   }
 
-  // Match card fighters to resolved headshots
+  // Match card fighters to resolved headshots. Try exact match first; if that
+  // fails, fall back to fuzzy match (subset tokens / surname / collapsed) so
+  // fighters ESPN lists with middle names ("Ian Machado Garry" vs "Ian Garry")
+  // still get their photo.
+  const espnNames = Object.values(nameToHeadshot).map(x => x.name);
   let resolved = 0;
   Object.entries(card.ml).forEach(([key, m]) => {
     const norm = normalizeName(m.name);
-    const hit = nameToHeadshot[norm];
+    let hit = nameToHeadshot[norm];
+    if (!hit) {
+      const fuzzy = findFuzzyFighter(m.name, espnNames);
+      if (fuzzy) hit = nameToHeadshot[normalizeName(fuzzy)];
+    }
     if (hit) {
       m.headshotUrl = hit.url;
       m.espnAthleteId = hit.athleteId;
@@ -5823,43 +5965,48 @@ async function autoGradeFromESPN(cardId) {
 
   for (const [normName, bets] of Object.entries(grouped)) {
     let entry = fightResults[normName];
+    let espnMatchName = normName;
 
-    // No direct match — prompt user to pick from ESPN's list
+    // No direct match — try three fallbacks silently before giving up:
+    //   1. Fuzzy match on the bet's fighter name (handles "Ian Garry" vs
+    //      ESPN's "Ian Machado Garry" and other middle-name variants)
+    //   2. Match by OPPONENT — if the opponent's name matches an ESPN fight,
+    //      the bet's fighter is the OTHER competitor by elimination (this
+    //      handles fighters with names ESPN spells radically differently)
+    //   3. Give up and skip silently — no more annoying picker prompts
     if (!entry) {
-      const displayName = bets[0].fighter;
-      const opponent = bets[0].opponent || '';
-      // Show ESPN fighters as a numbered list, user types a number (or 0 to skip)
-      const listStr = allESPNNames.map((n, i) => `${i + 1}. ${n}`).join('\n');
-      const answer = prompt(
-        `No ESPN match for: ${displayName}${opponent ? ` (vs ${opponent})` : ''}\n\n` +
-        `Which ESPN fighter is this? Type a number (or 0 to skip):\n\n${listStr}`,
-        ''
-      );
-      if (answer === null || answer.trim() === '' || answer.trim() === '0') {
-        skipped += bets.length;
-        mismatches.push(displayName);
-        continue;
+      const fuzzy = findFuzzyFighter(bets[0].fighter, allESPNNames);
+      if (fuzzy) {
+        const fuzzyNorm = normalizeName(fuzzy);
+        entry = fightResults[fuzzyNorm];
+        if (entry) espnMatchName = fuzzyNorm;
       }
-      const idx = parseInt(answer, 10) - 1;
-      if (isNaN(idx) || idx < 0 || idx >= allESPNNames.length) {
-        skipped += bets.length;
-        mismatches.push(displayName);
-        continue;
-      }
-      const chosenESPN = allESPNNames[idx];
-      entry = fightResults[normalizeName(chosenESPN)];
-      if (!entry) {
-        // Chosen fighter isn't in a completed fight yet
-        skipped += bets.length;
-        mismatches.push(displayName);
-        continue;
-      }
-      // Remember that this bet's fighter maps to this ESPN normalized name
-      resolvedMismatches[normName] = normalizeName(chosenESPN);
     }
-
-    // Now stamp the result on every bet in this group
-    const espnMatchName = resolvedMismatches[normName] || normName;
+    if (!entry && bets[0].opponent) {
+      // Try direct + fuzzy match on opponent name
+      let oppNorm = normalizeName(bets[0].opponent);
+      let oppEntry = fightResults[oppNorm];
+      if (!oppEntry) {
+        const oppFuzzy = findFuzzyFighter(bets[0].opponent, allESPNNames);
+        if (oppFuzzy) {
+          oppNorm = normalizeName(oppFuzzy);
+          oppEntry = fightResults[oppNorm];
+        }
+      }
+      if (oppEntry) {
+        // Opponent found — the bet's fighter is the OTHER name in the pair
+        const otherName = oppEntry.allNames.find(n => normalizeName(n) !== oppNorm);
+        if (otherName) {
+          entry = oppEntry;
+          espnMatchName = normalizeName(otherName);
+        }
+      }
+    }
+    if (!entry) {
+      skipped += bets.length;
+      mismatches.push(bets[0].fighter);
+      continue;
+    }
     const isWinner = entry.winner === espnMatchName;
     bets.forEach(b => {
       b.status = isWinner ? 'win' : 'loss';
