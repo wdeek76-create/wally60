@@ -786,6 +786,7 @@
         <p class="meta" style="margin:6px 0 0 0;">Per-fighter blend of Saber / MMAEye / Action / Arena. Weights renormalize when a source is missing for a fighter. Min 2 sources to show.</p>
       </div>
       <div style="display:flex; gap:8px; align-items:center;">
+        <button onclick="copyModelPicks()" class="ghost" style="padding:8px 12px; font-size:13px; white-space:nowrap;" title="Copy each fighter with their current-weight model win % to clipboard">📋 Copy picks</button>
         <button onclick="exportModelCardImage()" class="ghost" style="padding:8px 12px; font-size:13px; white-space:nowrap;">📷 Export card image</button>
         <select id="modelCardFilter" style="background:var(--bg2); border:1px solid var(--border); border-radius:6px; padding:7px 10px; color:var(--text); font-size:13px; min-width:280px;"></select>
       </div>
@@ -4415,6 +4416,78 @@ function renderModelBacktest() {
 // of fights (both sides w/ Model Win % + market odds + edge), then a Top Edge
 // Plays box at the bottom highlighting picks ≥5% edge. Sources are NOT
 // exposed so partners just see the model output.
+// Copy a plain-text breakdown of the currently-selected card's model picks
+// to the clipboard. One line per fight: "<Pick Name> <ModelWin%>". Uses the
+// current slider weights so it always matches what the Model tab is showing.
+async function copyModelPicks() {
+  const cardSel = document.getElementById('modelCardFilter');
+  const cardId = cardSel ? cardSel.value : '';
+  const card = STATE.cards.find(c => c.id === cardId);
+  if (!card) { toast('Pick a card first', 'error'); return; }
+
+  const wSaber  = +document.getElementById('modelWSaber').value;
+  const wEye    = +document.getElementById('modelWEye').value;
+  const wAction = 0;
+
+  // Build per-fighter blended prob using current weights (same math as
+  // renderModel). Then pair fighters into fights and pick the higher prob.
+  const fighterBlend = {};
+  Object.values(card.ml || {}).forEach(m => {
+    const eyeK   = findMatchKey(card.eye   || {}, m.name);
+    const saberK = findMatchKey(card.saber || {}, m.name);
+    const eP = eyeK   ? card.eye[eyeK].prob     : null;
+    const sP = saberK ? card.saber[saberK].prob : null;
+    let stokP = null;
+    const actBet = (card.bets || []).find(x => normalizeName(x.fighter) === normalizeName(m.name) && x.stokProb != null);
+    if (actBet) stokP = actBet.stokProb;
+
+    const parts = [];
+    if (sP != null) parts.push({ p: sP, w: wSaber });
+    if (eP != null) parts.push({ p: eP, w: wEye });
+    if (stokP != null) parts.push({ p: stokP, w: wAction });
+    if (parts.length < 2) return;
+    const totalW = parts.reduce((s, p) => s + p.w, 0);
+    if (totalW <= 0) return;
+    const prob = parts.reduce((s, p) => s + (p.w / totalW) * p.p, 0);
+    fighterBlend[normalizeName(m.name)] = { name: m.name, prob, opp: m.opponent };
+  });
+
+  // Pair into fights, dedupe, and pick the higher-prob fighter per fight
+  const seen = new Set();
+  const picks = [];
+  Object.values(fighterBlend).forEach(f => {
+    if (!f.opp) return;
+    const oppEntry = fighterBlend[normalizeName(f.opp)];
+    if (!oppEntry) return;
+    const key = [normalizeName(f.name), normalizeName(f.opp)].sort().join('|');
+    if (seen.has(key)) return;
+    seen.add(key);
+    const pick = f.prob >= oppEntry.prob ? f : oppEntry;
+    picks.push({ name: pick.name, prob: pick.prob });
+  });
+
+  if (!picks.length) { toast('No fights have enough sources to blend', 'error'); return; }
+
+  // Sort by confidence descending so the strongest picks are at the top
+  picks.sort((a, b) => b.prob - a.prob);
+
+  const text = picks.map(p => `${p.name} ${p.prob.toFixed(1)}%`).join('\n');
+
+  try {
+    await navigator.clipboard.writeText(text);
+    toast(`Copied ${picks.length} pick${picks.length === 1 ? '' : 's'} to clipboard`);
+  } catch (e) {
+    // Fallback for browsers that block clipboard API
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+    toast(`Copied ${picks.length} picks to clipboard`);
+  }
+}
+
 async function exportModelCardImage() {
   const cardSel = document.getElementById('modelCardFilter');
   const cardId = cardSel ? cardSel.value : '';
@@ -4654,10 +4727,18 @@ async function exportModelCardImage() {
     }));
   }
 
-  // Row height budget: fighter lines + Model/Fair + Market + record/country.
-  // "Pick" line was removed (pick is now highlighted in the matchup line
-  // itself). Record + country render on a single trailing muted line, ~14px.
-  const rowH = (r) => 8 + r.fighterLines.length * 18 + 6 + 16 * 2 + 14 + 10;
+  // Backfill hasMeta on each row so rowH() knows whether to reserve the
+  // trailing 14px record/country line. If no meta, the space would just be
+  // empty — and centering the edge chip against that empty band puts it
+  // visibly above the actual content.
+  rowLayouts.forEach(rl => {
+    const meta = metaMap[rl.pickName] || {};
+    rl.hasMeta = !!(meta.record || meta.country);
+  });
+
+  // Row height budget: fighter lines + Model/Fair + Market (+ optional
+  // record/country line, only when meta exists for that pick).
+  const rowH = (r) => 8 + r.fighterLines.length * 18 + 6 + 16 * 2 + (r.hasMeta ? 14 : 0) + 10;
 
   const rowsH = rowLayouts.reduce((s, r) => s + rowH(r), 0)
              + (rowLayouts.length - 1);  // 1px dividers between rows
@@ -4727,9 +4808,9 @@ async function exportModelCardImage() {
     // visible.
     const bodyTop = ry + 8;  // small top pad only
     // Body content: fighter lines + 6px gap + 2 KV rows (Model/Fair, Market)
-    // + 14px muted trailing line (record + country). Must match rowH() minus
-    // the top (8) and bottom (10) padding — otherwise the chip drifts.
-    const bodyH = fighterLines.length * 18 + 6 + 16 * 2 + 14;
+    // + optional 14px muted record/country line (only when meta present).
+    // Must match rowH() minus top(8)+bottom(10) padding — otherwise chip drifts.
+    const bodyH = fighterLines.length * 18 + 6 + 16 * 2 + (rl.hasMeta ? 14 : 0);
     const bodyMidY = bodyTop + bodyH / 2;
 
     // Avatar (pick's headshot as a circle, or initial placeholder if no image)
