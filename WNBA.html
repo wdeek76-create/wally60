@@ -3767,6 +3767,106 @@ async function fetchParlayProps(force) {
 
 // Fill the alt-book inputs for the player/stat/side currently in the modal.
 // Only writes a book when that price is >= 5% EV against the modal's fair.
+// ── CLOSING LINE VALUE ────────────────────────────────────────
+// Pulls ParlayAPI's /closing-odds for a date and stores the closing line+price
+// on each matching bet. Retroactive, so no need to be around at tip.
+// Book priority when several closed the market.
+const CLV_BOOK_PRIORITY = ["fanduel", "draftkings", "caesars", "fliff"];
+
+// Was the move in your favour?
+//   OVER  : closing line HIGHER than yours is good (you got the cheaper number)
+//   UNDER : closing line LOWER  than yours is good
+// At the same line it falls back to price: a shorter closing price on your side
+// means the market came to you.
+function computeCLV(bet) {
+  if (!bet || !bet.closing || bet.closing.line == null) return null;
+  const isUnder = (bet.ou || "").toLowerCase() === "under";
+  const myLine = Number(bet.line), clLine = Number(bet.closing.line);
+  const myPrice = Number(bet.odds), clPrice = Number(bet.closing.price);
+  if (!isFinite(myLine) || !isFinite(clLine)) return null;
+  const lineDelta = isUnder ? (myLine - clLine) : (clLine - myLine);   // + = your favour
+  let pricePct = null;
+  if (isFinite(myPrice) && isFinite(clPrice)) {
+    const myDec = oddsToDecimal(myPrice), clDec = oddsToDecimal(clPrice);
+    if (myDec && clDec) pricePct = ((myDec / clDec) - 1) * 100;        // + = you beat the close
+  }
+  // Line movement dominates when it happened; otherwise judge on price.
+  const favorable = Math.abs(lineDelta) >= 0.5 ? lineDelta > 0
+                  : (pricePct != null ? pricePct > 0 : null);
+  return { lineDelta, pricePct, favorable, book: bet.closing.book,
+           closeLine: clLine, closePrice: clPrice };
+}
+
+// Fetch closing odds for one ISO date and attach them to that day's bets.
+async function fetchClosingForDate(isoDate) {
+  const key = getParlayKey();
+  if (!key) throw new Error("no-key");
+  const url = `https://parlay-api.com/v1/historical/sports/basketball_wnba/closing-odds?date=${isoDate}`;
+  const res = await fetch(url, { headers: { "X-API-Key": key } });
+  if (res.status === 401) throw new Error("bad-key");
+  if (res.status === 403) throw new Error("credits");
+  if (!res.ok) throw new Error("http-" + res.status);
+  const data = await res.json();
+  return Array.isArray(data) ? data : (data && Array.isArray(data.rows) ? data.rows : []);
+}
+
+// Attach closing lines to every bet on a date that doesn't already have one.
+async function grabClosingLines(isoDate) {
+  try {
+    if (!getParlayKey() && !promptParlayKey()) return;
+    const day = isoDate || localYMD(new Date(Date.now() - 86400000));   // default: yesterday
+    loadBets();
+    const todays = bets.filter(b => b && betDayLocal(b) === day && !b.closing &&
+      !["GAME_TOTAL", "GAME_SPREAD"].includes((b.stat || "").toUpperCase()));
+    if (!todays.length) { showToast(`No bets needing closing lines on ${day}`); return; }
+    showToast(`Fetching closing odds for ${day}…`);
+    let rows;
+    try { rows = await fetchClosingForDate(day); }
+    catch (e) {
+      if (e.message === "bad-key") { showToast("Parlay key rejected"); return; }
+      if (e.message === "credits") { showToast("Parlay credit limit reached"); return; }
+      showToast("Closing-odds fetch failed — see console");
+      console.error("grabClosingLines:", e);
+      return;
+    }
+    console.log(`[CLV] ${day}: ${rows.length} closing rows`);
+    if (!rows.length) { showToast(`No closing rows returned for ${day}`); return; }
+
+    let matched = 0;
+    todays.forEach(b => {
+      const market = PARLAY_MARKET_BY_STAT[(b.stat || "").toUpperCase()];
+      if (!market) return;
+      const want = resolveNorm(b.player || "");
+      const mine = rows.filter(r => r && r.market_key === market &&
+        resolveNorm(r.player || "") === want);
+      if (!mine.length) return;
+      // Prefer your books in order, then anything else, and among those the
+      // row closest to the line you actually bet.
+      let best = null, bestRank = 99, bestGap = Infinity;
+      mine.forEach(r => {
+        const rank = CLV_BOOK_PRIORITY.indexOf(r.bookmaker);
+        const eff = rank === -1 ? 50 : rank;
+        const gap = Math.abs(Number(r.line) - Number(b.line));
+        if (eff < bestRank || (eff === bestRank && gap < bestGap)) {
+          best = r; bestRank = eff; bestGap = gap;
+        }
+      });
+      if (!best) return;
+      const isUnder = (b.ou || "").toLowerCase() === "under";
+      const price = isUnder ? best.under_price : best.over_price;
+      if (price == null || isNaN(price)) return;
+      b.closing = { book: best.bookmaker, line: Number(best.line),
+                    price: Number(price), at: Date.now() };
+      matched++;
+    });
+    if (matched) { saveBets(); renderTracker(); }
+    showToast(`Closing lines: ${matched} of ${todays.length} bets matched`);
+  } catch (e) {
+    showToast("Closing lines failed — see console");
+    console.error("grabClosingLines:", e);
+  }
+}
+
 async function fillBooksFromParlay() {
   try {
     if (!getParlayKey() && !promptParlayKey()) return;
@@ -9190,6 +9290,39 @@ function copyUA() {
 // Copy today's open totals AND spreads together, grouped by game: the total
 // line first, the spread line beneath it, a blank line between games. Reuses
 // formatBetCopyLine so both keep their existing formats.
+// Copy a closing-line recap for a date: what you bet vs where it closed, and
+// whether the market came to you. Same shape as the other recap copies.
+function copyClosingRecap(isoDate) {
+  loadBets();
+  const day = isoDate || localYMD(new Date(Date.now() - 86400000));
+  const rows = bets.filter(b => b && betDayLocal(b) === day && b.closing);
+  if (!rows.length) { showToast(`No closing lines stored for ${day}`); return; }
+  let beat = 0, lost = 0, pushSum = 0;
+  const lines = rows.map(b => {
+    const clv = computeCLV(b);
+    if (!clv) return null;
+    if (clv.favorable === true) beat++; else if (clv.favorable === false) lost++;
+    if (clv.pricePct != null) pushSum += clv.pricePct;
+    const dir = (b.ou || "").toLowerCase().startsWith("u") ? "u" : "o";
+    const statLbl = String(b.stat || "").toUpperCase();
+    const arrow = clv.favorable === true ? "\u2713" : clv.favorable === false ? "\u2717" : "\u2022";
+    const lineMove = clv.lineDelta === 0 ? "" : ` \u00b7 line ${b.line}\u2192${clv.closeLine}`;
+    const pct = clv.pricePct != null ? ` (${clv.pricePct >= 0 ? "+" : ""}${clv.pricePct.toFixed(1)}%)` : "";
+    return `${arrow} ${b.player}${b.team ? ` (${b.team})` : ""}: ${dir}${b.line} ${statLbl} ${b.odds > 0 ? "+" : ""}${b.odds} \u2192 ${clv.closePrice > 0 ? "+" : ""}${clv.closePrice}${pct}${lineMove}`;
+  }).filter(Boolean);
+  const n = beat + lost;
+  const avg = lines.length ? (pushSum / lines.length) : 0;
+  const header = [
+    `WNBA Closing Line \u00b7 ${day}`,
+    `Beat the close: ${beat}-${lost}${n ? ` (${Math.round((beat / n) * 100)}%)` : ""} \u00b7 avg ${avg >= 0 ? "+" : ""}${avg.toFixed(1)}%`,
+    ""
+  ];
+  const text = header.concat(lines).join("\n");
+  copyTextToClipboard(text,
+    () => showToast(`Copied ${lines.length} closing line${lines.length === 1 ? "" : "s"}`),
+    () => showToast("Copy blocked — text in console"));
+}
+
 function copyOpenGameLines() {
   const isTotal  = b => (b.stat || "").toUpperCase() === "GAME_TOTAL";
   const isSpread = b => (b.stat || "").toUpperCase() === "GAME_SPREAD";
@@ -13403,6 +13536,19 @@ function renderTracker() {
           }).join(" · ");
           return stat("Min (proj → actual)", `${parts} → <span style="color:#fff;font-weight:800;">${b.actualMin.toFixed(0)}</span>`, "#d4dae3");
         })()}
+        ${(() => {
+          // Closing line value — how the market moved after you bet.
+          const clv = computeCLV(b);
+          if (!clv) return "";
+          const col = clv.favorable === true ? "#4ade80" : clv.favorable === false ? "#f87171" : "#a8b0bb";
+          const lineTxt = clv.lineDelta === 0
+            ? `${b.line}`
+            : `${b.line} \u2192 ${clv.closeLine}`;
+          const priceTxt = `${b.odds > 0 ? "+" : ""}${b.odds} \u2192 ${clv.closePrice > 0 ? "+" : ""}${clv.closePrice}`;
+          const pctTxt = clv.pricePct != null ? ` (${clv.pricePct >= 0 ? "+" : ""}${clv.pricePct.toFixed(1)}%)` : "";
+          const bookTxt = clv.book ? ` \u00b7 ${clv.book}` : "";
+          return stat("Close", `<span style="color:${col};font-weight:800;">${lineTxt} \u00b7 ${priceTxt}${pctTxt}</span><span style="color:#525a64;font-size:9px;">${bookTxt}</span>`, col);
+        })()}
         ${stat("Stake", `${b.stake.toFixed(2)}u`, "#fff")}
         ${stat("P&L", plVal, plColor)}
         ${stat("Book", `${logoEl}${b.book||"—"}`, "#dde2e9")}
@@ -13484,6 +13630,8 @@ function renderTracker() {
         <button onclick="copyDailyRecapProps()" style="background:linear-gradient(135deg, #0c0d10 0%, #0a0d12 50%, #0c0d10 100%);border:1px solid #a855f7;color:#a855f7;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:600;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;">Props Recap</button>
         <button onclick="copyOpenTotals()" style="background:linear-gradient(135deg, #0c0d10 0%, #0a0d12 50%, #0c0d10 100%);border:1px solid #1e40af;color:#7dd3fc;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:600;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;">Copy Totals</button>
         <button onclick="selectAllVisibleBets()" style="background:linear-gradient(135deg, #0c0d10 0%, #0a0d12 50%, #0c0d10 100%);border:1px solid #a78bfa;color:#a78bfa;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:600;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;">Select All</button>
+        <button onclick="grabClosingLines()" title="Pull yesterday's closing lines from ParlayAPI and attach them to your bets" style="background:linear-gradient(135deg, #0c0d10 0%, #0a0d12 50%, #0c0d10 100%);border:1px solid #22c55e77;color:#22c55e;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:600;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;">Grab Closing</button>
+        <button onclick="copyClosingRecap()" title="Copy a closing-line recap for yesterday" style="background:linear-gradient(135deg, #0c0d10 0%, #0a0d12 50%, #0c0d10 100%);border:1px solid #1e40af;color:#7dd3fc;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:600;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;">Copy Closing</button>
         <button onclick="copyOpenGameLines()" style="background:linear-gradient(135deg, #0c0d10 0%, #0a0d12 50%, #0c0d10 100%);border:1px solid #1e40af;color:#7dd3fc;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:600;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;">Copy Games</button>
         <button onclick="copyDailyRecapTotals()" style="background:linear-gradient(135deg, #0c0d10 0%, #0a0d12 50%, #0c0d10 100%);border:1px solid #1e40af;color:#7dd3fc;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:600;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;">Totals Recap</button>
         <button onclick="exportBets()" style="background:linear-gradient(135deg, #0c0d10 0%, #0a0d12 50%, #0c0d10 100%);border:1px solid #1a1d22;color:#7dd3fc;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:600;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;">Backup</button>
