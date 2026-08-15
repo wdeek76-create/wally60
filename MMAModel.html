@@ -324,7 +324,7 @@
 <header>
   <div>
     <h1><span class="a">UFC</span> Model</h1>
-    <div class="sub">Auto-log ≥1% edge · ML devig · per-stream tracking <span class="meta" style="margin-left:8px; font-size:10px; opacity:0.6;">build 2026.08.15-breakdown</span></div>
+    <div class="sub">Auto-log ≥1% edge · ML devig · per-stream tracking <span class="meta" style="margin-left:8px; font-size:10px; opacity:0.6;">build 2026.08.15-wc-fix</span></div>
   </div>
   <div style="margin-left:auto; display:flex; align-items:center; gap:8px;">
     <label class="meta" style="display:flex; align-items:center; gap:6px; cursor:pointer; font-size:11px; letter-spacing:0.04em; text-transform:uppercase;" title="Hide Arena source from every tab and exclude it from consensus/combo math">
@@ -4173,9 +4173,15 @@ function renderModelBacktest() {
     totalUnits += unitProfit(b);
     totalEdge += edge;
     flaggedEdgeSum += edge;
+    // Pre-resolve the weight class from the CARD IN CONTEXT (c) so downstream
+    // tables never fail on stale cardId lookups. Also stamp cardId + label as
+    // fallbacks so helpers that expect them still work.
+    const wcMlKey = findMatchKey(c.ml || {}, b.fighter);
+    const resolvedWeightClass = wcMlKey ? c.ml[wcMlKey].weightClass : null;
     rows.push({
       fighter: b.fighter, opp: b.opponent, ml: b.ml, status: b.status, blended, edge,
-      cardId: b.cardId, cardLabel: b.cardLabel,
+      cardId: b.cardId || c.id, cardLabel: b.cardLabel || c.label,
+      weightClass: resolvedWeightClass,
       mkt,
       eyeProb: b.eyeProb, arenaProb: b.arenaProb, saberProb: b.saberProb, stokProb: b.stokProb,
       actionFair: b.actionFair,
@@ -5569,7 +5575,7 @@ document.querySelectorAll('.tabs .tab').forEach(t => {
   t.onclick = () => {
     document.querySelectorAll('.tabs .tab').forEach(x => x.classList.remove('active'));
     t.classList.add('active');
-    ['results','dashboard','ingest','grade','consensus','eye','arena','saber','action','model','cards'].forEach(name => {
+    ['results','dashboard','ingest','grade','consensus','eye','arena','saber','action','model','breakdown','cards'].forEach(name => {
       document.getElementById('tab-'+name).classList.toggle('hidden', name !== t.dataset.tab);
     });
     CURRENT_TAB = t.dataset.tab;
@@ -5584,6 +5590,7 @@ document.querySelectorAll('.tabs .tab').forEach(t => {
         action: 'actionCardFilter',
         dashboard: 'dashCardFilter',
         model: 'modelCardFilter',
+        breakdown: 'breakdownCardFilter',
       };
       const filterId = tabToFilter[CURRENT_TAB];
       if (filterId) {
@@ -6744,18 +6751,31 @@ function normalizeWeightClass(wc) {
 // bets: array of graded bets (any stream). Returns array sorted by units desc.
 function computeWeightClassBuckets(bets) {
   const cardsById = {};
-  (STATE.cards || []).forEach(c => { cardsById[c.id] = c; });
+  const cardsByLabel = {};
+  (STATE.cards || []).forEach(c => {
+    cardsById[c.id] = c;
+    if (c.label) cardsByLabel[c.label] = c;
+  });
   const buckets = {};
   bets.forEach(b => {
-    const card = cardsById[b.cardId];
-    if (!card) return;
-    const mlKey = findMatchKey(card.ml || {}, b.fighter);
-    const wc = mlKey ? normalizeWeightClass(card.ml[mlKey].weightClass) : null;
+    if (b.status !== 'win' && b.status !== 'loss') return;
+    // Try pre-resolved weight class first (renderModelBacktest stamps this
+    // directly on the row). Fall back to cardId or cardLabel lookup for other
+    // callers. Only give up if we exhaust all options.
+    let wcRaw = b.weightClass || null;
+    if (!wcRaw) {
+      const card = cardsById[b.cardId] || cardsByLabel[b.cardLabel];
+      if (card) {
+        const mlKey = findMatchKey(card.ml || {}, b.fighter);
+        wcRaw = mlKey ? card.ml[mlKey].weightClass : null;
+      }
+    }
+    const wc = wcRaw ? normalizeWeightClass(wcRaw) : null;
     const key = wc || 'Unknown';
     if (!buckets[key]) buckets[key] = { weightClass: key, n: 0, wins: 0, losses: 0, units: 0 };
-    if (b.status === 'win') { buckets[key].wins++; buckets[key].n++; }
-    else if (b.status === 'loss') { buckets[key].losses++; buckets[key].n++; }
-    else return;
+    buckets[key].n++;
+    if (b.status === 'win') buckets[key].wins++;
+    else buckets[key].losses++;
     buckets[key].units += unitProfit(b);
   });
   return Object.values(buckets)
@@ -6811,16 +6831,25 @@ function renderWeightClassTable(bets, headingText = 'Weight class') {
 // entries starting with "Women's" are Women's, all others are Men's.
 function renderGenderSplitTable(bets, headingText = 'Men\u2019s vs Women\u2019s') {
   const cardsById = {};
-  (STATE.cards || []).forEach(c => { cardsById[c.id] = c; });
+  const cardsByLabel = {};
+  (STATE.cards || []).forEach(c => {
+    cardsById[c.id] = c;
+    if (c.label) cardsByLabel[c.label] = c;
+  });
   const groups = { "Men's": { label: "Men's", n:0, wins:0, losses:0, units:0 },
                    "Women's": { label: "Women's", n:0, wins:0, losses:0, units:0 } };
   let unknownCount = 0;
   bets.forEach(b => {
     if (b.status !== 'win' && b.status !== 'loss') return;
-    const card = cardsById[b.cardId];
-    if (!card) return;
-    const mlKey = findMatchKey(card.ml || {}, b.fighter);
-    const wc = mlKey ? card.ml[mlKey].weightClass : null;
+    // Prefer pre-resolved (from model backtest); fall back to card lookup.
+    let wc = b.weightClass || null;
+    if (!wc) {
+      const card = cardsById[b.cardId] || cardsByLabel[b.cardLabel];
+      if (card) {
+        const mlKey = findMatchKey(card.ml || {}, b.fighter);
+        wc = mlKey ? card.ml[mlKey].weightClass : null;
+      }
+    }
     if (!wc) { unknownCount++; return; }
     const key = /women/i.test(wc) ? "Women's" : "Men's";
     groups[key].n++;
