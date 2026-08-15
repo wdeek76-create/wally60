@@ -4812,12 +4812,10 @@ async function exportModelCardImage() {
   // record/country line, only when meta exists for that pick).
   const rowH = (r) => 8 + r.fighterLines.length * 18 + 6 + 16 * 2 + (r.hasMeta ? 14 : 0) + 10;
 
-  // Every fight renders as a full matchup card (photos of both fighters,
-  // weight class pill, tale of the tape, model/market, edge chip). Each card
-  // uses a fixed ~300px budget so canvas height is predictable.
-  const matchupH = 210;
-  const rowsH = rowLayouts.length * matchupH
-             + Math.max(0, rowLayouts.length - 1) * 8;  // 8px gap between matchup cards
+  // Compact list layout — each row uses dynamic height based on its content
+  // (fighter matchup wraps + optional trailing meta line). 8px gap between rows.
+  const rowsH = rowLayouts.reduce((s, r) => s + rowH(r), 0)
+             + Math.max(0, rowLayouts.length - 1) * 8;
   const subtitleReserve = card.espnEventMeta ? 20 : 0;
   const cardH = cardPadY * 2 + cardTopH + subtitleReserve + 10 + rowsH;
   const H = paddingTop + cardH + paddingBottom;
@@ -4947,288 +4945,217 @@ async function exportModelCardImage() {
   // class pill, tale of the tape, model/market, edge chip). Uses fixed height
   // matchupH so canvas layout math is predictable.
   let ry = cardY + cardPadY + headerH + 10;
-  const drawMatchupCard = (rl, atY) => {
-    const fx = cardX + cardPadX;
-    const fy0 = atY;
-    const fw = tableW - cardPadX * 2;
-    const f = rl.fight;
-    const pickName = rl.pickName;
-    const oppName  = rl.oppName;
-    const isPickF1 = f.predictedWinner === f.fighter1;
-    const f1Name = f.fighter1;
-    const f2Name = f.fighter2;
-    const f1Meta = metaMap[f1Name] || {};
-    const f2Meta = metaMap[f2Name] || {};
-    const f1Img  = headshotMap[f1Name] || null;
-    const f2Img  = headshotMap[f2Name] || null;
-    const f1Flag = flagMap[f1Name] || null;
-    const f2Flag = flagMap[f2Name] || null;
+  // Compact list layout — one row per fight. Photo + rank + fighter matchup
+  // with green pick pill + Model/Market inline + trailing muted meta line
+  // (record vs record + weight class). Chip on right, vertically centered.
+  rowLayouts.forEach((rl, idx) => {
+    const { fight: f, rank, fighterLines, modelPct, fairAm, marketAm, marketPct, pickBook, pickName, oppName } = rl;
+    const rowX = cardX + cardPadX;
+    const height = rowH(rl);
 
-    // Weight class pill, centered at top
-    const wcRaw = f1Meta.weightClass || f2Meta.weightClass || '';
-    const wc = wcRaw ? wcRaw.replace(/\s*(bout|championship|title\s*fight)\s*$/i, '').trim().toUpperCase() : '';
-    let wcCursorY = fy0 + 2;
-    if (wc) {
-      ctx.font = `700 10px ${FONT_STACK}`;
-      const wcW = measureText(wc, ctx.font);
-      const wcPadX = 10, wcH = 18;
-      const wcBoxW = wcW + wcPadX * 2;
-      const wcX = fx + (fw - wcBoxW) / 2;
-      ctx.fillStyle = 'rgba(0,214,143,0.12)';
-      roundRect(wcX, wcCursorY, wcBoxW, wcH, 9);
-      ctx.fill();
-      ctx.fillStyle = GREEN;
+    // Body geometry — chip centers on visible content
+    const bodyTop = ry + 8;
+    const bodyH = fighterLines.length * 18 + 6 + 16 * 2 + (rl.hasMeta ? 14 : 0);
+    const bodyMidY = bodyTop + bodyH / 2;
+
+    // Avatar (pick's headshot) on left, cover-fit into a circle with flag corner
+    const avatarCX = rowX + avatarSize / 2;
+    const avatarCY = bodyMidY;
+    const img = headshotMap[pickName];
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(avatarCX, avatarCY, avatarSize / 2, 0, Math.PI * 2);
+    ctx.closePath();
+    ctx.clip();
+    if (img) {
+      const iw = img.naturalWidth || img.width;
+      const ih = img.naturalHeight || img.height;
+      let sx, sy, sSize;
+      if (iw >= ih) { sSize = ih; sx = (iw - ih) / 2; sy = 0; }
+      else          { sSize = iw; sx = 0; sy = Math.max(0, (ih - iw) * 0.15); }
+      ctx.drawImage(img, sx, sy, sSize, sSize, rowX, avatarCY - avatarSize / 2, avatarSize, avatarSize);
+    } else {
+      ctx.fillStyle = '#e2e8f0';
+      ctx.fillRect(rowX, avatarCY - avatarSize / 2, avatarSize, avatarSize);
+      ctx.fillStyle = '#64748b';
+      ctx.font = `700 ${Math.round(avatarSize * 0.45)}px ${FONT_STACK}`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillText(wc, fx + fw / 2, wcCursorY + wcH / 2);
-      wcCursorY += wcH + 6;
-    } else {
-      wcCursorY += 2;
+      ctx.fillText((pickName || '?').charAt(0).toUpperCase(), avatarCX, avatarCY);
     }
+    ctx.restore();
+    // Thin ring around avatar
+    ctx.strokeStyle = '#cbd5e1';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(avatarCX, avatarCY, avatarSize / 2, 0, Math.PI * 2);
+    ctx.stroke();
 
-    // Draw one fighter centered on cx: photo on top with optional green glow
-    // if this is the pick, then name + record + country stacked below.
-    const drawFighterCentered = (name, meta, img, flag, isPick, cx, topY, avSize) => {
-      const avCX = cx;
-      const avCY = topY + avSize / 2;
-
-      // Green glow behind the pick's photo — soft outer ring using shadowBlur.
-      // Rendered before the avatar so it sits behind. Two-pass draw gives a
-      // richer glow: an inner bright ring + a wider softer bloom.
-      if (isPick) {
-        ctx.save();
-        ctx.shadowColor = 'rgba(0,214,143,0.9)';
-        ctx.shadowBlur = 22;
-        ctx.strokeStyle = GREEN;
-        ctx.lineWidth = 3;
-        ctx.beginPath();
-        ctx.arc(avCX, avCY, avSize / 2 + 3, 0, Math.PI * 2);
-        ctx.stroke();
-        // Second pass for a softer, wider bloom
-        ctx.shadowBlur = 40;
-        ctx.strokeStyle = 'rgba(0,214,143,0.35)';
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.arc(avCX, avCY, avSize / 2 + 6, 0, Math.PI * 2);
-        ctx.stroke();
-        ctx.restore();
-      }
-
-      // Photo (clipped to circle) or initial placeholder
+    // Flag corner (bottom-right of avatar)
+    const flagImg = flagMap[pickName];
+    if (flagImg) {
+      const flagSize = Math.round(avatarSize * 0.42);
+      const flagCX = avatarCX + avatarSize / 2 - flagSize / 3;
+      const flagCY = avatarCY + avatarSize / 2 - flagSize / 3;
       ctx.save();
       ctx.beginPath();
-      ctx.arc(avCX, avCY, avSize / 2, 0, Math.PI * 2);
+      ctx.arc(flagCX, flagCY, flagSize / 2, 0, Math.PI * 2);
       ctx.closePath();
       ctx.clip();
-      if (img) {
-        const iw = img.naturalWidth || img.width;
-        const ih = img.naturalHeight || img.height;
-        let sx, sy, sSize;
-        if (iw >= ih) { sSize = ih; sx = (iw - ih) / 2; sy = 0; }
-        else          { sSize = iw; sx = 0; sy = Math.max(0, (ih - iw) * 0.15); }
-        ctx.drawImage(img, sx, sy, sSize, sSize, avCX - avSize / 2, avCY - avSize / 2, avSize, avSize);
-      } else {
-        ctx.fillStyle = '#e2e8f0';
-        ctx.fillRect(avCX - avSize / 2, avCY - avSize / 2, avSize, avSize);
-        ctx.fillStyle = '#64748b';
-        ctx.font = `700 ${Math.round(avSize * 0.42)}px ${FONT_STACK}`;
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText((name || '?').charAt(0).toUpperCase(), avCX, avCY);
-      }
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(flagCX - flagSize / 2, flagCY - flagSize / 2, flagSize, flagSize);
+      const iw = flagImg.naturalWidth || flagImg.width;
+      const ih = flagImg.naturalHeight || flagImg.height;
+      let fsx, fsy, fss;
+      if (iw >= ih) { fss = ih; fsx = (iw - ih) / 2; fsy = 0; }
+      else          { fss = iw; fsx = 0; fsy = (ih - iw) / 2; }
+      ctx.drawImage(flagImg, fsx, fsy, fss, fss, flagCX - flagSize / 2, flagCY - flagSize / 2, flagSize, flagSize);
       ctx.restore();
-      // Thin ring — only draw for non-picks (pick already has green ring)
-      if (!isPick) {
-        ctx.strokeStyle = '#cbd5e1';
-        ctx.lineWidth = 1;
-        ctx.beginPath(); ctx.arc(avCX, avCY, avSize / 2, 0, Math.PI * 2); ctx.stroke();
-      }
-
-      // Flag corner
-      if (flag) {
-        const fs = Math.round(avSize * 0.4);
-        const fCX = avCX + avSize / 2 - fs / 3;
-        const fCY = avCY + avSize / 2 - fs / 3;
-        ctx.save();
-        ctx.beginPath(); ctx.arc(fCX, fCY, fs / 2, 0, Math.PI * 2); ctx.closePath(); ctx.clip();
-        ctx.fillStyle = '#fff';
-        ctx.fillRect(fCX - fs/2, fCY - fs/2, fs, fs);
-        const iw = flag.naturalWidth || flag.width;
-        const ih = flag.naturalHeight || flag.height;
-        let sx, sy, sSize;
-        if (iw >= ih) { sSize = ih; sx = (iw - ih) / 2; sy = 0; }
-        else          { sSize = iw; sx = 0; sy = (ih - iw) / 2; }
-        ctx.drawImage(flag, sx, sy, sSize, sSize, fCX - fs/2, fCY - fs/2, fs, fs);
-        ctx.restore();
-        ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
-        ctx.beginPath(); ctx.arc(fCX, fCY, fs / 2, 0, Math.PI * 2); ctx.stroke();
-      }
-
-      // Name centered below photo (uppercase, no pill highlight — the glow
-      // marks the pick now)
-      const upperName = (name || '').toUpperCase();
-      ctx.font = `800 13px ${FONT_STACK}`;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'top';
-      ctx.fillStyle = TEXT;
-      ctx.fillText(upperName, cx, topY + avSize + 6);
-
-      // Record + country under the name
-      const parts = [];
-      if (meta.record) parts.push(meta.record);
-      if (meta.country) parts.push(meta.country);
-      if (parts.length) {
-        ctx.font = `600 10px ${FONT_STACK}`;
-        ctx.fillStyle = MUTED;
-        ctx.fillText(parts.join(' · '), cx, topY + avSize + 21);
-      }
-    };
-
-    // Draw both fighters side-by-side. Centers positioned at 22% / 78% of the
-    // card width so they sit comfortably apart with room for the "vs" and the
-    // tale of the tape between them below.
-    const avSize = 48;
-    const cx1 = fx + fw * 0.22;
-    const cx2 = fx + fw * 0.78;
-    drawFighterCentered(f1Name, f1Meta, f1Img, f1Flag, isPickF1,   cx1, wcCursorY, avSize);
-    drawFighterCentered(f2Name, f2Meta, f2Img, f2Flag, !isPickF1,  cx2, wcCursorY, avSize);
-
-    // Small "vs" pill between the two photos, vertically centered on the avatars
-    ctx.font = `700 10px ${FONT_STACK}`;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillStyle = MUTED;
-    ctx.fillText('vs', fx + fw / 2, wcCursorY + avSize / 2);
-
-    // Advance past the fighter block: avatar + 6 gap + name(13) + 2 gap + record(10) + bottom pad
-    let y = wcCursorY + avSize + 6 + 13 + 2 + 10 + 8;
-
-    // Tale of the tape (compact 2-column) — only render if we have at least
-    // one stat for either fighter. Show fighter 1 on the left, fighter 2 on
-    // right. A small green arrow points to the fighter with the advantage on
-    // that stat: younger age wins, taller/longer wins for height + reach.
-    // Stance is categorical so no arrow.
-    const parseHeight = (s) => {
-      // "5' 10\"" / "5'10\"" / "5' 10 in" → total inches. Returns null if unparseable.
-      if (!s) return null;
-      const m1 = String(s).match(/(\d+)\s*'\s*(\d+(?:\.\d+)?)/);
-      if (m1) return parseInt(m1[1], 10) * 12 + parseFloat(m1[2]);
-      const m2 = String(s).match(/(\d+(?:\.\d+)?)\s*(?:in|")/);
-      if (m2) return parseFloat(m2[1]);
-      const n = parseFloat(s);
-      return isNaN(n) ? null : n;
-    };
-    const parseReach = (s) => {
-      if (!s) return null;
-      const m1 = String(s).match(/(\d+(?:\.\d+)?)/);
-      return m1 ? parseFloat(m1[1]) : null;
-    };
-    // Advantage direction: 'lower' means smaller number wins (age); 'higher'
-    // means bigger number wins (height, reach). null = no comparison.
-    const tapeRows = [
-      { label: 'Age',    v1: f1Meta.age, v2: f2Meta.age, dir: 'lower',  parse: (x) => x },
-      { label: 'Height', v1: f1Meta.height, v2: f2Meta.height, dir: 'higher', parse: parseHeight },
-      { label: 'Reach',  v1: f1Meta.reach,  v2: f2Meta.reach,  dir: 'higher', parse: parseReach },
-      { label: 'Stance', v1: f1Meta.stance, v2: f2Meta.stance, dir: null,      parse: () => null },
-    ].filter(r => r.v1 != null || r.v2 != null);
-    if (tapeRows.length) {
-      const tapeStartY = y + 4;
-      const labelCX = fx + fw / 2;
-      const f1ValX  = fx + fw * 0.30;
-      const f2ValX  = fx + fw * 0.70;
-      tapeRows.forEach((r, i) => {
-        const ry2 = tapeStartY + i * 13;
-        ctx.textBaseline = 'middle';
-        // LABEL centered
-        ctx.font = `600 9px ${FONT_STACK}`;
-        ctx.fillStyle = MUTED;
-        ctx.textAlign = 'center';
-        ctx.fillText(r.label.toUpperCase(), labelCX, ry2);
-
-        // Determine which side has the advantage (if any)
-        let advSide = null;  // 'f1' or 'f2' or null
-        if (r.dir && r.v1 != null && r.v2 != null) {
-          const p1 = r.parse(r.v1);
-          const p2 = r.parse(r.v2);
-          if (p1 != null && p2 != null && p1 !== p2) {
-            if (r.dir === 'lower') advSide = p1 < p2 ? 'f1' : 'f2';
-            else                    advSide = p1 > p2 ? 'f1' : 'f2';
-          }
-        }
-
-        // F1 value (right-aligned toward center)
-        ctx.font = `700 11px ${FONT_STACK}`;
-        ctx.fillStyle = advSide === 'f1' ? GREEN : TEXT;
-        ctx.textAlign = 'right';
-        const v1Str = r.v1 != null ? String(r.v1) : '—';
-        ctx.fillText(v1Str, f1ValX + 30, ry2);
-        // Arrow to the LEFT of f1 value if f1 wins
-        if (advSide === 'f1') {
-          ctx.font = `800 10px ${FONT_STACK}`;
-          ctx.fillStyle = GREEN;
-          ctx.textAlign = 'right';
-          const v1w = measureText(v1Str, `700 11px ${FONT_STACK}`);
-          ctx.fillText('▲', f1ValX + 30 - v1w - 3, ry2);
-        }
-
-        // F2 value (left-aligned toward center)
-        ctx.font = `700 11px ${FONT_STACK}`;
-        ctx.fillStyle = advSide === 'f2' ? GREEN : TEXT;
-        ctx.textAlign = 'left';
-        const v2Str = r.v2 != null ? String(r.v2) : '—';
-        ctx.fillText(v2Str, f2ValX - 30, ry2);
-        // Arrow to the RIGHT of f2 value if f2 wins
-        if (advSide === 'f2') {
-          ctx.font = `800 10px ${FONT_STACK}`;
-          ctx.fillStyle = GREEN;
-          ctx.textAlign = 'left';
-          const v2w = measureText(v2Str, `700 11px ${FONT_STACK}`);
-          ctx.fillText('▲', f2ValX - 30 + v2w + 3, ry2);
-        }
-      });
-      y = tapeStartY + tapeRows.length * 13 + 4;
-    } else {
-      y += 4;
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(flagCX, flagCY, flagSize / 2, 0, Math.PI * 2);
+      ctx.stroke();
     }
 
-    // Model / Market lines centered
-    ctx.textAlign = 'center';
+    // Rank number (right of avatar)
+    const rankX = rowX + avatarSize + avatarGap;
+    ctx.fillStyle = RANK;
+    ctx.font = FONT_RANK;
+    ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
-    ctx.font = `700 11px ${FONT_STACK}`;
-    ctx.fillStyle = TEXT;
-    ctx.fillText(`Model ${rl.modelPct} (${rl.fairAm})   ·   Market ${rl.marketPct} (${rl.marketAm})${rl.pickBook ? '  @ ' + rl.pickBook : ''}`, fx + fw / 2, y + 6);
-    y += 15;
+    ctx.fillText(String(rank).padStart(2, '0'), rankX, bodyMidY);
 
-    // Edge chip centered
-    const eg = f.edge;
-    const isGreen = eg >= 5, isAmber = eg >= 1 && eg < 5, isRed = eg < 0;
-    const chipBg2 = isGreen ? CHIP_GREEN_BG : isAmber ? CHIP_AMBER_BG : isRed ? CHIP_RED_BG : CHIP_AMBER_BG;
-    const chipBr2 = isGreen ? CHIP_GREEN_BR : isAmber ? CHIP_AMBER_BR : isRed ? CHIP_RED_BR : CHIP_AMBER_BR;
-    const chipTx2 = isGreen ? GREEN : isAmber ? AMBER : isRed ? RED : AMBER;
-    const chipTxt = (eg >= 0 ? '+' : '') + eg.toFixed(1) + ' PP';
-    ctx.font = `800 11px ${FONT_STACK}`;
-    const chipTxtW = measureText(chipTxt, ctx.font);
-    const chipPadX = 10, chipH2 = 20;
-    const chipBoxW = chipTxtW + chipPadX * 2;
-    const chipXc = fx + (fw - chipBoxW) / 2;
-    ctx.fillStyle = chipBg2;
-    roundRect(chipXc, y + 4, chipBoxW, chipH2, 5);
+    // Fighter matchup line(s), with green pick pill highlight
+    const midX = rankX + rankW;
+    ctx.font = FONT_FIGHT;
+    let fy = bodyTop + 9;
+    fighterLines.forEach(line => {
+      const pickIdx = pickName ? line.indexOf(pickName) : -1;
+      if (pickIdx < 0) {
+        ctx.fillStyle = TEXT;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'top';
+        ctx.fillText(line, midX, fy);
+      } else {
+        const before = line.slice(0, pickIdx);
+        const after  = line.slice(pickIdx + pickName.length);
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'top';
+        let cursorX = midX;
+        if (before) {
+          const trimmedBefore = before.replace(/\s+$/, '');
+          if (trimmedBefore) {
+            ctx.fillStyle = TEXT;
+            ctx.fillText(trimmedBefore, cursorX, fy);
+            cursorX += measureText(trimmedBefore, FONT_FIGHT) + 4;
+          }
+        }
+        const pickW = measureText(pickName, FONT_FIGHT);
+        const padX = 6, padY = 2, pillH = 18;
+        const pillY = fy - padY;
+        ctx.fillStyle = CHIP_GREEN_BG;
+        roundRect(cursorX - padX, pillY, pickW + padX * 2, pillH, 4);
+        ctx.fill();
+        ctx.strokeStyle = CHIP_GREEN_BR;
+        ctx.lineWidth = 1;
+        roundRect(cursorX - padX, pillY, pickW + padX * 2, pillH, 4);
+        ctx.stroke();
+        ctx.fillStyle = GREEN;
+        ctx.fillText(pickName, cursorX, fy);
+        cursorX += pickW + padX + 4;
+        const trimmedAfter = after.replace(/^\s+/, '');
+        if (trimmedAfter) {
+          ctx.fillStyle = TEXT;
+          ctx.fillText(trimmedAfter, cursorX, fy);
+        }
+      }
+      fy += 18;
+    });
+    fy += 4;
+
+    // Data lines: Model, Market
+    const drawKV = (key, val, valColor, y) => {
+      ctx.font = FONT_KEY;
+      ctx.fillStyle = LABEL;
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      ctx.fillText(key, midX, y);
+      const kw = measureText(key, FONT_KEY);
+      ctx.font = FONT_VAL;
+      ctx.fillStyle = valColor;
+      ctx.fillText(val, midX + kw + 4, y);
+    };
+    drawKV('Model', `${modelPct} (${fairAm})`, TEXT, fy);
+    fy += 16;
+    drawKV('Market', `${marketPct} (${marketAm})${pickBook ? '  @ ' + pickBook : ''}`, TEXT, fy);
+    fy += 16;
+
+    // Trailing meta line: <pick record country> vs <opp record country> (weight class)
+    const pMeta = metaMap[pickName] || {};
+    const oMeta = metaMap[oppName] || {};
+    const fmtSide = (m) => {
+      const parts = [];
+      if (m.record) parts.push(m.record);
+      if (m.country) parts.push(m.country);
+      return parts.join(' ');
+    };
+    const pStr = fmtSide(pMeta);
+    const oStr = fmtSide(oMeta);
+    if (pStr || oStr) {
+      ctx.font = FONT_KEY;
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      let cx = midX;
+      if (pStr) {
+        ctx.fillStyle = GREEN;
+        ctx.fillText(pStr, cx, fy);
+        cx += measureText(pStr, FONT_KEY);
+      }
+      if (pStr && oStr) {
+        const sep = ' vs ';
+        ctx.fillStyle = TEXT;
+        ctx.fillText(sep, cx, fy);
+        cx += measureText(sep, FONT_KEY);
+      }
+      if (oStr) {
+        ctx.fillStyle = TEXT;
+        ctx.fillText(oStr, cx, fy);
+        cx += measureText(oStr, FONT_KEY);
+      }
+      const weightClass = pMeta.weightClass || oMeta.weightClass;
+      if (weightClass) {
+        const wcStr = `  (${weightClass})`;
+        ctx.fillStyle = MUTED;
+        ctx.fillText(wcStr, cx, fy);
+      }
+    }
+
+    // Edge chip on the right, vertically centered
+    const isGreen = f.edge >= 5;
+    const isAmber = f.edge >= 1 && f.edge < 5;
+    const isRed = f.edge < 0;
+    const chipBg = isGreen ? CHIP_GREEN_BG : isAmber ? CHIP_AMBER_BG : isRed ? CHIP_RED_BG : CHIP_AMBER_BG;
+    const chipBr = isGreen ? CHIP_GREEN_BR : isAmber ? CHIP_AMBER_BR : isRed ? CHIP_RED_BR : CHIP_AMBER_BR;
+    const chipTx = isGreen ? GREEN : isAmber ? AMBER : isRed ? RED : AMBER;
+    const chipX = cardX + tableW - cardPadX - chipW;
+    const chipY = bodyMidY - chipH / 2;
+    ctx.fillStyle = chipBg;
+    roundRect(chipX, chipY, chipW, chipH, 8);
     ctx.fill();
-    ctx.strokeStyle = chipBr2; ctx.lineWidth = 1;
-    roundRect(chipXc, y + 4, chipBoxW, chipH2, 5);
+    ctx.strokeStyle = chipBr;
+    ctx.lineWidth = 1;
+    roundRect(chipX, chipY, chipW, chipH, 8);
     ctx.stroke();
-    ctx.fillStyle = chipTx2;
+    ctx.fillStyle = chipTx;
+    ctx.font = FONT_CHIP_N;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText(chipTxt, fx + fw / 2, y + 4 + chipH2 / 2);
-    y += chipH2 + 6;
+    ctx.fillText((f.edge >= 0 ? '+' : '') + f.edge.toFixed(1), chipX + chipW / 2, chipY + 15);
+    ctx.font = FONT_CHIP_L;
+    ctx.fillText('PP', chipX + chipW / 2, chipY + 32);
 
-  };  // end drawMatchupCard
-
-  // Loop every fight and stack matchup cards down the page with an 8px gap
-  rowLayouts.forEach((rl, idx) => {
-    drawMatchupCard(rl, ry);
-    ry += matchupH + 8;
+    ry += height + 8;  // 8px gap to next row (no visible divider)
   });
 
 
@@ -6741,6 +6668,10 @@ function computeWeightClassBuckets(bets) {
 function renderWeightClassTable(bets, headingText = 'Weight class') {
   const buckets = computeWeightClassBuckets(bets);
   if (!buckets.length) return '';
+  const unknown = buckets.find(b => b.weightClass === 'Unknown');
+  const noteHtml = unknown
+    ? `<div class="meta" style="font-size:11px; margin-top:6px;">${unknown.n} bet${unknown.n === 1 ? '' : 's'} without weight class data — hit <b>📏 Pull weight classes</b> on the Cards tab to backfill from ESPN.</div>`
+    : '';
   let html = `<div style="margin:14px 0;">
     <h3 style="margin:0 0 10px 0; font-size:14px; color:var(--muted); letter-spacing:0.04em; text-transform:uppercase; font-weight:600;">${headingText}</h3>
     <table><thead><tr>
@@ -6755,8 +6686,10 @@ function renderWeightClassTable(bets, headingText = 'Weight class') {
     const wpColor  = b.winPct >= 50 ? 'var(--green)' : b.winPct > 0 ? 'var(--amber)' : 'var(--red)';
     const uColor   = b.units > 0 ? 'var(--green)' : b.units < 0 ? 'var(--red)' : 'var(--muted)';
     const roiColor = b.roi > 0 ? 'var(--green)' : b.roi < 0 ? 'var(--red)' : 'var(--muted)';
-    html += `<tr>
-      <td style="font-weight:600;">${b.weightClass}</td>
+    const isUnknown = b.weightClass === 'Unknown';
+    const rowStyle = isUnknown ? ' style="opacity:0.7;"' : '';
+    html += `<tr${rowStyle}>
+      <td style="font-weight:600;">${b.weightClass}${isUnknown ? ' <span class="meta" style="font-size:10px; font-weight:400;">· ESPN meta missing</span>' : ''}</td>
       <td class="num">${b.n}</td>
       <td class="num">${b.wins}-${b.losses}</td>
       <td class="num" style="color:${wpColor}; font-weight:600;">${b.winPct.toFixed(1)}%</td>
@@ -6764,7 +6697,7 @@ function renderWeightClassTable(bets, headingText = 'Weight class') {
       <td class="num" style="color:${roiColor}; font-weight:600;">${(b.roi >= 0 ? '+' : '') + b.roi.toFixed(1)}%</td>
     </tr>`;
   });
-  html += `</tbody></table></div>`;
+  html += `</tbody></table>${noteHtml}</div>`;
   return html;
 }
 
@@ -6776,24 +6709,28 @@ function renderGenderSplitTable(bets, headingText = 'Men\u2019s vs Women\u2019s'
   (STATE.cards || []).forEach(c => { cardsById[c.id] = c; });
   const groups = { "Men's": { label: "Men's", n:0, wins:0, losses:0, units:0 },
                    "Women's": { label: "Women's", n:0, wins:0, losses:0, units:0 } };
+  let unknownCount = 0;
   bets.forEach(b => {
     if (b.status !== 'win' && b.status !== 'loss') return;
     const card = cardsById[b.cardId];
     if (!card) return;
     const mlKey = findMatchKey(card.ml || {}, b.fighter);
     const wc = mlKey ? card.ml[mlKey].weightClass : null;
-    if (!wc) return;   // skip if we don't know the class (no gender inference)
+    if (!wc) { unknownCount++; return; }
     const key = /women/i.test(wc) ? "Women's" : "Men's";
     groups[key].n++;
     if (b.status === 'win') groups[key].wins++; else groups[key].losses++;
     groups[key].units += unitProfit(b);
   });
   const rows = Object.values(groups).filter(g => g.n > 0);
-  if (!rows.length) return '';
+  if (!rows.length && !unknownCount) return '';
   rows.forEach(g => {
     g.winPct = g.n ? g.wins / g.n * 100 : 0;
     g.roi = g.n ? g.units / g.n * 100 : 0;
   });
+  const noteHtml = unknownCount
+    ? `<div class="meta" style="font-size:11px; margin-top:6px;">${unknownCount} bet${unknownCount === 1 ? '' : 's'} without weight class data — hit <b>📏 Pull weight classes</b> on the Cards tab to backfill.</div>`
+    : '';
   let html = `<div style="margin:14px 0;">
     <h3 style="margin:0 0 10px 0; font-size:14px; color:var(--muted); letter-spacing:0.04em; text-transform:uppercase; font-weight:600;">${headingText}</h3>
     <table><thead><tr>
@@ -6817,7 +6754,7 @@ function renderGenderSplitTable(bets, headingText = 'Men\u2019s vs Women\u2019s'
       <td class="num" style="color:${roiColor}; font-weight:600;">${(g.roi >= 0 ? '+' : '') + g.roi.toFixed(1)}%</td>
     </tr>`;
   });
-  html += `</tbody></table></div>`;
+  html += `</tbody></table>${noteHtml}</div>`;
   return html;
 }
 
