@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <title>Prop Tracker</title>
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800;900&display=swap" rel="stylesheet">
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
@@ -84,6 +84,13 @@
     .movement-against { background: rgba(214, 69, 69, 0.2); color: #d64545; border: 2px solid rgba(214, 69, 69, 0.5); }
     .movement-neutral { background: rgba(255,255,255,0.08); color: #aaa; border: 2px solid rgba(255,255,255,0.15); }
 
+    .consensus-box { background: rgba(59, 158, 255, 0.1); border: 2px solid rgba(59, 158, 255, 0.3); padding: 12px; border-radius: 8px; margin-top: 12px; }
+    .consensus-title { font-size: 10px; font-weight: 700; text-transform: uppercase; color: #3b9eff; margin-bottom: 8px; }
+    .consensus-row { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px solid rgba(59, 158, 255, 0.2); font-size: 12px; }
+    .consensus-row:last-child { border-bottom: none; }
+    .consensus-label { color: #aaa; }
+    .consensus-value { font-weight: 700; color: #3b9eff; }
+
     .loading { text-align: center; padding: 20px; color: #888; font-size: 13px; }
     .empty { text-align: center; padding: 20px; color: #666; font-size: 12px; }
     .error { background: rgba(214, 69, 69, 0.1); border: 2px solid rgba(214, 69, 69, 0.3); color: #ff6b6b; padding: 12px; border-radius: 8px; font-size: 12px; margin: 8px; }
@@ -125,7 +132,7 @@
       const [apiKey, setApiKey] = useState(() => {
         try { return localStorage.getItem('parlay_api_key') || ''; } catch { return ''; }
       });
-      const [sport, setSport] = useState('tennis');
+      const [sport, setSport] = useState('nba');
       const [searchName, setSearchName] = useState('');
       const [suggestions, setSuggestions] = useState([]);
       const [players, setPlayers] = useState([]);
@@ -138,6 +145,7 @@
       const [betModalOpen, setBetModalOpen] = useState(false);
       const [selectedOdds, setSelectedOdds] = useState(null);
       const [betPrice, setBetPrice] = useState('');
+      const [consensus, setConsensus] = useState({});
       const searchInputRef = useRef(null);
 
       const PROP_KEYS = {
@@ -160,35 +168,25 @@
         setError('');
         setPlayers([]);
         setSuggestions([]);
+        setSearchName('');
 
         try {
-          let keys = [];
-          let market = '';
-          
-          if (sport === 'tennis') {
-            keys = ['tennis_atp', 'tennis_wta', 'tennis_atp_challenger', 'tennis_itf'];
-            market = 'h2h';
-          } else if (sport === 'nba') {
-            keys = ['nba'];
-            market = PROP_KEYS[selectedProp];
-          } else if (sport === 'wnba') {
-            keys = ['wnba'];
-            market = PROP_KEYS[selectedProp];
-          } else if (sport === 'ufc') {
-            keys = ['mma'];
-            market = 'h2h';
-          }
-
           let allOdds = [];
 
-          for (const key of keys) {
+          // For NBA/WNBA/UFC, use /props endpoint (3 credits, gets all books + markets)
+          if (sport === 'nba' || sport === 'wnba' || sport === 'ufc') {
+            const sportKey = sport === 'ufc' ? 'mma' : sport;
             try {
-              const url = `https://parlay-api.com/v1/sports/${key}/odds?regions=eu,us&markets=${market}&bookmakers=${BOOKMAKERS.join(',')}&apiKey=${apiKey}`;
+              const url = `https://parlay-api.com/v1/sports/${sportKey}/props?apiKey=${apiKey}`;
               const res = await fetch(url);
-              if (!res.ok) continue;
+              if (!res.ok) throw new Error(`${sportKey} props failed`);
               const data = await res.json();
-              if (Array.isArray(data)) allOdds = allOdds.concat(data);
-            } catch (e) {}
+              if (Array.isArray(data)) allOdds = data;
+            } catch (e) {
+              setError('Props fetch error: ' + e.message);
+              setLoading(false);
+              return;
+            }
           }
 
           if (!allOdds.length) { setError('No data found'); setLoading(false); return; }
@@ -199,6 +197,8 @@
               event.bookmakers.forEach(book => {
                 if (book.markets && Array.isArray(book.markets)) {
                   book.markets.forEach(mkt => {
+                    // Filter to selected prop only
+                    if (mkt.key !== PROP_KEYS[selectedProp]) return;
                     if (mkt.outcomes && Array.isArray(mkt.outcomes)) {
                       mkt.outcomes.forEach(outcome => {
                         const playerName = outcome.description || outcome.player_name || outcome.name || '';
@@ -226,6 +226,26 @@
 
           const playerList = Object.values(playerMap).sort((a, b) => a.name.localeCompare(b.name));
           setPlayers(playerList);
+
+          // Fetch consensus data (3 credits)
+          try {
+            const consensusKey = sport === 'nba' ? 'nba' : sport === 'wnba' ? 'wnba' : 'mma';
+            const consensusUrl = `https://parlay-api.com/v1/sports/${consensusKey}/consensus?apiKey=${apiKey}`;
+            const consensusRes = await fetch(consensusUrl);
+            if (consensusRes.ok) {
+              const consensusData = await consensusRes.json();
+              if (Array.isArray(consensusData)) {
+                const consensusMap = {};
+                consensusData.forEach(row => {
+                  const key = `${row.player || ''}-${row.market_key || ''}-${row.line || 0}`;
+                  consensusMap[key] = row;
+                });
+                setConsensus(consensusMap);
+              }
+            }
+          } catch (e) {
+            console.log('Consensus fetch error:', e);
+          }
         } catch (e) {
           setError('Error: ' + e.message);
         }
@@ -234,10 +254,10 @@
 
       const handleSearchChange = (val) => {
         setSearchName(val);
-        if (val.trim().length > 0) {
+        if (val.trim().length > 1) {
           const filtered = players
             .filter(p => p.name.toUpperCase().includes(val.toUpperCase()))
-            .slice(0, 8);
+            .slice(0, 5);
           setSuggestions(filtered.map(p => p.name));
         } else {
           setSuggestions([]);
@@ -247,6 +267,7 @@
       const handleSuggestionClick = (name) => {
         setSearchName(name);
         setSuggestions([]);
+        if (searchInputRef.current) searchInputRef.current.blur();
       };
 
       const clearSearch = () => {
@@ -301,6 +322,18 @@
         }
       };
 
+      const getConsensusForOdds = (odds) => {
+        if (!odds) return null;
+        // Try to find consensus data matching this odds entry
+        const propKey = PROP_KEYS[selectedProp];
+        Object.entries(consensus).forEach(([key, data]) => {
+          if (data.line === odds.line && data.market_key === propKey) {
+            return data;
+          }
+        });
+        return null;
+      };
+
       return (
         <div className="container">
           <div className="header">
@@ -312,7 +345,7 @@
               )}
             </div>
             <div className="sport-tabs">
-              {['tennis', 'nba', 'wnba', 'ufc'].map(s => (
+              {['nba', 'wnba', 'ufc'].map(s => (
                 <button key={s} className={`sport-tab ${sport === s ? 'active' : ''}`} onClick={() => { setSport(s); setPlayers([]); setSearchName(''); setSuggestions([]); }}>
                   {s.toUpperCase()}
                 </button>
@@ -359,7 +392,7 @@
                 <div className="empty" style={{marginTop: '12px'}}>Enter API key above and click Load Odds</div>
               </div>
             )}
-            {loading && <div className="loading">Fetching {sport.toUpperCase()} {sport === 'tennis' || sport === 'ufc' ? 'odds' : 'props'}...</div>}
+            {loading && <div className="loading">Fetching {sport.toUpperCase()}...</div>}
 
             {filteredPlayers.map(player => (
               <div key={player.name} className="player-card">
@@ -370,15 +403,21 @@
                 <div className="books-container">
                   {BOOKMAKERS.map(book => {
                     const bookOdds = player.books[book];
-                    const best = bestOdds(bookOdds);
-                    if (!best) return null;
+                    if (!bookOdds || bookOdds.length === 0) return null;
+                    
+                    // Sort by line for better display
+                    const sorted = [...bookOdds].sort((a, b) => (a.line || 0) - (b.line || 0));
+                    const mainline = sorted[0];
+                    const altLines = sorted.slice(1);
+                    
                     const key = `${player.name}-${book}-${selectedProp}`;
+                    
                     return (
                       <div key={book}>
                         <div className="book-row">
-                          <div className="odds-box" onClick={() => showBetModal(best)}>
-                            <div className="odds-value">{best.odds_american > 0 ? '+' : ''}{best.odds_american}</div>
-                            {best.line != null && <div className="odds-line">{best.line > 0 ? '+' : ''}{best.line}</div>}
+                          <div className="odds-box" onClick={() => showBetModal(mainline)}>
+                            <div className="odds-value">{mainline.odds_american > 0 ? '+' : ''}{mainline.odds_american}</div>
+                            {mainline.line != null && <div className="odds-line">{mainline.line > 0 ? '+' : ''}{mainline.line}</div>}
                           </div>
                           <div className="book-name">{BOOK_NAMES[book]}</div>
                           <div style={{textAlign: 'center'}}>
@@ -387,6 +426,20 @@
                             </button>
                           </div>
                         </div>
+                        {altLines.length > 0 && (
+                          <div style={{paddingLeft: '8px', paddingRight: '8px', paddingBottom: '6px', display: 'flex', flexDirection: 'column', gap: '4px'}}>
+                            {altLines.map((alt, idx) => (
+                              <div key={idx} className="book-row" style={{marginBottom: '0'}}>
+                                <div className="odds-box" onClick={() => showBetModal(alt)} style={{opacity: 0.7}}>
+                                  <div className="odds-value" style={{fontSize: '12px'}}>{alt.odds_american > 0 ? '+' : ''}{alt.odds_american}</div>
+                                  {alt.line != null && <div className="odds-line">{alt.line > 0 ? '+' : ''}{alt.line}</div>}
+                                </div>
+                                <div className="book-name" style={{fontSize: '9px', color: '#666'}}>ALT</div>
+                                <div></div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </div>
                     );
                   })}
@@ -445,6 +498,39 @@
                     return (
                       <div className={`movement-indicator movement-${movement}`}>
                         {messages[movement]}
+                      </div>
+                    );
+                  })()}
+
+                  {selectedOdds && (() => {
+                    const propKey = PROP_KEYS[selectedProp];
+                    const matchingConsensus = Object.values(consensus).find(
+                      c => c.line === selectedOdds.line && c.market_key === propKey
+                    );
+                    if (!matchingConsensus) return null;
+                    return (
+                      <div className="consensus-box">
+                        <div className="consensus-title">Market Consensus</div>
+                        <div className="consensus-row">
+                          <span className="consensus-label">Consensus</span>
+                          <span className="consensus-value">{matchingConsensus.consensus_odds > 0 ? '+' : ''}{matchingConsensus.consensus_odds}</span>
+                        </div>
+                        <div className="consensus-row">
+                          <span className="consensus-label">Best</span>
+                          <span className="consensus-value">{matchingConsensus.best_odds?.price > 0 ? '+' : ''}{matchingConsensus.best_odds?.price} ({matchingConsensus.best_odds?.bookmaker})</span>
+                        </div>
+                        <div className="consensus-row">
+                          <span className="consensus-label">Worst</span>
+                          <span className="consensus-value">{matchingConsensus.worst_odds?.price > 0 ? '+' : ''}{matchingConsensus.worst_odds?.price} ({matchingConsensus.worst_odds?.bookmaker})</span>
+                        </div>
+                        <div className="consensus-row">
+                          <span className="consensus-label">Spread</span>
+                          <span className="consensus-value">{matchingConsensus.spread}</span>
+                        </div>
+                        <div className="consensus-row" style={{marginTop: '8px', paddingTop: '8px', borderTop: '1px solid rgba(59,158,255,0.2)'}}>
+                          <span className="consensus-label">Books ({matchingConsensus.num_books}/{matchingConsensus.total_books})</span>
+                          <span className="consensus-value">{Math.round(matchingConsensus.consensus_prob || 0)}%</span>
+                        </div>
                       </div>
                     );
                   })()}
