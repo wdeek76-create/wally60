@@ -128,11 +128,14 @@
       pinnacle: 'PIN'
     };
 
+    const getTennisBookmakers = () => ['fanduel', 'novig', 'pinnacle'];
+    const getPropsBookmakers = () => BOOKMAKERS;
+
     const PropTracker = () => {
       const [apiKey, setApiKey] = useState(() => {
         try { return localStorage.getItem('parlay_api_key') || ''; } catch { return ''; }
       });
-      const [sport, setSport] = useState('nba');
+      const [sport, setSport] = useState('tennis');
       const [searchName, setSearchName] = useState('');
       const [suggestions, setSuggestions] = useState([]);
       const [players, setPlayers] = useState([]);
@@ -146,6 +149,7 @@
       const [selectedOdds, setSelectedOdds] = useState(null);
       const [betPrice, setBetPrice] = useState('');
       const [consensus, setConsensus] = useState({});
+      const [showApiInput, setShowApiInput] = useState(false);
       const searchInputRef = useRef(null);
 
       const PROP_KEYS = {
@@ -163,42 +167,76 @@
       }, [apiKey]);
 
       const fetchProps = async () => {
-        if (!apiKey) { setError('Enter API key'); return; }
+        const currentSport = sport; // Capture sport at time of fetch
+        console.log('fetchProps called, sport:', currentSport, 'apiKey:', !!apiKey);
+        if (!apiKey) { setError('Enter API key'); console.log('No API key'); return; }
         setLoading(true);
         setError('');
         setPlayers([]);
         setSuggestions([]);
         setSearchName('');
+        setConsensus({});
 
         try {
           let allOdds = [];
 
-          // For NBA/WNBA/UFC, use /props endpoint (3 credits, gets all books + markets)
-          if (sport === 'nba' || sport === 'wnba' || sport === 'ufc') {
-            const sportKey = sport === 'ufc' ? 'mma' : sport;
+          if (currentSport === 'tennis') {
+            console.log('Fetching TENNIS odds...');
+            // Tennis: use /odds with moneyline only, regions=eu,us for Pinnacle
+            const keys = ['tennis_atp', 'tennis_wta', 'tennis_atp_challenger', 'tennis_itf'];
+            const tennisBooksmakers = ['fanduel', 'novig', 'pinnacle'];
+            
+            for (const key of keys) {
+              try {
+                const url = `https://parlay-api.com/v1/sports/${key}/odds?regions=eu,us&markets=h2h&bookmakers=${tennisBooksmakers.join(',')}&apiKey=${apiKey}`;
+                console.log(`Fetching ${key}...`);
+                const res = await fetch(url);
+                if (!res.ok) { console.log(`${key} returned ${res.status}`); continue; }
+                const data = await res.json();
+                if (Array.isArray(data)) { 
+                  console.log(`${key} got ${data.length} events`);
+                  allOdds = allOdds.concat(data); 
+                }
+              } catch (e) { console.log(`${key} error:`, e.message); }
+            }
+          } else if (currentSport === 'nba' || currentSport === 'wnba' || currentSport === 'ufc') {
+            console.log(`Fetching ${currentSport.toUpperCase()} props...`);
+            // Props: use /props endpoint (3 credits, all books + markets)
+            const sportKey = currentSport === 'ufc' ? 'mma' : currentSport;
             try {
               const url = `https://parlay-api.com/v1/sports/${sportKey}/props?apiKey=${apiKey}`;
+              console.log(`Props URL: ${url.substring(0, 60)}...`);
               const res = await fetch(url);
-              if (!res.ok) throw new Error(`${sportKey} props failed`);
+              if (!res.ok) throw new Error(`${sportKey} props failed: ${res.status}`);
               const data = await res.json();
-              if (Array.isArray(data)) allOdds = data;
+              if (Array.isArray(data)) { 
+                console.log(`${sportKey} props got ${data.length} events`);
+                allOdds = data; 
+              }
             } catch (e) {
+              console.log(`Props fetch error:`, e.message);
               setError('Props fetch error: ' + e.message);
               setLoading(false);
               return;
             }
           }
 
-          if (!allOdds.length) { setError('No data found'); setLoading(false); return; }
+          if (!allOdds.length) { 
+            console.log('No data found for sport:', currentSport);
+            setError('No data found'); 
+            setLoading(false); 
+            return; 
+          }
 
+          console.log('Processing', allOdds.length, 'events for', currentSport);
           const playerMap = {};
           allOdds.forEach(event => {
             if (event.bookmakers && Array.isArray(event.bookmakers)) {
               event.bookmakers.forEach(book => {
                 if (book.markets && Array.isArray(book.markets)) {
                   book.markets.forEach(mkt => {
-                    // Filter to selected prop only
-                    if (mkt.key !== PROP_KEYS[selectedProp]) return;
+                    // For props, filter to selected prop only
+                    if (currentSport !== 'tennis' && mkt.key !== PROP_KEYS[selectedProp]) return;
                     if (mkt.outcomes && Array.isArray(mkt.outcomes)) {
                       mkt.outcomes.forEach(outcome => {
                         const playerName = outcome.description || outcome.player_name || outcome.name || '';
@@ -225,28 +263,34 @@
           });
 
           const playerList = Object.values(playerMap).sort((a, b) => a.name.localeCompare(b.name));
+          console.log('Processed', playerList.length, 'players for', currentSport);
           setPlayers(playerList);
 
-          // Fetch consensus data (3 credits)
-          try {
-            const consensusKey = sport === 'nba' ? 'nba' : sport === 'wnba' ? 'wnba' : 'mma';
-            const consensusUrl = `https://parlay-api.com/v1/sports/${consensusKey}/consensus?apiKey=${apiKey}`;
-            const consensusRes = await fetch(consensusUrl);
-            if (consensusRes.ok) {
-              const consensusData = await consensusRes.json();
-              if (Array.isArray(consensusData)) {
-                const consensusMap = {};
-                consensusData.forEach(row => {
-                  const key = `${row.player || ''}-${row.market_key || ''}-${row.line || 0}`;
-                  consensusMap[key] = row;
-                });
-                setConsensus(consensusMap);
+          // Fetch consensus data for props only
+          if (currentSport !== 'tennis') {
+            try {
+              const consensusKey = currentSport === 'nba' ? 'nba' : currentSport === 'wnba' ? 'wnba' : 'mma';
+              const consensusUrl = `https://parlay-api.com/v1/sports/${consensusKey}/consensus?apiKey=${apiKey}`;
+              console.log('Fetching consensus for', consensusKey);
+              const consensusRes = await fetch(consensusUrl);
+              if (consensusRes.ok) {
+                const consensusData = await consensusRes.json();
+                if (Array.isArray(consensusData)) {
+                  const consensusMap = {};
+                  consensusData.forEach(row => {
+                    const key = `${row.player || ''}-${row.market_key || ''}-${row.line || 0}`;
+                    consensusMap[key] = row;
+                  });
+                  setConsensus(consensusMap);
+                  console.log('Consensus entries:', Object.keys(consensusMap).length);
+                }
               }
+            } catch (e) {
+              console.log('Consensus fetch error:', e);
             }
-          } catch (e) {
-            console.log('Consensus fetch error:', e);
           }
         } catch (e) {
+          console.log('Error:', e.message);
           setError('Error: ' + e.message);
         }
         setLoading(false);
@@ -338,15 +382,15 @@
         <div className="container">
           <div className="header">
             <div className="api-toggle">
-              {!apiKey ? (
+              {!apiKey || showApiInput ? (
                 <input type="password" placeholder="ParalayAPI Key" value={apiKey} onChange={(e) => setApiKey(e.target.value)} style={{padding: '6px 10px', fontSize: '12px', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.08)', color: '#fff', fontFamily: 'inherit', flex: 1}} />
               ) : (
-                <button className="api-btn set">✓ Key Set</button>
+                <button className="api-btn set" onClick={() => setShowApiInput(true)}>✓ KEY SET</button>
               )}
             </div>
             <div className="sport-tabs">
-              {['nba', 'wnba', 'ufc'].map(s => (
-                <button key={s} className={`sport-tab ${sport === s ? 'active' : ''}`} onClick={() => { setSport(s); setPlayers([]); setSearchName(''); setSuggestions([]); }}>
+              {['tennis', 'nba', 'wnba', 'ufc'].map(s => (
+                <button key={s} className={`sport-tab ${sport === s ? 'active' : ''}`} onClick={() => { setSport(s); setPlayers([]); setSearchName(''); setSuggestions([]); setConsensus({}); if (s === 'tennis') setSelectedProp('tennis'); else setSelectedProp('pts'); }}>
                   {s.toUpperCase()}
                 </button>
               ))}
@@ -401,7 +445,7 @@
                   <button className="player-copy" onClick={() => { navigator.clipboard.writeText(player.name); }}>🔗</button>
                 </div>
                 <div className="books-container">
-                  {BOOKMAKERS.map(book => {
+                  {(sport === 'tennis' ? getTennisBookmakers() : getPropsBookmakers()).map(book => {
                     const bookOdds = player.books[book];
                     if (!bookOdds || bookOdds.length === 0) return null;
                     
@@ -426,7 +470,7 @@
                             </button>
                           </div>
                         </div>
-                        {altLines.length > 0 && (
+                        {sport !== 'tennis' && altLines.length > 0 && (
                           <div style={{paddingLeft: '8px', paddingRight: '8px', paddingBottom: '6px', display: 'flex', flexDirection: 'column', gap: '4px'}}>
                             {altLines.map((alt, idx) => (
                               <div key={idx} className="book-row" style={{marginBottom: '0'}}>
