@@ -6512,7 +6512,7 @@ function updateBulkCopyBar() {
 // settings are added.
 const BACKUP_KEYS = [
   "wnba_injuries_cache", "wnba_injuries_show_all", "wnba_blender_hidden_books",
-  "wnba_totals_page_dimers_v1"
+  "wnba_totals_page_dimers_v1", "wnba_starter_log_v1"
 ];
 function exportBets() {
   const extras = {};
@@ -6583,6 +6583,46 @@ function playToOdds(fairOdds, evCutoff) {
   if (fp == null) return null;
   const bookDec = (1 + evCutoff/100) / fp;
   return decimalToAmerican(bookDec);
+}
+
+// ── STARTER HISTORY (from ESPN box scores) ────────────────────
+// The depth-chart paste isn't used, so starter status comes from ESPN instead:
+// every graded box score records whether each player started that night.
+// Backward-looking — it tells you the pattern ("started 18 of 20"), not
+// tonight's lineup.
+const STARTER_LOG_KEY = "wnba_starter_log_v1";
+function getStarterLog() {
+  try { return JSON.parse(localStorage.getItem(STARTER_LOG_KEY) || "{}"); } catch (e) { return {}; }
+}
+function _saveStarterLog(log) {
+  try { localStorage.setItem(STARTER_LOG_KEY, JSON.stringify(log)); } catch (e) {}
+}
+// Record one date's rows. Keyed by player then date, so re-grading a day
+// overwrites rather than double-counting.
+function recordStarterRows(isoDate, rows) {
+  if (!isoDate || !Array.isArray(rows) || !rows.length) return;
+  const log = getStarterLog();
+  rows.forEach(r => {
+    if (!r || !r.playerNorm || r.dnp) return;      // DNPs aren't a bench decision
+    if (!log[r.playerNorm]) log[r.playerNorm] = { name: r.displayName, games: {} };
+    log[r.playerNorm].name = r.displayName || log[r.playerNorm].name;
+    log[r.playerNorm].games[isoDate] = r.starter === true ? 1 : 0;
+  });
+  _saveStarterLog(log);
+}
+// { starts, games, pct, recent } or null when we've never logged this player.
+function starterRateFor(playerName, lastN) {
+  try {
+    const log = getStarterLog();
+    const entry = log[resolveNorm(playerName || "")];
+    if (!entry || !entry.games) return null;
+    const dates = Object.keys(entry.games).sort();
+    if (!dates.length) return null;
+    const use = lastN ? dates.slice(-lastN) : dates;
+    const starts = use.reduce((s, d) => s + (entry.games[d] ? 1 : 0), 0);
+    return { starts, games: use.length, pct: Math.round((starts / use.length) * 100),
+             recent: entry.games[dates[dates.length - 1]] === 1 };
+  } catch (e) { return null; }
 }
 
 // ── ESPN AUTOGRADE ─────────────────────────────────────────────────────────
@@ -6691,6 +6731,7 @@ async function fetchESPNStatsForDate(isoDate) {
             playerNorm: norm(fullName),
             displayName: fullName,
             dnp,
+            starter: a.starter === true,
             stats: {
               min: dnp ? 0 : minVal,
               pts: idx.pts >= 0 ? parseInt0(stRow[idx.pts]) : 0,
@@ -6709,6 +6750,8 @@ async function fetchESPNStatsForDate(isoDate) {
     }
   }
   _espnCache[isoDate] = allRows;
+  // Build the starter history as box scores come in — no extra fetch needed.
+  try { recordStarterRows(isoDate, allRows); } catch (e) {}
   _espnGameCountCache[isoDate] = meta;
   return { rows: allRows, meta };
 }
@@ -7860,7 +7903,7 @@ function updateAdvBar() {
     if (!hasScore && !hasReb && !hasAst) {
       if (adv.usg != null) advPills.push(pill("USG%", adv.usg.toFixed(1), sc(adv.usg, 22, 16)));
     }
-    const summaryRow = _advRoleSummary(adv);
+    const summaryRow = _advRoleSummary(adv, player);
     if (summaryRow) rows.push(`<div style="font-size:10.5px;font-weight:900;color:#fff;letter-spacing:0.5px;text-transform:uppercase;">${summaryRow}</div>`);
     const s = section("Season", advPills);
     if (s) rows.push(s);
@@ -8113,25 +8156,43 @@ function updateStatsSignalBorder() {
   }
 }
 
-function _advRoleSummary(adv) {
+function _advRoleSummary(adv, playerName) {
   if (!adv) return "";
   const g = adv.g || 0;
   if (g < 5) return "";
   const usg = adv.usg || 0, per = adv.per || 0;
   const mpg = (adv.mp && adv.g) ? (adv.mp / adv.g).toFixed(1) : null;
+  // Usage alone was calling bench scorers "starters". Check the actual lineup
+  // when we have it: a 24% usage player off the bench is a high-usage RESERVE,
+  // which is a different bet entirely.
+  let starts = null, startNote = "";
+  try {
+    // ESPN box-score history first — that's the source we actually populate.
+    const sr = (typeof starterRateFor === "function") ? starterRateFor(playerName, 10) : null;
+    if (sr && sr.games >= 3) {
+      starts = sr.pct >= 60;
+      startNote = ` · started ${sr.starts}/${sr.games}`;
+    } else if (playerName && typeof getLineupStatusForPlayer === "function") {
+      // Fall back to a pasted lineup if one happens to be loaded.
+      const ls = getLineupStatusForPlayer(playerName);
+      if (ls && ls.status) starts = ls.status === "STARTING";
+    }
+  } catch (e) {}
   let role = "";
   if (usg >= 28) role = "primary option";
-  else if (usg >= 23) role = "high-usage starter";
-  else if (usg >= 18) role = "rotation starter";
+  else if (usg >= 23) role = starts === false ? "high-usage reserve" : "high-usage starter";
+  else if (usg >= 18) role = starts === false ? "rotation reserve" : "rotation starter";
   else if (usg >= 12) role = "role player";
   else role = "bench contributor";
+  // Only claim "starter" when the lineup confirms it; otherwise stay neutral.
+  if (starts === null && /starter/.test(role)) role = role.replace("starter", "regular");
   let eff = "";
   if (per >= 22) eff = "elite efficiency";
   else if (per >= 17) eff = "above-avg efficiency";
   else if (per >= 12) eff = "average efficiency";
   else if (per > 0) eff = "below-avg efficiency";
   const mpgNote = mpg ? ` (${mpg} mpg)` : "";
-  return `${role}${eff ? ` – ${eff}` : ""}${mpgNote}`;
+  return `${role}${eff ? ` – ${eff}` : ""}${mpgNote}${startNote}`;
 }
 
 
@@ -8139,7 +8200,7 @@ function _buildAdvRow(adv, tinyText, playerName) {
   if (!adv) return "";
   const g = adv.g || 0;
   if (g < 5) return `<div style="font-size:9.5px;color:#525a64;margin-top:5px;">Too few games (${g}) — adv stats unreliable</div>`;
-  const summary = _advRoleSummary(adv);
+  const summary = _advRoleSummary(adv, player);
   const pg = playerName && typeof getBBRefPGForPlayer === "function" ? getBBRefPGForPlayer(playerName) : null;
   // Tiny stat chip: value in mono, dim label after
   const chip = (val, label, tip, valColor) => `<span ${tip?`class="tip" data-tip="${tip.replace(/"/g,'&quot;')}"`:''} style="font-size:10px;font-weight:700;color:${valColor||'#d4dae3'};font-family:'JetBrains Mono','Menlo',monospace;${tip?'cursor:help;':''}">${val}<span style="color:#6b7280;font-weight:600;margin-left:2px;font-family:'Plus Jakarta Sans',sans-serif;">${label}</span></span>`;
@@ -8184,7 +8245,7 @@ function updateBBRefAdvInModal() {
   const usgColor = adv.usg != null ? (adv.usg >= 28 ? "#7dd3fc" : adv.usg >= 22 ? "#fff" : "#fff") : "#fff";
   const perColor = adv.per != null ? (adv.per >= 22 ? "#7dd3fc" : adv.per >= 15 ? "#fff" : "#fff") : "#fff";
   const ortgColor = adv.ortg != null ? (adv.ortg >= 115 ? "#22c55e" : adv.ortg >= 105 ? "#fff" : "#f87171") : "#fff";
-  const summary = _advRoleSummary(adv);
+  const summary = _advRoleSummary(adv, player);
 
   container.innerHTML = `
     <div style="padding:6px 2px 10px;">
