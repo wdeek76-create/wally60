@@ -1512,6 +1512,12 @@ function getRowsForRender() {
     });
 }
 
+// Headshot caches — declared above renderTable because it references them on
+// every render; a `const` below would sit in the temporal dead zone and throw
+// a ReferenceError that killed the whole table (and its + buttons).
+const _rosterHeadshotCache = new Map();   // ESPN team abbr -> Map(normName -> href)
+const _headshotDataUriCache = new Map();  // href -> data URI (or null)
+
 function renderTable() {
   if (!merged) return;
   document.getElementById("empty-results").style.display="none";
@@ -1520,17 +1526,6 @@ function renderTable() {
 
   const lookups = getSlotLookups();
   const rows = getRowsForRender();
-
-  // Kick off headshot loading for whichever teams are on screen. Fires once per
-  // team, re-renders when done, and is a no-op on repeat calls.
-  try {
-    const teamsShown = [...new Set(rows.map(r => r && r.team).filter(Boolean))];
-    const missing = teamsShown.some(t => {
-      const espn = (INTERNAL_TO_ESPN_ABBR[String(t).toUpperCase()] || String(t).toUpperCase()).toLowerCase();
-      return !_rosterHeadshotCache.has(espn);
-    });
-    if (missing && typeof loadTableHeadshots === "function") loadTableHeadshots(teamsShown);
-  } catch (e) {}
 
   document.getElementById("shown-count").textContent = `${rows.length} shown`;
   // Live-update the "N Props Tracked" counter next to the search bar — this
@@ -1654,7 +1649,6 @@ function renderTable() {
     return `<tr class="${i%2===0?'even':'odd'}">
       <td style="padding:7px 10px;">
         <div style="display:flex;align-items:center;gap:8px;">
-          ${tableHeadshotHtml(r.rawName, 22)}
           <span style="font-size:14px;font-weight:700;color:${tc};white-space:nowrap;">${displayPlayerName(r.rawName)}</span>
           <span style="display:inline-flex;align-items:center;gap:4px;flex:0 0 auto;">${r.team ? `${teamLogoImg(r.team, 16)}<span style="background:#7dd3fc1a;border:1px solid #7dd3fc55;color:#7dd3fc;font-size:9px;font-weight:800;letter-spacing:0.4px;border-radius:4px;padding:1px 6px;">${displayTeamAbbr(r.team)}</span>` : ''}${r.pos ? `<span style="background:#93c5fd1a;border:1px solid #93c5fd55;color:#93c5fd;font-size:9px;font-weight:800;letter-spacing:0.4px;border-radius:4px;padding:1px 6px;">${r.pos}</span>` : ''}${(() => {
             const inj = getInjuryForPlayer(r.rawName, r.team);
@@ -1715,10 +1709,7 @@ function renderTable() {
             const ceilingColor = isOngoingCause ? "#fb923c" : "#22c55e";  // orange vs green
             // Positional weight: a big going down means more for another big.
             // 2 = same slot, 1 = partial overlap, 0 = different position.
-            const posTag = ben.posOverlap === 2 ? " · SAME POS"
-                         : ben.posOverlap === 1 ? " · POS OVERLAP"
-                         : ben.posOverlap === 0 ? " · DIFF POS" : "";
-            const ceilingLabel = (isOngoingCause ? "CEILING ↑ MODERATE" : "CEILING ↑") + posTag;
+            const ceilingLabel = isOngoingCause ? "CEILING ↑ MODERATE" : "CEILING ↑";
             const tipData = {
               kind: "upside",
               player: r.rawName,
@@ -3352,27 +3343,11 @@ function updateSourceAgreement() {
 function openTrackModal(player, pos, stat, proj, team, presetDate) {
   modalPlayer = player;
   modalPos = pos;
-  document.getElementById("modal-player-name").textContent = displayPlayerName(player);
+  document.getElementById("modal-player-name").textContent = player;
   window._modalPlayer = player;
   document.getElementById("modal-player-sub").textContent = (pos||"") + " · Add a bet";
-  // Player face. Uses whatever the projections table already cached; if this
-  // team's roster hasn't loaded yet, fetch it and fill in when it lands.
-  try {
-    const faceEl = document.getElementById("modal-player-face");
-    if (faceEl) {
-      faceEl.innerHTML = tableHeadshotHtml(player, 40);
-      if (team && !_tableHeadshots.has(resolveNorm(player))) {
-        loadTableHeadshots([team]).then(() => {
-          const el = document.getElementById("modal-player-face");
-          // Only repaint if the modal is still on this player.
-          if (el && window._modalPlayer === player) el.innerHTML = tableHeadshotHtml(player, 40);
-        }).catch(() => {});
-      }
-    }
-  } catch (e) {}
   // Reset shorthand and hidden fields
   window._modalPresetDate = presetDate || null;
-  try { setTimeout(updateRebSignalInModal, 0); } catch (e) {}
   // Cache per-source projections for THIS player+stat so the agreement panel
   // (rendered under Blended Proj) can compare them against whatever line the
   // user types. Key: source label (RG/RW/SABER/DMR). Value: number or null.
@@ -5523,8 +5498,6 @@ const INTERNAL_TO_ESPN_ABBR = {
 // Roster responses are cached per team so one slate costs at most a handful of
 // requests. Headshot URLs come from athlete.headshot.href — never hand-built,
 // since not every player has one and ESPN's paths change.
-const _rosterHeadshotCache = new Map();   // ESPN team abbr -> Map(normName -> href)
-const _headshotDataUriCache = new Map();  // href -> data URI (or null)
 
 async function _fetchTeamHeadshots(abbr) {
   if (!abbr) return new Map();
@@ -14625,8 +14598,8 @@ function _ingestInjuryRecords(records) {
 // both slots.
 let _posByNorm = null;
 function _buildPosIndex() {
-  _posByNorm = new Map();
   try {
+    _posByNorm = new Map();
     if (typeof WNBA_TEMPLATE !== "undefined" && Array.isArray(WNBA_TEMPLATE)) {
       WNBA_TEMPLATE.forEach(p => { if (p && p.name && p.position) _posByNorm.set(resolveNorm(p.name), p.position); });
     }
@@ -14634,11 +14607,14 @@ function _buildPosIndex() {
     if (typeof merged !== "undefined" && merged && merged.length) {
       merged.forEach(r => { if (r && r.rawName && r.pos) _posByNorm.set(resolveNorm(r.rawName), r.pos); });
     }
-  } catch (e) {}
+  } catch (e) { _posByNorm = new Map(); }   // never leave it null
 }
 function positionFor(name) {
-  if (!_posByNorm) _buildPosIndex();
-  return _posByNorm.get(resolveNorm(name || "")) || null;
+  try {
+    if (!_posByNorm) _buildPosIndex();
+    if (!_posByNorm) return null;
+    return _posByNorm.get(resolveNorm(name || "")) || null;
+  } catch (e) { return null; }
 }
 // Called after a CSV upload so newly loaded positions are picked up.
 function invalidatePosIndex() { _posByNorm = null; }
@@ -14651,12 +14627,14 @@ function _posSlots(pos) {
 //   2 = same primary slot (C out, C in)   1 = partial overlap (C out, C-F in)
 //   0 = no overlap (C out, G in)          null = unknown
 function positionOverlap(aPos, bPos) {
+  try {
   if (!aPos || !bPos) return null;
   const A = _posSlots(aPos), B = _posSlots(bPos);
   if (!A.size || !B.size) return null;
   const shared = [...A].filter(s => B.has(s));
   if (!shared.length) return 0;
   return (A.size === 1 && B.size === 1) ? 2 : 1;
+  } catch (e) { return null; }
 }
 
 let beneficiariesCache = null;
@@ -21828,13 +21806,8 @@ function evCalcUpdateEvPanel() {
   <div id="track-modal-box" onclick="event.stopPropagation()">
     <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;">
       <div style="flex:1;min-width:0;">
-        <div style="display:flex;align-items:center;gap:10px;">
-          <span id="modal-player-face" style="flex:0 0 auto;"></span>
-          <div style="min-width:0;">
-            <h3 id="modal-player-name" style="margin:0;">Player Name</h3>
-            <div class="sub" id="modal-player-sub" style="margin-top:2px;">Add a bet</div>
-          </div>
-        </div>
+        <h3 id="modal-player-name" style="margin:0;">Player Name</h3>
+        <div class="sub" id="modal-player-sub" style="margin-top:2px;">Add a bet</div>
       </div>
       <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;flex:0 0 auto;">
         <div style="display:flex;align-items:center;gap:6px;">
@@ -21851,7 +21824,7 @@ function evCalcUpdateEvPanel() {
       <div class="modal-field" style="flex:0 0 auto;">
         <label>Stat</label>
         <div id="modal-stat-display" style="background:#050507;border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:11px 16px;font-size:15px;color:#7dd3fc;font-weight:800;letter-spacing:0.5px;min-width:80px;text-align:center;">PTS</div>
-        <select id="modal-stat" style="display:none;" onchange="recomputeFairFromProj();updateRebSignalInModal()">
+        <select id="modal-stat" style="display:none;" onchange="recomputeFairFromProj()">
           <option value="PTS">PTS</option>
           <option value="REB">REB</option>
           <option value="AST">AST</option>
