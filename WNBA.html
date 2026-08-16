@@ -1713,13 +1713,21 @@ function renderTable() {
             // acute today causes (sudden Q/OUT today — clear short-term uplift).
             const isOngoingCause = causedByInj && typeof _injuryIsOngoing === "function" && _injuryIsOngoing(causedByInj);
             const ceilingColor = isOngoingCause ? "#fb923c" : "#22c55e";  // orange vs green
-            const ceilingLabel = isOngoingCause ? "CEILING ↑ MODERATE" : "CEILING ↑";
+            // Positional weight: a big going down means more for another big.
+            // 2 = same slot, 1 = partial overlap, 0 = different position.
+            const posTag = ben.posOverlap === 2 ? " · SAME POS"
+                         : ben.posOverlap === 1 ? " · POS OVERLAP"
+                         : ben.posOverlap === 0 ? " · DIFF POS" : "";
+            const ceilingLabel = (isOngoingCause ? "CEILING ↑ MODERATE" : "CEILING ↑") + posTag;
             const tipData = {
               kind: "upside",
               player: r.rawName,
               causedBy: ben.causedBy,
               causedByStatus: ben.causedByStatus,
               reason: ben.reason,
+              outPos: ben.outPos,
+              benPos: ben.benPos,
+              posOverlap: ben.posOverlap,
               headline: causedByInj?.comment || "",
               analysis: causedByInj?.longComment || "",
               conservative: isOngoingCause
@@ -14538,8 +14546,49 @@ function _ingestInjuryRecords(records) {
 // records who caused the upside (the injured/sitting player) and which phrase
 // in the analysis blurb triggered the match. Rebuilt every time injuries are
 // ingested; consumed by getBeneficiaryForPlayer() on Results render.
+// ── POSITION OVERLAP ──────────────────────────────────────────
+// A center going down means more for another big than for a guard. Positions
+// come from the roster template ("F", "C-F", "G-F"...) so hybrids count for
+// both slots.
+let _posByNorm = null;
+function _buildPosIndex() {
+  _posByNorm = new Map();
+  try {
+    if (typeof WNBA_TEMPLATE !== "undefined" && Array.isArray(WNBA_TEMPLATE)) {
+      WNBA_TEMPLATE.forEach(p => { if (p && p.name && p.position) _posByNorm.set(resolveNorm(p.name), p.position); });
+    }
+    // Anything loaded in the blender overrides the template (more current).
+    if (typeof merged !== "undefined" && merged && merged.length) {
+      merged.forEach(r => { if (r && r.rawName && r.pos) _posByNorm.set(resolveNorm(r.rawName), r.pos); });
+    }
+  } catch (e) {}
+}
+function positionFor(name) {
+  if (!_posByNorm) _buildPosIndex();
+  return _posByNorm.get(resolveNorm(name || "")) || null;
+}
+// Called after a CSV upload so newly loaded positions are picked up.
+function invalidatePosIndex() { _posByNorm = null; }
+// "C-F" -> ["C","F"].  Returns a Set of single-letter slots.
+function _posSlots(pos) {
+  if (!pos) return new Set();
+  return new Set(String(pos).toUpperCase().split(/[-/,\s]+/).filter(Boolean).map(s => s[0]));
+}
+// How much an absence at position B matters to a player at position A:
+//   2 = same primary slot (C out, C in)   1 = partial overlap (C out, C-F in)
+//   0 = no overlap (C out, G in)          null = unknown
+function positionOverlap(aPos, bPos) {
+  if (!aPos || !bPos) return null;
+  const A = _posSlots(aPos), B = _posSlots(bPos);
+  if (!A.size || !B.size) return null;
+  const shared = [...A].filter(s => B.has(s));
+  if (!shared.length) return 0;
+  return (A.size === 1 && B.size === 1) ? 2 : 1;
+}
+
 let beneficiariesCache = null;
 function _rebuildBeneficiariesCache() {
+  invalidatePosIndex();   // merged may have loaded since last build
   beneficiariesCache = new Map();
   if (!injuriesCache || injuriesCache.size === 0) return;
   // Build a roster lookup (norm name → display name) from the currently merged
@@ -14624,10 +14673,15 @@ function _rebuildBeneficiariesCache() {
           reason = `${rec.name} (${rec.status || "injury"}) → mentioned in report`;
         }
         if (!beneficiariesCache.has(cand)) beneficiariesCache.set(cand, []);
+        // Positional context: an absence at the same slot means more.
+        const outPos = positionFor(rec.name);
+        const benPos = positionFor(cand);
+        const overlap = positionOverlap(benPos, outPos);
         beneficiariesCache.get(cand).push({
           causedBy: rec.name,
           causedByStatus: rec.status,
-          reason
+          reason,
+          outPos, benPos, posOverlap: overlap
         });
         break;  // only tag once per matched run
       }
