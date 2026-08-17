@@ -1654,7 +1654,11 @@ function renderTable() {
           const dirLine = (tracked.ou && tracked.line != null)
             ? `${tracked.ou === "under" ? "u" : "o"}${tracked.line}`
             : "";
-          return `<span style="background:#22c55e1a;border:1px solid #22c55e66;color:#22c55e;font-size:9px;font-weight:800;letter-spacing:0.4px;border-radius:4px;padding:1px 6px;white-space:nowrap;">✓ TRACKED${dirLine ? " " + dirLine : ""}</span>`;
+          // Price you took, so you can see at a glance whether the market moved.
+          const oddsStr = (tracked.odds != null && !isNaN(tracked.odds))
+            ? ` ${tracked.odds > 0 ? "+" : ""}${tracked.odds}`
+            : "";
+          return `<span style="background:#22c55e1a;border:1px solid #22c55e66;color:#22c55e;font-size:9px;font-weight:800;letter-spacing:0.4px;border-radius:4px;padding:1px 6px;white-space:nowrap;">✓ TRACKED${dirLine ? " " + dirLine : ""}${oddsStr}</span>`;
         })()
       : "";
 
@@ -2495,6 +2499,57 @@ function parseLineInput(el) {
   recomputeFairFromProj();
 }
 
+// Open the track modal on an existing bet so odds/books can be adjusted before
+// posting. Saving replaces the original rather than creating a duplicate.
+function editTrackedBet(betId) {
+  try {
+    loadBets();
+    const b = bets.find(x => x && String(x.id) === String(betId));
+    if (!b) { showToast("Bet not found"); return; }
+    openTrackModal(b.player, b.pos || "", b.stat, b.proj, b.team, b.gameDate || b.date);
+    window._modalEditBetId = b.id;
+    // Prefill the entry fields from the stored bet.
+    setTimeout(() => {
+      try {
+        const dir = (b.ou || "").toLowerCase().startsWith("u") ? "u" : "o";
+        const oddsStr = b.odds > 0 ? `+${b.odds}` : `${b.odds}`;
+        const sh = document.getElementById("modal-shorthand");
+        if (sh) {
+          sh.value = `${dir}${b.line} ${oddsStr}`;
+          sh.dispatchEvent(new Event("input"));
+        }
+        const fairEl = document.getElementById("modal-fair");
+        if (fairEl && b.fair != null) {
+          fairEl.value = b.fair;
+          window._modalFairManual = true;
+        }
+        const statEl = document.getElementById("modal-stat");
+        if (statEl && b.stat) { statEl.value = b.stat; }
+        // Restore alt-book prices.
+        if (Array.isArray(b.altBooks)) {
+          b.altBooks.forEach(a => {
+            if (!a || !a.book) return;
+            const inp = document.querySelector(`input.alt-input[data-book="${a.book}"]`);
+            if (inp && a.odds != null) {
+              const sameLine = a.line == null || Number(a.line) === Number(b.line);
+              inp.value = sameLine ? String(a.odds)
+                                   : `${dir}${a.line} ${a.odds}`;
+            }
+          });
+        }
+        if (typeof updateEvPreview === "function") updateEvPreview();
+        ["modal-save-btn", "modal-save-btn-top"].forEach(id => {
+          const btn = document.getElementById(id);
+          if (btn) btn.textContent = "Update Bet \u2197";
+        });
+      } catch (e) { console.error("editTrackedBet prefill:", e); }
+    }, 0);
+  } catch (e) {
+    showToast("Could not open that bet");
+    console.error("editTrackedBet:", e);
+  }
+}
+
 function trackRow(i) {
   const r = rowCache[i];
   if (!r) return;
@@ -2521,9 +2576,13 @@ const sessionTrackedProps = (() => {
 function _saveTrackedProps() {
   try { localStorage.setItem(TRACKED_PROPS_STORAGE_KEY, JSON.stringify([...sessionTrackedProps])); } catch(e) {}
 }
-function _markTrackedProp(player, stat, ou, line) {
+function _markTrackedProp(player, stat, ou, line, odds) {
   if (!player || !stat) return;
-  sessionTrackedProps.set(`${player}|${(stat||"").toUpperCase()}`, { ou: ou || null, line: line != null ? line : null });
+  sessionTrackedProps.set(`${player}|${(stat||"").toUpperCase()}`, {
+    ou: ou || null,
+    line: line != null ? line : null,
+    odds: (odds != null && !isNaN(odds)) ? Number(odds) : null
+  });
   _saveTrackedProps();
 }
 function _isTrackedProp(player, stat) {
@@ -3370,6 +3429,7 @@ function updateSourceAgreement() {
 }
 
 function openTrackModal(player, pos, stat, proj, team, presetDate) {
+  window._modalEditBetId = null;   // fresh open — not editing
   modalPlayer = player;
   modalPos = pos;
   document.getElementById("modal-player-name").textContent = player;
@@ -6184,14 +6244,35 @@ function saveBet() {
       }
     } catch (e) { /* matchup snapshot is non-critical */ }
   }
-  bets.unshift(bet);
+  // Editing an existing tracked bet? Replace it in place, keeping its id,
+  // original timestamp and any grading already attached.
+  const _editId = window._modalEditBetId;
+  if (_editId != null) {
+    const idx = bets.findIndex(b => b && String(b.id) === String(_editId));
+    if (idx >= 0) {
+      const prev = bets[idx];
+      bet.id = prev.id;
+      bet.timestamp = prev.timestamp || bet.timestamp;
+      bet.result = prev.result || "pending";
+      if (prev.actual != null) bet.actual = prev.actual;
+      if (prev.actualMin != null) bet.actualMin = prev.actualMin;
+      if (prev.statLine) bet.statLine = prev.statLine;
+      if (prev.closing) bet.closing = prev.closing;
+      bets[idx] = bet;
+    } else {
+      bets.unshift(bet);
+    }
+    window._modalEditBetId = null;
+  } else {
+    bets.unshift(bet);
+  }
   // Remember the date used for totals so the next total prefills it (slate is days out)
   if ((stat||"").toUpperCase() === "GAME_TOTAL" && isoDate) {
     try { localStorage.setItem("wnba_last_total_date", isoDate); } catch(e) {}
   }
   // Mark this player+stat as tracked in the current session so Results shows ✓ TRACKED.
   // Player props only — GAME_TOTAL is handled by the totals tab's own indicator.
-  if (stat !== "GAME_TOTAL") _markTrackedProp(bet.player, stat, ou, line);
+  if (stat !== "GAME_TOTAL") _markTrackedProp(bet.player, stat, ou, line, bet.odds);
   saveBets();
   closeTrackModal();
   if (currentTab === "tracker") renderTracker();
@@ -13682,6 +13763,7 @@ function renderTracker() {
             return `${hitBtn}${missBtn}${voidBtn}${cancelBtn}`;
           })()}
           <button onclick="copySingleBet('${b.id}')" style="background:transparent;border:1px solid #1a1d22;color:#7dd3fc;font-size:10px;font-weight:700;cursor:pointer;padding:2px 6px;border-radius:3px;font-family:'Plus Jakarta Sans',sans-serif;letter-spacing:0.4px;" title="Copy this bet">COPY</button>
+          <button onclick="editTrackedBet('${b.id}')" style="background:transparent;border:none;color:#7dd3fc;font-size:12px;cursor:pointer;padding:0 4px;" title="Edit odds / books">✎</button>
           <button onclick="deleteBet('${b.id}')" style="background:transparent;border:none;color:#525a64;font-size:13px;cursor:pointer;padding:0 3px;" title="Delete">✕</button>
         </div>
       </div>
