@@ -709,6 +709,27 @@
   .ufc-f-chev { font-size: 10px; color: rgba(255,255,255,0.4); transition: transform 0.2s; }
   .ufc-fight.expanded .ufc-f-chev { transform: rotate(180deg); color: var(--ufc); }
   .ufc-fdetail { max-height: 0; overflow: hidden; transition: max-height 0.25s ease; }
+  .ufc-odds { display: none; margin-top: 10px; }
+  .ufc-odds.show { display: block; }
+  .ufc-odds-grid {
+    border-top: 1px solid var(--border); padding-top: 8px;
+  }
+  .ufc-odds-book {
+    display: grid; grid-template-columns: 44px 1fr 1fr; align-items: center;
+    padding: 3px 0; gap: 8px;
+  }
+  .ufc-odds-head .ufc-odds-price {
+    font-size: 9px; font-weight: 700; color: rgba(255,255,255,0.5);
+    text-transform: uppercase; letter-spacing: 0.5px;
+  }
+  .ufc-odds-blabel {
+    font-size: 9px; font-weight: 800; color: var(--ufc);
+    letter-spacing: 0.5px;
+  }
+  .ufc-odds-price {
+    font-size: 13px; font-weight: 800; color: #fff; text-align: center;
+    font-variant-numeric: tabular-nums;
+  }
   .ufc-fdetail.open { max-height: 400px; margin-top: 10px; }
   .ufc-fd-loading { font-size: 11px; color: rgba(255,255,255,0.5); font-weight: 600; padding: 6px 0; text-align: center; }
   .ufc-debug {
@@ -1484,6 +1505,89 @@ function renderUFC() {
   // Enrich finished fights with the real method (R1 KO etc.) from the core API
   enrichUFCMethods(ev);
   enrichUFCHeadshots(ev);
+  enrichUFCOdds(ev);
+}
+
+// ── UFC ODDS (parlay-api.com) ─────────────────────────────────────
+// Set your key here. NOTE: this file is public on GitHub Pages, so anyone
+// viewing source can see this key. Use a free/throwaway key or a proxy.
+const PARLAY_API_KEY = ''; // <-- paste your X-API-Key here to enable odds
+const PARLAY_SPORT = 'mma_mixed_martial_arts';
+let _oddsCache = null, _oddsCacheAt = 0;
+
+function normName(s) {
+  return (s||'').toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+    .replace(/[^a-z ]/g,'').replace(/\s+/g,' ').trim();
+}
+function nameMatches(a, b) {
+  a = normName(a); b = normName(b);
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const al = a.split(' '), bl = b.split(' ');
+  const aLast = al[al.length-1], bLast = bl[bl.length-1];
+  if (aLast !== bLast) return false;
+  return al[0][0] === bl[0][0];
+}
+function fmtOdds(p) { return p > 0 ? `+${p}` : `${p}`; }
+
+async function fetchParlayOdds() {
+  if (!PARLAY_API_KEY) return null;
+  const now = Date.now();
+  if (_oddsCache && now - _oddsCacheAt < 60000) return _oddsCache;
+  try {
+    const url = `https://parlay-api.com/v1/sports/${PARLAY_SPORT}/odds?regions=us&markets=h2h&oddsFormat=american&bookmakers=pinnacle,fanduel`;
+    const r = await fetch(url, { headers: { 'X-API-Key': PARLAY_API_KEY } });
+    if (!r.ok) return null;
+    _oddsCache = await r.json();
+    _oddsCacheAt = now;
+    return _oddsCache;
+  } catch(_) { return null; }
+}
+
+function bookLine(oddsEvent, bookKey, aName, bName) {
+  const book = (oddsEvent.bookmakers||[]).find(bk => bk.key === bookKey);
+  if (!book) return null;
+  const mkt = (book.markets||[]).find(m => m.key === 'h2h');
+  if (!mkt) return null;
+  const outA = mkt.outcomes.find(o => nameMatches(o.name, aName));
+  const outB = mkt.outcomes.find(o => nameMatches(o.name, bName));
+  if (!outA && !outB) return null;
+  return { a: outA?.price, b: outB?.price };
+}
+
+async function enrichUFCOdds(ev) {
+  const odds = await fetchParlayOdds();
+  if (!odds || !Array.isArray(odds)) return;
+  ev.fights.forEach(f => {
+    const slot = document.getElementById(`odds-${f.id}`);
+    if (!slot) return;
+    const oe = odds.find(o =>
+      (nameMatches(o.home_team, f.aName) && nameMatches(o.away_team, f.bName)) ||
+      (nameMatches(o.home_team, f.bName) && nameMatches(o.away_team, f.aName))
+    );
+    if (!oe) return;
+    const pin = bookLine(oe, 'pinnacle', f.aName, f.bName);
+    const fd  = bookLine(oe, 'fanduel',  f.aName, f.bName);
+    if (!pin && !fd) return;
+    const cell = (label, a, b) => `
+      <div class="ufc-odds-book">
+        <span class="ufc-odds-blabel">${label}</span>
+        <span class="ufc-odds-price">${a!=null?fmtOdds(a):'—'}</span>
+        <span class="ufc-odds-price">${b!=null?fmtOdds(b):'—'}</span>
+      </div>`;
+    slot.innerHTML = `
+      <div class="ufc-odds-grid">
+        <div class="ufc-odds-book ufc-odds-head">
+          <span class="ufc-odds-blabel"></span>
+          <span class="ufc-odds-price">${f.aName.split(' ').pop()}</span>
+          <span class="ufc-odds-price">${f.bName.split(' ').pop()}</span>
+        </div>
+        ${pin?cell('PIN', pin.a, pin.b):''}
+        ${fd?cell('FD', fd.a, fd.b):''}
+      </div>`;
+    slot.classList.add('show');
+  });
 }
 
 async function enrichUFCHeadshots(ev) {
@@ -1634,6 +1738,7 @@ function ufcFightRow(f, evIdx, fIdx) {
       </div>
       ${(statusHtml || canExpand) ? `<div class="ufc-f-right">${statusHtml}${canExpand?`<span class="ufc-f-chev">▾</span>`:''}</div>` : ''}
     </div>
+    <div class="ufc-odds" id="odds-${f.id}"></div>
     <div class="ufc-fdetail" id="${detailId}"></div>
   </div>`;
 }
@@ -1694,11 +1799,56 @@ async function getTaleOfTape(eventId, fightId) {
   }
   if (!comp) throw new Error('fight not found');
 
+  // Fight format — number of rounds (3 or 5)
+  let rounds = null;
+  try {
+    let fmt = comp.format;
+    if (fmt?.$ref) fmt = await (await fetch(fixUrl(fmt.$ref))).json();
+    rounds = fmt?.regulation?.periods || comp.format?.regulation?.periods || null;
+  } catch(_) {}
+
   const out = [];
   for (const cptr of (comp.competitors || [])) {
     const c = cptr.$ref ? await (await fetch(fixUrl(cptr.$ref))).json() : cptr;
     let ath = c.athlete;
     if (ath?.$ref) ath = await (await fetch(fixUrl(ath.$ref))).json();
+
+    // Ranking — from competitor or athlete
+    let rank = c.rank || c.ranking || ath?.rank || null;
+
+    // Recent form via eventLog: last 5 results + layoff (days since last fight)
+    let last5 = [], layoffDays = null;
+    try {
+      if (ath?.eventLog?.$ref) {
+        const log = await (await fetch(fixUrl(ath.eventLog.$ref))).json();
+        let items = log.events?.items || [];
+        // Each item has a competition ref + a result; walk newest first
+        const past = items.filter(it => it.played !== false).slice(-6).reverse();
+        for (const it of past) {
+          if (last5.length >= 5) break;
+          try {
+            // result: win/loss for this athlete
+            let res = it.gameResult || it.result;
+            let won = null;
+            if (typeof res === 'string') won = /w/i.test(res);
+            // fetch competition for date + result if needed
+            let compRef = it.competition?.$ref || it.event?.$ref;
+            let cd = compRef ? await (await fetch(fixUrl(compRef))).json() : null;
+            // date for layoff (most recent only)
+            if (layoffDays === null && cd?.date) {
+              layoffDays = Math.floor((Date.now() - new Date(cd.date)) / 86400000);
+            }
+            // find this athlete's win flag
+            if (won === null && cd?.competitors) {
+              const me = cd.competitors.find(x => String(x.athlete?.$ref||'').includes(String(ath.id)) || String(x.id)===String(ath.id));
+              if (me) won = !!me.winner;
+            }
+            if (won !== null) last5.push(won ? 'W' : 'L');
+          } catch(_) {}
+        }
+      }
+    } catch(_) {}
+
     out.push({
       name: ath?.displayName || 'Fighter',
       age: ath?.age ?? null,
@@ -1708,9 +1858,12 @@ async function getTaleOfTape(eventId, fightId) {
       stance: ath?.stance?.text || ath?.stance?.name || null,
       record: ath?.records?.items?.[0]?.summary || null,
       country: ath?.citizenship || ath?.birthPlace?.country || ath?.flag?.alt || null,
+      rank: rank,
+      last5: last5,
+      layoff: layoffDays,
     });
   }
-  const result = { competitors: out };
+  const result = { competitors: out, rounds };
   _ufcDetailCache[cacheKey] = result;
   return result;
 }
@@ -1748,20 +1901,40 @@ function renderTaleOfTape(data) {
 
   addRow('Record', a.record, b.record, false);   // no better/worse
   addRow('Country', a.country, b.country, false);
+  if (a.rank || b.rank) addRow('Ranking', a.rank?`#${a.rank}`:'—', b.rank?`#${b.rank}`:'—', false);
   addRow('Age', a.age, b.age, false);            // younger highlighted
   addRow('Height', a.height, b.height, true);
   addRow('Reach', a.reach, b.reach, true);
   addRow('Stance', a.stance, b.stance, false);
-
-  // Record & Stance shouldn't compare numerically — strip their hi flags
-  // (handled by parseNum returning -1 for non-numeric, so they stay plain)
+  // Layoff — shorter is fresher (highlight the more active fighter)
+  const layoffStr = d => d==null ? null : d < 60 ? `${d}d` : `${Math.round(d/30)} mo`;
+  if (a.layoff != null || b.layoff != null) {
+    // lower layoff = more recently active; highlight that side
+    const la = a.layoff ?? 99999, lb = b.layoff ?? 99999;
+    const aHi = la < lb, bHi = lb < la;
+    rows.push(`<div class="ufc-stat-row">
+      <span class="ufc-stat-a"><span class="sv${aHi?' hi':''}">${layoffStr(a.layoff) ?? '—'}</span></span>
+      <span class="ufc-stat-label">Layoff</span>
+      <span class="ufc-stat-b"><span class="sv${bHi?' hi':''}">${layoffStr(b.layoff) ?? '—'}</span></span>
+    </div>`);
+  }
+  // Last 5 — W/L streak boxes
+  const streak = arr => (arr||[]).map(r =>
+    `<span class="ufc-wl ${r==='W'?'w':'l'}">${r}</span>`).join('');
+  if ((a.last5&&a.last5.length) || (b.last5&&b.last5.length)) {
+    rows.push(`<div class="ufc-stat-row ufc-streak-row">
+      <span class="ufc-stat-a"><span class="ufc-streak">${streak(a.last5)||'—'}</span></span>
+      <span class="ufc-stat-label">Last 5</span>
+      <span class="ufc-stat-b"><span class="ufc-streak">${streak(b.last5)||'—'}</span></span>
+    </div>`);
+  }
 
   if (!rows.length) return `<div class="ufc-fd-loading">Fighter details not posted yet.</div>`;
 
   return `
     <div class="ufc-fd-head">
       <span class="ufc-fd-name">${a.name}</span>
-      <span class="ufc-fd-vs">tale of the tape</span>
+      <span class="ufc-fd-vs">tale of the tape${data.rounds?` · ${data.rounds} rds`:''}</span>
       <span class="ufc-fd-name">${b.name}</span>
     </div>
     ${rows.join('')}`;
