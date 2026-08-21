@@ -1497,7 +1497,13 @@
       <div class="field" style="margin-bottom:10px"><label>Market odds</label><input type="number" id="editMktOdds"></div>
       <div class="field" style="margin-bottom:10px"><label>Unit size ($)</label><input type="number" id="editUnit" value="100" min="1"></div>
       <div class="field" style="margin-bottom:10px"><label>Tournament</label><input type="text" id="editTourney"></div>
-      <div class="field" style="margin-bottom:10px"><label>Book</label><input type="text" id="editBook" list="editBookList" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="type or pick"><datalist id="editBookList"></datalist></div>
+      <div class="field" style="margin-bottom:10px"><label>Book</label>
+        <div style="position:relative">
+          <input type="text" id="editBook" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="type or pick" style="padding-right:28px">
+          <span style="position:absolute;right:10px;top:50%;transform:translateY(-50%);pointer-events:none;color:var(--text2);font-size:10px">▾</span>
+          <div id="editBookList" style="display:none;position:absolute;top:100%;left:0;right:0;margin-top:3px;background:#0a0f0c;border:1px solid rgba(192,132,252,0.35);border-radius:8px;padding:2px;z-index:60;max-height:190px;overflow-y:auto;box-shadow:0 6px 18px rgba(0,0,0,0.7)"></div>
+        </div>
+      </div>
       <div style="display:flex;gap:8px;margin-bottom:16px">
         <div class="field" style="flex:1"><label>Date</label><input type="date" id="editDate"></div>
         <div class="field" style="flex:1"><label>Time (opt)</label><input type="text" id="editTime" placeholder="e.g. 10:30 AM"></div>
@@ -4828,12 +4834,7 @@ function editBet(id){
   const editBookEl = document.getElementById('editBook');
   if(editBookEl){
     editBookEl.value = b.book || '';
-    const dl = document.getElementById('editBookList');
-    if(dl){
-      try {
-        dl.innerHTML = allBooks().map(x => `<option value="${x.label}"></option>`).join('');
-      } catch(err){ dl.innerHTML = ''; }
-    }
+    _wireEditBookCombo();
   }
   updateEditCalc();
   const modal = document.getElementById('editModal');
@@ -4849,6 +4850,71 @@ function updateEditCalc(){
   const r = calcEV(wp,mo,100);
   const sl = stakeLabel(mo,100);
   el.textContent = `Fair ${(r.yourOdds>=0?'+':'')+r.yourOdds}  ·  EV ${(r.evPct>=0?'+':'')+r.evPct.toFixed(1)}%  ·  ${sl}`;
+}
+
+// Book combo for the edit modal. Mirrors the entry form: same visible book
+// list, same shorthands, space-to-commit. Wired once, on first use.
+let _editBookWired = false;
+function _wireEditBookCombo(){
+  if(_editBookWired) return;
+  const input = document.getElementById('editBook');
+  const list  = document.getElementById('editBookList');
+  if(!input || !list) return;
+  _editBookWired = true;
+
+  function books(){
+    try { return allBooks(); } catch(e){ return []; }
+  }
+  function close(){ list.style.display = 'none'; }
+  function open(filter){
+    const q = (filter||'').trim().toLowerCase();
+    let rows = books();
+    if(q){
+      const sid = (typeof BOOK_SHORTHAND !== 'undefined') ? BOOK_SHORTHAND[q] : null;
+      rows = rows.filter(b => b.label.toLowerCase().includes(q) || (sid && b.id === sid));
+    }
+    if(!rows.length){ close(); return; }
+    list.innerHTML = rows.map(b =>
+      `<div class="edit-book-item" data-label="${b.label}" style="padding:5px 9px;font-size:12px;font-weight:600;color:var(--text);cursor:pointer;border-radius:5px;line-height:1.35">${b.label}</div>`
+    ).join('');
+    list.querySelectorAll('.edit-book-item').forEach(el => {
+      el.addEventListener('mousedown', function(ev){
+        ev.preventDefault();
+        input.value = el.dataset.label;
+        close();
+      });
+    });
+    list.style.display = 'block';
+  }
+
+  input.addEventListener('focus', function(){ open(''); });
+  input.addEventListener('input', function(){
+    // Trailing space commits the shorthand: "nv " -> Novig
+    if(/\s$/.test(input.value)){
+      const id = (typeof matchBook === 'function') ? matchBook(input.value.trim()) : null;
+      if(id){
+        const sel = document.getElementById('iMktBook');
+        const opt = sel ? Array.from(sel.options).find(o => o.value === id) : null;
+        if(opt){ input.value = opt.text; close(); return; }
+      }
+    }
+    open(input.value);
+  });
+  input.addEventListener('blur', function(){
+    setTimeout(function(){
+      // Resolve whatever is typed to a real label on the way out
+      const raw = input.value.trim();
+      if(raw){
+        const id = (typeof matchBook === 'function') ? matchBook(raw) : null;
+        if(id){
+          const sel = document.getElementById('iMktBook');
+          const opt = sel ? Array.from(sel.options).find(o => o.value === id) : null;
+          if(opt) input.value = opt.text;
+        }
+      }
+      close();
+    }, 140);
+  });
 }
 
 function saveEdit(){
@@ -6078,13 +6144,22 @@ function openSettleModal(id){
   oddsInp.value = (effOdds>=0?'+':'')+effOdds;
   settleRefreshOddsHint();
 
-  // Determine starting unit: existing if flagged, else global default, else 0.75
+  // Starting unit: this bet's own stake if already flagged, otherwise the LAST
+  // STAKE USED (persisted), otherwise the on-screen default, otherwise 0.75.
   let startUnit;
   if(b.buddy && typeof b.settleUnit === 'number' && b.settleUnit > 0){
     startUnit = b.settleUnit;
   } else {
-    const sui = document.getElementById('settleUnitInput');
-    let g = sui ? parseFloat(sui.value) : NaN;
+    let g = NaN;
+    try {
+      const last = parseFloat(localStorage.getItem('tennis_ev_last_stake'));
+      if(!isNaN(last) && last > 0) g = last;
+    } catch(e){}
+    if(isNaN(g)){
+      const sui = document.getElementById('settleUnitInput');
+      const v = sui ? parseFloat(sui.value) : NaN;
+      if(!isNaN(v) && v > 0) g = v;
+    }
     if(isNaN(g) || g <= 0) g = 0.75;
     startUnit = g;
   }
@@ -6141,6 +6216,8 @@ function settleOddsChanged(){
 
 function settlePickUnit(u){
   const b = bets.find(x => x.id === _settleCurrentBetId); if(!b) return;
+  // Remember this stake so the next bet opens on it
+  try { if(u > 0) localStorage.setItem('tennis_ev_last_stake', String(u)); } catch(e){}
   // Highlight the matching pill
   document.querySelectorAll('#settleUnitPills button').forEach(btn => {
     const isMatch = parseFloat(btn.dataset.unit) === u;
@@ -8368,7 +8445,12 @@ window.addEventListener('storage', function(e){
       const v = sui.value.trim();
       const n = parseFloat(v);
       if(!isNaN(n) && n > 0){
-        try { localStorage.setItem('tennis_settle_unit', v); } catch(e){}
+        try {
+          localStorage.setItem('tennis_settle_unit', v);
+          // Same key the settle modal defaults from, so a typed stake also
+          // becomes the "last used" one.
+          localStorage.setItem('tennis_ev_last_stake', String(n));
+        } catch(e){}
       }
       if(_showBuddy && _lastSummaryRange) copyDaySummary(_lastSummaryRange);
       if(_showBuddy && typeof _calSelected !== 'undefined' && _calSelected) calSelectDay(_calSelected, true);
