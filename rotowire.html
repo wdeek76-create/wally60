@@ -162,6 +162,7 @@
         /* Clickable matchup pills + drill-down panel */
         .pm-chip.pm-chip-click { cursor: pointer; transition: border-color 0.15s, background 0.15s; }
         .pm-chip.pm-chip-click:hover { border-color: #8b5cf6; background: #1a1330; }
+        .pm-chip.pm-chip-click.ring { border-color: #8b5cf6; box-shadow: 0 0 0 1px #8b5cf6; }
         .pm-chip .pm-chip-caret { color: #8b5cf6; font-size: 9px; margin-left: 1px; }
         .matchup-drill { margin-top: 10px; background: #0d0a16; border: 1px solid #2a2440; border-radius: 10px; padding: 12px 14px; }
         .md-head { font-family: 'JetBrains Mono', monospace; font-size: 12px; font-weight: 800; color: #c4b5fd; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; }
@@ -250,6 +251,12 @@
         .glog-usg-key { width: 14px; height: 2px; background: #3b82f6; display: inline-block; }
         .glog-chart { position: relative; overflow: hidden; }
         .glog-bars { display: flex; align-items: flex-end; gap: 3px; overflow-x: auto; padding-bottom: 2px; position: relative; z-index: 2; }
+        /* Full-season / many-game view: pack thin bars edge-to-edge with no horizontal scroll,
+           so the whole set fits the width and the overlay line stays aligned. */
+        .glog-bars.dense { gap: 1px; overflow-x: hidden; }
+        .glog-bars.dense .glog-col { flex: 1 1 0; min-width: 0; }
+        .glog-bars.dense .glog-val, .glog-bars.dense .glog-opp, .glog-bars.dense .glog-min { display: none; }
+        .glog-bars.dense .glog-date { font-size: 7px; }
         .glog-col { flex: 1 0 26px; min-width: 26px; display: flex; flex-direction: column; align-items: center; gap: 3px; }
         .glog-bar-wrap { display: flex; align-items: flex-end; width: 100%; }
         .glog-bar { width: 100%; border-radius: 4px 4px 0 0; position: relative; display: flex; align-items: flex-start; justify-content: center; min-height: 6px; }
@@ -1297,12 +1304,33 @@
         // One file with EVERYTHING loaded: projections CSV, roster, injuries, lineups,
         // and the sportsbook order + best/reference/off settings. Send it and the other
         // person gets an identical board.
+        // In-memory copy of the last uploaded projections CSV, used only when localStorage
+        // couldn't persist it (so backups still capture projections).
+        let _projCsvFallback = '';
+        // Rebuild a projections CSV from the live projections object (last-resort backup source).
+        function _reconstructProjCsv() {
+            const rows = Object.values(projections || {});
+            if (!rows.length) return '';
+            const header = 'Player,Team,Pos,Min,Pts,Reb,Ast,3PM';
+            const body = rows.map(p => [
+                p.displayName || '', p.team || '', p.pos || '',
+                p.minutes ?? '', p.points ?? '', p.rebounds ?? '', p.assists ?? '', p.threes ?? ''
+            ].join(',')).join('\n');
+            return header + '\n' + body;
+        }
         function exportFullBackup() {
             const get = k => { try { return localStorage.getItem(k); } catch (e) { return null; } };
+            // Projections CSV: prefer the stored key; if that's empty (write was blocked) fall
+            // back to the in-memory copy from this session; if even that's gone but projections
+            // are loaded, reconstruct a CSV from them so a backup is never silently empty.
+            let projCsv = get('rwProjCSV') || (typeof _projCsvFallback === 'string' ? _projCsvFallback : '') || '';
+            if (!projCsv && typeof projections === 'object' && projections && Object.keys(projections).length) {
+                projCsv = _reconstructProjCsv();
+            }
             return {
                 type: 'rwps-backup', version: 1, app: 'RWPropZone', exported: new Date().toISOString(),
                 data: {
-                    projectionsCSV: get('rwProjCSV') || '',
+                    projectionsCSV: projCsv,
                     rosterPaste: get('rwRosterPaste') || '',
                     injuriesPaste: get('rwInjuriesPaste') || '',
                     lineupsPaste: get('rwLineupsPaste') || '',
@@ -3151,14 +3179,14 @@
             if (oppValue == null || leagueAvg == null || leagueAvg === 0) return null;
             const rawBoost = +((oppValue / leagueAvg - 1) * 100).toFixed(1);
             const favorable = direction === 'under' ? -rawBoost : rawBoost;
-            // Rank the opponent among all loaded teams for this stat. Rank 1 = allows the MOST
-            // (softest matchup for an over); higher number = stingier. So an over bettor wants
-            // a low rank. We flip the reading for unders in the chip label.
+            // Rank the opponent among all loaded teams for this stat. Convention: Rank 1 =
+            // allows the FEWEST (best/toughest defense); higher number = softer (allows more).
+            // An over bettor wants a HIGH rank (soft D). We read this consistently everywhere.
             const vals = Object.values(matchupData.teams).map(t => t[col]).filter(v => v != null);
             const nTeams = vals.length;
             let rank = null;
             if (nTeams) {
-                const sorted = vals.slice().sort((a, b) => b - a); // most-allowed first
+                const sorted = vals.slice().sort((a, b) => a - b); // fewest-allowed first = rank 1
                 rank = sorted.indexOf(oppValue) + 1; // 1-based; ties share the first index
             }
             return { opp: oppKey, stat: statKey, oppValue, leagueAvg, boostPct: rawBoost, favorable,
@@ -3536,7 +3564,7 @@
         // Which metric the blue overlay line plots. Default = the viewed prop's own trend
         // ('stat'). Toggle 'MIN' to overlay RotoWire projected minutes and see how the stat
         // tracks with minutes played.
-        let _glogOverlay = 'stat';
+        let _glogOverlay = 'none';
         function setGlogOverlay(m) {
             _glogOverlay = m;
             // Turning Minutes ON defaults to the RW solo anchor (games right at the projection).
@@ -3589,6 +3617,19 @@
         // "vs {opp}" matchup filter: when on, bars show only games vs defenses in the same tier
         // (soft/avg/stingy for this stat) as tonight's opponent.
         let _glogMatchup = false;
+        // Rank-band filter: when set to a rank N, bars show only games vs defenses ranked within
+        // ±_glogRankSpan of N (i.e. defenses of similar quality to a chosen opponent).
+        let _glogRankBand = null;
+        const _glogRankSpan = 3;
+        function filterGraphByRank(opp, rank) {
+            if (rank == null) return;
+            // Toggle off if the same band is already active.
+            _glogRankBand = (_glogRankBand === rank) ? null : rank;
+            const c = document.getElementById('glogContainer');
+            if (c) c.innerHTML = _gameLogInner();
+            const chart = document.querySelector('#glogContainer .glog-chart');
+            if (chart && chart.scrollIntoView) chart.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
         function toggleGlogMatchup() {
             _glogMatchup = !_glogMatchup;
             const c = document.getElementById('glogContainer');
@@ -3674,12 +3715,13 @@
                 // hash), NOT the current line — so editing the alt line genuinely recolors bars
                 // and shifts the hit rate instead of the values sliding with it.
                 const center = _mockCenter(playerName); // stable per player, matches default line
-                for (let i = 0; i < N; i++) {
+                const mockN = _glogWindow === 'full' ? 34 : N; // realistic WNBA season length
+                for (let i = 0; i < mockN; i++) {
                     const val = Math.max(0, Math.round(center + (rnd() - 0.5) * center * 0.85));
                     const usg = 0.18 + rnd() * 0.16;
                     const min = Math.round(22 + rnd() * 14); // 22–36 mock minutes
                     const opp = wnbaOpps[Math.floor(rnd() * wnbaOpps.length)];
-                    const d = new Date(Date.now() - (N - i) * 3 * 86400000);
+                    const d = new Date(Date.now() - (mockN - i) * 3 * 86400000);
                     games.push({ val, over: val >= baseLine, usg, min, opp,
                         dateLbl: `${d.getMonth()+1}/${String(d.getDate()).padStart(2,'0')}`, real: false });
                 }
@@ -3696,8 +3738,22 @@
                 return a && a.boostPct != null ? a.boostPct : null;
             };
             const dvpAvailable = games.some(g => dvpBoost(g.opp) != null);
+            // Opponent pace per game (possessions-ish). Uses loaded pace data if present, else a
+            // stable deterministic mock so the overlay is populated for demo.
+            const _oppPace = (opp) => {
+                if (!opp) return null;
+                const key = _matchupKey(opp);
+                const row = matchupData && matchupData.teams ? (matchupData.teams[key] || null) : null;
+                const p = row && (row['PACE'] ?? row['Pace'] ?? row['POSS']);
+                if (p != null) return +p;
+                return 92 + (hashStr((key || opp) + '|pace') % 16); // 92–107 mock
+            };
             // Tag every game with its metric values so filtering + overlay agree.
-            games.forEach(g => { g._dvp = dvpBoost(g.opp); g._min = (g.min != null ? g.min : (rojMin || null)); });
+            const _oppRank = (opp) => {
+                const a = opp ? getMatchupAdjustment(opp, betStatOv, 'over') : null;
+                return a && a.rank != null ? a.rank : null;
+            };
+            games.forEach(g => { g._dvp = dvpBoost(g.opp); g._min = (g.min != null ? g.min : (rojMin || null)); g._pace = _oppPace(g.opp); g._rank = _oppRank(g.opp); });
 
             // Tonight's opponent tier for this stat: soft (+), stingy (−), or average.
             const _oppTonight = _glogCtx.opp || '';
@@ -3706,13 +3762,19 @@
 
             // ---- Apply the active filters to the games shown ----
             let filterNote = '';
+            // Rank-band filter: games vs defenses ranked within ±span of a chosen opponent's rank.
+            if (_glogRankBand != null) {
+                const lo = _glogRankBand - _glogRankSpan, hi = _glogRankBand + _glogRankSpan;
+                const kept = games.filter(g => g._rank != null && g._rank >= lo && g._rank <= hi);
+                if (kept.length) { games = kept; filterNote = `vs defenses ranked ${Math.max(1,lo)}–${hi}`; }
+            }
             // "vs {opp}" matchup filter: keep only games vs defenses in the SAME tier as tonight.
             if (_glogMatchup && _oppTier && dvpAvailable) {
                 const inTier = (b) => b == null ? false : (_oppTier === 'soft' ? b > 3 : _oppTier === 'tough' ? b < -3 : (b >= -3 && b <= 3));
                 const kept = games.filter(g => inTier(g._dvp));
                 if (kept.length) {
                     games = kept;
-                    filterNote = `vs ${_oppTier === 'soft' ? 'soft' : _oppTier === 'tough' ? 'stingy' : 'average'} D (like ${_oppTonight})`;
+                    filterNote = `vs defenses like ${_oppTonight}`;
                 }
             }
             // Minutes range: only games whose minutes fall in [lo, hi]. RW-anchored via slider.
@@ -3745,11 +3807,15 @@
                 </div>`;
             }).join('');
 
-            // ---- Overlay line: plots the active metric (stat trend / minutes / def-vs-player).
+            // ---- Overlay line: only drawn when a CONTEXT metric is toggled (minutes, opp pace,
+            // def-vs-player). Default view is bars only — the blue line is for context, not the
+            // stat itself (the bars already show the stat).
+            const showLine = _glogOverlay === 'MIN' || _glogOverlay === 'PACE' || _glogOverlay === 'DVP';
             const overlayVal = (g, i) => {
                 if (_glogOverlay === 'MIN') return g._min != null ? g._min : (rojMin || 24);
+                if (_glogOverlay === 'PACE') return g._pace != null ? g._pace : 0;
                 if (_glogOverlay === 'DVP') return g._dvp == null ? 0 : g._dvp;
-                return g.val; // 'stat' → the prop's own per-game value
+                return g.val;
             };
             const oSeries = games.map((g, i) => overlayVal(g, i));
             const oMin = Math.min(...oSeries), oMax = Math.max(...oSeries);
@@ -3765,12 +3831,14 @@
             if (_glogOverlay === 'MIN') {
                 const szn = rojMin != null ? rojMin : oAvg;
                 overlayReadout = `MINUTES [avg: ${oAvg.toFixed(1)} · RW proj: ${(+szn).toFixed(1)}]`;
+            } else if (_glogOverlay === 'PACE') {
+                overlayReadout = `OPP PACE [avg: ${oAvg.toFixed(1)} · higher = faster opponent]`;
             } else if (_glogOverlay === 'DVP') {
                 overlayReadout = dvpAvailable
                     ? `DEF vs ${betStatOv} [opp allowed vs lg avg · + = softer matchup]`
                     : `DEF vs ${betStatOv} [load Opponent table to populate]`;
             } else {
-                overlayReadout = `${propLabel} trend [avg: ${oAvg.toFixed(1)}]`;
+                overlayReadout = `${propLabel} by game [avg: ${oAvg.toFixed(1)}]`;
             }
 
             const lineY = chartH - (baseLine / maxVal) * chartH;
@@ -3791,17 +3859,21 @@
             const sznCls = sznPct == null ? '' : (sznPct >= 60 ? 'good' : sznPct <= 40 ? 'bad' : '');
             const hitStrip = `<div class="glog-hrstrip">${miniHit('L5', splits.l5, 5)}${miniHit('L10', splits.l10, 10)}${miniHit('L20', splits.l20, 20)}<span class="glog-hr glass ${sznCls}${_glogWindow === 'full' ? ' active' : ''}" onclick="setGlogWindow('full')"><span class="glog-hr-lbl">Szn</span>${sznPct != null ? sznPct + '%' : '—'}</span></div>`;
 
-            // The bars are ALWAYS the stat; the blue overlay line traces the stat by default.
-            // Minutes is a single toggle that swaps the overlay to minutes AND reveals the
-            // minutes filter — it feeds into the same view rather than being a separate mode.
-            const minOn = _glogOverlay === 'MIN';
-            const overlayChips = `<span class="glog-ovchip glass ${minOn ? 'active' : ''}" onclick="setGlogOverlay('${minOn ? 'stat' : 'MIN'}')">Minutes</span>`;
+            // Context-metric toggles that draw the blue OVERLAY LINE. Default (no toggle) shows
+            // bars only. Each is exclusive: tapping one turns it on, tapping again turns it off
+            // (back to bars-only 'none'). Minutes also reveals the minutes filter.
+            const ovToggle = (m, lbl) => {
+                const on = _glogOverlay === m;
+                return `<span class="glog-ovchip glass ${on ? 'active' : ''}" onclick="setGlogOverlay('${on ? 'none' : m}')">${lbl}</span>`;
+            };
+            const overlayChips = ovToggle('MIN', 'Minutes') + ovToggle('PACE', 'Opp Pace');
 
             // "Matchup vs CON" is NOT a graph line — it's a FILTER (toggle) that shows only
-            // games vs defenses in the SAME tier as tonight's opponent.
+            // games vs defenses in the SAME tier as tonight's opponent (grouped silently by
+            // tier — no soft/tough label on the chip; the filtering does the work).
             const tierWord = _oppTier === 'soft' ? 'soft' : _oppTier === 'tough' ? 'stingy' : 'avg';
             const matchupChip = _oppTonight
-                ? `<span class="glog-ovchip glass matchup ${_glogMatchup ? 'active' : ''}" onclick="toggleGlogMatchup()"${dvpAvailable ? '' : ' style="opacity:.55"'} title="${dvpAvailable ? `Show only games vs ${tierWord} defenses like ${_oppTonight}` : 'Load Opponent table to enable'}">${oppLogoImg(_oppTonight)}vs ${_oppTonight}${_oppTier ? ` · ${tierWord} D` : ''}</span>`
+                ? `<span class="glog-ovchip glass matchup ${_glogMatchup ? 'active' : ''}" onclick="toggleGlogMatchup()"${dvpAvailable ? '' : ' style="opacity:.55"'} title="${dvpAvailable ? `Show only games vs defenses similar to ${_oppTonight}` : 'Load Opponent table to enable'}">${oppLogoImg(_oppTonight)}vs ${_oppTonight}</span>`
                 : '';
 
             // Filter row for the active metric.
@@ -3871,14 +3943,14 @@
                         <button class="glog-step" onclick="stepGlogLine(0.5)" title="+0.5">+</button>
                     </div>
                 </div>
-                <div class="glog-legend"><span class="glog-usg-key"></span>${trendLabel} · <span style="color:#4ade80">▮</span>${_glogDir === 'under' ? 'under (hit)' : 'over (hit)'} <span style="color:#f87171">▮</span>${_glogDir === 'under' ? 'over (miss)' : 'under (miss)'}</div>
+                <div class="glog-legend">${showLine ? `<span class="glog-usg-key"></span>${trendLabel} · ` : ''}<span style="color:#4ade80">▮</span>${_glogDir === 'under' ? 'under (hit)' : 'over (hit)'} <span style="color:#f87171">▮</span>${_glogDir === 'under' ? 'over (miss)' : 'under (miss)'}</div>
                 <div class="glog-chart">
                     <div class="glog-lineval" style="top:${lineY}px;">${baseLine}</div>
                     <div class="glog-linemark" style="top:${lineY}px;"></div>
-                    <svg class="glog-usg" style="height:${chartH}px;" viewBox="0 0 100 ${chartH}" preserveAspectRatio="none">
+                    ${showLine ? `<svg class="glog-usg" style="height:${chartH}px;" viewBox="0 0 100 ${chartH}" preserveAspectRatio="none">
                         <polyline points="${pts}" fill="none" stroke="#3b82f6" stroke-width="1.4" vector-effect="non-scaling-stroke"/>
-                    </svg>
-                    <div class="glog-bars">${bars}</div>
+                    </svg>` : ''}
+                    <div class="glog-bars${games.length > 24 ? ' dense' : ''}">${bars}</div>
                 </div>
                 <div class="glog-controls">
                     <div class="glog-ctl-row">${hitStrip}</div>
@@ -3893,10 +3965,11 @@
         // styled like a scouting card. Real stats fill in where we have them (proj, hit rates).
         function openPlayerModal(playerName, team, rowIndex) {
             // Each player opens fresh: overlay on the stat trend, window on L20, no filter, over.
-            _glogOverlay = 'stat';
+            _glogOverlay = 'none';
             _glogWindow = 20;
             _glogFilter = { dvp: 'all', minRange: null };
             _glogMatchup = false;
+            _glogRankBand = null;
             _glogDir = 'over';
             const proj = projections[playerName.toLowerCase()] || {};
             // rowIndex is the index into the FILTERED table data (data-row-index), so look the
@@ -3952,9 +4025,9 @@
                 const rankPart = adj.rank
                     ? `<span class="pm-rank ${good ? 'rank-good' : 'rank-bad'}">${ordinal(adj.rank)}<span class="pm-rank-of">/${adj.nTeams}</span></span>`
                     : `<span class="pm-rank ${good ? '' : 'bad'}">${sign}${adj.boostPct}%</span>`;
-                return `<span class="pm-chip pm-chip-matchup ${good ? 'good' : 'bad'}" title="${opp} allows ${adj.oppValue} ${betStat} — ${rankTxt} (league avg ${adj.leagueAvg}, ${sign}${adj.boostPct}% vs avg)">
+                return `<span class="pm-chip pm-chip-matchup pm-chip-click ${good ? 'good' : 'bad'} ${_glogRankBand ? 'ring' : ''}" onclick="filterGraphByRank('${opp}', ${adj.rank || 'null'})" title="Click: show her games vs defenses ranked near ${opp} (${ordinal(adj.rank)}) on the graph above">
                     <span class="pm-chip-lbl">vs ${oppLogo}${opp} · ${betStat} allowed</span>
-                    ${rankPart}</span>`;
+                    ${rankPart}<span class="pm-chip-caret">▸</span></span>`;
             };
 
             // DEF RTG chip — already pace-adjusted by wnba.com, so it reads straight.
@@ -4031,7 +4104,7 @@
                     <div class="pm-chips">
                         ${adjChip()}
                         ${defRtgChip()}
-                        <span class="pm-chip pm-chip-click" onclick="showMatchupDrill('${playerName.replace(/'/g, "\\'")}','${opp}','pts','Def vs Pos')" title="Click: this player vs ${opp} & similar defenses">
+                        <span class="pm-chip pm-chip-click ${_glogMatchup ? 'good' : ''}" onclick="filterGraphByDefense('${playerName.replace(/'/g, "\\'")}','${opp}')" title="Show games vs ${opp} & similar defenses on the graph above">
                             <span class="pm-chip-lbl">Def vs Pos</span><span class="pm-rank ${rankCls('dvp')}">#${rankNum('dvp')}<span class="pm-rank-of">/${N_TEAMS}</span></span><span class="pm-chip-caret">▸</span></span>
                         <span class="pm-chip pm-chip-click" onclick="showMatchupDrill('${playerName.replace(/'/g, "\\'")}','${opp}','pts','Def vs DPT')" title="Click: breakdown">
                             <span class="pm-chip-lbl">Def vs DPT</span><span class="pm-rank ${rankCls('dpt')}">#${rankNum('dpt')}<span class="pm-rank-of">/${N_TEAMS}</span></span><span class="pm-chip-caret">▸</span></span>
@@ -4049,6 +4122,20 @@
         }
         function closePlayerModal() {
             document.getElementById('playerModal').style.display = 'none';
+        }
+        // Clicking a Def-vs pill filters the GAME-LOG GRAPH to games vs defenses similar to
+        // tonight's opponent — reusing the chart's matchup filter so it composes with the
+        // O/U, window (L5/L10/L20/Szn) and minutes filters exactly like the on-chart chip.
+        function filterGraphByDefense(playerName, opp) {
+            _glogMatchup = !_glogMatchup;
+            const c = document.getElementById('glogContainer');
+            if (c) c.innerHTML = _gameLogInner();
+            // Scroll the chart into view so the effect is visible.
+            const chart = document.querySelector('#glogContainer .glog-chart');
+            if (chart && chart.scrollIntoView) chart.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            // Reflect the active state on the pill without a full modal rebuild.
+            const pills = document.querySelectorAll('.pm-chip-click');
+            pills.forEach(p => { if (/Def vs Pos/.test(p.textContent)) p.classList.toggle('good', _glogMatchup); });
         }
 
         // Click a matchup pill → expand a breakdown of THIS player vs the opponent and vs
@@ -4756,7 +4843,14 @@
             const reader = new FileReader();
             reader.onload = (e) => {
                 const csv = e.target.result;
-                try { localStorage.setItem('rwProjCSV', csv); } catch (err) {}
+                let saved = false;
+                try { localStorage.setItem('rwProjCSV', csv); saved = (localStorage.getItem('rwProjCSV') === csv); } catch (err) { saved = false; }
+                if (!saved) {
+                    // The raw CSV didn't persist (quota/private mode). Keep it in memory so the
+                    // backup can still capture it, and tell the user rather than failing silently.
+                    _projCsvFallback = csv;
+                    alert('Heads up: your projections loaded for this session, but the browser blocked saving them to local storage (often storage is full or private mode). They\'ll still be included in a backup export.');
+                }
                 parseProjections(csv);
                 buildSlateFromProjections();
                 // Re-scan any loaded injury report against the new slate names
