@@ -664,6 +664,8 @@
                 <span id="dirDown" class="bq-seg" onclick="setDirFilter('down')">Downside ↓</span>
             </div>
             <div class="tab tab-injuries" onclick="toggleLineupPanel()" style="color:#38bdf8;">📋 Lineups <span id="luTabCount" style="color:#38bdf8;"></span></div>
+            <div class="tab" onclick="downloadFullBackup()" style="color:#a3e635; cursor:pointer;" title="Save everything (projections, roster, injuries, lineups, book settings) to one file">💾 Backup</div>
+            <label class="tab" style="color:#38bdf8; cursor:pointer;" title="Load a backup file — replaces the current board">📂 Restore<input type="file" accept="application/json,.json" style="display:none;" onchange="handleBackupFile(this)"></label>
         </div>
     </div>
 
@@ -775,7 +777,7 @@
         function bestEligibleBooks() { return bookOrder.filter(b => bookState[b] === 'best'); }
 
         // Exchanges that have liquidity (peer-to-peer). Add prophetx, kalshi when their data comes in.
-        const EXCHANGES = new Set(['novig', 'prophetx', 'kalshi', 'onyx']);
+        const EXCHANGES = new Set(['novig', 'prophetx', 'kalshi']);
         // Sharp low-margin books that publish max bet LIMITS (not P2P liquidity).
         const LIMIT_BOOKS = new Set(['pinnacle', 'bet105']);
 
@@ -1019,6 +1021,8 @@
                 try { data = JSON.parse(reader.result); }
                 catch (e) { alert('That file is not valid JSON.'); return; }
                 const t = data && data.type;
+                // A full backup can be dropped into any importer — route it to restore.
+                if (t === 'rwps-backup') { restoreBackup(data); return; }
                 let ok = false;
                 if (t === 'rwps-roster' || expectedType === 'roster') ok = importRosterJSON(data);
                 else if (t === 'rwps-injuries' || expectedType === 'injuries') ok = importInjuriesJSON(data);
@@ -1027,6 +1031,55 @@
             };
             reader.readAsText(file);
             input.value = ''; // allow re-selecting the same file
+        }
+
+        // ===== FULL BACKUP / RESTORE =====
+        // One file with EVERYTHING loaded: projections CSV, roster, injuries, lineups,
+        // and the sportsbook order + best/reference/off settings. Send it and the other
+        // person gets an identical board.
+        function exportFullBackup() {
+            const get = k => { try { return localStorage.getItem(k); } catch (e) { return null; } };
+            return {
+                type: 'rwps-backup', version: 1, app: 'RWPropStation', exported: new Date().toISOString(),
+                data: {
+                    projectionsCSV: get('rwProjCSV') || '',
+                    rosterPaste: get('rwRosterPaste') || '',
+                    injuriesPaste: get('rwInjuriesPaste') || '',
+                    lineupsPaste: get('rwLineupsPaste') || '',
+                    bookOrder: (() => { try { return JSON.parse(get('rwBookOrder4') || 'null'); } catch (e) { return null; } })(),
+                    bookState: (() => { try { return JSON.parse(get('rwBookState') || 'null'); } catch (e) { return null; } })()
+                }
+            };
+        }
+        function downloadFullBackup() {
+            downloadJSON(`RWPropStation-backup-${todayStamp()}.json`, exportFullBackup());
+        }
+        // Load a full backup: write everything to localStorage, then re-run the load path.
+        function restoreBackup(obj) {
+            if (!obj || obj.type !== 'rwps-backup' || !obj.data) { alert('That is not an RWPropStation backup file.'); return; }
+            const d = obj.data;
+            const set = (k, v) => { try { if (v != null && v !== '') localStorage.setItem(k, v); else localStorage.removeItem(k); } catch (e) {} };
+            set('rwProjCSV', d.projectionsCSV);
+            set('rwRosterPaste', d.rosterPaste);
+            set('rwInjuriesPaste', d.injuriesPaste);
+            set('rwLineupsPaste', d.lineupsPaste);
+            set('rwBookOrder4', d.bookOrder ? JSON.stringify(d.bookOrder) : '');
+            set('rwBookState', d.bookState ? JSON.stringify(d.bookState) : '');
+            // Reload so every subsystem re-initializes cleanly from the restored state.
+            location.reload();
+        }
+        function handleBackupFile(input) {
+            const file = input.files && input.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = () => {
+                let data;
+                try { data = JSON.parse(reader.result); }
+                catch (e) { alert('That file is not valid JSON.'); return; }
+                restoreBackup(data);
+            };
+            reader.readAsText(file);
+            input.value = '';
         }
 
 
@@ -3269,6 +3322,7 @@
             const reader = new FileReader();
             reader.onload = (e) => {
                 const csv = e.target.result;
+                try { localStorage.setItem('rwProjCSV', csv); } catch (err) {}
                 parseProjections(csv);
                 buildSlateFromProjections();
                 // Re-scan any loaded injury report against the new slate names
@@ -3957,6 +4011,13 @@
 
         window.addEventListener('load', () => {
             allData = mockData;
+            // Restore uploaded projections (builds the real slate) before anything else
+            const savedProj = localStorage.getItem('rwProjCSV');
+            if (savedProj && savedProj.trim()) {
+                parseProjections(savedProj);
+                buildSlateFromProjections();
+                const ps = document.getElementById('projStatus'); if (ps) ps.style.display = 'inline-block';
+            }
             // Restore roster index FIRST (so abbreviated names expand everywhere)
             const savedRoster = localStorage.getItem('rwRosterPaste');
             if (savedRoster && savedRoster.trim()) {
