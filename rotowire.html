@@ -353,6 +353,17 @@
         #dirAll.active { background: #8b5cf6; color: #fff; }
         #dirUp.active { background: #a3e635; }
         #dirDown.active { background: #f87171; }
+        /* Injury-status chips (Q / GTD / P / OUT) live inside the Conditional toggle group.
+           They light up independently — multi-select, so Q + P shows either. */
+        .bq-divider { width: 1px; align-self: stretch; background: #2a2440; }
+        .st-seg { font-size: 10px; font-weight: 700; color: #777; padding: 5px 9px; cursor: pointer; font-family: 'JetBrains Mono', monospace; letter-spacing: 0.03em; border-right: 1px solid #2a2440; transition: all 0.12s; }
+        .st-seg:last-child { border-right: none; }
+        .st-seg:hover { color: #ccc; }
+        .st-seg.active { color: #0a0a0a; }
+        #stQ.active { background: #fbbf24; }
+        #stGTD.active { background: #fb923c; }
+        #stP.active { background: #4ade80; }
+        #stOUT.active { background: #f87171; }
         .inj-row { border-bottom: 1px solid #1a1626; padding: 10px 4px; }
         .inj-row-head { display: flex; align-items: center; gap: 7px; cursor: pointer; flex-wrap: wrap; }
         .inj-chip { font-size: 9px; font-weight: 800; border: 1px solid; border-radius: 3px; padding: 1px 6px; font-family: 'JetBrains Mono', monospace; letter-spacing: 0.03em; }
@@ -946,17 +957,22 @@
             <div class="prop-pill glass" id="lineupsPill" onclick="toggleLineupPanel()" style="margin-left:8px;">Lineups<span id="luTabCount" style="margin-left:5px;"></span></div>
         </div>
         <div style="margin-left:auto; display:flex; align-items:center; gap:10px;">
-            <div class="bq-toggle">
+            <div class="bq-toggle" title="All / Clean / Conditional, then filter Conditional players by their injury status (toggle more than one, e.g. Q + P).">
                 <span id="bqAll" class="bq-seg active" onclick="setBetQuality('all')">All</span>
                 <span id="bqClean" class="bq-seg" onclick="setBetQuality('clean')">Clean</span>
                 <span id="bqCond" class="bq-seg" onclick="setBetQuality('conditional')">Conditional</span>
+                <span class="bq-divider"></span>
+                <span id="stQ" class="st-seg" onclick="toggleStatusFilter('QUESTIONABLE')">Q</span>
+                <span id="stGTD" class="st-seg" onclick="toggleStatusFilter('GTD')">GTD</span>
+                <span id="stP" class="st-seg" onclick="toggleStatusFilter('PROBABLE')">P</span>
+                <span id="stOUT" class="st-seg" onclick="toggleStatusFilter('OUT')">OUT</span>
             </div>
             <div class="bq-toggle">
                 <span id="dirAll" class="bq-seg active" onclick="setDirFilter('all')">All</span>
                 <span id="dirUp" class="bq-seg" onclick="setDirFilter('up')">Upside &#8593;</span>
                 <span id="dirDown" class="bq-seg" onclick="setDirFilter('down')">Downside &#8595;</span>
             </div>
-            <div class="tab" data-admin="1" onclick="openAdvancedPaste()" style="color:#c084fc; cursor:pointer;" title="Paste opponent-allowed + defense tables from wnba.com">ð¡️ Defense</div>
+            <div class="tab" data-admin="1" onclick="openAdvancedPaste()" style="color:#c084fc; cursor:pointer;" title="Paste opponent-allowed + defense tables from wnba.com">🛡️ Defense</div>
             <div class="tab" data-admin="1" onclick="downloadFullBackup()" style="color:#a3e635; cursor:pointer;" title="Save everything (projections, roster, injuries, lineups, book settings) to one file">💾 Backup</div>
             <label class="tab" data-admin="1" style="color:#38bdf8; cursor:pointer;" title="Load a backup file &mdash; replaces the current board">📂 Restore<input type="file" accept="application/json,.json" style="display:none;" onchange="handleBackupFile(this)"></label>
         </div>
@@ -2264,6 +2280,34 @@
         let injStatusFilter = 'ALL';
         let betQualityFilter = 'all'; // all | clean | conditional
         let dirFilter = 'all'; // all | up | down
+        // Multi-select injury-status filter for the MAIN board. Empty = no filter (show all).
+        // Any status in the set is a match, so toggling Q + P shows players who are either.
+        let statusFilterSet = new Set();
+
+        function toggleStatusFilter(status) {
+            if (statusFilterSet.has(status)) statusFilterSet.delete(status);
+            else statusFilterSet.add(status);
+            const map = { QUESTIONABLE: 'stQ', GTD: 'stGTD', PROBABLE: 'stP', OUT: 'stOUT' };
+            Object.entries(map).forEach(([s, id]) => {
+                const el = document.getElementById(id);
+                if (el) el.classList.toggle('active', statusFilterSet.has(s));
+            });
+            // Status is a sub-filter of Conditional players — turning a chip on implies
+            // Conditional mode; clearing the last chip hands control back to All.
+            if (statusFilterSet.size && betQualityFilter !== 'conditional') {
+                setBetQuality('conditional'); // this re-renders
+                return;
+            }
+            renderTable();
+        }
+
+        // A player's OWN injury status (not a beneficiary signal) — reads the injuries cache
+        // for this exact player. Returns '' when they carry no injury record.
+        function playerOwnStatus(playerName) {
+            if (!injuriesCache.size) return '';
+            const rec = injuriesCache.get(resolveNorm(playerName));
+            return rec ? (rec.status || '') : '';
+        }
 
         function setBetQuality(mode) {
             betQualityFilter = mode;
@@ -2271,6 +2315,11 @@
                 const el = document.getElementById(id);
                 if (el) el.classList.toggle('active', m === mode);
             });
+            // Status chips only make sense within Conditional — clear them when switching away.
+            if (mode !== 'conditional' && statusFilterSet.size) {
+                statusFilterSet.clear();
+                ['stQ','stGTD','stP','stOUT'].forEach(id => document.getElementById(id)?.classList.remove('active'));
+            }
             renderTable();
         }
 
@@ -5386,6 +5435,14 @@
                     const dir = rowDirection(d);
                     if (dirFilter === 'up' && !dir.up) return false;
                     if (dirFilter === 'down' && !dir.down) return false;
+                }
+                // Injury-status filter (multi-select): keep only players whose OWN status is
+                // one of the selected chips. Empty set = no filtering. GTD chip also covers
+                // DTD (day-to-day) since they're the same actionable bucket.
+                if (statusFilterSet.size && injuriesCache.size) {
+                    let st = playerOwnStatus(d.player);
+                    if (st === 'DTD') st = 'GTD';
+                    if (!st || !statusFilterSet.has(st)) return false;
                 }
                 return true;
             });
