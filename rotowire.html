@@ -3988,10 +3988,8 @@
                     let proj;
                     if (currentProp === 'pra') proj = (playerProj.points||0)+(playerProj.rebounds||0)+(playerProj.assists||0);
                     else { const k = currentProp==='points'?'points':currentProp==='rebounds'?'rebounds':currentProp==='assists'?'assists':'threes'; proj = playerProj[k]||0; }
-                    const diff = proj - sbData.over[0];
-                    const overFair = Math.max(0.02, Math.min(0.98, 0.5 + diff * 0.06));
-                    oEv = evFromProbAndOdds(overFair, sbData.over[1]);
-                    uEv = evFromProbAndOdds(1 - overFair, sbData.under[1]);
+                    const overFair = modelWinProb(proj, sbData.over[0], 'over', currentProp, false);
+                    if (overFair != null) { oEv = evFromProbAndOdds(overFair, sbData.over[1]); uEv = evFromProbAndOdds(1 - overFair, sbData.under[1]); }
                 }
                 best = Math.max(best, oEv || 0, uEv || 0);
             });
@@ -4136,6 +4134,71 @@
         }
 
         // EV% given your true win prob and the American odds you can bet at
+        // ═══════════════════════════════════════════════════════════════
+        // WIN-PROBABILITY MODEL — projection → fair prob → EV
+        // Poisson for discrete low-count stats (asymmetric tails); Normal with
+        // stat-specific σ scaling for the rest. σ scaling is the whole point:
+        // a 0.2 gap on a 24.5 points line is a coinflip, but a large edge on a
+        // 2.5 rebound line — because σ differs. Never treat raw gap as edge.
+        // ═══════════════════════════════════════════════════════════════
+        const POISSON_STATS = new Set(['REB','AST','3PM','THREES','STL','BLK','TOV','TO']);
+        // Normal-model σ config: σ = max(floor, √(proj × scale)).
+        const SIGMA_CFG = {
+            PTS:{scale:2.0,floor:4.5}, PRA:{scale:2.2,floor:5.5}, PR:{scale:1.8,floor:4.5},
+            PA:{scale:1.8,floor:4.0}, RA:{scale:1.0,floor:2.5}, MIN:{scale:0.9,floor:3.5},
+            REB:{scale:1.0,floor:2.0}, AST:{scale:0.7,floor:1.0}, '3PM':{scale:0.6,floor:0.7},
+            THREES:{scale:0.6,floor:0.7}
+        };
+        const _DEFAULT_SIGMA = {scale:1.5,floor:3.0};
+
+        // Normalize a prop/stat token to the model's stat key.
+        function _statKeyFor(propOrStat) {
+            const m = { points:'PTS', rebounds:'REB', assists:'AST', threes:'3PM', pra:'PRA',
+                        pr:'PR', pa:'PA', ra:'RA', minutes:'MIN', min:'MIN' };
+            const up = String(propOrStat || '').trim();
+            return m[up.toLowerCase()] || up.toUpperCase();
+        }
+
+        // erf via Abramowitz-Stegun 7.1.26 (max error ~1.5e-7) → standard-normal CDF Φ.
+        function _erf(x) {
+            const s = x < 0 ? -1 : 1; x = Math.abs(x);
+            const t = 1 / (1 + 0.3275911 * x);
+            const y = 1 - (((((1.061405429*t - 1.453152027)*t) + 1.421413741)*t - 0.284496736)*t + 0.254829592) * t * Math.exp(-x*x);
+            return s * y;
+        }
+        function _normCdf(z) { return 0.5 * (1 + _erf(z / Math.SQRT2)); }
+        // Poisson CDF P(X ≤ k) for mean λ, summed term-by-term (stable for WNBA counts).
+        function _poissonCdf(k, lambda) {
+            if (lambda <= 0) return 1;
+            k = Math.floor(k);
+            let term = Math.exp(-lambda), cum = term;
+            for (let i = 1; i <= k; i++) { term *= lambda / i; cum += term; }
+            return Math.min(1, cum);
+        }
+
+        // Core: projection → P(side) for a line and stat. isGameTotal → flat σ = 14.
+        function modelWinProb(proj, line, side, stat, isGameTotal) {
+            if (proj == null || line == null) return null;
+            const key = _statKeyFor(stat);
+            let pUnder;
+            if (isGameTotal) {
+                const z = (line - proj) / 14;
+                pUnder = _normCdf(z);
+            } else if (POISSON_STATS.has(key)) {
+                pUnder = _poissonCdf(Math.floor(line), proj); // P(X ≤ floor(line))
+            } else {
+                const cfg = SIGMA_CFG[key] || _DEFAULT_SIGMA;
+                const sigma = Math.max(cfg.floor, Math.sqrt(Math.max(0, proj) * cfg.scale));
+                const z = (line - proj) / sigma;
+                pUnder = _normCdf(z);
+            }
+            pUnder = Math.max(0.001, Math.min(0.999, pUnder));
+            const pOver = 1 - pUnder;
+            return side === 'under' ? pUnder : pOver;
+        }
+        // Fair prob → American odds lives below as probToAmerican() (display only;
+        // do NOT round-trip EV through it — use fairProb directly in evFromProbAndOdds).
+
         function evFromProbAndOdds(prob, odds) {
             const dec = odds > 0 ? (odds / 100) + 1 : (100 / Math.abs(odds)) + 1;
             return (prob * dec - 1) * 100;
@@ -4161,10 +4224,8 @@
             let fairProb;
             const proj = getProjForContext();
             if (lineChanged && proj !== null) {
-                // Alt line: fair prob comes from the projection vs the NEW line
-                // (same model the table uses: 0.06 prob per unit of distance).
-                const diff = proj - newLine;
-                const overFair = Math.max(0.02, Math.min(0.98, 0.5 + diff * 0.06));
+                // Alt line: fair prob from the distribution model vs the NEW line.
+                const overFair = modelWinProb(proj, newLine, 'over', currentProp, false);
                 fairProb = side === 'over' ? overFair : (1 - overFair);
             } else {
                 // Line unchanged: hold the original fair prob (from the edge shown in the table)
@@ -4226,8 +4287,7 @@
             let fairProb;
             const proj = getProjForContext();
             if (lineChanged && proj !== null) {
-                const diff = proj - newLine;
-                const overFair = Math.max(0.02, Math.min(0.98, 0.5 + diff * 0.06));
+                const overFair = modelWinProb(proj, newLine, 'over', currentProp, false);
                 fairProb = side === 'over' ? overFair : (1 - overFair);
             } else {
                 fairProb = Math.max(0.02, Math.min(0.98, americanToProb(baseOdds) + (baseEv / 100)));
@@ -4753,10 +4813,8 @@
                     let proj;
                     if (currentProp === 'pra') proj = (playerProj.points||0)+(playerProj.rebounds||0)+(playerProj.assists||0);
                     else { const k = currentProp==='points'?'points':currentProp==='rebounds'?'rebounds':currentProp==='assists'?'assists':'threes'; proj = playerProj[k]||0; }
-                    const diff = proj - d.over[0];
-                    const overFair = Math.max(0.02, Math.min(0.98, 0.5 + diff * 0.06));
-                    oEv = evFromProbAndOdds(overFair, d.over[1]);
-                    uEv = evFromProbAndOdds(1 - overFair, d.under[1]);
+                    const overFair = modelWinProb(proj, d.over[0], 'over', currentProp, false);
+                    if (overFair != null) { oEv = evFromProbAndOdds(overFair, d.over[1]); uEv = evFromProbAndOdds(1 - overFair, d.under[1]); }
                 }
                 const isExchange = EXCHANGES.has(sb);
                 const overLiqOk = !isExchange || !minLiq || (parseLiq(d.over_liq) >= minLiq);
@@ -4977,10 +5035,8 @@
                         let proj;
                         if (currentProp === 'pra') proj = (playerProj.points||0)+(playerProj.rebounds||0)+(playerProj.assists||0);
                         else { const k = currentProp==='points'?'points':currentProp==='rebounds'?'rebounds':currentProp==='assists'?'assists':'threes'; proj = playerProj[k]||0; }
-                        const diff = proj - d.over[0];
-                        const overFair = Math.max(0.02, Math.min(0.98, 0.5 + diff * 0.06));
-                        oEv = evFromProbAndOdds(overFair, d.over[1]);
-                        uEv = evFromProbAndOdds(1 - overFair, d.under[1]);
+                        const overFair = modelWinProb(proj, d.over[0], 'over', currentProp, false);
+                        if (overFair != null) { oEv = evFromProbAndOdds(overFair, d.over[1]); uEv = evFromProbAndOdds(1 - overFair, d.under[1]); }
                     }
                     if (!best || oEv > best.ev) best = { book: sb, side: 'over', line: d.over[0], odds: d.over[1], ev: oEv };
                     if (!best || uEv > best.ev) best = { book: sb, side: 'under', line: d.under[0], odds: d.under[1], ev: uEv };
@@ -5029,10 +5085,10 @@
                                 proj = playerProj[key] || 0;
                             }
                             
-                            // Fair probability from projection vs line, then EV = fair prob vs the actual price.
-                            // This makes the edge respond to the odds (so editing odds updates it).
-                            const projDiff = proj - overLine[0];
-                            overFairProb = Math.max(0.02, Math.min(0.98, 0.5 + projDiff * 0.06));
+                            // Fair probability from the distribution model vs the line, then
+                            // EV = fair prob vs the actual price (so editing odds updates it).
+                            overFairProb = modelWinProb(proj, overLine[0], 'over', currentProp, false);
+                            if (overFairProb == null) overFairProb = 0.5;
                             underFairProb = 1 - overFairProb;
                             overEv = evFromProbAndOdds(overFairProb, overLine[1]);
                             underEv = evFromProbAndOdds(underFairProb, underLine[1]);
@@ -5274,18 +5330,53 @@
             _activeFlashes.push(f);
         }
 
-        // Recompute over/under EV for one book after its odds/line changed.
+        // Recompute over/under EV for one book after its odds/line changed. Works for BOTH
+        // real projection rows and mock rows — so the +EV pill actually moves when odds move.
         function recomputeCellEv(row, sb) {
             const d = row[sb];
             if (!d || !d.over || !d.under) return;
-            const playerProj = row.player ? projections[row.player.toLowerCase()] : null;
-            if (!playerProj) return; // mock rows keep their preset EV
-            let proj;
-            if (currentProp === 'pra') proj = (playerProj.points||0)+(playerProj.rebounds||0)+(playerProj.assists||0);
-            else { const k = currentProp==='points'?'points':currentProp==='rebounds'?'rebounds':currentProp==='assists'?'assists':'threes'; proj = playerProj[k]||0; }
-            const overFair = Math.max(0.02, Math.min(0.98, 0.5 + (proj - d.over[0]) * 0.06));
+            const proj = _projForRow(row);
+            let overFair;
+            if (proj != null) {
+                overFair = modelWinProb(proj, d.over[0], 'over', currentProp, false);
+            } else {
+                // Mock row → anchor a stable no-vig fair prob per market so EV still tracks odds.
+                if (d._fairOver == null) d._fairOver = _mockFairProb(row, 'over');
+                overFair = d._fairOver;
+            }
+            if (overFair == null) return;
             d.over_ev = evFromProbAndOdds(overFair, d.over[1]);
             d.under_ev = evFromProbAndOdds(1 - overFair, d.under[1]);
+        }
+
+        // The player's projection for the CURRENT prop, or null for mock rows.
+        function _projForRow(row) {
+            const pj = row && row.player ? projections[row.player.toLowerCase()] : null;
+            if (!pj) return null;
+            if (currentProp === 'pra') return (pj.points||0)+(pj.rebounds||0)+(pj.assists||0);
+            const k = currentProp==='points'?'points':currentProp==='rebounds'?'rebounds':currentProp==='assists'?'assists':'threes';
+            return pj[k] || 0;
+        }
+
+        // A stable fair over-probability for a mock market: no-vig the reference book's two-way
+        // price so the fair value is realistic, then EV = fair vs each book's posted odds.
+        function _mockFairProb(row, side) {
+            // Prefer a sharp book if present, else the first book with a full two-way price.
+            const refBooks = ['pinnacle', 'bet105', 'fanduel', 'draftkings'];
+            let ref = null;
+            for (const b of refBooks) { if (row[b] && row[b].over && row[b].under) { ref = row[b]; break; } }
+            if (!ref) {
+                for (const k in row) { if (row[k] && row[k].over && row[k].under) { ref = row[k]; break; } }
+            }
+            if (!ref) return 0.5;
+            const impOver = _impliedProb(ref.over[1]);
+            const impUnder = _impliedProb(ref.under[1]);
+            const sum = impOver + impUnder;
+            return sum > 0 ? impOver / sum : 0.5; // no-vig fair prob for the over
+        }
+        function _impliedProb(odds) {
+            if (odds == null) return 0.5;
+            return odds < 0 ? (-odds) / (-odds + 100) : 100 / (odds + 100);
         }
 
         // Apply a flash to its cell. `elapsed` (ms since the move) lets a re-render resume the
