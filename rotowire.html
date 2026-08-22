@@ -511,6 +511,11 @@
             font-family: 'JetBrains Mono', monospace; letter-spacing: 0.02em; white-space: nowrap;
             position: sticky; left: 318px; z-index: 10;
             box-shadow: inset 1px 0 0 rgba(255,255,255,0.35), 2px 0 8px rgba(0,0,0,0.35); }
+        /* Best pick that couldn't clear the Min Edge filter (nothing takeable qualified) —
+           muted so you can tell at a glance it's below your threshold. */
+        .best-td.best-belowfilter { background: linear-gradient(150deg, #3a4a2a 0%, #33421f 40%, #2c3a1a 100%);
+            color: #cfe0b0; box-shadow: inset 1px 0 0 rgba(255,255,255,0.08), 2px 0 8px rgba(0,0,0,0.35); }
+        .best-td.best-belowfilter .best-edge.pos { color: #a3e635; }
         tbody tr:hover .best-td { background: linear-gradient(150deg, #c6f56b 0%, #aef03e 40%, #9ade30 100%); }
         .best-inner { display: flex; flex-direction: column; align-items: center; gap: 5px; padding: 2px 0; }
         .best-logo { width: 22px; height: 22px; background: rgba(10,10,10,0.85); border-radius: 6px; display: flex; align-items: center; justify-content: center; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.25); }
@@ -5257,12 +5262,6 @@
                     if (dirFilter === 'up' && !dir.up) return false;
                     if (dirFilter === 'down' && !dir.down) return false;
                 }
-                // Min Edge: keep only rows with at least one takeable bet clearing the edge
-                // threshold. Uses countValueBets so it respects Min Liq too — an exchange side
-                // only counts if its available liquidity clears Min Liq (an 8% edge with $0
-                // behind it isn't a real bet).
-                const minEdge = parseFloat(document.getElementById('minEdge')?.value) || 0;
-                if (minEdge > 0 && countValueBets(d, minEdge) === 0) return false;
                 return true;
             });
             if (sortByEdge) {
@@ -5498,27 +5497,54 @@
                 // Find the best play: highest edge across BEST-eligible books & both sides.
                 // (Reference books show on screen but never win the Best column.)
                 const bestBooks = bestEligibleBooks();
-                let best = null; // { book, side, line, odds, ev }
+                const _minEdge = parseFloat(document.getElementById('minEdge')?.value) || 0;
+                const _minLiq = parseFloat(document.getElementById('minLiq')?.value) || 0;
+                // A side is "takeable" if it clears Min Edge AND — for exchanges — actually has
+                // liquidity clearing Min Liq at that edge. A headline price with $0 behind it on
+                // an exchange is not a real play, so Best should skip it.
+                const _takeable = (sb, ev, odds, fairProb, liqStr) => {
+                    if (_minEdge > 0 && ev < _minEdge) return false;
+                    if (EXCHANGES.has(sb)) {
+                        const total = parseLiq(liqStr);
+                        if (total <= 0) return false;
+                        if (_minEdge > 0 && fairProb != null) {
+                            const r = edgeFilteredLiq(total, odds, fairProb, _minEdge);
+                            if (!r.qualifies || r.liq < _minLiq) return false;
+                        } else if (_minLiq > 0 && total < _minLiq) return false;
+                    }
+                    return true;
+                };
+                let best = null;         // best takeable play (respects Min Edge + liq)
+                let bestAny = null;      // highest-EV play regardless (fallback if none takeable)
                 bestBooks.forEach(sb => {
                     const d = row[sb];
                     if (!d || !d.over || !d.under) return;
                     let oEv = d.over_ev, uEv = d.under_ev;
+                    let oFair = null, uFair = null;
                     if (playerProj) {
                         let proj;
                         if (currentProp === 'pra') proj = (playerProj.points||0)+(playerProj.rebounds||0)+(playerProj.assists||0);
                         else { const k = currentProp==='points'?'points':currentProp==='rebounds'?'rebounds':currentProp==='assists'?'assists':'threes'; proj = playerProj[k]||0; }
                         const overFair = modelWinProb(proj, d.over[0], 'over', currentProp, false);
-                        if (overFair != null) { oEv = evFromProbAndOdds(overFair, d.over[1]); uEv = evFromProbAndOdds(1 - overFair, d.under[1]); }
+                        if (overFair != null) { oFair = overFair; uFair = 1 - overFair; oEv = evFromProbAndOdds(overFair, d.over[1]); uEv = evFromProbAndOdds(1 - overFair, d.under[1]); }
                     }
-                    if (!best || oEv > best.ev) best = { book: sb, side: 'over', line: d.over[0], odds: d.over[1], ev: oEv };
-                    if (!best || uEv > best.ev) best = { book: sb, side: 'under', line: d.under[0], odds: d.under[1], ev: uEv };
+                    const oCand = { book: sb, side: 'over', line: d.over[0], odds: d.over[1], ev: oEv };
+                    const uCand = { book: sb, side: 'under', line: d.under[0], odds: d.under[1], ev: uEv };
+                    if (!bestAny || oEv > bestAny.ev) bestAny = oCand;
+                    if (!bestAny || uEv > bestAny.ev) bestAny = uCand;
+                    if (_takeable(sb, oEv, d.over[1], oFair, d.over_liq) && (!best || oEv > best.ev)) best = oCand;
+                    if (_takeable(sb, uEv, d.under[1], uFair, d.under_liq) && (!best || uEv > best.ev)) best = uCand;
                 });
+                // If Min Edge filtered out everything takeable, fall back to the top raw edge so
+                // the Best column is never blank — but mark it as not clearing the filter.
+                const bestUnfiltered = !best && bestAny;
+                if (!best) best = bestAny;
 
                 if (best) {
                     const meta = bookMeta[best.book];
                     const logo = meta ? meta.logo() : '';
                     const evClass = best.ev >= 0 ? 'pos' : 'neg';
-                    html += `<td class="best-td"><div class="best-inner">
+                    html += `<td class="best-td${bestUnfiltered ? ' best-belowfilter' : ''}"><div class="best-inner">
                         <div class="best-logo">${logo}</div>
                         <div class="best-linewrap">
                             <span class="best-sideline"><span class="best-side">${best.side === 'over' ? 'Over' : 'Under'}</span><span class="best-num">${best.line}</span></span>
@@ -5586,13 +5612,24 @@
                             if (overFairProb == null) overFairProb = probFromEvAndOdds(overEv, overLine[1]);
                             if (underFairProb == null) underFairProb = probFromEvAndOdds(underEv, underLine[1]);
 
-                            // If Min Edge set, show liquidity available within that edge + weighted odds
+                            // If Min Edge set, show liquidity available within that edge +
+                            // weighted odds. If NOTHING qualifies at the set edge, step the
+                            // threshold down toward 5% and show the best breakdown we can find,
+                            // flagged with the edge it actually clears (so you still see depth).
                             function liqDisplay(sideLiqStr, sideOdds, fairProb) {
                                 const total = parseLiq(sideLiqStr);
                                 if (minEdge > 0 && total > 0) {
-                                    const r = edgeFilteredLiq(total, sideOdds, fairProb, minEdge);
+                                    let r = edgeFilteredLiq(total, sideOdds, fairProb, minEdge);
                                     if (r.qualifies) {
                                         return `${fmtMoney(r.liq)} <span style="opacity:0.65">@ ${r.wOdds > 0 ? '+' : ''}${r.wOdds}</span>`;
+                                    }
+                                    // Fallback: try lower thresholds down to 5% (0.5% steps).
+                                    const floor = Math.min(5, minEdge);
+                                    for (let e = minEdge - 0.5; e >= floor; e -= 0.5) {
+                                        const rr = edgeFilteredLiq(total, sideOdds, fairProb, e);
+                                        if (rr.qualifies) {
+                                            return `<span style="opacity:0.6">${fmtMoney(rr.liq)} <span style="opacity:0.7">@ ${rr.wOdds > 0 ? '+' : ''}${rr.wOdds}</span> <span style="color:#f59e0b">·${e.toFixed(1)}%</span></span>`;
+                                        }
                                     }
                                     return `<span style="opacity:0.4">$0</span>`;
                                 }
