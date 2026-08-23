@@ -2286,10 +2286,93 @@ function loadBets() {
   if (migrated > 0) saveBets();
 }
 
+// ── STORAGE GUARD ─────────────────────────────────────────────
+// Bets are the only irreplaceable data here. Season logs, injuries and
+// headshots are all refetchable. So: keep headroom, warn early, and never
+// let a refetchable cache crowd out a bet.
+const STORAGE_BUDGET_BYTES = 4.5 * 1024 * 1024;   // conservative vs the ~5MB norm
+// Keys safe to drop automatically — everything here can be rebuilt.
+const EVICTABLE_KEYS = [
+  "wnba_season_logs_v1",
+  "wnba_espn_cache",
+  "wnba_headshot_cache_v1",
+];
+function storageBytes() {
+  let n = 0;
+  try { for (const k in localStorage) {
+    if (Object.prototype.hasOwnProperty.call(localStorage, k)) n += k.length + (localStorage[k] || "").length;
+  } } catch (e) {}
+  return n;
+}
+function storageReport() {
+  const out = [];
+  try { for (const k in localStorage) {
+    if (Object.prototype.hasOwnProperty.call(localStorage, k)) {
+      out.push({ key: k, kb: Math.round((localStorage[k] || "").length / 1024) });
+    }
+  } } catch (e) {}
+  return out.sort((a, b) => b.kb - a.kb);
+}
+// Free space by dropping refetchable caches, largest first. Never touches bets.
+function freeStorageSpace(neededBytes) {
+  let freed = 0;
+  for (const k of EVICTABLE_KEYS) {
+    try {
+      const v = localStorage.getItem(k);
+      if (v == null) continue;
+      freed += v.length;
+      localStorage.removeItem(k);
+      console.warn(`[storage] evicted ${k} (${Math.round(v.length / 1024)}kb) to make room for bets`);
+      if (freed >= (neededBytes || 0)) break;
+    } catch (e) {}
+  }
+  return freed;
+}
+// Warn before it becomes a problem, not after.
+function checkStorageHealth() {
+  const used = storageBytes();
+  const pct = Math.round((used / STORAGE_BUDGET_BYTES) * 100);
+  if (pct >= 85) {
+    console.warn(`[storage] ${pct}% full (${Math.round(used / 1024)}kb). Biggest:`, storageReport().slice(0, 3));
+    try {
+      if (typeof showToast === "function") {
+        showToast(`\u26a0 Storage ${pct}% full \u2014 sync splits less often or clear them`);
+      }
+    } catch (e) {}
+  }
+  return { used, pct };
+}
+
 function saveBets() {
+  const json = JSON.stringify(bets);
   try {
-    localStorage.setItem("wnba_blender_bets", JSON.stringify(bets));
-  } catch(e) { console.warn("save failed", e); }
+    localStorage.setItem("wnba_blender_bets", json);
+    return true;
+  } catch (e) {
+    // Out of room. Bets outrank every cache here, so evict the refetchable
+    // ones and try again rather than losing the bet.
+    console.warn("[storage] bet save failed, evicting caches and retrying");
+    freeStorageSpace(json.length * 2);
+    try {
+      localStorage.setItem("wnba_blender_bets", json);
+      try {
+        if (typeof showToast === "function") showToast("Storage was full \u2014 cleared splits cache to save your bets");
+      } catch (e3) {}
+      return true;
+    } catch (e2) {
+      // Still failing after eviction — this is genuinely bad, make it loud.
+      console.error("SAVE FAILED after eviction — bets are in memory only:", e2);
+      try {
+        if (typeof showToast === "function") {
+          showToast("\u26a0 SAVE FAILED \u2014 EXPORT YOUR BETS NOW");
+        }
+        if (typeof alert === "function") {
+          alert("Storage is full and your bets could NOT be saved.\n\nThey are still in memory. Export them now, before reloading the page.");
+        }
+      } catch (e3) {}
+      return false;
+    }
+  }
 }
 
 function calcStake(odds) {
@@ -2687,6 +2770,7 @@ function loadTrackedIntoBets() {
 // never persisted.
 function copyTrackedProps() {
   try {
+    loadBets();
     const lines = [];
     sessionTrackedProps.forEach((v, key) => {
       const sep = key.lastIndexOf("|");
@@ -2704,7 +2788,19 @@ function copyTrackedProps() {
           if (row && row.team) team = ` (${row.team})`;
         }
       } catch (e) {}
-      lines.push(`${player}${team}  ${dir} ${v.line} ${statWordFor(stat)}${odds}`);
+      let realBet = null;
+      try {
+        realBet = bets.find(b => b &&
+          resolveNorm(b.player || "") === resolveNorm(player) &&
+          (b.stat || "").toUpperCase() === stat.toUpperCase() &&
+          Number(b.line) === Number(v.line) &&
+          (b.ou || "").toLowerCase() === dir);
+      } catch (e) {}
+      if (realBet && typeof formatBetCopyLine === "function") {
+        lines.push(formatBetCopyLine(realBet));
+      } else {
+        lines.push(`${player}${team}  ${dir} ${v.line} ${statWordFor(stat)}${odds}`);
+      }
     });
     if (!lines.length) { showToast("No tracked props"); return; }
     const text = `WNBA tracked props: (${lines.length})\n` + lines.join("\n");
@@ -7049,12 +7145,32 @@ function getSeasonLogs() {
   }
 }
 
-function saveSeasonLogs(payload) {
+const SEASON_LOG_MAX_DAYS = 75;   // splits only look back ~10 games
+function _trimSeasonLogs(payload) {
+  try {
+    if (!payload || !Array.isArray(payload.rows)) return payload;
+    const cutoff = new Date(Date.now() - SEASON_LOG_MAX_DAYS * 86400000);
+    const cutIso = `${cutoff.getFullYear()}-${String(cutoff.getMonth() + 1).padStart(2, "0")}-${String(cutoff.getDate()).padStart(2, "0")}`;
+    const before = payload.rows.length;
+    const rows = payload.rows.filter(r => r && typeof r.d === "string" && r.d >= cutIso);
+    if (rows.length < before) {
+      console.log(`[storage] trimmed season logs ${before} -> ${rows.length} rows (last ${SEASON_LOG_MAX_DAYS} days)`);
+    }
+    return { ...payload, rows };
+  } catch (e) { return payload; }
+}
+function saveSeasonLogs(payloadRaw) {
+  const payload = _trimSeasonLogs(payloadRaw);
   try {
     localStorage.setItem(SEASON_LOG_STORAGE_KEY, JSON.stringify(payload));
     return true;
   } catch (e) {
-    console.warn("Failed to save season logs:", e);
+    // Never let a refetchable cache block the app. Drop it and move on.
+    console.warn("[storage] season logs too large to store — dropping cache", e);
+    try { localStorage.removeItem(SEASON_LOG_STORAGE_KEY); } catch (e2) {}
+    try {
+      if (typeof showToast === "function") showToast("Splits cache too large \u2014 cleared. Re-sync when you need it.");
+    } catch (e2) {}
     if (typeof showToast === "function") showToast("Storage full — couldn't save logs");
     return false;
   }
@@ -7162,6 +7278,23 @@ async function _fetchSeasonGameDay(isoDate) {
 }
 
 // Main sync — incremental by default. Pass force=true to wipe and re-fetch.
+// Drop the splits cache. Safe: it's the biggest thing in localStorage and
+// fully refetchable from ESPN via the sync button.
+function clearSeasonLogs() {
+  let kb = 0;
+  try {
+    const raw = localStorage.getItem(SEASON_LOG_STORAGE_KEY);
+    kb = raw ? Math.round(raw.length / 1024) : 0;
+  } catch (e) {}
+  if (!kb) { showToast("No splits cache stored"); return; }
+  if (!confirm(`Clear the splits cache (${kb}kb)?\n\nSplits and the game-log chart will be empty until you sync again. Your bets are not affected.`)) return;
+  try { localStorage.removeItem(SEASON_LOG_STORAGE_KEY); } catch (e) {}
+  try { localStorage.removeItem(SEASON_LOG_STORAGE_KEY + "_meta"); } catch (e) {}
+  if (typeof renderSeasonLogsStatus === "function") renderSeasonLogsStatus();
+  const after = (typeof checkStorageHealth === "function") ? checkStorageHealth() : null;
+  showToast(`Cleared ${kb}kb` + (after ? ` \u00b7 storage now ${after.pct}% full` : ""));
+}
+
 async function syncSeasonLogs({ force = false, onProgress = null } = {}) {
   const today = new Date().toISOString().slice(0, 10);
   let startDate = SEASON_START_DATE;
@@ -8879,7 +9012,7 @@ async function gradeAllPending(mode) {
   // since the last sync) and already has its own internal error handling,
   // so this is a cheap, safe call — but we still wrap it defensively here
   // in case something upstream changes later.
-  if (graded > 0 && typeof syncSeasonLogs === "function") {
+  if (graded > 0 && typeof syncSeasonLogs === "function" && window._autoSyncSplits === true) {
     (async () => {
       try {
         await syncSeasonLogs({});
@@ -14065,6 +14198,7 @@ function renderTracker() {
         <button onclick="copyDailyRecapTotals()" style="background:linear-gradient(135deg, #0c0d10 0%, #0a0d12 50%, #0c0d10 100%);border:1px solid #1e40af;color:#7dd3fc;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:600;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;">Totals Recap</button>
         <button onclick="exportBets()" style="background:linear-gradient(135deg, #0c0d10 0%, #0a0d12 50%, #0c0d10 100%);border:1px solid #1a1d22;color:#7dd3fc;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:600;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;">Backup</button>
         <button onclick="importBets()" style="background:linear-gradient(135deg, #0c0d10 0%, #0a0d12 50%, #0c0d10 100%);border:1px solid #1a1d22;color:#d4dae3;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:600;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;">Restore</button>
+        <button onclick="clearSeasonLogs()" title="Delete the cached game logs to free storage (refetchable)" style="background:transparent;border:1px solid #f8717155;color:#f87171;border-radius:6px;padding:6px 12px;font-size:11px;font-weight:600;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;margin-right:6px;">CLEAR CACHE</button>
         <button id="seasonLogsSyncBtnTop" onclick="handleSyncSeasonLogs(false)" title="Sync season logs" style="background:linear-gradient(135deg, #0c0d10 0%, #0a0d12 50%, #0c0d10 100%);border:1px solid #1e40af;color:#7dd3fc;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:600;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;">🔄 Sync Logs</button>
         <button onclick="shareOpenPropsAsImageDiscord()" title="Wide grid layout optimized for Discord" style="background:linear-gradient(135deg, #0c0d10 0%, #0a0d12 50%, #0c0d10 100%);border:1px solid #a855f7;color:#a855f7;border-radius:6px;padding:6px 10px;font-size:12px;font-weight:600;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;width:100%;margin-top:8px;">🖼 DiscordPic</button>
       </span>
@@ -14087,7 +14221,8 @@ function renderTracker() {
          backtests. Incremental — only fetches new dates after the last sync. -->
     <div style="display:flex;align-items:center;gap:10px;padding:8px 12px;margin:8px 0 12px 0;background:#0a0b0d;border:1px solid #1a1d22;border-radius:6px;font-family:'Plus Jakarta Sans',sans-serif;flex-wrap:wrap;">
       <span style="font-size:10px;color:#525a64;letter-spacing:1px;text-transform:uppercase;font-weight:700;">Season Logs</span>
-      <button id="seasonLogsSyncBtn" onclick="handleSyncSeasonLogs(false)" title="Pull new game logs from ESPN" style="background:linear-gradient(135deg, #0c0d10 0%, #0a0d12 50%, #0c0d10 100%);border:1px solid #a855f7;color:#a855f7;border-radius:5px;padding:5px 11px;font-size:11px;font-weight:600;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;">🔄 Sync</button>
+      <button onclick="clearSeasonLogs()" title="Delete the cached game logs to free storage (refetchable)" style="background:transparent;border:1px solid #f8717155;color:#f87171;border-radius:6px;padding:6px 12px;font-size:11px;font-weight:600;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;margin-right:6px;">CLEAR CACHE</button>
+        <button id="seasonLogsSyncBtn" onclick="handleSyncSeasonLogs(false)" title="Pull new game logs from ESPN" style="background:linear-gradient(135deg, #0c0d10 0%, #0a0d12 50%, #0c0d10 100%);border:1px solid #a855f7;color:#a855f7;border-radius:5px;padding:5px 11px;font-size:11px;font-weight:600;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;">🔄 Sync</button>
       <button onclick="if(confirm('Re-fetch the entire season? Existing logs will be replaced.')) handleSyncSeasonLogs(true);" title="Wipe and re-fetch the entire season" style="background:transparent;border:1px solid #1a1d22;color:#525a64;border-radius:5px;padding:5px 9px;font-size:10px;font-weight:600;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;">Force Re-sync</button>
       <span id="seasonLogsStatus" style="font-size:11px;color:#8b93a0;font-family:'Plus Jakarta Sans',sans-serif;font-variant-numeric:tabular-nums;">never synced</span>
     </div>
