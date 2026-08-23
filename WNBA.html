@@ -9862,7 +9862,8 @@ const IMPORT_STAT_MAP = {
   points: "PTS", point: "PTS", pts: "PTS",
   rebounds: "REB", rebound: "REB", reb: "REB", rebs: "REB",
   assists: "AST", assist: "AST", ast: "AST", asts: "AST",
-  threes: "3PM", three: "3PM", "3pm": "3PM", "3s": "3PM",
+  threes: "3PM", three: "3PM", "3pm": "3PM", "3s": "3PM", "3's": "3PM",
+  "3\u2019s": "3PM", threepointers: "3PM", "3pt": "3PM",
   pra: "PRA", pr: "PR", pa: "PA", ra: "RA",
   steals: "STL", blocks: "BLK", turnovers: "TOV"
 };
@@ -9880,8 +9881,18 @@ function parsePropsPaste(text) {
   if (!text) return out;
   const lines = String(text).split(/\r?\n/);
   let curPlayer = null, curTeam = null, pending = null;
-  const PROP_RE = /\b(over|under|o|u)\s*(\d+(?:\.\d+)?)\s+([A-Za-z0-9]+)\s+([+-]\d+)(?:\s+(.+?))?\s*$/i;
-  const flush = () => { if (pending) { out.push(pending); pending = null; } };
+  // Odds on the SAME line as the prop: "over 9.5 points +104 FanDuel"
+  const PROP_RE = /\b(over|under|o|u)\s*(\d+(?:\.\d+)?)\s+([A-Za-z0-9']+)\s+([+-]\d+)(?:\s+(.+?))?\s*$/i;
+  // Prop with NO odds — books follow on their own lines:
+  //   "Natasha Cloud (CHI)  under 1.5 threes"
+  //   "FanDuel -108"  /  "Prop builder -114"  /  "🛑 Good to -140"
+  // Allows .5 with no leading zero, curly apostrophes, and "3's".
+  const PROP_NOODDS_RE = /\b(over|under|o|u)\s*(\d*\.?\d+)\s+([A-Za-z0-9'\u2019]+)\s*$/i;
+  // A standalone "Book -110" line.
+  const BOOK_LINE_RE = /^\s*([A-Za-z][A-Za-z0-9 .&'\u2019-]{1,24}?)\s+([+-]\d{2,4})\s*$/;
+  // "🛑 Good to -140" — same meaning as "play to".
+  const GOOD_TO_RE = /(?:good to|play to)\s*([+-]\d+)/i;
+  const flush = () => { if (pending && pending.odds != null) out.push(pending); pending = null; };
   lines.forEach(raw => {
     const line = raw.replace(/\s+$/, "");
     if (!line.trim()) return;
@@ -9892,14 +9903,44 @@ function parsePropsPaste(text) {
       if (f != null) pending.fair = f;
     }
     // player header, with or without a trailing prop on the same line
-    const head = line.match(/^([A-Za-zÀ-ÿ'’.\-\s]+?)\s*\(([A-Z]{2,4})\)/);
+    const head = line.match(/^([A-Za-z\u00C0-\u024F\u1E00-\u1EFF'\u2019.\-\s]+?)\s*\(([A-Z]{2,4})\)/);
     if (head && !/^\s*\d+\./.test(line)) {
       flush();
       curPlayer = head[1].trim();
       curTeam = head[2].trim();
     }
-    const clean = line.replace(/\s*play to\s+[+-]\d+\s*$/i, "");
-    const m = clean.match(PROP_RE);
+    // "Good to -140" / "play to -140" on its own line — implied fair for the
+    // prop above it.
+    const gt = line.match(GOOD_TO_RE);
+    const hasPropOnLine = /\b(over|under)\b/i.test(line);
+    if (gt && pending && !hasPropOnLine) {
+      if (pending.fair == null) {
+        const f = _fairFromPlayTo(parseInt(gt[1], 10));
+        if (f != null) pending.fair = f;
+      }
+      return;
+    }
+    // A standalone "FanDuel -108" line belongs to the prop above it. First one
+    // seen is the primary book; the rest become alt books.
+    if (pending) {
+      const bl = line.match(BOOK_LINE_RE);
+      if (bl && !/\b(over|under)\b/i.test(line)) {
+        const bookName = bl[1].trim();
+        const price = parseInt(bl[2], 10);
+        if (bookName && !isNaN(price)) {
+          if (pending.odds == null) { pending.odds = price; pending.book = bookName; }
+          else { pending.altBooks.push({ book: bookName, odds: price, line: pending.line }); }
+          return;
+        }
+      }
+    }
+    const clean = line.replace(/\s*(?:play|good) to\s+[+-]\d+\s*$/i, "");
+    let m = clean.match(PROP_RE);
+    let noOdds = false;
+    if (!m) {
+      const m2 = clean.match(PROP_NOODDS_RE);
+      if (m2) { m = [m2[0], m2[1], m2[2], m2[3], null, null]; noOdds = true; }
+    }
     if (!m || !curPlayer) return;
     const statKey = String(m[3]).toLowerCase();
     const stat = IMPORT_STAT_MAP[statKey];
@@ -9913,8 +9954,9 @@ function parsePropsPaste(text) {
       ou: dir.startsWith("u") ? "under" : "over",
       line: parseFloat(m[2]),
       stat,
-      odds: parseInt(m[4], 10),
-      book: (m[5] || "").trim() || null,
+      odds: noOdds ? null : parseInt(m[4], 10),
+      book: noOdds ? null : ((m[5] || "").trim() || null),
+      altBooks: [],
       fair: inlinePt ? _fairFromPlayTo(parseInt(inlinePt[1], 10)) : null
     };
   });
@@ -9954,7 +9996,7 @@ function importPropsFromPaste() {
       date: mdy, gameDate: isoDate, timestamp: timeStr,
       player: p.player, pos: "",
       stat: p.stat, ou: p.ou, line: p.line, odds: p.odds,
-      fair: p.fair, altBooks: [],
+      fair: p.fair, altBooks: Array.isArray(p.altBooks) ? p.altBooks : [],
       stake: s.stake, toWin: s.toWin, type: s.type,
       book: p.book || "", team: p.team,
       result: "pending", importedFromPaste: true
