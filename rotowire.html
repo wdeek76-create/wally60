@@ -1539,6 +1539,8 @@
             'lynx': 'MIN', 'liberty': 'NYL', 'mercury': 'PHX', 'storm': 'SEA',
             'mystics': 'WAS', 'tempo': 'TOR', 'fire': 'POR'
         };
+        // All valid team codes — used to recognize bare "SEA"/"DAL" code lines in lineup pastes.
+        const KNOWN_TEAM_CODES = new Set(Object.values(TEAM_NICK_TO_CODE));
 
         // ===== DAILY LINEUP PIPELINE =====
         // norm(player) &#8594; { name, team, pos, slot(1-5 = starter order), status, starter:true/false }
@@ -2171,17 +2173,21 @@
 
         // Group parsed teams into games by shared tip-off time (2 teams per game).
         function groupLineupsIntoGames() {
-            const byTime = new Map();
+            // Group by the game index assigned at parse time — NOT by tip-off time, since
+            // several games share a time (three 7:00 PM ET games on a normal slate would
+            // otherwise collapse into one). Falls back to time for older data lacking game idx.
+            const hasGameIdx = [...lineupsByTeam.values()].some(v => v.game != null && v.game >= 0);
+            const byKey = new Map();
             lineupsByTeam.forEach((info, code) => {
-                const key = info.time || 'TBD';
-                const arr = byTime.get(key) || [];
+                const key = hasGameIdx ? ('g' + (info.game ?? 'x')) : (info.time || 'TBD');
+                const arr = byKey.get(key) || [];
                 arr.push({ code, ...info });
-                byTime.set(key, arr);
+                byKey.set(key, arr);
             });
-            // Sort games by time (parse "7:00 PM ET"), teams within a game keep insertion order
             const games = [];
-            byTime.forEach((teams, time) => games.push({ time, teams }));
-            games.sort((a, b) => luTimeSort(a.time) - luTimeSort(b.time));
+            byKey.forEach((teams, key) => games.push({ time: teams[0]?.time || '', teams, _g: teams[0]?.game ?? 9999 }));
+            // Order by game index when available, else by time.
+            games.sort((a, b) => hasGameIdx ? (a._g - b._g) : (luTimeSort(a.time) - luTimeSort(b.time)));
             return games;
         }
         function luTimeSort(t) {
@@ -2615,10 +2621,15 @@
             let curTime = null;
             // Each game lists BOTH team codes/nicknames first, then the two "Expected Lineup"
             // blocks in the same order. Queue the game's teams and pop one per Expected Lineup.
+            // gameIdx pairs the two teams of a game together — critical because MULTIPLE games
+            // share the same tip-off time (three 7:00 PM ET games on a typical slate), so we
+            // can't group by time. Each Expected Lineup pair increments to the next game.
             let teamQueue = [];
             let curTeam = null;
             let mode = null;
             let slot = 0;
+            let gameIdx = -1;          // which game (0-based) we're currently filling
+            let expectedInGame = 0;    // how many Expected Lineup blocks seen in current game (0,1,2)
 
             const pushPlayer = (code, name, pos, status, isStarter) => {
                 const nrm = resolveNorm(name);
@@ -2631,9 +2642,10 @@
                     name, team: code, pos, status: status || '',
                     slot: isStarter ? slot : 0, starter: !!isStarter, time: curTime
                 });
-                const t = lineupsByTeam.get(code) || { starters: [], bench: [], time: curTime };
+                const t = lineupsByTeam.get(code) || { starters: [], bench: [], time: curTime, game: gameIdx };
                 if (isStarter) t.starters.push(name); else t.bench.push(name);
                 t.time = curTime;
+                if (t.game == null || t.game < 0) t.game = gameIdx;
                 lineupsByTeam.set(code, t);
             };
 
@@ -2642,12 +2654,25 @@
                 const timeM = ln.match(/^(\d{1,2}:\d{2}\s*(?:AM|PM)\s*ET)$/i);
                 if (timeM) { curTime = timeM[1].toUpperCase().replace(/\s+/g, ' '); teamQueue = []; continue; }
 
-                // Nickname line &#8594; enqueue this game's team (in order). Dedup consecutive repeats.
+                // Nickname line → enqueue this game's team (in order). Dedup within the queue.
                 const nick = TEAM_NICK_TO_CODE[ln.toLowerCase()];
-                if (nick) { if (teamQueue[teamQueue.length - 1] !== nick) teamQueue.push(nick); continue; }
+                if (nick) { if (!teamQueue.includes(nick)) teamQueue.push(nick); continue; }
+                // Fallback: a bare team CODE line (e.g. "SEA", "DAL"). RotoWire prints the code
+                // twice then the nickname; both map to the same team, so dedup by membership so
+                // we don't enqueue SEA twice. Guarantees the queue is never empty → avoids the
+                // "nothing parsed" failure if the nickname map ever misses a team.
+                const codeM = /^[A-Z]{2,3}$/.test(ln) && KNOWN_TEAM_CODES.has(ln.toUpperCase()) ? ln.toUpperCase() : null;
+                if (codeM) { if (!teamQueue.includes(codeM)) teamQueue.push(codeM); continue; }
 
                 if (/^Expected Lineup$/i.test(ln)) {
                     mode = 'starters'; slot = 0;
+                    // Two Expected Lineup blocks per game. When we've already filled two (or this
+                    // is the very first), the next block starts a NEW game — bump the index.
+                    if (expectedInGame === 0 || expectedInGame >= 2) {
+                        gameIdx++;
+                        expectedInGame = 0;
+                    }
+                    expectedInGame++;
                     curTeam = teamQueue.shift() || curTeam; // next team in the game
                     continue;
                 }
@@ -2748,7 +2773,19 @@
             renderTable();
             if (document.getElementById('lineupPanel').style.display === 'flex') renderLineupPanel();
             const cs = document.getElementById('lineupCopyStatus');
-            if (cs) cs.textContent = lineupsCache.size ? `✓ ${lineupsCache.size} players loaded` : 'Nothing parsed.';
+            if (cs) {
+                if (lineupsCache.size) {
+                    cs.textContent = `✓ ${lineupsCache.size} players loaded`;
+                    cs.style.color = '#4ade80';
+                } else {
+                    // Diagnose why: does the text even contain lineup markers?
+                    const hasMarker = /Expected Lineup/i.test(text) || /(^|\n)\s*[A-Z]{2,3}:\s*[GFC]\s/i.test(text);
+                    cs.textContent = hasMarker
+                        ? 'Parsed 0 — check this is the Daily Lineups page.'
+                        : "Nothing parsed — no lineup blocks found. Paste RotoWire's Daily Lineups page here (not injuries).";
+                    cs.style.color = '#f87171';
+                }
+            }
         }
 
         // ===== ROSTER MODAL (Basketball-Reference) =====
