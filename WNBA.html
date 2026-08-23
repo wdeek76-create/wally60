@@ -605,6 +605,8 @@ table colgroup col.avg-col{width:16%;}
         <button id="export-extra-btn" onclick="doExportExtra()" title="RG + RW + any loaded optional sources (Saber, Dimers)">EXPORT EXTRA</button>
         <button id="export-matrix-btn" onclick="doExportMatrix()" title="Per-stat trained tightness — only the genuinely-agreeing edges per stat, all stats in one file" style="background:linear-gradient(135deg, #0c0d10 0%, #0a0d12 50%, #0c0d10 100%);border:1px solid #a855f7;color:#c084fc;border-radius:9px;padding:7px 14px;font-size:12px;font-weight:700;letter-spacing:0.3px;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;transition:all 0.2s;">MatrixCSV</button>
         <button id="export-matrix-pra-btn" onclick="doExportMatrixPRA()" title="PRA-only — players whose sources agree on the PRA total within the trained 12% threshold. Writes their PTS/REB/AST through so PRA reconstructs on upload." style="background:linear-gradient(135deg, #0c0d10 0%, #0a0d12 50%, #0c0d10 100%);border:1px solid #a855f7;color:#c084fc;border-radius:9px;padding:7px 14px;font-size:12px;font-weight:700;letter-spacing:0.3px;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;transition:all 0.2s;">PRA Matrix</button>
+        <button onclick="copyTrackedProps()" title="Copy all tracked props as text" style="background:#1e40af;border:none;color:#fff;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:700;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;margin-right:6px;">COPY TRACKED</button>
+        <button onclick="loadTrackedIntoBets()" title="Turn every tracked pill into a pending bet in the tracker" style="background:#22c55e;border:none;color:#050507;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:700;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;margin-right:6px;">LOAD TRACKED → BETS</button>
         <button onclick="clearTrackedProps()" title="Clear all ✓ TRACKED pills from Projections. Does NOT affect your actual tracked bets in the Tracker." style="background:linear-gradient(135deg, #0c0d10 0%, #0a0d12 50%, #0c0d10 100%);border:1px solid #1a1d22;color:#a8b0bb;border-radius:9px;padding:7px 14px;font-size:12px;font-weight:600;letter-spacing:0.3px;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;transition:all 0.2s;">CLEAR TRACKED</button>
       </div>
       <div style="display:flex;justify-content:flex-end;align-items:center;gap:12px;margin-bottom:8px;">
@@ -2617,6 +2619,111 @@ function _isTrackedProp(player, stat) {
 }
 // Manual clear — wired to a button at the top of the Results page so the user
 // can wipe the pills when starting a new slate.
+// Recover: turn every ✓ TRACKED pill into a real pending bet. The pills store
+// player|stat -> {ou, line, odds}, which is everything needed to rebuild the
+// bet. Skips anything already in the tracker so it's safe to run twice.
+function loadTrackedIntoBets() {
+  try {
+    loadBets();
+    const iso = localYMD(new Date());
+    const [y, m, d] = iso.split("-");
+    const mdy = `${m}/${d}/${y}`;
+    const stamp = new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" }) + " " + iso;
+    let added = 0, skipped = 0;
+    sessionTrackedProps.forEach((v, key) => {
+      const sep = key.lastIndexOf("|");
+      if (sep < 0) return;
+      const player = key.slice(0, sep);
+      const stat = key.slice(sep + 1);
+      if (!player || !stat || v == null || v.line == null) return;
+      const ou = v.ou || "over";
+      const already = bets.some(b => b &&
+        resolveNorm(b.player || "") === resolveNorm(player) &&
+        (b.stat || "").toUpperCase() === stat.toUpperCase() &&
+        Number(b.line) === Number(v.line) &&
+        (b.ou || "").toLowerCase() === ou.toLowerCase());
+      if (already) { skipped++; return; }
+      const odds = (v.odds != null && !isNaN(v.odds)) ? Number(v.odds) : -110;
+      const s = calcStake(odds) || { stake: 1, toWin: 1, type: "even" };
+      // Pull team/pos from the loaded projections when we can.
+      let row = null;
+      try {
+        if (typeof merged !== "undefined" && merged) {
+          row = merged.find(r => r && resolveNorm(r.rawName) === resolveNorm(player));
+        }
+      } catch (e) {}
+      bets.push({
+        id: Date.now() + added,
+        date: mdy, gameDate: iso, timestamp: stamp,
+        player, pos: row ? (row.pos || "") : "",
+        stat: stat.toUpperCase(), ou, line: Number(v.line), odds,
+        fair: null, altBooks: [],
+        stake: s.stake, toWin: s.toWin, type: s.type,
+        book: "", team: row ? (row.team || "") : "",
+        result: "pending", recoveredFromPill: true
+      });
+      added++;
+    });
+    if (!added && !skipped) { showToast("No tracked pills to load"); return; }
+    let saved = true;
+    try {
+      localStorage.setItem("wnba_blender_bets", JSON.stringify(bets));
+    } catch (e) { saved = false; }
+    renderTracker();
+    if (!saved) {
+      showToast(`Added ${added} in memory \u2014 SAVE FAILED, storage full. Export now.`);
+      console.warn("[recover] localStorage full. Bets are in memory only \u2014 export immediately.");
+    } else {
+      showToast(`Loaded ${added} bet${added === 1 ? "" : "s"}` + (skipped ? ` \u00b7 ${skipped} already tracked` : ""));
+    }
+  } catch (e) {
+    showToast("Load failed \u2014 see console");
+    console.error("loadTrackedIntoBets:", e);
+  }
+}
+
+// Copy every ✓ TRACKED pill as text, same shape as Copy Open Props.
+// Reads only the pills — works even when localStorage is full and bets
+// never persisted.
+function copyTrackedProps() {
+  try {
+    const lines = [];
+    sessionTrackedProps.forEach((v, key) => {
+      const sep = key.lastIndexOf("|");
+      if (sep < 0) return;
+      const player = key.slice(0, sep);
+      const stat = key.slice(sep + 1);
+      if (!player || !stat || v == null || v.line == null) return;
+      const dir = (v.ou || "over").toLowerCase().startsWith("u") ? "under" : "over";
+      const odds = (v.odds != null && !isNaN(v.odds))
+        ? ` ${v.odds > 0 ? "+" : ""}${v.odds}` : "";
+      let team = "";
+      try {
+        if (typeof merged !== "undefined" && merged) {
+          const row = merged.find(r => r && resolveNorm(r.rawName) === resolveNorm(player));
+          if (row && row.team) team = ` (${row.team})`;
+        }
+      } catch (e) {}
+      lines.push(`${player}${team}  ${dir} ${v.line} ${statWordFor(stat)}${odds}`);
+    });
+    if (!lines.length) { showToast("No tracked props"); return; }
+    const text = `WNBA tracked props: (${lines.length})\n` + lines.join("\n");
+    copyTextToClipboard(text,
+      () => showToast(`Copied ${lines.length} tracked prop${lines.length === 1 ? "" : "s"}`),
+      () => showToast("Copy blocked \u2014 text in console"));
+  } catch (e) {
+    showToast("Copy failed \u2014 see console");
+    console.error("copyTrackedProps:", e);
+  }
+}
+// Stat code -> the word the open-props copy uses.
+function statWordFor(stat) {
+  const s = String(stat || "").toUpperCase();
+  return ({ PTS: "points", REB: "rebounds", AST: "assists", "3PM": "threes",
+            PRA: "PRA", PR: "PR", PA: "PA", RA: "RA", MIN: "minutes",
+            STL: "steals", BLK: "blocks", TOV: "turnovers" })[s] || s.toLowerCase();
+}
+
 function clearTrackedProps() {
   if (sessionTrackedProps.size === 0) { showToast("No tracked pills to clear"); return; }
   if (!confirm(`Clear ${sessionTrackedProps.size} tracked pill${sessionTrackedProps.size === 1 ? "" : "s"}? This only affects the ✓ TRACKED indicators on Projections — your actual tracked bets stay intact.`)) return;
