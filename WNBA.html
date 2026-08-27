@@ -11719,6 +11719,65 @@ function renderPlayerAnalytics() {
   const buildRows = (arr) => arr.length ? arr.map(s => row(s, { featured: s.pl >= 5, dim: s.pl <= -3 })).join("") : `<tr><td colspan="5" style="padding:14px;text-align:center;color:#525a64;font-size:11px;font-family:'Plus Jakarta Sans',sans-serif;">Not enough data (need ≥${MIN_PLAYER_BETS} settled bets per player).</td></tr>`;
   const buildComboRows = (arr) => arr.length ? arr.map(s => row(s, { featured: s.pl >= 3, dim: s.pl <= -2 })).join("") : `<tr><td colspan="5" style="padding:14px;text-align:center;color:#525a64;font-size:11px;font-family:'Plus Jakarta Sans',sans-serif;">Not enough data (need ≥${MIN_COMBO_BETS} bets per player+stat combo).</td></tr>`;
 
+  // ── TEAMS · PROFIT BY ROSTER ────────────────────────────────────
+  // Which teams' players you actually make money on. Grouped by the player's
+  // own team (not the opponent), min 3 bets so single results don't headline.
+  const teamSectionHtml = (() => {
+    try {
+      const byTeam = new Map();
+      let tTotal = 0;
+      settled.forEach(b => {
+        const team = String(b.team || "").toUpperCase().trim();
+        if (!team) return;
+        if (!byTeam.has(team)) byTeam.set(team, { total: 0, hits: 0, pushes: 0, staked: 0, pl: 0 });
+        const s = byTeam.get(team);
+        s.total++;
+        if (b.result === "hit") { s.hits++; s.pl += Number(b.toWin) || 1; }
+        else { s.pl -= Number(b.stake) || 1; }
+        s.staked += Number(b.stake) || 1;
+        tTotal++;
+      });
+      const entries = [...byTeam.entries()]
+        .filter(([, s]) => s.total >= 3)
+        .map(([team, s]) => ({ team, s, roi: s.staked > 0 ? (s.pl / s.staked) * 100 : 0 }))
+        .sort((a, b) => b.roi - a.roi);
+      if (entries.length < 2) return "";
+      const half = Math.max(1, Math.floor(entries.length / 2));
+      const best = entries.slice(0, Math.min(5, half));
+      const worst = entries.slice(-Math.min(5, entries.length - best.length)).reverse();
+      const logo = (t) => (typeof teamLogoImg === "function") ? teamLogoImg(t, 13) : "";
+      const nm = (t) => (typeof displayTeamAbbr === "function") ? displayTeamAbbr(t) : t;
+      const mkRows = (arr) => arr.map(e => buildRows([{
+        label: `${logo(e.team)} ${nm(e.team)}`, ...e.s
+      }])).join("");
+      const rowsFor = (arr) => arr.map(e => {
+        const wl = `${e.s.hits}-${e.s.total - e.s.hits}`;
+        const hitPct = Math.round((e.s.hits / e.s.total) * 100);
+        const plCol = e.s.pl >= 0 ? "#22c55e" : "#f87171";
+        const roiCol = e.roi >= 0 ? "#7dd3fc" : "#f87171";
+        const hitCol = hitPct >= 55 ? "#22c55e" : hitPct >= 45 ? "#d4dae3" : "#f87171";
+        return `<tr style="border-bottom:1px solid #0f1217;">
+          <td style="padding:7px 10px;font-size:12px;color:#d4dae3;">${logo(e.team)} ${nm(e.team)}</td>
+          <td style="padding:7px 10px;font-size:11px;text-align:right;font-family:'JetBrains Mono','Menlo',monospace;color:#a8b0bb;">${wl}</td>
+          <td style="padding:7px 10px;font-size:11px;text-align:right;font-family:'JetBrains Mono','Menlo',monospace;color:${hitCol};font-weight:700;">${hitPct}%</td>
+          <td style="padding:7px 10px;font-size:11px;text-align:right;font-family:'JetBrains Mono','Menlo',monospace;color:${plCol};font-weight:700;">${e.s.pl >= 0 ? "+" : ""}${e.s.pl.toFixed(2)}u</td>
+          <td style="padding:7px 10px;font-size:11px;text-align:right;font-family:'JetBrains Mono','Menlo',monospace;color:${roiCol};font-weight:700;">${e.roi >= 0 ? "+" : ""}${e.roi.toFixed(1)}%</td>
+        </tr>`;
+      }).join("");
+      const head = `<div style="font-size:11px;color:#fff;line-height:1.5;padding:8px 10px;background:rgba(255,255,255,0.02);border-radius:6px;margin-bottom:8px;">
+        <span style="color:#7dd3fc;font-weight:800;">TAKEAWAY</span> \u00b7 Best: ${nm(best[0].team)} (${best[0].roi >= 0 ? "+" : ""}${best[0].roi.toFixed(1)}% over ${best[0].s.total})${worst.length ? ` \u00b7 Worst: ${nm(worst[0].team)} (${worst[0].roi >= 0 ? "+" : ""}${worst[0].roi.toFixed(1)}% over ${worst[0].s.total})` : ""}.
+        Small samples move fast \u2014 the W-L column is there so you can weigh it yourself.</div>`;
+      const body = head
+        + `<div style="font-size:10px;color:#8b93a0;font-weight:700;letter-spacing:0.5px;text-transform:uppercase;margin:6px 0 3px;">Most profitable</div>`
+        + tableShell(rowsFor(best), { labelHead: "Team" })
+        + (worst.length ? `<div style="font-size:10px;color:#8b93a0;font-weight:700;letter-spacing:0.5px;text-transform:uppercase;margin:10px 0 3px;">Least profitable</div>`
+            + tableShell(rowsFor(worst), { labelHead: "Team" }) : "");
+      return section("Teams \u00b7 Profit by Roster", `${tTotal} settled bets \u00b7 ${entries.length} teams with 3+ bets`, body, false,
+        "Grouped by the team the player is on. Shows which rosters you read well and which keep costing you.");
+    } catch (e) { console.warn("team section:", e); return ""; }
+  })();
+
+
   root.innerHTML = `
     <div style="padding:18px 16px;max-width:920px;margin:0 auto;font-family:'Plus Jakarta Sans',sans-serif;">
       <div style="margin-bottom:18px;">
@@ -11732,6 +11791,7 @@ function renderPlayerAnalytics() {
       ${section("By Line Bucket", "Stat-relative groupings with Over/Under split — finds which line ranges you nail vs. miss and which direction", tableShell(buildLineRows(lineRows)), false, `Groups bets by how big the number you bet was, relative to what's typical for that stat (small lines vs. large lines), then splits each group by over/under. Answers questions like "am I better betting unders on high lines than low lines."`)}
       ${section("By Odds Bucket", "How you perform across pricing tiers — are you better at favorites or dogs?", tableShell(oddsRows.length ? oddsRows.map(s => row(s, { featured: s.pl >= 5, dim: s.pl <= -3 })).join("") : `<tr><td colspan="5" style="padding:14px;text-align:center;color:#525a64;font-size:11px;">No buckets with ≥3 bets.</td></tr>`), false, `Groups bets by the odds you got — heavy favorites (like -200) vs. plus-money longshots. Some bettors are sharper picking obvious favorites; others find more value in underdog-priced lines. This shows which side of that you actually land on.`)}
       ${section("By Stat Type", "Worst stats first — where your edge is weakest", tableShell(statRows.length ? statRows.map(s => row(s, { featured: s.pl >= 8, dim: s.pl <= -3 })).join("") : `<tr><td colspan="5" style="padding:14px;text-align:center;color:#525a64;font-size:11px;">No stat buckets with ≥3 bets.</td></tr>`), false, `Your full record broken down by PTS/REB/AST/3PM/PRA. Sorted worst-first on purpose — this is meant to flag which stat category is dragging on your overall results, not to celebrate your best one (see "By Player" above for that).`)}
+      ${teamSectionHtml}
     </div>
   `;
 }
