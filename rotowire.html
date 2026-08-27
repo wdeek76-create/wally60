@@ -966,8 +966,8 @@
                 <button class="search-clear" id="searchClear" onclick="clearSearch()" title="Clear">&times;</button>
             </div>
             <div class="prop-pill glass" id="lineupsPill" onclick="toggleLineupPanel()" style="margin-left:8px;">Lineups<span id="luTabCount" style="margin-left:5px;"></span></div>
-            <label class="glass" style="cursor: pointer; background-color: rgba(139,92,246,0.2); color: #b79dff; border: 1px solid rgba(139,92,246,0.5); padding: 6px 12px; border-radius: 6px; font-size: 11px; font-weight: 600; display: inline-flex; align-items:center; gap:5px; margin-left:8px;" onclick="openBookModal()">Sportsbooks</label>
-            <label class="glass" style="cursor: pointer; background-color: rgba(56,189,248,0.2); color: #38bdf8; border: 1px solid rgba(56,189,248,0.5); padding: 6px 12px; border-radius: 6px; font-size: 11px; font-weight: 600; display: inline-flex; align-items:center; gap:5px; margin-left:8px;" onclick="toggleBetTracker()" title="Bet Tracker — watch your logged bets move for/against you (CLV)">📊 Tracker<span id="betTrackerCount" style="color:#38bdf8; font-weight:700;"></span></label>
+            <div class="prop-pill glass" onclick="openBookModal()" style="margin-left:8px;">Sportsbooks</div>
+            <div class="prop-pill glass" onclick="toggleBetTracker()" style="margin-left:8px;" title="Bet Tracker — watch your logged bets move for/against you (CLV)">Tracker<span id="betTrackerCount" style="margin-left:5px; color:#38bdf8; font-weight:700;"></span></div>
         </div>
         <div style="margin-left:auto; display:flex; align-items:center; gap:10px;">
             <div class="bq-toggle" title="All / Clean / Conditional, then filter Conditional players by their injury status (toggle more than one, e.g. Q + P).">
@@ -1006,6 +1006,7 @@
         <div style="padding:14px 16px; border-bottom:1px solid #1a3a4a; display:flex; justify-content:space-between; align-items:center;">
             <div style="font-size:13px; font-weight:700; color:#38bdf8; font-family:'JetBrains Mono',monospace; letter-spacing:0.05em;">BET TRACKER</div>
             <div style="display:flex; align-items:center; gap:12px;">
+                <span onclick="refreshBetTracker()" style="cursor:pointer; color:#38bdf8; font-size:10px; font-family:'JetBrains Mono',monospace; display:inline-flex; align-items:center; gap:4px;" title="Refresh market — pull latest line/odds movement"><span id="btRefreshIcon" style="display:inline-block; transition:transform 0.5s;">↻</span> REFRESH</span>
                 <span onclick="clearTrackedBets()" style="cursor:pointer; color:#f87171; font-size:10px; font-family:'JetBrains Mono',monospace;" title="Clear all tracked bets">CLEAR</span>
                 <span style="cursor:pointer; color:#999; font-size:20px;" onclick="toggleBetTracker()">&times;</span>
             </div>
@@ -4768,11 +4769,23 @@
             const odds = oddsEl ? parseInt(oddsEl.value.replace('+', ''), 10) : activeFairContext.baseOdds;
             const fairEl = document.getElementById('fairProbVal');
             const fairProb = fairEl ? (parseFloat(fairEl.textContent) / 100) : null;
+            const fairValEl = document.getElementById('fairVal');
+            const fairOdds = fairValEl ? parseInt(fairValEl.textContent.replace('+', ''), 10) : null;
+            const evEl = document.getElementById('liveEv');
+            const entryEv = evEl ? parseFloat(evEl.textContent) : (activeFairContext.baseEv ?? null);
+            // RW projection for the exact stat + projected minutes (if roster/projections loaded).
+            const pProj = row ? projections[row.player.toLowerCase()] : null;
+            let rwProj = null, projMins = null;
+            if (pProj) {
+                projMins = pProj.minutes != null ? +pProj.minutes : null;
+                if (currentProp === 'pra') rwProj = (pProj.points||0)+(pProj.rebounds||0)+(pProj.assists||0);
+                else { const k = currentProp==='points'?'points':currentProp==='rebounds'?'rebounds':currentProp==='assists'?'assists':'threes'; rwProj = pProj[k] != null ? +pProj[k] : null; }
+            }
             const bet = {
                 id: Date.now() + '-' + Math.random().toString(36).slice(2, 7),
                 player, team, teamCode, prop: currentProp, side: activeFairContext.side,
                 book: activeFairContext.book,
-                entryLine: line, entryOdds: odds, fairProb,
+                entryLine: line, entryOdds: odds, fairProb, fairOdds, entryEv, rwProj, projMins,
                 added: Date.now(),
                 // current market — seeded at entry, drifts via mockBetDrift()
                 curLine: line, curOdds: odds, lastUpdate: Date.now()
@@ -4812,22 +4825,41 @@
             if (el) el.textContent = trackedBets.length ? trackedBets.length : '';
         }
 
-        // Mock the market drifting through the day. Each bet's current line/odds wanders a bit
-        // every time the tracker is viewed, biased slightly so some go for you and some against —
-        // enough to demo CLV. Real odds can replace this by setting curLine/curOdds directly.
+        // Mock the market drifting through the day. Weighted so MOST bets steam toward your side
+        // (line moves your way, price shortens) with a minority going against — realistic demo of
+        // CLV. Each bet's tendency is seeded by its id so it's stable across re-renders. Real odds
+        // can replace this by writing curLine/curOdds directly.
+        let _driftTick = 0;
         function mockBetDrift() {
             const now = Date.now();
+            _driftTick++;
             trackedBets.forEach(b => {
                 const mins = (now - b.lastUpdate) / 60000;
                 if (mins < 0.15) return; // don't thrash on rapid re-renders
-                // deterministic-ish wobble seeded by id so each bet has its own tendency
                 const seed = [...b.id].reduce((s, c) => s + c.charCodeAt(0), 0);
-                const bias = ((seed % 5) - 2) * 0.4; // -0.8..+0.8 cents-ish tendency
-                const step = Math.round((Math.sin(now / 900000 + seed) * 6) + bias);
-                b.curOdds = clampAmerican(b.curOdds + step);
-                // occasionally the line itself moves a half-point
-                if ((seed + Math.floor(now / 1800000)) % 7 === 0) {
-                    b.curLine = +(b.curLine + (seed % 2 === 0 ? 0.5 : -0.5)).toFixed(1);
+                // Tendency buckets: ~65% favor, ~20% mild-against, ~15% clearly-bad. Reroll with the
+                // tick so each manual refresh can flip a bet's direction (mostly still favorable).
+                const roll = (seed + _driftTick * 3) % 20;
+                let dir, magnitude;
+                if (roll < 13) { dir = +1; magnitude = 1; }          // favor (most)
+                else if (roll < 15) { dir = +1; magnitude = 2; }     // strong steam your way
+                else if (roll < 19) { dir = -1; magnitude = 1; }     // mild against
+                else { dir = -1; magnitude = 2; }                    // clearly bad
+                // "dir toward you" means: shorter price (higher implied prob) + line moving your way.
+                // Over wants line DOWN, Under wants line UP. Price shortens = odds move toward -EV
+                // side of the number (more negative for favorites, less positive for dogs).
+                const wobble = Math.abs(Math.sin(now / 900000 + seed + _driftTick)); // 0..1 variation
+                const centsStep = Math.round((3 + wobble * 9) * magnitude); // 3..12 cents * mag
+                // Shorten (favor) => push American odds "down" in payout: subtract from + odds,
+                // add magnitude to the negative side. Simplest: move implied prob up by centsStep.
+                const p = Math.min(0.97, Math.max(0.03, americanToProb(b.curOdds) + dir * (centsStep / 1000)));
+                b.curOdds = clampAmerican(probToAmerican(p));
+                // Line drifts occasionally, in the favorable direction most of the time.
+                const lineRoll = (seed + _driftTick) % 5;
+                if (lineRoll === 0) {
+                    const favorableLineStep = b.side === 'over' ? -0.5 : 0.5; // toward your side
+                    const step = dir > 0 ? favorableLineStep : -favorableLineStep;
+                    b.curLine = +(b.curLine + step).toFixed(1);
                 }
                 b.lastUpdate = now;
             });
@@ -4847,15 +4879,38 @@
             panel.style.display = 'flex';
         }
 
-        // CLV in cents: how much better your entry price is than the current market. Positive =
-        // you beat the market (line moved your way). Computed on no-vig implied prob difference.
+        // Manual refresh: force every tracked bet to advance (bypass the anti-thrash guard) so a
+        // click visibly moves the market, then re-render. Spins the icon for feedback.
+        function refreshBetTracker() {
+            trackedBets.forEach(b => { b.lastUpdate = 0; });
+            mockBetDrift();
+            renderBetTracker();
+            const icon = document.getElementById('btRefreshIcon');
+            if (icon) {
+                const cur = parseInt(icon.dataset.rot || '0', 10) + 360;
+                icon.dataset.rot = cur;
+                icon.style.transform = `rotate(${cur}deg)`;
+            }
+        }
+
+        // CLV = closing-line value: did the market move FOR you (you locked a better number than
+        // now) or AGAINST you. Must account for BOTH the price and the LINE, and must be signed by
+        // your side. We express it as the change in your bet's win-probability-equivalent:
+        //   - price component: de-vigged implied prob at entry vs now (same side)
+        //   - line component: each half-point the line moves your way is worth ~1.3% for that side
+        // Positive ONLY when the total move favors your side; negative when it hurts you.
         function betClv(bet) {
             const entryProb = americanToProb(bet.entryOdds);
             const curProb = americanToProb(bet.curOdds);
-            // For the SAME side, a lower current implied prob = market now thinks it's less likely
-            // = your entry (higher payout) beat the close. CLV% = entryProb - curProb, but framed
-            // so positive means good: you locked a better price than now.
-            return (curProb - entryProb) * 100; // >0 means current is priced shorter → you got value
+            // Price move for YOUR side: if the current price is shorter (higher implied prob) than
+            // your entry, the market agrees more with your side now → you beat the close.
+            const priceEdge = (curProb - entryProb) * 100;
+            // Line move for YOUR side: Over wants the line to DROP, Under wants it to RISE.
+            const lineDelta = bet.curLine - bet.entryLine;           // + = line went up
+            const favorablePts = bet.side === 'over' ? -lineDelta : lineDelta; // + = moved your way
+            const PT_VALUE = 2.6; // ~cents of value per full point of line move (half-pt ≈ 1.3)
+            const lineEdge = favorablePts * PT_VALUE;
+            return priceEdge + lineEdge;
         }
 
         function renderBetTracker() {
@@ -4890,8 +4945,28 @@
 
                 const lineArrow = lineMoved === 0 ? '·' : (lineMoved > 0 ? '▲' : '▼');
                 const lineColor = lineGood ? '#4ade80' : lineBad ? '#f87171' : '#94a3b8';
-                const oddsColor = oddsMoved === 0 ? '#94a3b8' : (oddsMoved > 0 ? '#4ade80' : '#f87171');
-                const oddsArrow = oddsMoved === 0 ? '·' : (oddsMoved > 0 ? '▲' : '▼');
+                // Odds move shown as cents ("-3c" / "+5c"). A SHORTER current price (market moved
+                // toward your side) means you beat that number → good; longer → the number drifted
+                // away from you. Color by that, not by raw +/-.
+                const oddsGood = americanToProb(b.curOdds) > americanToProb(b.entryOdds); // shorter now
+                const oddsColor = oddsMoved === 0 ? '#94a3b8' : (oddsGood ? '#4ade80' : '#f87171');
+                const oddsCents = oddsMoved === 0 ? 'no move' : `${oddsMoved > 0 ? '+' : ''}${oddsMoved}c`;
+
+                // Analytics captured at entry: +EV, fair value, RW projection + projected minutes.
+                const evColor = b.entryEv == null ? '#64748b' : (b.entryEv >= 0 ? '#4ade80' : '#f87171');
+                const evChip = b.entryEv == null ? '' : `<span style="font-size:10px; font-weight:800; color:${evColor}; background:${evColor}1c; padding:3px 8px; border-radius:6px; font-family:'JetBrains Mono',monospace;">${b.entryEv >= 0 ? '+' : ''}${b.entryEv.toFixed(1)}% EV</span>`;
+                const fairChip = b.fairOdds == null ? '' : `<span style="font-size:10px; font-weight:700; color:#c4b5fd; background:rgba(139,92,246,0.14); padding:3px 8px; border-radius:6px; font-family:'JetBrains Mono',monospace;" title="Fair value at entry">FAIR ${fmtO(b.fairOdds)}</span>`;
+                // RW proj vs the line, colored by whether the projection supports your side.
+                let rwChip = '';
+                if (b.rwProj != null) {
+                    const supports = b.side === 'over' ? b.rwProj > b.entryLine : b.rwProj < b.entryLine;
+                    const rc = supports ? '#a3e635' : '#f59e0b';
+                    const mins = b.projMins != null ? ` <span style="color:#7c8794;">· ${b.projMins}m</span>` : '';
+                    rwChip = `<span style="font-size:10px; font-weight:700; color:${rc}; background:${rc}14; padding:3px 8px; border-radius:6px; font-family:'JetBrains Mono',monospace;" title="RotoWire projection${b.projMins!=null?' · projected minutes':''}">RW ${b.rwProj.toFixed(1)}${mins}</span>`;
+                }
+                const analyticsRow = (evChip || fairChip || rwChip)
+                    ? `<div style="display:flex; flex-wrap:wrap; gap:6px; padding:0 14px 10px 18px;">${evChip}${fairChip}${rwChip}</div>`
+                    : '';
 
                 return `
                 <div style="position:relative; background:linear-gradient(160deg,#111a28 0%,#0c1420 60%,#0a1018 100%); border:1px solid ${accent}44; border-radius:14px; padding:0; margin-bottom:12px; overflow:hidden; box-shadow:0 4px 16px rgba(0,0,0,0.4), 0 0 24px ${accentGlow};">
@@ -4919,6 +4994,7 @@
                         <span style="font-size:9px; font-weight:800; letter-spacing:0.08em; color:${accent}; font-family:'JetBrains Mono',monospace;">● ${statusText}</span>
                         <span style="font-size:9px; color:#475569; font-family:'JetBrains Mono',monospace;">logged ${addedStr}</span>
                     </div>
+                    ${analyticsRow}
                     <!-- metric tiles -->
                     <div style="display:grid; grid-template-columns:1fr 1fr 1.15fr; gap:1px; background:#0a1018; border-top:1px solid #16202e;">
                         <div style="padding:10px 8px; text-align:center; background:#0d1622;">
@@ -4929,7 +5005,7 @@
                         <div style="padding:10px 8px; text-align:center; background:#0d1622;">
                             <div style="font-size:8px; color:#64748b; letter-spacing:0.07em; font-family:'JetBrains Mono',monospace; margin-bottom:3px;">ODDS</div>
                             <div style="font-size:16px; font-weight:800; color:#e2e8f0; font-family:'JetBrains Mono',monospace; line-height:1;">${fmtO(b.curOdds)}</div>
-                            <div style="font-size:8px; color:${oddsColor}; margin-top:3px; font-weight:600;">${oddsMoved === 0 ? 'no move' : oddsArrow + ' ' + Math.abs(oddsMoved)}</div>
+                            <div style="font-size:8px; color:${oddsColor}; margin-top:3px; font-weight:600;">${oddsCents}</div>
                         </div>
                         <div style="padding:10px 8px; text-align:center; background:${accent}14;">
                             <div style="font-size:8px; color:${accent}; letter-spacing:0.07em; font-family:'JetBrains Mono',monospace; margin-bottom:3px; opacity:0.8;">CLV</div>
