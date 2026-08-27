@@ -4857,7 +4857,8 @@
                 // Line drifts occasionally, in the favorable direction most of the time.
                 const lineRoll = (seed + _driftTick) % 5;
                 if (lineRoll === 0) {
-                    const favorableLineStep = b.side === 'over' ? -0.5 : 0.5; // toward your side
+                    // Favorable = books move toward your side: Over line UP, Under line DOWN.
+                    const favorableLineStep = b.side === 'over' ? 0.5 : -0.5;
                     const step = dir > 0 ? favorableLineStep : -favorableLineStep;
                     b.curLine = +(b.curLine + step).toFixed(1);
                 }
@@ -4893,23 +4894,23 @@
             }
         }
 
-        // CLV = closing-line value: did the market move FOR you (you locked a better number than
-        // now) or AGAINST you. Must account for BOTH the price and the LINE, and must be signed by
-        // your side. We express it as the change in your bet's win-probability-equivalent:
-        //   - price component: de-vigged implied prob at entry vs now (same side)
-        //   - line component: each half-point the line moves your way is worth ~1.3% for that side
-        // Positive ONLY when the total move favors your side; negative when it hurts you.
+        // CLV = closing-line value, measured as MARKET AGREEMENT: has the market moved toward your
+        // side since you bet? Both the line and the price convert to the same unit — the market's
+        // implied probability of YOUR side — so a full-point line move and a few-cent price move add
+        // up cleanly (no mixing "cents" with "points").
+        //   - price: de-vigged implied prob of your side, entry vs now
+        //   - line:  the number moving toward your side raises your side's implied prob
+        // For an OVER, the line going UP = books saying "more" = toward your side = GOOD.
+        // For an UNDER, the line going DOWN = books saying "less" = toward your side = GOOD.
         function betClv(bet) {
             const entryProb = americanToProb(bet.entryOdds);
             const curProb = americanToProb(bet.curOdds);
-            // Price move for YOUR side: if the current price is shorter (higher implied prob) than
-            // your entry, the market agrees more with your side now → you beat the close.
-            const priceEdge = (curProb - entryProb) * 100;
-            // Line move for YOUR side: Over wants the line to DROP, Under wants it to RISE.
-            const lineDelta = bet.curLine - bet.entryLine;           // + = line went up
-            const favorablePts = bet.side === 'over' ? -lineDelta : lineDelta; // + = moved your way
-            const PT_VALUE = 2.6; // ~cents of value per full point of line move (half-pt ≈ 1.3)
-            const lineEdge = favorablePts * PT_VALUE;
+            const priceEdge = (curProb - entryProb) * 100; // + = price shortened toward your side
+            // Line move toward your side, in probability terms. Over wants the line UP, Under DOWN.
+            const lineDelta = bet.curLine - bet.entryLine;            // + = number went up
+            const towardYou = bet.side === 'over' ? lineDelta : -lineDelta; // + = market moved your way
+            const PT_VALUE = 2.6; // ≈ % of implied-prob value per full point of line move
+            const lineEdge = towardYou * PT_VALUE;
             return priceEdge + lineEdge;
         }
 
@@ -4928,8 +4929,9 @@
             const fmtO = o => (o > 0 ? '+' : '') + o;
             body.innerHTML = trackedBets.map(b => {
                 const lineMoved = +(b.curLine - b.entryLine).toFixed(1);
-                const lineGood = b.side === 'over' ? lineMoved < 0 : lineMoved > 0;
-                const lineBad = b.side === 'over' ? lineMoved > 0 : lineMoved < 0;
+                // "In favor" = books moved toward your side: Over wants the line UP, Under DOWN.
+                const lineGood = b.side === 'over' ? lineMoved > 0 : lineMoved < 0;
+                const lineBad = b.side === 'over' ? lineMoved < 0 : lineMoved > 0;
                 const oddsMoved = b.curOdds - b.entryOdds;
                 const clv = betClv(b);
                 const clvGood = clv > 0.3, clvBad = clv < -0.3;
@@ -5000,7 +5002,7 @@
                         <div style="padding:10px 8px; text-align:center; background:#0d1622;">
                             <div style="font-size:8px; color:#64748b; letter-spacing:0.07em; font-family:'JetBrains Mono',monospace; margin-bottom:3px;">LINE</div>
                             <div style="font-size:16px; font-weight:800; color:${lineColor}; font-family:'JetBrains Mono',monospace; line-height:1;">${b.curLine}<span style="font-size:10px; margin-left:2px;">${lineArrow}</span></div>
-                            <div style="font-size:8px; color:${lineColor}; margin-top:3px; font-weight:600;">${lineMoved === 0 ? 'no move' : (lineGood ? 'in favor' : 'against')}</div>
+                            <div style="font-size:8px; color:${lineColor}; margin-top:3px; font-weight:600;">${lineMoved === 0 ? `${b.entryLine} · flat` : `${b.entryLine}→${b.curLine} ${lineGood ? 'favor' : 'against'}`}</div>
                         </div>
                         <div style="padding:10px 8px; text-align:center; background:#0d1622;">
                             <div style="font-size:8px; color:#64748b; letter-spacing:0.07em; font-family:'JetBrains Mono',monospace; margin-bottom:3px;">ODDS</div>
@@ -5491,7 +5493,10 @@
                     const h = hashStr(displayName + propLabel);
                     const offsets = [-1, -0.5, 0, 0.5, 1];      // book line vs rounded proj
                     const off = offsets[h % offsets.length];
-                    let line = Math.round(statVal * 2) / 2 + off;
+                    // Props are almost always posted on the half-point (X.5) to avoid pushes.
+                    // Round the proj to the nearest whole, apply the offset, then snap to X.5.
+                    let line = Math.round(statVal) + off;
+                    line = Math.floor(line) + 0.5;              // always land on a half-point
                     if (line < 0.5) line = 0.5;
 
                     generatedData.push({
@@ -6341,7 +6346,7 @@
         function _nudgeLiq(s) {
             const v = _parseLiq(s);
             if (v == null) return { val: s, dir: null, delta: 0 };
-            const pct = (0.08 + Math.random() * 0.35) * (Math.random() < 0.5 ? 1 : -1); // ±8–43%
+            const pct = (0.15 + Math.random() * 0.40) * (Math.random() < 0.5 ? 1 : -1); // ±15–55%
             let nv = Math.max(50, v * (1 + pct)); // floor so it never fully drains
             nv = nv >= 1000 ? Math.round(nv / 100) * 100 : Math.round(nv / 10) * 10;
             return { val: _fmtLiq(nv), dir: nv > v ? 'up' : (nv < v ? 'down' : null), delta: Math.round(nv - v) };
@@ -6388,41 +6393,45 @@
             const side = Math.random() < 0.5 ? 'over' : 'under';
             const pair = d[side];
 
-            // If this book carries liquidity (exchange), ~45% of the time do a LIQUIDITY-only
-            // move &mdash; money flowing in or out &mdash; instead of touching the odds.
+            // If this book carries liquidity (exchange), ~65% of the time do LIQUIDITY-only
+            // moves — money flowing in or out — instead of touching the odds. (Weighted up, and
+            // batched to 2–4 cells per tick, so the depth is visibly active on camera.)
             const hasLiq = d.over_liq != null || d.under_liq != null;
-            if (hasLiq && Math.random() < 0.45) {
-                const liqSide = Math.random() < 0.5 ? 'over' : 'under';
-                const liqKey = liqSide + '_liq';
-                if (d[liqKey] != null) {
-                    const res = _nudgeLiq(d[liqKey]);
-                    if (!res.dir || res.delta === 0) return; // no visible change, skip
-                    d[liqKey] = res.val;
-                    _queueFlash({ rowIndex: rowIdx, book: sb, side: liqSide,
+            if (hasLiq && Math.random() < 0.65) {
+                // Gather all exchange liquidity cells currently on the board, then move a handful.
+                const exBooks = visBooks.filter(x => EXCHANGES.has(x));
+                const cells = [];
+                src.forEach((r, ri) => exBooks.forEach(xb => {
+                    const dd = r[xb];
+                    if (!dd) return;
+                    if (dd.over_liq != null) cells.push({ ri, r, xb, side: 'over' });
+                    if (dd.under_liq != null) cells.push({ ri, r, xb, side: 'under' });
+                }));
+                if (!cells.length) return;
+                const n = 2 + Math.floor(Math.random() * 3); // 2–4 cells
+                for (let i = 0; i < n && cells.length; i++) {
+                    const pick = cells.splice(Math.floor(Math.random() * cells.length), 1)[0];
+                    const dd = pick.r[pick.xb];
+                    const liqKey = pick.side + '_liq';
+                    const res = _nudgeLiq(dd[liqKey]);
+                    if (!res.dir || res.delta === 0) continue;
+                    dd[liqKey] = res.val;
+                    _queueFlash({ rowIndex: pick.ri, book: pick.xb, side: pick.side,
                         kind: res.dir === 'up' ? 'liq-up' : 'liq-down', delta: res.delta, dur: 1400 });
-                    // Patch just this liquidity cell + flash it; no full re-render.
-                    patchLiqCell(rowIdx, row, sb, liqSide);
-                    _activeFlashes.forEach(f => applyOddsFlash(f, Date.now() - f.start));
+                    patchLiqCell(pick.ri, pick.r, pick.xb, pick.side);
                 }
+                _activeFlashes.forEach(f => applyOddsFlash(f, Date.now() - f.start));
                 return;
             }
 
-            // Decide the move. ~12% of the time the LINE itself moves (orange). Otherwise
-            // an odds tick, which is better (green) or worse (red) for the bettor.
+            // Odds-only ticks — the main displayed LINE never moves, so it stays a solid, stable
+            // number on the board. Only the price ticks better (green) or worse (red).
             const oldOdds = pair[1];
             let kind;
-            if (Math.random() < 0.12) {
-                // line move &#8594; orange indicator, re-price near key number
-                const step = Math.random() < 0.5 ? 0.5 : 1;
-                pair[0] = +(pair[0] + (Math.random() < 0.5 ? step : -step)).toFixed(1);
-                pair[1] = nextValidOddsBy(-110, [0, 2, -2, 4, -4][Math.floor(Math.random() * 5)]);
-                // keep the two sides on the same number
-                d[side === 'over' ? 'under' : 'over'][0] = pair[0];
-                kind = 'move';
-            } else {
+            {
                 const ticks = [2, 4, 6][Math.floor(Math.random() * 3)] * (Math.random() < 0.5 ? 1 : -1);
                 pair[1] = nextValidOddsBy(oldOdds, ticks);
-                // Better price for bettor = odds moved UP (e.g. -120 &#8594; -110, or +100 &#8594; +110)
+                // Better price for bettor = odds moved UP (e.g. -120 → -110, or +100 → +110)
                 kind = pair[1] > oldOdds ? 'better' : (pair[1] < oldOdds ? 'worse' : null);
             }
             if (!kind) return;
@@ -6597,9 +6606,10 @@
 
         function startLiveOdds() {
             if (_liveOddsTimer) return;
-            // Fire on a randomized cadence so updates feel organic (every 4–9s).
+            // Fire on a randomized cadence so updates feel organic (every 2–4s — brisk enough to
+            // show the market moving on camera without feeling frantic).
             const schedule = () => {
-                _liveOddsTimer = setTimeout(() => { liveOddsTick(); schedule(); }, 4000 + Math.random() * 5000);
+                _liveOddsTimer = setTimeout(() => { liveOddsTick(); schedule(); }, 2000 + Math.random() * 2000);
             };
             schedule();
         }
