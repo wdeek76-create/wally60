@@ -324,7 +324,7 @@
 <header>
   <div>
     <h1><span class="a">UFC</span> Model</h1>
-    <div class="sub">Auto-log ≥1% edge · ML devig · per-stream tracking <span class="meta" style="margin-left:8px; font-size:10px; opacity:0.6;">build 2026.08.15-scope-fix</span></div>
+    <div class="sub">Auto-log ≥1% edge · ML devig · per-stream tracking <span class="meta" style="margin-left:8px; font-size:10px; opacity:0.6;">build 2026.08.15-auto-opt</span></div>
   </div>
   <div style="margin-left:auto; display:flex; align-items:center; gap:8px;">
     <label class="meta" style="display:flex; align-items:center; gap:6px; cursor:pointer; font-size:11px; letter-spacing:0.04em; text-transform:uppercase;" title="Hide Arena source from every tab and exclude it from consensus/combo math">
@@ -787,6 +787,7 @@
         <p class="meta" style="margin:6px 0 0 0;">Per-fighter blend of Saber / MMAEye / Action / Arena. Weights renormalize when a source is missing for a fighter. Min 2 sources to show.</p>
       </div>
       <div style="display:flex; gap:8px; align-items:center;">
+        <button onclick="autoOptimizeModelWeights()" class="ghost" style="padding:8px 12px; font-size:13px; white-space:nowrap;" title="Sweep every Saber/Eye weight split and find combinations that maximize units, ROI, or win %">🔍 Auto-optimize</button>
         <button onclick="copyModelPicks()" class="ghost" style="padding:8px 12px; font-size:13px; white-space:nowrap;" title="Copy each fighter with their current-weight model win % to clipboard">📋 Copy picks</button>
         <button onclick="exportModelCardImage()" class="ghost" style="padding:8px 12px; font-size:13px; white-space:nowrap;">📷 Export card image</button>
         <select id="modelCardFilter" style="background:var(--bg2); border:1px solid var(--border); border-radius:6px; padding:7px 10px; color:var(--text); font-size:13px; min-width:280px;"></select>
@@ -4081,6 +4082,179 @@ function toggleBacktestCard(detailId, summaryRow) {
   if (chev) chev.textContent = open ? '▸' : '▾';
 }
 
+// Extract the same 'all' pool the backtest uses, standalone so we can
+// evaluate different weight combos without rendering.
+function buildBacktestPool() {
+  const seen = new Set();
+  const all = [];
+  STATE.cards.forEach(c => {
+    (c.bets || []).forEach(b => {
+      if (!(b.status === 'win' || b.status === 'loss')) return;
+      const key = c.id + '|' + normalizeName(b.fighter);
+      if (seen.has(key)) return;
+      seen.add(key);
+      const eyeK   = findMatchKey(c.eye   || {}, b.fighter);
+      const arenaK = findMatchKey(c.arena || {}, b.fighter);
+      const saberK = findMatchKey(c.saber || {}, b.fighter);
+      let stokProb = b.stokProb;
+      if (stokProb == null) {
+        const actBet = (c.bets || []).find(x =>
+          normalizeName(x.fighter) === normalizeName(b.fighter) &&
+          x.stokProb != null && (x.stream === 'consensus' || x.stream === 'action')
+        );
+        if (actBet) stokProb = actBet.stokProb;
+      }
+      const filled = {
+        ...b,
+        cardLabel: c.label,
+        eyeProb:   b.eyeProb   != null ? b.eyeProb   : (eyeK   ? c.eye[eyeK].prob     : null),
+        arenaProb: b.arenaProb != null ? b.arenaProb : (arenaK ? c.arena[arenaK].prob : null),
+        saberProb: b.saberProb != null ? b.saberProb : (saberK ? c.saber[saberK].prob : null),
+        stokProb,
+      };
+      all.push(filled);
+    });
+  });
+  return all;
+}
+
+// Pure computation: given weights + a pool, return the backtest stats. No DOM.
+// Used both by the auto-optimize sweep and any live display in the modal.
+function computeBacktestAtWeights(pool, wSaber, wEye, wAction = 0) {
+  let wins = 0, losses = 0, units = 0, edgeSum = 0;
+  pool.forEach(b => {
+    const mkt = b.mlImpliedFair;
+    if (mkt == null) return;
+    const parts = [];
+    if (b.saberProb != null) parts.push({ p: b.saberProb, w: wSaber });
+    if (b.eyeProb   != null) parts.push({ p: b.eyeProb,   w: wEye });
+    if (b.stokProb  != null) parts.push({ p: b.stokProb,  w: wAction });
+    if (parts.length < 2) return;
+    const totalW = parts.reduce((s, p) => s + p.w, 0);
+    if (totalW <= 0) return;
+    const blended = parts.reduce((s, p) => s + (p.w / totalW) * p.p, 0);
+    const edge = blended - mkt;
+    if (edge < EDGE_THRESHOLD) return;   // model wouldn't fire
+    if (b.status === 'win') wins++; else losses++;
+    units += unitProfit(b);
+    edgeSum += edge;
+  });
+  const n = wins + losses;
+  return {
+    saber: wSaber, eye: wEye,
+    wins, losses, n,
+    winPct: n ? (wins / n) * 100 : 0,
+    units,
+    roi: n ? (units / n) * 100 : 0,
+    avgEdge: n ? edgeSum / n : 0,
+  };
+}
+
+// Sweep every Saber/Eye split from 0/100 → 100/0 in 1% steps, find the
+// weights that maximize different metrics. Shows a modal so the user can
+// see the top candidates + apply one.
+function autoOptimizeModelWeights() {
+  const pool = buildBacktestPool();
+  if (!pool.length) {
+    toast('No graded bets to optimize on yet', 'error');
+    return;
+  }
+
+  const results = [];
+  for (let s = 0; s <= 100; s++) {
+    results.push(computeBacktestAtWeights(pool, s, 100 - s));
+  }
+
+  // Best-in-class picks. For ROI + Win%, require a minimum sample size so
+  // small-n outliers don't beat honest results.
+  const MIN_N = 20;
+  const bestUnits  = [...results].sort((a, b) => b.units  - a.units)[0];
+  const qualified  = results.filter(r => r.n >= MIN_N);
+  const bestROI    = qualified.length ? [...qualified].sort((a, b) => b.roi    - a.roi)[0]    : null;
+  const bestWinPct = qualified.length ? [...qualified].sort((a, b) => b.winPct - a.winPct)[0] : null;
+
+  // Current stats for comparison
+  const curSaber = +document.getElementById('modelWSaber').value;
+  const curEye = +document.getElementById('modelWEye').value;
+  const current = computeBacktestAtWeights(pool, curSaber, curEye);
+
+  showOptimizeModal({ bestUnits, bestROI, bestWinPct, current, minN: MIN_N });
+}
+
+function showOptimizeModal({ bestUnits, bestROI, bestWinPct, current, minN }) {
+  const fmtRow = (label, r, tag = '') => {
+    if (!r) return `<div style="padding:12px 14px; background:var(--bg2); border:1px solid var(--border); border-radius:8px; opacity:0.5;">
+      <div style="font-weight:700; margin-bottom:4px;">${label}</div>
+      <div class="meta" style="font-size:12px;">Not enough qualified bets (need ${minN}+)</div>
+    </div>`;
+    const uColor = r.units >= 0 ? 'var(--green)' : 'var(--red)';
+    const rColor = r.roi >= 0 ? 'var(--green)' : 'var(--red)';
+    return `<div style="padding:12px 14px; background:var(--bg2); border:1px solid var(--border); border-radius:8px;">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+        <div style="font-weight:700;">${label} ${tag ? `<span class="meta" style="font-weight:400; font-size:11px; margin-left:6px;">${tag}</span>` : ''}</div>
+        <button class="primary" onclick="applyOptimizedWeights(${r.saber}, ${r.eye})" style="padding:5px 12px; font-size:12px;">Apply</button>
+      </div>
+      <div style="display:flex; gap:14px; align-items:center; font-size:12px; flex-wrap:wrap;">
+        <span><b style="color:var(--saber);">Saber ${r.saber}</b> / <b style="color:var(--gold);">Eye ${r.eye}</b></span>
+        <span>${r.wins}-${r.losses}</span>
+        <span>Win% <b>${r.winPct.toFixed(1)}%</b></span>
+        <span>Units <b style="color:${uColor};">${r.units >= 0 ? '+' : ''}${r.units.toFixed(2)}u</b></span>
+        <span>ROI <b style="color:${rColor};">${r.roi >= 0 ? '+' : ''}${r.roi.toFixed(1)}%</b></span>
+      </div>
+    </div>`;
+  };
+
+  const overlay = document.createElement('div');
+  overlay.id = 'optimizeOverlay';
+  overlay.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:9999; display:flex; align-items:center; justify-content:center; padding:20px;';
+  overlay.innerHTML = `
+    <div style="background:var(--bg); border:1px solid var(--border); border-radius:12px; max-width:680px; width:100%; max-height:85vh; overflow-y:auto; padding:22px;">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px;">
+        <h3 style="margin:0; font-size:16px;">🔍 Auto-optimize model weights</h3>
+        <button class="ghost" onclick="closeOptimizeModal()" style="padding:6px 10px;">✕</button>
+      </div>
+      <p class="meta" style="margin:0 0 16px 0; font-size:12px;">Swept every Saber/Eye split from 0/100 to 100/0 across your ${current.n + (current.wins + current.losses - current.n)} graded flagged bets. Each option below applies those exact weights to your live model. You can always adjust manually after.</p>
+
+      <div style="display:grid; gap:10px; margin-bottom:14px;">
+        ${fmtRow('💰 Best P/L (most units won)', bestUnits, 'no min sample')}
+        ${fmtRow('📈 Best ROI', bestROI, `min ${minN} bets`)}
+        ${fmtRow('🎯 Best Win %', bestWinPct, `min ${minN} bets`)}
+      </div>
+
+      <div style="padding:12px 14px; background:var(--bg2); border:1px dashed var(--border); border-radius:8px; margin-bottom:12px;">
+        <div style="font-weight:700; margin-bottom:6px;">Current weights (for comparison)</div>
+        <div style="display:flex; gap:14px; align-items:center; font-size:12px; flex-wrap:wrap;">
+          <span><b style="color:var(--saber);">Saber ${current.saber}</b> / <b style="color:var(--gold);">Eye ${current.eye}</b></span>
+          <span>${current.wins}-${current.losses}</span>
+          <span>Win% <b>${current.winPct.toFixed(1)}%</b></span>
+          <span>Units <b style="color:${current.units >= 0 ? 'var(--green)' : 'var(--red)'};">${current.units >= 0 ? '+' : ''}${current.units.toFixed(2)}u</b></span>
+          <span>ROI <b style="color:${current.roi >= 0 ? 'var(--green)' : 'var(--red)'};">${current.roi >= 0 ? '+' : ''}${current.roi.toFixed(1)}%</b></span>
+        </div>
+      </div>
+
+      <div style="display:flex; justify-content:flex-end; gap:8px;">
+        <button class="ghost" onclick="closeOptimizeModal()">Close</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+}
+
+function closeOptimizeModal() {
+  const el = document.getElementById('optimizeOverlay');
+  if (el) el.remove();
+}
+
+function applyOptimizedWeights(saber, eye) {
+  ['modelWSaber','modelWSaberB'].forEach(id => { const el = document.getElementById(id); if (el) el.value = String(saber); });
+  ['modelWEye','modelWEyeB'].forEach(id => { const el = document.getElementById(id); if (el) el.value = String(eye); });
+  ['modelWSaberLbl','modelWSaberLblB'].forEach(id => { const el = document.getElementById(id); if (el) el.textContent = saber; });
+  ['modelWEyeLbl','modelWEyeLblB'].forEach(id => { const el = document.getElementById(id); if (el) el.textContent = eye; });
+  saveModelWeights(saber, eye);
+  closeOptimizeModal();
+  renderModel();
+  toast(`Applied Saber ${saber} / Eye ${eye}`);
+}
+
 function renderModelBacktest() {
   // The backtest output is split into two divs so the slider block can live
   // between them: #modelBacktestTop holds the headline stats + skipped sanity
@@ -4520,7 +4694,17 @@ async function copyModelPicks() {
     const key = [normalizeName(f.name), normalizeName(f.opp)].sort().join('|');
     if (seen.has(key)) return;
     seen.add(key);
-    const pick = f.prob >= oppEntry.prob ? f : oppEntry;
+    // Pick the +EV side (bigger edge vs market), same logic as export
+    const mkt1 = americanToImplied(f.ml);
+    const mkt2 = americanToImplied(oppEntry.ml);
+    const edge1 = mkt1 != null ? f.prob - mkt1 : null;
+    const edge2 = mkt2 != null ? oppEntry.prob - mkt2 : null;
+    let pick;
+    if (edge1 != null && edge2 != null) {
+      pick = edge1 >= edge2 ? f : oppEntry;
+    } else {
+      pick = f.prob >= oppEntry.prob ? f : oppEntry;
+    }
     picks.push({ name: pick.name, prob: pick.prob });
   });
 
@@ -4604,10 +4788,22 @@ async function exportModelCardImage() {
     const mktB = americanToImplied(oppEntry.ml);
     const edgeA = mktA != null ? f.prob - mktA : null;
     const edgeB = mktB != null ? oppEntry.prob - mktB : null;
-    // Winner = fighter with higher model prob; edge % = their edge
+    // Winner = fighter with the biggest EDGE (the +EV side), not the higher
+    // probability. Model tab flags Denise Gomes at +6.4% edge even though
+    // Xiaonan Yan has higher win prob — Gomes is the +EV bet because market
+    // underpriced her. Export should follow the same logic: pick the side we
+    // want to bet, not the side more likely to win. Falls back to prob-based
+    // pick if either edge is null (missing market data).
     let winner, edge, edgeName;
-    if (f.prob >= oppEntry.prob) { winner = f.name; edge = edgeA; edgeName = f.name; }
-    else { winner = oppEntry.name; edge = edgeB; edgeName = oppEntry.name; }
+    const canCompareEdges = edgeA != null && edgeB != null;
+    if (canCompareEdges) {
+      if (edgeA >= edgeB) { winner = f.name;        edge = edgeA; edgeName = f.name; }
+      else                { winner = oppEntry.name; edge = edgeB; edgeName = oppEntry.name; }
+    } else {
+      // No market → fall back to prob-based pick
+      if (f.prob >= oppEntry.prob) { winner = f.name;        edge = edgeA; edgeName = f.name; }
+      else                          { winner = oppEntry.name; edge = edgeB; edgeName = oppEntry.name; }
+    }
 
     fights.push({
       fighter1: f.name, fighter2: oppEntry.name,
@@ -6489,8 +6685,15 @@ async function generateCardBreakdown() {
     const edge1 = mkt1 != null ? (f.prob - mkt1) * 100 : 0;
     const edge2 = mkt2 != null ? (oppEntry.prob - mkt2) * 100 : 0;
     let winner, edge;
-    if (f.prob >= oppEntry.prob) { winner = f.name; edge = edge1; }
-    else { winner = oppEntry.name; edge = edge2; }
+    // Pick +EV side (bigger edge) — same logic as export
+    if (mkt1 != null && mkt2 != null) {
+      if (edge1 >= edge2) { winner = f.name;        edge = edge1; }
+      else                 { winner = oppEntry.name; edge = edge2; }
+    } else {
+      // Fall back to higher-prob when market data is incomplete
+      if (f.prob >= oppEntry.prob) { winner = f.name;        edge = edge1; }
+      else                          { winner = oppEntry.name; edge = edge2; }
+    }
     fights.push({
       fighter1: f.name, fighter2: oppEntry.name,
       f1Prob: f.prob, f2Prob: oppEntry.prob,
