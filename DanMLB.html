@@ -333,6 +333,7 @@
   <button class="tab-btn" onclick="switchTab('calendar',this)">📅 Calendar</button>
   <button class="tab-btn" onclick="switchTab('chart',this)">📈 Chart</button>
   <button class="tab-btn" onclick="switchTab('add',this)">➕ Add Bets</button>
+  <button class="tab-btn" onclick="switchTab('cfb',this)">🏈 CFB</button>
 </div>
 
 <!-- CALENDAR TAB -->
@@ -550,6 +551,64 @@ Format: Team [F5] Odds Stake" oninput="debounceParse()"></textarea>
       <div id="addStatus" style="margin-top:10px;font-size:12px;color:var(--accent);"></div>
     </div>
   </div>
+</div>
+
+
+<!-- CFB TAB -->
+<div class="tab-panel" id="tab-cfb">
+<div class="stats-bar" id="cfbStatsBar"></div>
+<div class="filters">
+  <span style="color:var(--sub);font-size:11px;font-weight:600;margin-right:4px;">FILTER:</span>
+  <button class="filter-btn active" onclick="cfbSetFilter('all',this)">All</button>
+  <button class="filter-btn" onclick="cfbSetFilter('win',this)">Wins</button>
+  <button class="filter-btn" onclick="cfbSetFilter('loss',this)">Losses</button>
+  <button class="filter-btn" onclick="cfbSetFilter('push',this)">Pushes</button>
+  <button class="filter-btn" onclick="cfbSetFilter('pending',this)">Pending</button>
+  <button class="filter-btn" onclick="cfbSetFilter('ml',this)">ML</button>
+  <button class="filter-btn" onclick="cfbSetFilter('spread',this)">Spreads</button>
+  <button class="filter-btn" onclick="cfbSetFilter('total',this)">Totals</button>
+  <button class="filter-btn" onclick="cfbSetFilter('1h',this)">1H Only</button>
+  <span class="sep">|</span>
+  <input type="text" id="cfbTeamSearch" placeholder="Search team..." oninput="cfbRender()">
+  <button class="grade-btn" id="cfbGradeBtn" onclick="cfbGradeAll()" style="margin-left:auto;">⚡ GRADE ALL (ESPN)</button>
+</div>
+<div id="cfbStatus" style="padding:6px 20px;font-size:11px;color:var(--sub);"></div>
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr>
+      <th>Date</th>
+      <th>Bet</th>
+      <th>Type</th>
+      <th>Odds</th>
+      <th>Risk</th>
+      <th>To Win</th>
+      <th>Result</th>
+      <th>Score</th>
+      <th style="text-align:right;padding-right:14px;">P&L</th>
+      <th style="text-align:right;padding-right:14px;">Running</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody id="cfbTbody"></tbody>
+</table>
+</div>
+<div class="add-wrap">
+  <div class="add-panel">
+    <h3>📥 Paste CFB Bets (Dan format)</h3>
+    <textarea id="cfbPaste" placeholder="9/6: Alabama -180 bol (.67u risk) win
+Georgia -7.5 -110 fd (.55u risk)
+Ohio State/Texas u54.5 -105 b105 (.5u risk)
+Michigan 1h -3.5 -115 dk (.5u risk)
+
+Dates as M/D: prefix carry down. Results (win/loss/push) optional — leave off to grade via ESPN."></textarea>
+    <div style="display:flex;gap:8px;margin-top:10px;">
+      <button class="parse-btn" onclick="cfbAddPaste()">➕ PARSE &amp; ADD</button>
+      <button class="parse-btn" style="background:var(--card);color:var(--text);border:1px solid var(--border);" onclick="document.getElementById('cfbPaste').value=''">✕ CLEAR</button>
+    </div>
+    <div id="cfbAddStatus" style="margin-top:10px;font-size:12px;color:var(--accent);"></div>
+  </div>
+</div>
 </div>
 
 <script>
@@ -3401,6 +3460,330 @@ renderTable();
 // default date inputs to today
 const _today = new Date();
 document.getElementById('addDate').value = `${_today.getMonth()+1}/${_today.getDate()}`;
+
+// ═══ CFB MODULE (self-contained; does not touch MLB state) ═══════════════════
+const CFB_KEY = 'cfb_bets_v1';
+let cfbBets = [];
+let cfbFilter = 'all';
+
+function cfbLoad() {
+  try { cfbBets = JSON.parse(localStorage.getItem(CFB_KEY) || '[]'); }
+  catch(e) { cfbBets = []; }
+}
+function cfbSave() { localStorage.setItem(CFB_KEY, JSON.stringify(cfbBets)); }
+
+function cfbNorm(s) {
+  return String(s||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+    .replace(/[^a-z0-9 ]/g,'').replace(/\s+/g,' ').trim();
+}
+function cfbTeamsMatch(a, b) {
+  a = cfbNorm(a); b = cfbNorm(b);
+  if (!a || !b) return false;
+  return a.indexOf(b) >= 0 || b.indexOf(a) >= 0;
+}
+
+function cfbParseLines(raw) {
+  const lines = raw.trim().split('\n');
+  let currentDate = null;
+  const out = [];
+  for (let line of lines) {
+    line = line.trim();
+    if (!line) continue;
+
+    const dm = line.match(/^(\d+\/\d+):\s*(.*)/);
+    if (dm) { currentDate = dm[1] + '/2026'; line = dm[2].trim(); if (!line) continue; }
+    if (!currentDate) continue;
+
+    let loggedResult = null;
+    if (/ win$/i.test(line)) { loggedResult='win'; line=line.replace(/ win$/i,'').trim(); }
+    else if (/ loss$/i.test(line)) { loggedResult='loss'; line=line.replace(/ loss$/i,'').trim(); }
+    else if (/ push$/i.test(line)) { loggedResult='push'; line=line.replace(/ push$/i,'').trim(); }
+    else if (/ \?$/.test(line)) { loggedResult='pending'; line=line.replace(/ \?$/,'').trim(); }
+    else if (/ pending$/i.test(line)) { loggedResult='pending'; line=line.replace(/ pending$/i,'').trim(); }
+
+    line = line.replace(/\bML(-\d+)/gi, '$1');
+    const is1H = /\b1h\b/i.test(line);
+
+    // risk
+    let risk = null;
+    const toWinM = line.match(/\(to win\s+([0-9.]+)u\)/i);
+    const riskM = line.match(/\(([0-9.]+)u(?:\s*risk)?[^)]*\)?/);
+    const oddsNums = line.match(/[+-]\d+(\.\d+)?/g) || [];
+
+    // classify signed numbers: spread line = abs < 100 (or has .5); odds = abs >= 100
+    let spreadLine = null, odds = null, totalLine = null, isTotal = false, ou = null, team = null;
+
+    // total: "Team1/Team2 [1h] u54.5" or o54.5
+    const totM = line.match(/^([A-Za-z.'\s]+)\/([A-Za-z.'\s]+?)\s+(?:1h\s+)?([ou])([0-9.]+)/i);
+    if (totM) {
+      isTotal = true;
+      team = totM[1].trim();
+      ou = totM[3].toLowerCase();
+      totalLine = parseFloat(totM[4]);
+      for (const n of oddsNums) { const v = parseFloat(n); if (Math.abs(v) >= 100 && odds === null) odds = parseInt(n,10); }
+    } else {
+      for (const n of oddsNums) {
+        const v = parseFloat(n);
+        if ((Math.abs(v) < 100 || /\.5$/.test(n)) && spreadLine === null && Math.abs(v) < 100) spreadLine = v;
+        else if (Math.abs(v) >= 100 && odds === null) odds = parseInt(n,10);
+      }
+      const tm = line.match(/^([A-Za-z.'\s]+?)(?:\s+1h)?\s+[+-]\d/i);
+      team = tm ? tm[1].trim() : line.split(/\s+/)[0];
+    }
+
+    if (toWinM && odds !== null) {
+      const tw = parseFloat(toWinM[1]);
+      risk = odds < 0 ? +(tw*Math.abs(odds)/100).toFixed(2) : +(tw/(odds/100)).toFixed(2);
+    } else if (riskM) {
+      risk = parseFloat(riskM[1]);
+    }
+
+    if (odds === null && spreadLine === null && !isTotal) continue;
+    if (odds === null) odds = -110;
+    if (risk === null) risk = odds < 0 ? +(Math.abs(odds)/100).toFixed(2) : 1;
+
+    const toWin = odds > 0 ? +(risk*odds/100).toFixed(2) : +(risk*100/Math.abs(odds)).toFixed(2);
+    const betType = isTotal ? 'Total' : (spreadLine !== null ? 'Spread' : 'ML');
+
+    out.push({
+      id: Date.now() + Math.floor(Math.random()*100000),
+      date: currentDate, team: team, is1H: is1H,
+      betType: betType, ou: ou, totalLine: totalLine, spreadLine: spreadLine,
+      odds: odds, risk: risk, toWin: toWin,
+      loggedResult: loggedResult, apiResult: null, manualResult: null,
+      score: null, opponent: null, raw: line, conflict: false
+    });
+  }
+  return out;
+}
+
+function cfbAddPaste() {
+  const raw = document.getElementById('cfbPaste').value.trim();
+  if (!raw) return;
+  const parsed = cfbParseLines(raw);
+  if (!parsed.length) {
+    document.getElementById('cfbAddStatus').textContent = 'Nothing parsed — check the format (date prefix like 9/6: required)';
+    return;
+  }
+  cfbBets = cfbBets.concat(parsed);
+  cfbSave();
+  document.getElementById('cfbPaste').value = '';
+  document.getElementById('cfbAddStatus').textContent = '➕ Added ' + parsed.length + ' bets';
+  cfbRender();
+}
+
+function cfbEffective(b) {
+  if (b.manualResult) return b.manualResult;
+  if (b.apiResult) return b.apiResult;
+  return b.loggedResult;
+}
+function cfbPnl(b) {
+  const r = cfbEffective(b);
+  if (!r || r === 'pending') return null;
+  if (r === 'push') return 0;
+  if (r === 'win') return b.toWin;
+  if (r === 'loss') return -b.risk;
+  return null;
+}
+function cfbSetManual(id, result) {
+  const b = cfbBets.find(x => x.id === id);
+  if (!b) return;
+  b.manualResult = b.manualResult === result ? null : result;
+  cfbSave(); cfbRender();
+}
+function cfbDelete(id) {
+  if (!confirm('Delete this bet?')) return;
+  cfbBets = cfbBets.filter(x => x.id !== id);
+  cfbSave(); cfbRender();
+}
+function cfbSetFilter(f, el) {
+  cfbFilter = f;
+  document.querySelectorAll('#tab-cfb .filter-btn').forEach(b => b.classList.remove('active'));
+  if (el) el.classList.add('active');
+  cfbRender();
+}
+
+function cfbBetLabel(b) {
+  if (b.betType === 'Total') return b.team + ' game ' + (b.is1H ? '1H ' : '') + b.ou + b.totalLine;
+  if (b.betType === 'Spread') return b.team + ' ' + (b.is1H ? '1H ' : '') + (b.spreadLine > 0 ? '+' : '') + b.spreadLine;
+  return b.team + (b.is1H ? ' 1H' : '') + ' ML';
+}
+
+function cfbRender() {
+  const search = (document.getElementById('cfbTeamSearch').value || '').toLowerCase();
+  let list = cfbBets.slice();
+  if (cfbFilter === 'win' || cfbFilter === 'loss' || cfbFilter === 'push') list = list.filter(b => cfbEffective(b) === cfbFilter);
+  else if (cfbFilter === 'pending') list = list.filter(b => { const r = cfbEffective(b); return !r || r === 'pending'; });
+  else if (cfbFilter === 'ml') list = list.filter(b => b.betType === 'ML');
+  else if (cfbFilter === 'spread') list = list.filter(b => b.betType === 'Spread');
+  else if (cfbFilter === 'total') list = list.filter(b => b.betType === 'Total');
+  else if (cfbFilter === '1h') list = list.filter(b => b.is1H);
+  if (search) list = list.filter(b => b.team.toLowerCase().indexOf(search) >= 0);
+
+  list.sort((a,b) => new Date(a.date) - new Date(b.date) || a.id - b.id);
+
+  // stats (across ALL cfb bets, not filtered)
+  let w=0,l=0,pu=0,pend=0,pnl=0;
+  cfbBets.forEach(b => {
+    const r = cfbEffective(b);
+    if (!r || r === 'pending') { pend++; return; }
+    if (r === 'win') w++; else if (r === 'loss') l++; else if (r === 'push') pu++;
+    pnl += cfbPnl(b) || 0;
+  });
+  const wp = (w+l) > 0 ? (w/(w+l)*100).toFixed(1) : '0.0';
+  const pnlCls = pnl > 0 ? 'pos' : (pnl < 0 ? 'neg' : 'neu');
+  document.getElementById('cfbStatsBar').innerHTML =
+    '<div class="stat"><div class="label">Record</div><div class="val">' + w + '-' + l + (pu?'-'+pu:'') + '</div><div class="sub-val">' + pend + ' pending</div></div>' +
+    '<div class="stat"><div class="label">Win %</div><div class="val">' + wp + '%</div></div>' +
+    '<div class="stat"><div class="label">Units</div><div class="val ' + pnlCls + '">' + (pnl>=0?'+':'') + pnl.toFixed(2) + 'u</div></div>' +
+    '<div class="stat"><div class="label">Bets</div><div class="val neu">' + cfbBets.length + '</div></div>';
+
+  let running = 0;
+  const rows = list.map(b => {
+    const r = cfbEffective(b);
+    const p = cfbPnl(b);
+    if (p !== null) running += p;
+    const resCls = r === 'win' ? 'pos' : (r === 'loss' ? 'neg' : '');
+    const resTxt = r === 'win' ? 'WIN' : (r === 'loss' ? 'LOSS' : (r === 'push' ? 'PUSH' : '—'));
+    const resColor = r === 'win' ? 'var(--win)' : (r === 'loss' ? 'var(--loss)' : (r === 'push' ? 'var(--push)' : 'var(--sub)'));
+    return '<tr>' +
+      '<td>' + b.date.replace('/2026','') + '</td>' +
+      '<td style="font-weight:600;">' + cfbBetLabel(b) + (b.opponent ? '<div style="font-size:10px;color:var(--sub);">vs ' + b.opponent + '</div>' : '') + '</td>' +
+      '<td>' + b.betType + (b.is1H ? ' 1H' : '') + '</td>' +
+      '<td>' + (b.odds > 0 ? '+' : '') + b.odds + '</td>' +
+      '<td>' + b.risk.toFixed(2) + 'u</td>' +
+      '<td>' + b.toWin.toFixed(2) + 'u</td>' +
+      '<td style="color:' + resColor + ';font-weight:700;">' + resTxt + (b.manualResult ? ' ✎' : '') + '</td>' +
+      '<td style="font-size:11px;color:var(--sub);">' + (b.score || '—') + '</td>' +
+      '<td style="text-align:right;padding-right:14px;font-weight:700;color:' + (p === null ? 'var(--sub)' : (p > 0 ? 'var(--win)' : (p < 0 ? 'var(--loss)' : 'var(--push)'))) + ';">' + (p === null ? '—' : (p>0?'+':'') + p.toFixed(2) + 'u') + '</td>' +
+      '<td style="text-align:right;padding-right:14px;color:' + (running >= 0 ? 'var(--win)' : 'var(--loss)') + ';">' + (running>=0?'+':'') + running.toFixed(2) + 'u</td>' +
+      '<td style="white-space:nowrap;">' +
+        '<button class="grade-btn dark" style="padding:3px 7px;font-size:10px;" onclick="cfbSetManual(' + b.id + ',\'win\')">W</button> ' +
+        '<button class="grade-btn dark" style="padding:3px 7px;font-size:10px;" onclick="cfbSetManual(' + b.id + ',\'loss\')">L</button> ' +
+        '<button class="grade-btn dark" style="padding:3px 7px;font-size:10px;" onclick="cfbSetManual(' + b.id + ',\'push\')">P</button> ' +
+        '<button class="grade-btn dark" style="padding:3px 7px;font-size:10px;color:var(--loss);" onclick="cfbDelete(' + b.id + ')">✕</button>' +
+      '</td>' +
+      '</tr>';
+  });
+  document.getElementById('cfbTbody').innerHTML = rows.join('') || '<tr><td colspan="11" style="padding:20px;color:var(--sub);text-align:center;">No CFB bets yet — paste below</td></tr>';
+}
+
+async function cfbFetchScoreboard(ymd) {
+  const events = [];
+  const seen = {};
+  for (const grp of ['80','81']) {
+    try {
+      const r = await fetch('https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard?dates=' + ymd + '&groups=' + grp + '&limit=400');
+      if (!r.ok) continue;
+      const data = await r.json();
+      (data.events || []).forEach(ev => {
+        if (seen[ev.id]) return;
+        seen[ev.id] = true;
+        events.push(ev);
+      });
+    } catch(e) {}
+  }
+  return events;
+}
+
+function cfbExtractGame(ev) {
+  const comp = (ev.competitions && ev.competitions[0]) || {};
+  const st = (comp.status && comp.status.type) || (ev.status && ev.status.type) || {};
+  if (!st.completed) return null;
+  let home = null, away = null;
+  (comp.competitors || []).forEach(c => { if (c.homeAway === 'home') home = c; else if (c.homeAway === 'away') away = c; });
+  if (!home || !away) return null;
+  function halfScore(c) {
+    const ls = c.linescores || [];
+    if (ls.length < 2) return null;
+    return (parseFloat(ls[0].value) || 0) + (parseFloat(ls[1].value) || 0);
+  }
+  return {
+    homeName: (home.team && (home.team.displayName || home.team.location)) || '',
+    awayName: (away.team && (away.team.displayName || away.team.location)) || '',
+    homeScore: parseFloat(home.score), awayScore: parseFloat(away.score),
+    home1H: halfScore(home), away1H: halfScore(away)
+  };
+}
+
+function cfbGradeBet(b, games) {
+  let g = null;
+  for (const game of games) {
+    if (cfbTeamsMatch(game.homeName, b.team) || cfbTeamsMatch(game.awayName, b.team)) { g = game; break; }
+  }
+  if (!g) return null;
+  const isHome = cfbTeamsMatch(g.homeName, b.team);
+  b.opponent = isHome ? g.awayName : g.homeName;
+
+  let my, opp;
+  if (b.is1H) {
+    if (g.home1H === null || g.away1H === null) return null;
+    my = isHome ? g.home1H : g.away1H;
+    opp = isHome ? g.away1H : g.home1H;
+  } else {
+    if (isNaN(g.homeScore) || isNaN(g.awayScore)) return null;
+    my = isHome ? g.homeScore : g.awayScore;
+    opp = isHome ? g.awayScore : g.homeScore;
+  }
+
+  if (b.betType === 'Total') {
+    const total = my + opp;
+    b.score = my + '+' + opp + '=' + total + (b.is1H ? ' 1H' : '') + ' (' + b.ou + b.totalLine + ')';
+    if (total === b.totalLine) return 'push';
+    if (b.ou === 'u') return total < b.totalLine ? 'win' : 'loss';
+    return total > b.totalLine ? 'win' : 'loss';
+  }
+  if (b.betType === 'Spread') {
+    b.score = my + '-' + opp + (b.is1H ? ' 1H' : '');
+    const adj = my + b.spreadLine - opp;
+    if (adj === 0) return 'push';
+    return adj > 0 ? 'win' : 'loss';
+  }
+  b.score = my + '-' + opp + (b.is1H ? ' 1H' : '');
+  if (my === opp) return 'push';
+  return my > opp ? 'win' : 'loss';
+}
+
+async function cfbGradeAll() {
+  const btn = document.getElementById('cfbGradeBtn');
+  const pending = cfbBets.filter(b => { const r = cfbEffective(b); return !r || r === 'pending' || (!b.apiResult && !b.manualResult); });
+  if (!pending.length) { document.getElementById('cfbStatus').textContent = 'Nothing to grade'; return; }
+  btn.disabled = true; btn.textContent = '⏳ GRADING...';
+
+  const dates = {};
+  pending.forEach(b => {
+    const [m,d,y] = b.date.split('/');
+    dates[y + String(m).padStart(2,'0') + String(d).padStart(2,'0')] = true;
+  });
+
+  let graded = 0;
+  for (const ymd of Object.keys(dates)) {
+    const events = await cfbFetchScoreboard(ymd);
+    const games = events.map(cfbExtractGame).filter(Boolean);
+    document.getElementById('cfbStatus').textContent = ymd + ': ' + games.length + ' completed games';
+    pending.forEach(b => {
+      const [m,d,y] = b.date.split('/');
+      const bymd = y + String(m).padStart(2,'0') + String(d).padStart(2,'0');
+      if (bymd !== ymd || b.apiResult) return;
+      const res = cfbGradeBet(b, games);
+      if (res) { b.apiResult = res; graded++; }
+    });
+  }
+
+  cfbBets.forEach(b => {
+    b.conflict = b.apiResult && b.loggedResult && b.loggedResult !== 'pending' && b.apiResult !== b.loggedResult && !b.manualResult;
+  });
+
+  cfbSave();
+  cfbRender();
+  const conflicts = cfbBets.filter(b => b.conflict).length;
+  document.getElementById('cfbStatus').textContent = '✅ Graded ' + graded + '/' + pending.length + (conflicts ? ' · ⚠ ' + conflicts + ' conflicts with logged results' : '');
+  btn.disabled = false; btn.textContent = '⚡ GRADE ALL (ESPN)';
+}
+
+cfbLoad();
+cfbRender();
+
 </script>
 </body>
 </html>
