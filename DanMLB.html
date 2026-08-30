@@ -596,6 +596,11 @@ Format: Team [F5] Odds Stake" oninput="debounceParse()"></textarea>
 <div class="add-wrap">
   <div class="add-panel">
     <h3>📥 Paste CFB Bets (Dan format)</h3>
+    <div style="margin-bottom:10px;display:flex;align-items:center;gap:10px;">
+      <span style="font-size:11px;color:var(--sub);">Date:</span>
+      <input class="date-input" type="text" id="cfbAddDate" placeholder="e.g. 9/6" />
+      <span style="font-size:10px;color:var(--sub);">used when the paste has no M/D: prefix</span>
+    </div>
     <textarea id="cfbPaste" placeholder="9/6: Alabama -180 bol (.67u risk) win
 Georgia -7.5 -110 fd (.55u risk)
 Ohio State/Texas u54.5 -105 b105 (.5u risk)
@@ -621,7 +626,13 @@ const TEAM_IDS = {
   'Atlanta':144,'Braves':144,'Tigers':116,'Detroit':116,'Athletics':133,
   'Oakland':133,'Rockies':115,'Cubs':112,'Yankees':147,'Twins':142,
   'Padres':135,'Reds':113,'Astros':117,'Cardinals':138,'Giants':137,
-  'Dodgers':119,'Arizona':109,'Miami':146,'Marlins':146
+  'Dodgers':119,'Arizona':109,'Miami':146,
+  'Seattle':136,'Boston':111,'Milwaukee':158,'Anaheim':108,'LAA':108,
+  'Texas':140,'Tampa':139,'Tampa Bay':139,'Kansas City':118,'KC':118,
+  'Washington':120,'Pittsburgh':134,'Colorado':115,'Minnesota':142,
+  'San Diego':135,'SD':135,'Cincinnati':113,'Cincy':113,'Houston':117,
+  'St Louis':138,'St. Louis':138,'San Francisco':137,'SF':137,
+  'Philadelphia':143,'Philly':143,'Diamondbacks':109,'Dbacks':109,'D-backs':109
 };
 
 // ─── ESPN LOGO MAP ───────────────────────────────────────────────────────────
@@ -633,7 +644,13 @@ const TEAM_LOGOS = {
   'Atlanta':'atl','Braves':'atl','Tigers':'det','Detroit':'det','Athletics':'oak',
   'Oakland':'oak','Rockies':'col','Cubs':'chc','Yankees':'nyy','Twins':'min',
   'Padres':'sd','Reds':'cin','Astros':'hou','Cardinals':'stl','Giants':'sf',
-  'Dodgers':'lad','Arizona':'ari'
+  'Dodgers':'lad','Arizona':'ari',
+  'Seattle':'sea','Boston':'bos','Milwaukee':'mil','Anaheim':'laa','LAA':'laa',
+  'Texas':'tex','Tampa':'tb','Tampa Bay':'tb','Kansas City':'kc','KC':'kc',
+  'Washington':'wsh','Pittsburgh':'pit','Colorado':'col','Minnesota':'min',
+  'San Diego':'sd','SD':'sd','Cincinnati':'cin','Cincy':'cin','Houston':'hou',
+  'St Louis':'stl','St. Louis':'stl','San Francisco':'sf','SF':'sf',
+  'Philadelphia':'phi','Philly':'phi','Diamondbacks':'ari','Dbacks':'ari','D-backs':'ari'
 };
 function teamLogo(name, size=18) {
   const abbrev = TEAM_LOGOS[name];
@@ -1789,7 +1806,20 @@ async function gradeAll() {
   btn.textContent = '⏳ GRADING...';
   document.getElementById('progressWrap').style.display = 'block';
 
-  const dates = [...new Set(bets.map(b=>b.date))].sort();
+  // FTN-style: only dates that are finished (today or earlier) and still have ungraded bets
+  const now = new Date();
+  const todayMid = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  function dateMs(ds) { const [m,d,y] = ds.split('/').map(Number); return new Date(y, m-1, d).getTime(); }
+  const needsGrade = b => !b.apiResult && !b.manualResult;
+  const allDates = [...new Set(bets.map(b=>b.date))];
+  const dates = allDates.filter(ds => dateMs(ds) <= todayMid && bets.some(b => b.date === ds && needsGrade(b))).sort();
+  const skippedFuture = allDates.filter(ds => dateMs(ds) > todayMid).length;
+  if (!dates.length) {
+    document.getElementById('status-bar').textContent = skippedFuture ? `Nothing to grade — ${skippedFuture} future date(s) skipped` : 'Nothing to grade';
+    document.getElementById('progressWrap').style.display = 'none';
+    btn.disabled = false; btn.className = 'grade-btn'; btn.textContent = '▶ RE-GRADE ALL';
+    return;
+  }
   let graded = 0;
 
   for (let i = 0; i < dates.length; i++) {
@@ -1815,8 +1845,8 @@ async function gradeAll() {
 
     // grade bets for this date — skip pending, always re-fetch score+opponent
     dateBets.forEach(b => {
-      // never touch bets with no logged result (pending/unresolved)
-      if (!b.loggedResult || b.loggedResult === 'pending') return;
+      // grade anything not already settled (findGame only matches Final games, so live games stay pending)
+      if (b.apiResult || b.manualResult) return;
       let grade = null;
       if (b.isF5) {
         grade = gradeF5(b, games, linescoreCache);
@@ -1834,7 +1864,7 @@ async function gradeAll() {
 
   const conflicts = bets.filter(b=>b.conflict).length;
   document.getElementById('status-bar').textContent =
-    `✅ Done · ${graded} graded · ${conflicts} conflicts`;
+    `✅ Done · ${graded} graded across ${dates.length} finished date(s)` + (skippedFuture ? ` · ${skippedFuture} future skipped` : '') + ` · ${conflicts} conflicts`;
   document.getElementById('progressWrap').style.display = 'none';
   btn.disabled = false;
   btn.className = 'grade-btn';
@@ -3460,6 +3490,7 @@ renderTable();
 // default date inputs to today
 const _today = new Date();
 document.getElementById('addDate').value = `${_today.getMonth()+1}/${_today.getDate()}`;
+document.getElementById('cfbAddDate').value = `${_today.getMonth()+1}/${_today.getDate()}`;
 
 // ═══ CFB MODULE (self-contained; does not touch MLB state) ═══════════════════
 const CFB_KEY = 'cfb_bets_v1';
@@ -3482,9 +3513,9 @@ function cfbTeamsMatch(a, b) {
   return a.indexOf(b) >= 0 || b.indexOf(a) >= 0;
 }
 
-function cfbParseLines(raw) {
+function cfbParseLines(raw, fallbackDate) {
   const lines = raw.trim().split('\n');
-  let currentDate = null;
+  let currentDate = fallbackDate ? fallbackDate + '/2026' : null;
   const out = [];
   for (let line of lines) {
     line = line.trim();
@@ -3494,6 +3525,11 @@ function cfbParseLines(raw) {
     if (dm) { currentDate = dm[1] + '/2026'; line = dm[2].trim(); if (!line) continue; }
     if (!currentDate) continue;
 
+    // Skip Dan's commentary/analysis lines: real bet lines carry a (Xu risk)/(to win Xu) bracket or end with a result
+    const hasStake = /\(\s*(?:to win\s+)?[0-9.]+u/i.test(line);
+    const hasResult = /\s(win|loss|push|pending|\?)$/i.test(line);
+    if (/^proj\b/i.test(line) || (!hasStake && !hasResult)) continue;
+
     let loggedResult = null;
     if (/ win$/i.test(line)) { loggedResult='win'; line=line.replace(/ win$/i,'').trim(); }
     else if (/ loss$/i.test(line)) { loggedResult='loss'; line=line.replace(/ loss$/i,'').trim(); }
@@ -3502,6 +3538,7 @@ function cfbParseLines(raw) {
     else if (/ pending$/i.test(line)) { loggedResult='pending'; line=line.replace(/ pending$/i,'').trim(); }
 
     line = line.replace(/\bML(-\d+)/gi, '$1');
+    line = line.replace(/\bML\b/gi, ' ').replace(/\s+/g, ' ').trim();
     const is1H = /\b1h\b/i.test(line);
 
     // risk
@@ -3560,9 +3597,10 @@ function cfbParseLines(raw) {
 function cfbAddPaste() {
   const raw = document.getElementById('cfbPaste').value.trim();
   if (!raw) return;
-  const parsed = cfbParseLines(raw);
+  const fallbackDate = (document.getElementById('cfbAddDate').value || '').trim();
+  const parsed = cfbParseLines(raw, fallbackDate || null);
   if (!parsed.length) {
-    document.getElementById('cfbAddStatus').textContent = 'Nothing parsed — check the format (date prefix like 9/6: required)';
+    document.getElementById('cfbAddStatus').textContent = 'Nothing parsed — add a date (M/D) above or a M/D: prefix in the paste';
     return;
   }
   cfbBets = cfbBets.concat(parsed);
