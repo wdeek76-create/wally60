@@ -3904,29 +3904,44 @@ function cfbGradeBet(b, games) {
   return my > opp ? 'win' : 'loss';
 }
 
+function cfbYmd(b) {
+  const parts = b.date.split('/');
+  return parts[2] + String(parts[0]).padStart(2,'0') + String(parts[1]).padStart(2,'0');
+}
+
 async function cfbGradeAll() {
   const btn = document.getElementById('cfbGradeBtn');
   const pending = cfbBets.filter(b => { const r = cfbEffective(b); return !r || r === 'pending' || (!b.apiResult && !b.manualResult); });
-  if (!pending.length) { document.getElementById('cfbStatus').textContent = 'Nothing to grade'; return; }
+  const needLogo = cfbBets.filter(b => !b.logo);
+  if (!pending.length && !needLogo.length) { document.getElementById('cfbStatus').textContent = 'Nothing to grade'; return; }
   btn.disabled = true; btn.textContent = '⏳ GRADING...';
 
   const dates = {};
-  pending.forEach(b => {
-    const [m,d,y] = b.date.split('/');
-    dates[y + String(m).padStart(2,'0') + String(d).padStart(2,'0')] = true;
-  });
+  pending.concat(needLogo).forEach(b => { dates[cfbYmd(b)] = true; });
 
-  let graded = 0;
+  let graded = 0, logosAdded = 0;
   for (const ymd of Object.keys(dates)) {
     const events = await cfbFetchScoreboard(ymd);
     const games = events.map(cfbExtractGame).filter(Boolean);
     document.getElementById('cfbStatus').textContent = ymd + ': ' + games.length + ' completed games';
     pending.forEach(b => {
-      const [m,d,y] = b.date.split('/');
-      const bymd = y + String(m).padStart(2,'0') + String(d).padStart(2,'0');
-      if (bymd !== ymd || b.apiResult) return;
+      if (cfbYmd(b) !== ymd || b.apiResult) return;
       const res = cfbGradeBet(b, games);
       if (res) { b.apiResult = res; graded++; }
+    });
+    // backfill logos/opponent on already-graded bets from this date
+    cfbBets.forEach(b => {
+      if (cfbYmd(b) !== ymd || b.logo) return;
+      for (const g of games) {
+        const isHome = cfbSideMatches(g.homeNames, g.homeAbbr, b.team);
+        const isAway = cfbSideMatches(g.awayNames, g.awayAbbr, b.team);
+        if (!isHome && !isAway) continue;
+        b.logo = isHome ? g.homeLogo : g.awayLogo;
+        b.oppLogo = isHome ? g.awayLogo : g.homeLogo;
+        if (!b.opponent) b.opponent = isHome ? g.awayName : g.homeName;
+        if (b.logo) logosAdded++;
+        break;
+      }
     });
   }
 
@@ -3937,7 +3952,7 @@ async function cfbGradeAll() {
   cfbSave();
   cfbRender();
   const conflicts = cfbBets.filter(b => b.conflict).length;
-  document.getElementById('cfbStatus').textContent = '✅ Graded ' + graded + '/' + pending.length + (conflicts ? ' · ⚠ ' + conflicts + ' conflicts with logged results' : '');
+  document.getElementById('cfbStatus').textContent = '✅ Graded ' + graded + '/' + pending.length + (logosAdded ? ' · ' + logosAdded + ' logos added' : '') + (conflicts ? ' · ⚠ ' + conflicts + ' conflicts with logged results' : '');
   btn.disabled = false; btn.textContent = '⚡ GRADE ALL (ESPN)';
 }
 
