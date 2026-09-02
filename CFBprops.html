@@ -80,6 +80,7 @@
     <button class="tab-btn active" data-tab="upload" onclick="switchTab('upload')">UPLOAD</button>
     <button class="tab-btn" data-tab="proj" onclick="switchTab('proj')">PROJECTIONS</button>
     <button class="tab-btn" data-tab="tracker" onclick="switchTab('tracker')">TRACKER</button>
+    <button class="tab-btn" data-tab="solo" onclick="switchTab('solo')">RW SOLO</button>
   </div>
 
   <!-- ── UPLOAD ─────────────────────────────────────────────── -->
@@ -116,6 +117,7 @@
         <button class="btn ghost sm" onclick="resetTemplate()" title="Go back to the built-in list">RESET</button>
         <button class="btn green sm" onclick="doExportConsensus()" title="RG + RotoWire only \u2014 the locked baseline">EXPORT CONSENSUS</button>
         <button class="btn ghost sm" onclick="doExportAll()" title="Average of every loaded source">EXPORT ALL AVG</button>
+        <button class="btn ghost sm" onclick="doExportPS()" title="Prop Station format \u2014 RG + RotoWire baseline" style="border-color:#7c5cff55;color:#a78bfa;">EXPORT TO PS</button>
         <span id="tpl-status" class="sub" style="flex:1;min-width:140px;"></span>
       </div>
     </div>
@@ -142,6 +144,7 @@
         <button class="btn ghost sm" id="tight-btn" onclick="toggleTight()">TIGHTEST FIRST</button>
         <button class="btn green sm" onclick="doExportConsensus()" title="RG + RotoWire only — the locked baseline">EXPORT CONSENSUS</button>
         <button class="btn ghost sm" onclick="doExportAll()" title="Average of every loaded source">EXPORT ALL AVG</button>
+        <button class="btn ghost sm" onclick="doExportPS()" title="Prop Station format \u2014 RG + RotoWire baseline" style="border-color:#7c5cff55;color:#a78bfa;">EXPORT TO PS</button>
         <input type="text" id="search" placeholder="filter player or team\u2026"
                oninput="renderTable()" style="flex:1;min-width:140px;"/>
         <span id="shown-count" class="sub mono"></span>
@@ -171,11 +174,55 @@
       <div id="grade-log" class="mono" style="margin-top:8px;max-height:220px;overflow-y:auto;"></div>
     </div>
     <div id="tracker-summary"></div>
+    <div id="tracker-buckets"></div>
     <div id="tracker-list"></div>
   </div>
 </div>
 
-<!-- ── TRACK MODAL ──────────────────────────────────────────── -->
+<!-- ── RW SOLO ──────────────────────────────────────────────── -->
+  <div id="solo-tab" style="display:none;">
+    <div class="card" style="padding:10px 12px;">
+      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
+        <span class="sub" style="margin-right:4px;">STAT</span>
+        <span id="solo-stat-btns"></span>
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:8px;">
+        <input type="text" id="solo-search" placeholder="filter player or team\u2026"
+               oninput="renderSoloTable()" style="flex:1;min-width:140px;"/>
+        <input type="date" id="solo-date"/>
+        <span id="solo-shown" class="sub mono"></span>
+      </div>
+    </div>
+    <div class="card" style="padding:0;overflow-x:auto;">
+      <table>
+        <thead><tr id="solo-head"></tr></thead>
+        <tbody id="solo-body"></tbody>
+      </table>
+      <div id="solo-empty" style="padding:36px 20px;text-align:center;color:#525a64;font-size:13px;">
+        Load RotoWire projections on the Upload tab to see players here.
+      </div>
+    </div>
+
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;flex-wrap:wrap;gap:8px;">
+        <span class="card-title" style="margin:0;">RW Solo bets</span>
+        <span id="solo-count" class="sub mono"></span>
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;">
+        <button class="btn sm" data-grade-btn onclick="gradeSolo()">GRADE FROM ESPN</button>
+        <button class="btn ghost sm" data-grade-btn onclick="gradeSolo('regrade')">RE-GRADE</button>
+        <button class="btn ghost sm" onclick="copySoloOpen()">COPY OPEN</button>
+        <button class="btn ghost sm" onclick="exportSolo()">EXPORT</button>
+        <button class="btn ghost sm" onclick="importSolo()">IMPORT</button>
+      </div>
+      <div id="solo-log" class="mono" style="margin-top:8px;max-height:200px;overflow-y:auto;"></div>
+    </div>
+    <div id="solo-summary"></div>
+    <div id="solo-buckets"></div>
+    <div id="solo-list"></div>
+  </div>
+
+  <!-- ── TRACK MODAL ──────────────────────────────────────────── -->
 <div class="modal-bg" id="track-modal" onclick="if(event.target===this)closeTrackModal()">
   <div class="modal-box">
     <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;">
@@ -854,7 +901,7 @@ function trackRow(i){
   openTrackModal(r.player, r.team, r.pos, r.stat, r.proj, r.opp);
 }
 function openTrackModal(player, team, pos, stat, proj, opp){
-  modal = { player, team, pos, opp, stat, proj, ou:null, line:null, editId:null };
+  modal = { player, team, pos, opp, stat, proj, ou:null, line:null, editId:null, soloMode:false };
   document.getElementById("m-player").textContent = player;
   const g = rowCache.find(x=>x&&x.player===player) || {};
   document.getElementById("m-sub").textContent =
@@ -1067,9 +1114,22 @@ function saveBet(){
     player: modal.player, team: modal.team, pos: modal.pos, opp: modal.opp,
     stat: modal.stat, ou, line, odds, fair: isNaN(fair)?null:fair,
     proj: modal.proj, altBooks,
+    book: modal.book || "",
+    // Edge at the moment of tracking, so the tracker can bucket by it later.
+    // Recorded once — it must not drift if the projection is reloaded.
+    ev: (!isNaN(fair) && !isNaN(odds)) ? +(calcEdge(odds, fair) || 0).toFixed(2) : null,
+    evSource: modal.evOverride != null ? "override" : "model",
     stake:s.stake, toWin:s.toWin, type:s.type,
     result:"pending"
   };
+  // RW Solo keeps its own book.
+  if(modal.soloMode){
+    loadSolo();
+    soloBets.unshift(bet);
+    saveSolo(); renderSolo(); closeTrackModal();
+    showToast("Added to RW Solo");
+    return;
+  }
   if(modal.editId!=null){
     const i=bets.findIndex(b=>String(b.id)===String(modal.editId));
     if(i>=0){ bet.result=bets[i].result||"pending";
@@ -1101,10 +1161,74 @@ function editBet(id){
   renderBookEv();
   document.getElementById("m-save").textContent="Update Bet \u2197";
 }
+// Group settled bets by the edge recorded at track time. This is the check
+// that matters: if your 10%+ bucket isn't beating your 0-5% bucket, the model
+// isn't finding real edge — it's finding noise.
+const EV_BUCKETS = [
+  { key:"neg",  label:"< 0%",    lo:-Infinity, hi:0 },
+  { key:"low",  label:"0-5%",    lo:0,   hi:5 },
+  { key:"mid",  label:"5-10%",   lo:5,   hi:10 },
+  { key:"high", label:"10-20%",  lo:10,  hi:20 },
+  { key:"max",  label:"20%+",    lo:20,  hi:Infinity },
+];
+function evBucketFor(ev){
+  if(ev==null||isNaN(ev)) return null;
+  return EV_BUCKETS.find(b=>ev>=b.lo && ev<b.hi) || null;
+}
+function renderEvBuckets(list, hostId){
+  const host=document.getElementById(hostId);
+  if(!host) return;
+  const settled=list.filter(b=>b.result==="hit"||b.result==="miss");
+  const withEv=settled.filter(b=>b.ev!=null);
+  if(withEv.length<3){ host.innerHTML=""; return; }
+  const acc={};
+  EV_BUCKETS.forEach(b=>{ acc[b.key]={ n:0, w:0, pl:0, staked:0 }; });
+  withEv.forEach(b=>{
+    const bk=evBucketFor(b.ev); if(!bk) return;
+    const a=acc[bk.key];
+    a.n++;
+    if(b.result==="hit"){ a.w++; a.pl+=(+b.toWin||1); } else a.pl-=(+b.stake||1);
+    a.staked+=(+b.stake||1);
+  });
+  const rows=EV_BUCKETS.filter(b=>acc[b.key].n>0).map(b=>{
+    const a=acc[b.key];
+    const roi=a.staked>0?(a.pl/a.staked)*100:0;
+    const hitPct=Math.round((a.w/a.n)*100);
+    const plCol=a.pl>=0?"#22c55e":"#f87171";
+    const roiCol=roi>=0?"#7dd3fc":"#f87171";
+    return `<tr style="border-bottom:1px solid #0f1217;">
+      <td style="padding:6px 10px;font-size:12px;color:#d4dae3;">${b.label}</td>
+      <td class="mono" style="padding:6px 10px;font-size:11px;text-align:right;color:#a8b0bb;">${a.w}-${a.n-a.w}</td>
+      <td class="mono" style="padding:6px 10px;font-size:11px;text-align:right;color:#d4dae3;">${hitPct}%</td>
+      <td class="mono" style="padding:6px 10px;font-size:11px;text-align:right;color:${plCol};font-weight:700;">${a.pl>=0?"+":""}${a.pl.toFixed(2)}u</td>
+      <td class="mono" style="padding:6px 10px;font-size:11px;text-align:right;color:${roiCol};font-weight:700;">${roi>=0?"+":""}${roi.toFixed(1)}%</td>
+    </tr>`;
+  }).join("");
+  const noEv=settled.length-withEv.length;
+  host.innerHTML=`<div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+      <span class="card-title" style="margin:0;">By edge at track time</span>
+      <span class="sub mono">${withEv.length} settled${noEv?` \u00b7 ${noEv} without an edge`:""}</span>
+    </div>
+    <table style="width:100%;border-collapse:collapse;">
+      <thead><tr>
+        <th style="text-align:left;">Edge</th><th style="text-align:right;">W-L</th>
+        <th style="text-align:right;">Win %</th><th style="text-align:right;">P&amp;L</th>
+        <th style="text-align:right;">ROI</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <div class="sub" style="margin-top:6px;font-size:10px;">
+      Higher buckets should out-earn lower ones. If they don't, the edge isn't real.
+    </div>
+  </div>`;
+}
+
 function renderTracker(){
   loadBets();
   const list=document.getElementById("tracker-list");
   const sum=document.getElementById("tracker-summary");
+  renderEvBuckets(bets, "tracker-buckets");
   if(!bets.length){
     list.innerHTML=`<div class="card" style="text-align:center;color:#525a64;padding:36px 20px;">No bets tracked yet.</div>`;
     sum.innerHTML=""; return;
@@ -1133,6 +1257,7 @@ function renderTracker(){
           <div class="mono" style="font-size:12px;margin-top:2px;">
             ${b.ou==="under"?"u":"o"}${b.line} ${STAT_BY_KEY[b.stat]?STAT_BY_KEY[b.stat].label:b.stat}
             <span class="muted">${b.odds>0?"+":""}${b.odds}</span>
+            ${b.ev!=null?`<span class="mono" style="color:${b.ev>=5?"#22c55e":b.ev>0?"#7dd3fc":"#f87171"};font-weight:700;"> ${b.ev>0?"+":""}${b.ev}%</span>`:""}
             ${b.actual!=null?`<span class="muted"> \u00b7 actual ${b.actual}</span>`:""}
           </div>
         </div>
@@ -1146,6 +1271,256 @@ function renderTracker(){
       </div>
     </div>`;
   }).join("");
+}
+
+// ── RW SOLO ───────────────────────────────────────────────────
+// A second, independent book. Own storage key, own record, own grading —
+// nothing here touches the main tracker.
+const SOLO_KEY = "cfb_solo_bets";
+let soloBets = [];
+function loadSolo(){ try{ const r=localStorage.getItem(SOLO_KEY); if(r) soloBets=JSON.parse(r); }catch(e){} }
+function saveSolo(){
+  try{ localStorage.setItem(SOLO_KEY, JSON.stringify(soloBets)); return true; }
+  catch(e){
+    console.error("SOLO SAVE FAILED \u2014 in memory only:", e);
+    showToast("\u26a0 SAVE FAILED \u2014 export your solo bets now");
+    return false;
+  }
+}
+let soloStat = "RECYDS";
+// RW-only view: build a player list straight from the RotoWire slots, so this
+// table shows exactly what RW projected — not the blend.
+function soloRows(){
+  const idx=SOURCES.map((s,i)=>({s,i})).filter(x=>x.s.provider==="rw" && !disabledSources.has(x.s.key)).map(x=>x.i);
+  const byKey=new Map();
+  idx.forEach(i=>{
+    if(!slots[i] || !slots[i].rows) return;
+    slots[i].rows.forEach(r=>{
+      const v=r.stats[soloStat];
+      if(v==null || isNaN(v) || v<=0) return;
+      const k=playerKey(r.rawName, r.team);
+      if(!byKey.has(k)) byKey.set(k,{ name:r.rawName, team:r.team, pos:r.pos, opp:r.opp,
+                                      spread:r.spread, total:r.total, home:r.home, key:k, proj:v });
+    });
+  });
+  let rows=[...byKey.values()];
+  const q=(document.getElementById("solo-search").value||"").toLowerCase().trim();
+  if(q) rows=rows.filter(r=>r.name.toLowerCase().includes(q)||String(r.team).toLowerCase().includes(q));
+  rows.sort((a,b)=>b.proj-a.proj);
+  return rows;
+}
+function soloStatBtns(){
+  const el=document.getElementById("solo-stat-btns"); if(!el) return;
+  el.innerHTML=STATS.filter(s=>s.sim).map(s=>
+    `<button class="btn ${s.key===soloStat?"":"ghost"} sm" style="margin:2px;"
+       onclick="setSoloStat('${s.key}')">${s.label}</button>`).join("");
+}
+function setSoloStat(k){ soloStat=k; soloStatBtns(); renderSoloTable(); }
+let soloRowCache=[];
+function renderSoloTable(){
+  const body=document.getElementById("solo-body");
+  const head=document.getElementById("solo-head");
+  const empty=document.getElementById("solo-empty");
+  if(!body||!head) return;
+  const rows=soloRows();
+  if(!rows.length){ body.innerHTML=""; head.innerHTML=""; empty.style.display="block";
+    document.getElementById("solo-shown").textContent=""; return; }
+  empty.style.display="none";
+  document.getElementById("solo-shown").textContent=`${rows.length} shown`;
+  head.innerHTML=`<th>Player</th><th style="text-align:right;">${STAT_BY_KEY[soloStat].label}</th><th></th>`;
+  soloRowCache=rows.map(r=>({ player:r.name, team:r.team, pos:r.pos, opp:r.opp,
+                              spread:r.spread, total:r.total, home:r.home,
+                              stat:soloStat, proj:r.proj }));
+  body.innerHTML=rows.map((r,i)=>`<tr class="${i%2===0?'even':''}">
+    <td style="padding:7px 10px;">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+        <span style="font-size:14px;font-weight:700;color:#fff;white-space:nowrap;">${esc(r.name)}</span>
+        ${r.team?`<span class="pill" style="background:#7dd3fc1a;border:1px solid #7dd3fc33;color:#7dd3fc;">${esc(r.team)}</span>`:""}
+        ${r.pos?`<span class="pill" style="background:rgba(255,255,255,.04);color:#a8b0bb;">${esc(r.pos)}</span>`:""}
+        ${r.opp?`<span class="muted mono" style="font-size:10px;">${r.home?"vs":"@"} ${esc(r.opp)}</span>`:""}
+      </div>
+      <div style="font-size:12px;margin-top:4px;display:flex;align-items:center;flex-wrap:wrap;gap:2px;">
+        <span class="copyable" onclick="event.stopPropagation();copyVal(${r.proj.toFixed(2)})" title="RotoWire: ${r.proj.toFixed(2)} (click to copy)" style="display:inline-flex;align-items:center;gap:4px;background:#050507;border:1px solid #1e40af66;border-radius:4px;padding:1px 7px;white-space:nowrap;"><span style="color:#8b93a0;font-weight:600;font-size:10px;">RW</span><span style="color:#fff;font-weight:700;">${r.proj.toFixed(2)}</span></span>
+        ${(r.spread!=null||r.total!=null)?`<span class="muted mono" style="font-size:9px;margin-left:6px;">${r.spread!=null?(r.spread>0?"+":"")+r.spread:""}${r.total!=null?` \u00b7 o/u ${r.total}`:""}</span>`:""}
+      </div>
+    </td>
+    <td class="mono" style="text-align:right;vertical-align:top;">
+      <span style="font-size:15px;font-weight:800;color:#fff;">${r.proj.toFixed(2)}</span>
+    </td>
+    <td style="text-align:right;vertical-align:top;">
+      <button class="btn sm" onclick="soloTrackRow(${i})" title="Track bet">+</button>
+    </td>
+  </tr>`).join("");
+}
+// Opens the SAME modal, flagged so saving files it to the solo book.
+function soloTrackRow(i){
+  const r=soloRowCache[i]; if(!r) return;
+  const d=document.getElementById("solo-date");
+  openTrackModal(r.player, r.team, r.pos, r.stat, r.proj, r.opp);
+  modal.soloMode=true;
+  if(d && d.value) document.getElementById("m-date").value=d.value;
+  document.getElementById("m-sub").textContent=
+    ["RW SOLO", r.pos, r.team, r.opp?("vs "+r.opp):""].filter(Boolean).join(" \u00b7 ");
+}
+function deleteSoloBet(id){
+  if(!confirm("Delete this solo bet?")) return;
+  soloBets=soloBets.filter(b=>String(b.id)!==String(id));
+  saveSolo(); renderSolo();
+}
+function renderSolo(){
+  loadSolo();
+  const dateEl=document.getElementById("solo-date");
+  if(dateEl && !dateEl.value) dateEl.value=localYMD();
+  soloStatBtns();
+  renderSoloTable();
+  const list=document.getElementById("solo-list");
+  const sum=document.getElementById("solo-summary");
+  renderEvBuckets(soloBets, "solo-buckets");
+  const cnt=document.getElementById("solo-count");
+  if(cnt) cnt.textContent=`${soloBets.length} bet${soloBets.length===1?"":"s"}`;
+  if(!list||!sum) return;
+  if(!soloBets.length){
+    list.innerHTML=`<div class="card" style="text-align:center;color:#525a64;padding:36px 20px;">No solo bets yet.</div>`;
+    sum.innerHTML=""; return;
+  }
+  const settled=soloBets.filter(b=>b.result==="hit"||b.result==="miss");
+  const w=settled.filter(b=>b.result==="hit").length, l=settled.length-w;
+  const pl=settled.reduce((a,b)=>a+(b.result==="hit"?(+b.toWin||1):-(+b.stake||1)),0);
+  const staked=settled.reduce((a,b)=>a+(+b.stake||1),0);
+  const roi=staked>0?(pl/staked)*100:0;
+  sum.innerHTML=`<div class="card" style="display:flex;gap:18px;flex-wrap:wrap;">
+    <div><div class="sub">RECORD</div><div style="font-size:19px;font-weight:800;">${w}-${l}</div></div>
+    <div><div class="sub">P&amp;L</div><div style="font-size:19px;font-weight:800;color:${pl>=0?'#4ade80':'#f87171'};">${pl>=0?"+":""}${pl.toFixed(2)}u</div></div>
+    <div><div class="sub">ROI</div><div style="font-size:19px;font-weight:800;color:${roi>=0?'#4ade80':'#f87171'};">${roi>=0?"+":""}${roi.toFixed(1)}%</div></div>
+    <div><div class="sub">PENDING</div><div style="font-size:19px;font-weight:800;">${soloBets.filter(b=>b.result==="pending").length}</div></div>
+  </div>`;
+  list.innerHTML=soloBets.map(b=>{
+    const col=b.result==="hit"?"#4ade80":b.result==="miss"?"#f87171":b.result==="void"?"#fbbf24":"#a78bfa";
+    const res=b.result==="hit"?`WIN +${(+b.toWin).toFixed(2)}u`
+            :b.result==="miss"?`LOSS -${(+b.stake).toFixed(2)}u`
+            :b.result==="void"?"VOID":"pending";
+    return `<div class="card" style="border-left:3px solid ${col};padding:10px 12px;margin-bottom:6px;">
+      <div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:center;">
+        <div style="min-width:0;">
+          <span style="font-weight:700;color:#fff;">${esc(b.player)}</span>
+          ${b.team?`<span class="muted mono" style="font-size:11px;"> ${esc(b.team)}${b.opp?` vs ${esc(b.opp)}`:""}</span>`:""}
+          ${!b.opp?`<span class="pill" style="background:#fbbf2418;color:#fbbf24;" title="No opponent recorded \u2014 grading matches on name + date only">no matchup</span>`:""}
+          <div class="mono" style="font-size:12px;margin-top:2px;">
+            <span class="muted">${esc(b.gameDate||b.date||"")}</span>
+            ${b.ou==="under"?"u":"o"}${b.line} ${STAT_BY_KEY[b.stat]?STAT_BY_KEY[b.stat].label:b.stat}
+            <span class="muted">${b.odds>0?"+":""}${b.odds}</span>
+            ${b.book?` ${bookBadge(b.book,26)}`:""}
+            ${b.ev!=null?`<span class="mono" style="color:${b.ev>=5?"#22c55e":b.ev>0?"#7dd3fc":"#f87171"};font-weight:700;"> ${b.ev>0?"+":""}${b.ev}%</span>`:""}
+            ${b.actual!=null?`<span class="muted"> \u00b7 actual ${b.actual}</span>`:""}
+          </div>
+        </div>
+        <div style="text-align:right;">
+          <div class="mono" style="color:${col};font-weight:800;font-size:12px;">${res}</div>
+          <button class="btn ghost sm" style="margin-top:4px;" onclick="deleteSoloBet('${b.id}')">\u2715</button>
+        </div>
+      </div>
+    </div>`;
+  }).join("");
+}
+function logSolo(msg, kind){
+  const el=document.getElementById("solo-log"); if(!el) return;
+  const col=kind==="hit"?"#4ade80":kind==="miss"?"#f87171":kind==="void"?"#fbbf24":kind==="err"?"#f87171":"#8b93a0";
+  const line=document.createElement("div");
+  line.style.cssText=`color:${col};font-size:11px;line-height:1.5;`;
+  line.textContent=msg;
+  el.appendChild(line); el.scrollTop=el.scrollHeight;
+}
+// Same grader, same rules — just pointed at the solo book.
+async function gradeSolo(mode){
+  if(gradingInProgress) return;
+  loadSolo();
+  const isRegrade=mode==="regrade";
+  const targets=isRegrade ? soloBets.filter(b=>b.result&&b.result!=="pending")
+                          : soloBets.filter(b=>b.result==="pending");
+  if(!targets.length){ showToast(isRegrade?"No settled solo bets":"No pending solo bets"); return; }
+  if(isRegrade && !confirm(`Re-grade ${targets.length} settled solo bet(s)?`)) return;
+  gradingInProgress=true;
+  const el=document.getElementById("solo-log"); if(el) el.innerHTML="";
+  logSolo(`${isRegrade?"Re-grading":"Starting grading for"} ${targets.length} ${isRegrade?"settled":"pending"} bets\u2026`,"info");
+  let graded=0, failed=0, skipped=0, hit=0, miss=0, voided=0, changed=0;
+  const byDate=new Map();
+  targets.forEach(b=>{ const d=b.gameDate||b.date||"(no date)";
+    if(!byDate.has(d)) byDate.set(d,[]); byDate.get(d).push(b); });
+  for(const d of [...byDate.keys()].sort()){
+    const dayBets=byDate.get(d);
+    const nice=(()=>{ const m=/^(\d{4})-(\d{2})-(\d{2})$/.exec(d);
+      return m?new Date(+m[1],+m[2]-1,+m[3]).toLocaleDateString("en-US",{weekday:"short",month:"short",day:"numeric"}):d; })();
+    logSolo(`\u2500 ${nice} \u00b7 ${dayBets.length} bet${dayBets.length===1?"":"s"}`,"info");
+    let rows=null, fetchErr=null;
+    if(d==="(no date)") fetchErr="no game date";
+    else { try{ rows=await fetchEspnDay(d); }catch(e){ fetchErr=e.message; logSolo(`  ESPN error: ${e.message}`,"err"); } }
+    for(const b of dayBets){
+      const lineStr=`${(b.ou||"").toUpperCase()} ${b.line}`;
+      const statLbl=STAT_BY_KEY[b.stat]?STAT_BY_KEY[b.stat].label:b.stat;
+      if(fetchErr){ failed++; logSolo(`  ${b.player} ${lineStr} ${statLbl}: ${fetchErr}`,"err"); continue; }
+      if(!rows||!rows.length){ skipped++; logSolo(`  ${b.player} ${lineStr} ${statLbl}: no completed games \u2014 skipped`,"void"); continue; }
+      const prev=b.result;
+      const r=gradeOneBet(b, rows);
+      if(!r.ok){
+        const soft=/not found|no .* recorded/i.test(r.reason);
+        if(soft){ skipped++; logSolo(`  ${b.player} ${lineStr} ${statLbl}: ${r.reason} \u2014 skipped`,"void"); }
+        else { failed++; logSolo(`  ${b.player} ${lineStr} ${statLbl}: ${r.reason}`,"err"); }
+        continue;
+      }
+      const t=soloBets.find(x=>String(x.id)===String(b.id)); if(!t) continue;
+      const didChange=isRegrade && t.result!==r.result;
+      t.result=r.result; t.actual=r.total; if(r.statLine) t.statLine=r.statLine;
+      graded++; if(didChange) changed++;
+      if(r.result==="hit") hit++; else if(r.result==="miss") miss++; else voided++;
+      logSolo(`  ${b.player} ${lineStr} ${statLbl}: ${r.dnp?"no usage \u2192 VOID":`actual ${r.total} \u2192 ${r.result.toUpperCase()}`}${didChange?` (was ${String(prev).toUpperCase()})`:""}`,
+              r.result==="hit"?"hit":r.result==="miss"?"miss":"void");
+    }
+  }
+  saveSolo(); gradingInProgress=false;
+  const parts=[`${graded} graded (${hit}W ${miss}L ${voided}V)`];
+  if(isRegrade) parts.push(`${changed} changed`);
+  if(skipped) parts.push(`${skipped} not final`);
+  if(failed) parts.push(`${failed} failed`);
+  logSolo(`Done. ${parts.join(", ")}.`,"info");
+  renderSolo();
+  showToast(parts.join(" \u2022 "));
+}
+function copySoloOpen(){
+  loadSolo();
+  const open=soloBets.filter(b=>b.result==="pending");
+  if(!open.length){ showToast("No open solo bets"); return; }
+  const lines=open.map(b=>{
+    const pt=b.fair!=null?playToOdds(b.fair,5):null;
+    return `${b.player}${b.team?` (${b.team})`:""}  ${b.ou} ${b.line} ${STAT_BY_KEY[b.stat]?STAT_BY_KEY[b.stat].label:b.stat} ${b.odds>0?"+":""}${b.odds}${b.book?` ${b.book}`:""}`
+      + (pt!=null?`\nplay to ${pt>0?"+":""}${pt}`:"");
+  });
+  const text=`RW Solo: (${open.length})\n`+lines.join("\n");
+  navigator.clipboard.writeText(text).then(()=>showToast(`Copied ${open.length}`))
+    .catch(()=>{ console.log(text); showToast("Copy blocked \u2014 text in console"); });
+}
+function exportSolo(){
+  loadSolo();
+  const blob=new Blob([JSON.stringify({__format:"cfb-solo-v1",exportedAt:new Date().toISOString(),bets:soloBets},null,2)],{type:"application/json"});
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(blob); a.download="cfb_solo_bets.json";
+  document.body.appendChild(a); a.click();
+  setTimeout(()=>{ document.body.removeChild(a); URL.revokeObjectURL(a.href); },100);
+}
+function importSolo(){
+  const inp=document.createElement("input");
+  inp.type="file"; inp.accept=".json";
+  inp.onchange=e=>{
+    const f=e.target.files[0]; if(!f) return;
+    const rd=new FileReader();
+    rd.onload=ev=>{
+      try{ const p=JSON.parse(ev.target.result);
+        soloBets=Array.isArray(p)?p:(p.bets||[]);
+        saveSolo(); renderSolo(); showToast(`Imported ${soloBets.length}`);
+      }catch(err){ showToast("Import failed"); }
+    };
+    rd.readAsText(f);
+  };
+  inp.click();
 }
 
 // ── ESPN AUTOGRADE ────────────────────────────────────────────
@@ -1370,9 +1745,10 @@ async function gradeAllBets(mode){
 // re-uploads. So bets get no delete button, and a full-quota save evicts
 // caches rather than failing silently.
 const STORAGE_BUDGET_BYTES = 4.5 * 1024 * 1024;
-const STORAGE_PROTECTED = ["cfb_blender_bets"];
+const STORAGE_PROTECTED = ["cfb_blender_bets", "cfb_solo_bets"];
 const STORAGE_LABELS = {
   "cfb_blender_bets":      { label:"BETS",           color:"#4ade80" },
+  "cfb_solo_bets":         { label:"RW SOLO bets",   color:"#a78bfa" },
   "cfb_ua_template_v1":    { label:"UA template",    color:"#fbbf24" },
   "cfb_disabled_sources":  { label:"setting",        color:"#7a8390" },
 };
@@ -1516,6 +1892,72 @@ function renderColMap(){
         }).join("")}
       </div>
     </div>`).join("");
+}
+
+// ── PROP STATION EXPORT ───────────────────────────────────────
+// Their importer maps on exact header names, so match its field labels
+// verbatim: Player, Team, Pass_Att, Pass_Comp, ... No player ids involved,
+// so every merged player exports — no template needed.
+const PS_HEADER = ["Player","Team","Pass_Att","Pass_Comp","Pass_Yds","Pass_TD","Pass_INT",
+                   "Rush_Att","Rush_TD","Rush_Yds","Rec","Rec_TD","Rec_Yds"];
+const PS_STAT_BY_COL = {
+  "Pass_Att":"PATT", "Pass_Comp":"CMP", "Pass_Yds":"PASSYDS", "Pass_TD":"PASSTD",
+  "Pass_INT":"INT", "Rush_Att":"CAR", "Rush_TD":"RUSHTD", "Rush_Yds":"RUSHYDS",
+  "Rec":"REC", "Rec_TD":"RECTD", "Rec_Yds":"RECYDS",
+};
+function doExportPS(){ exportPropStation(["rg","rwqb","rwskill"], "consensus (RG+RW)"); }
+function doExportPSAll(){
+  const loaded=SOURCES.map(s=>s.key).filter(k=>{
+    const i=SOURCES.findIndex(s=>s.key===k);
+    return slots[i] && slots[i].rows && slots[i].rows.length;
+  });
+  if(!loaded.length){ showToast("Upload projections first"); return; }
+  exportPropStation(loaded, `all sources (${loaded.length})`);
+}
+function exportPropStation(keys, label){
+  if(!merged.length){ showToast("Upload projections first"); return; }
+  const useIdx=keys.map(k=>SOURCES.findIndex(s=>s.key===k))
+    .filter(i=>i>=0 && slots[i] && slots[i].rows && slots[i].rows.length);
+  if(!useIdx.length){ showToast(`No ${label} sources loaded`); return; }
+  const conFor=(r)=>{
+    const out={};
+    STATS.forEach(s=>{
+      const vals=[];
+      useIdx.forEach(i=>{
+        const rows=slots[i].rows;
+        const row=rows.find(x=>playerKey(x.rawName,x.team)===r.key)
+               || rows.find(x=>resolveNorm(x.rawName)===resolveNorm(r.name) && normTeam(x.opp)===normTeam(r.opp));
+        const v=row&&row.stats[s.key];
+        if(v!=null && !isNaN(v) && v>0) vals.push(v);
+      });
+      out[s.key]=vals.length ? vals.reduce((a,b)=>a+b,0)/vals.length : null;
+    });
+    return out;
+  };
+  const num=(v)=> (v!=null && !isNaN(v)) ? Number(v).toFixed(2) : "0.00";
+  const rows=[...merged]
+    .sort((a,b)=>a.name.localeCompare(b.name))
+    .map(r=>{
+      const c=conFor(r);
+      if(!STATS.some(s=>c[s.key]!=null)) return null;   // nothing from these sources
+      return [r.name, r.team||""].concat(
+        PS_HEADER.slice(2).map(col=>num(c[PS_STAT_BY_COL[col]]))
+      );
+    }).filter(Boolean);
+  if(!rows.length){ showToast("Nothing to export"); return; }
+  const esc=(v)=>{ const s=String(v==null?"":v);
+    return /[",\n]/.test(s) ? '"'+s.replace(/"/g,'""')+'"' : s; };
+  const csv=[PS_HEADER.join(","), ...rows.map(r=>r.map(esc).join(","))].join("\r\n")+"\r\n";
+  const d=new Date();
+  const stamp=`${d.getMonth()+1}${d.getDate()}`;
+  const blob=new Blob([csv],{type:"text/csv;charset=utf-8;"});
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(blob);
+  a.download=`PSProps${stamp}.csv`;
+  document.body.appendChild(a); a.click();
+  setTimeout(()=>{ document.body.removeChild(a); URL.revokeObjectURL(a.href); },100);
+  showToast(`Exported ${rows.length} to Prop Station \u00b7 ${label}`);
+  console.log(`[PS export] ${rows.length} players \u00b7 ${label}`);
 }
 
 // ── UA CONSENSUS EXPORT ───────────────────────────────────────
@@ -1741,12 +2183,13 @@ function importBets(){
 
 // ── TABS / BOOT ───────────────────────────────────────────────
 function switchTab(t){
-  ["upload","proj","tracker"].forEach(x=>{
+  ["upload","proj","tracker","solo"].forEach(x=>{
     document.getElementById(x+"-tab").style.display = x===t?"block":"none";
   });
   document.querySelectorAll(".tab-btn").forEach(b=>
     b.classList.toggle("active", b.dataset.tab===t));
   if(t==="tracker") renderTracker();
+  if(t==="solo") renderSolo();
   if(t==="proj") renderTable();
 }
 function updateStorageChip(){
@@ -1761,7 +2204,7 @@ function updateStorageChip(){
 document.addEventListener("DOMContentLoaded",()=>{
   document.getElementById("m-stat").innerHTML=STATS.map(s=>`<option value="${s.key}">${s.label}</option>`).join("");
   statBtns(); renderSourceList(); renderSourceSettings(); renderColMap(); renderTable(); renderTemplateStatus();
-  loadBets(); renderTracker(); updateStorageChip();
+  loadBets(); renderTracker(); loadSolo(); renderSolo(); updateStorageChip();
 });
 </script>
 </body>
