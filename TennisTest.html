@@ -3343,13 +3343,47 @@ async function autofillOddsForEntry(){
     if(arrow) arrow.textContent = '▾';
   }
 
+  // Live prices win over whatever was in the cell. The pasted block carries the
+  // price at model-run time, which can be stale by the time you log — writing
+  // the current number here is the whole point of the lookup.
   Object.keys(prices).forEach(cellId => {
+    // A price you typed yourself is the one you are betting — leave it alone.
+    if(_userEditedCells.has(cellId)) return;
     const cell = document.getElementById(cellId);
-    // Only fill blanks — never overwrite a price you typed yourself.
-    if(cell && !(cell.value || '').trim()){
+    if(cell){
       cell.value = _formatOddsStr(String(prices[cellId]));
+      _apiFilledCells.add(cellId);
     }
   });
+
+  // When the API has prices it drives the entry fields, so what gets logged
+  // matches the feed rather than whatever book was used last. Best price wins:
+  // plain numeric compare is correct for both signs (+150 > -110, -105 > -150).
+  let bestCell = null, bestVal = null;
+  Object.keys(prices).forEach(cellId => {
+    if(bestVal === null || prices[cellId] > bestVal){ bestVal = prices[cellId]; bestCell = cellId; }
+  });
+  // Do not move the book/odds fields if you have already set the odds by hand.
+  if(bestCell !== null && !_userEditedOdds){
+    const sel = document.getElementById('iMktBook');
+    const opt = sel ? Array.from(sel.options).find(o => o.value === bestCell) : null;
+    if(sel && opt){
+      sel.value = bestCell;
+      const combo = document.getElementById('iBookCombo');
+      if(combo){
+        combo.value = opt.text;
+        combo.dataset.original = opt.text;
+        combo.dataset.confirmed = '1';
+      }
+    }
+    const oddsEl = document.getElementById('iMktOdds');
+    if(oddsEl){
+      oddsEl.value = _formatOddsStr(String(bestVal));
+      if(typeof syncOddsSignFromValue === 'function') syncOddsSignFromValue(oddsEl.value);
+    }
+    // Keep the mirror pointed at the cell the main odds field now reflects
+    _mirrorBookId = bestCell;
+  }
   _entryCommence = ev.commence_time || null;
 
   // One-line verdict: is the live price still good enough to bet? Pinnacle is
@@ -3390,6 +3424,24 @@ let _entryCommence = null;
 // Worst Price straight from the pasted block. Preferred over our own
 // worstOddsAt5pct() so the model's math is what gates the play.
 let _importedWorst = null;
+// Cells and fields you have typed into for the current entry. The API fills
+// around these — anything you set by hand wins.
+let _userEditedCells = new Set();
+// Cells holding a price pulled from the API. Never cleared by the odds mirror,
+// because they are real data, not a copy of the main odds box.
+let _apiFilledCells = new Set();
+let _userEditedOdds = false;
+
+// Delegated so it does not depend on BOOKS (declared further down the file) or
+// on the elements existing yet. A direct wire-up here silently no-ops whenever
+// this runs after DOM ready, because BOOKS is still in its temporal dead zone.
+document.addEventListener('input', function(e){
+  const id = e.target && e.target.id;
+  if(!id) return;
+  if(id === 'iMktOdds'){ _userEditedOdds = true; return; }
+  // Book cells are the b-prefixed odds inputs (bP, bFD, bN, bPX, …)
+  if(/^b[A-Z0-9]/.test(id) && e.target.tagName === 'INPUT') _userEditedCells.add(id);
+}, true);
 
 function applyKVBlock(kv){
   if(!kv) return false;
@@ -5122,6 +5174,10 @@ function clearForm(){
   _importedGender = null;  // Clear imported gender
   _entryCommence = null;
   _importedWorst = null;
+  _userEditedCells = new Set();
+  _apiFilledCells = new Set();
+  _mirrorBookId = null;
+  _userEditedOdds = false;
   ['iName','iOpp','iWinPct','iMktOdds','iTourney','iPlayTime'].forEach(id=>{ const el=document.getElementById(id); if(el){ el.value=''; el.setAttribute('readonly',''); } });
   // Reset odds sign button to minus (default for favorites)
   const signBtn = document.getElementById('oddsSignBtn');
@@ -8711,8 +8767,12 @@ function _syncOddsToBookCell(){
 
   // Drop the previous mirror if we've moved to a different book
   if(_mirrorBookId && _mirrorBookId !== bookId){
-    const prevEl = document.getElementById(_mirrorBookId);
-    if(prevEl) prevEl.value = '';
+    // Only clear a cell that was mirroring the odds box. An API-filled cell is
+    // a real price for that book and must survive a book switch.
+    if(!_apiFilledCells.has(_mirrorBookId)){
+      const prevEl = document.getElementById(_mirrorBookId);
+      if(prevEl) prevEl.value = '';
+    }
     _mirrorBookId = null;
   }
 
@@ -8745,9 +8805,10 @@ document.getElementById('iMktBook').addEventListener('change', function(){
     // New book has its own price — that wins
     oddsEl.value = _formatOddsStr(newBookVal); syncOddsSignFromValue(_formatOddsStr(newBookVal));
   } else if(typed){
-    // New book has no price of its own: keep what you typed and MOVE it into
-    // the new book's cell, clearing whichever cell was mirroring it before.
-    _syncOddsToBookCell();
+    // New book has no price of its own. Keep the current number on screen so
+    // it can be adjusted up or down from a known reference, and do NOT move or
+    // clear any cell — the previous book's price is real pulled data.
+    // The cell for this book fills in only once the odds are actually edited.
   }
   if(newBookVal){
     // Adopting the new book's own price — it is now the mirrored cell
@@ -8987,7 +9048,16 @@ function copyPlayerName(){
     }
     return;
   }
-  navigator.clipboard.writeText(name).then(()=>{
+  // Include the live Pinnacle price and start countdown when we have them.
+  let out = name;
+  try {
+    const pinCell = document.getElementById('bP');
+    const pin = pinCell ? (pinCell.value || '').trim() : '';
+    const cd  = _entryCommence ? startsIn(_entryCommence, 'copy') : '';
+    if(pin) out = 'Pinnacle ' + pin + (cd ? ' starts ' + cd : '');
+  } catch(e){}
+
+  navigator.clipboard.writeText(out).then(()=>{
     if(btn){
       btn.textContent = '✓ Copied';
       btn.classList.add('copied');
