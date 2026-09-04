@@ -70,6 +70,7 @@
     .mh-line .starts-in { color: #22c55e; margin-left: 6px; font-weight: 900; text-shadow: 0 0 12px rgba(34, 197, 94, 0.5); }
     .mh-time { color: #22c55e; }
     .live-badge { display: inline-flex; align-items: center; gap: 4px; color: #ff3b3b; margin-left: 6px; font-weight: 900; }
+    .out-of-range { color: #ff3b3b; font-size: 10px; font-weight: 900; text-transform: uppercase; letter-spacing: 0.3px; margin-left: 6px; font-family: 'JetBrains Mono', monospace; text-shadow: 0 0 10px rgba(255, 59, 59, 0.5); }
     .live-dot { width: 6px; height: 6px; border-radius: 50%; background: #ff3b3b; animation: livePulse 1.2s ease-in-out infinite; }
     @keyframes livePulse { 0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(255, 59, 59, 0.6); } 50% { opacity: 0.4; box-shadow: 0 0 0 4px rgba(255, 59, 59, 0); } }
     .col-heads { display: grid; grid-template-columns: 1fr 44px 1fr; gap: 8px; margin-bottom: 8px; }
@@ -238,6 +239,19 @@
       const queryWords = q.split(/\s+/);
       return queryWords.every(qw => nameWords.some(nw => nw.startsWith(qw)));
     };
+    const parsePastedPick = (text) => {
+      const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+      let player = null, worstPrice = null;
+      for (const line of lines) {
+        if (!player && line.includes('>')) {
+          const left = line.split('>')[0].replace(/\*/g, '').trim();
+          if (left) player = left;
+        }
+        const wpMatch = line.match(/worst\s*price\s*([+-]?\d+)/i);
+        if (wpMatch) worstPrice = parseInt(wpMatch[1], 10);
+      }
+      return player ? { player, worstPrice } : null;
+    };
     const startsInCopy = (isoString) => {
       try {
         const diff = new Date(isoString) - new Date();
@@ -251,7 +265,7 @@
       } catch { return ''; }
     };
 
-    const BestCell = ({ pick, lineFmt, player, sur, fillBetForm, searchName, copiedName, setCopiedName, commence }) => {
+    const BestCell = ({ pick, lineFmt, player, sur, fillBetForm, searchName, copiedName, setCopiedName, commence, worstPrice }) => {
       if (!pick) return <div className="best-cell"><span className="bc-line">—</span></div>;
       const { odd, book } = pick;
       const isSearchMatch = nameMatches(player, searchName);
@@ -259,6 +273,7 @@
       const countdown = commence ? startsInCopy(commence) : '';
       const copyText = countdown ? `${BOOK_FULL_NAMES[book]} ${oddsStr} starts ${countdown}` : `${BOOK_FULL_NAMES[book]} ${oddsStr}`;
       const isCopied = copiedName === copyText;
+      const isOutOfRange = isSearchMatch && worstPrice != null && odd.odds_american < worstPrice;
       return (
         <div className="best-cell" onClick={(e) => { e.stopPropagation(); if (isSearchMatch) { navigator.clipboard.writeText(copyText); setCopiedName(copyText); setTimeout(() => setCopiedName(null), 1500); } }} style={{background: isCopied ? 'rgba(34, 197, 94, 0.25)' : '', cursor: isSearchMatch ? 'pointer' : 'default'}}>
           <div className="bc-num">
@@ -267,6 +282,7 @@
             <span className="bc-limit">{getLimit(odd)}</span>
           </div>
           {BOOK_LOGOS[book] ? <img src={BOOK_LOGOS[book]} alt={BOOK_NAMES[book]} className="book-logo" /> : <div className="book-fallback">{BOOK_NAMES[book]}</div>}
+          {isOutOfRange && <span className="out-of-range">OUT OF RANGE</span>}
         </div>
       );
     };
@@ -346,6 +362,7 @@
       });
       const [betForm, setBetForm] = useState({ player: '', odds: '', amount: '', book: 'pinnacle', result: 'win' });
       const [suggestions, setSuggestions] = useState([]);
+      const [worstPrice, setWorstPrice] = useState(null);
       const [prices, setPrices] = useState([]);
       const [modalOpen, setModalOpen] = useState(false);
       const searchInputRef = useRef(null);
@@ -392,6 +409,7 @@
 
       const handleSearchChange = (val) => {
         setSearchName(val);
+        setWorstPrice(null);
         if (val.trim().length > 0) {
           const playerNames = new Set();
           matches.forEach(m => {
@@ -419,6 +437,7 @@
         const playerName = typeof suggestion === 'string' ? suggestion : suggestion.name;
         setSearchName(playerName);
         setSuggestions([]);
+        setWorstPrice(null);
         fetchOdds(true);
       };
 
@@ -426,7 +445,21 @@
         e.preventDefault();
         setSearchName('');
         setSuggestions([]);
+        setWorstPrice(null);
         if (searchInputRef.current) searchInputRef.current.focus();
+      };
+
+      const handleSearchPaste = (e) => {
+        const text = e.clipboardData.getData('text');
+        if (!text || (!text.includes('\n') && !/worst\s*price/i.test(text))) return;
+        const parsed = parsePastedPick(text);
+        if (parsed) {
+          e.preventDefault();
+          setSearchName(parsed.player);
+          setWorstPrice(parsed.worstPrice);
+          setSuggestions([]);
+          fetchOdds(true);
+        }
       };
 
       const fetchingRef = useRef(false);
@@ -634,6 +667,9 @@
 
             // Skip doubles matches (player names like "Player A / Player B")
             if (home.includes('/') || away.includes('/')) return;
+
+            // Skip matches that have already started (no live matches shown)
+            if (new Date(commence) <= new Date()) return;
             
             // Map odds by (book, market, sur)
             const odds = {};
@@ -868,7 +904,7 @@
                           {copiedName === primaryName ? '✓' : '🔗'}
                         </button>
                       </div>
-                      <BestCell pick={bestOf(primaryML)} player={primaryName} sur={primarySur} searchName={searchName} copiedName={copiedName} setCopiedName={setCopiedName} commence={match.commence} />
+                      <BestCell pick={bestOf(primaryML)} player={primaryName} sur={primarySur} searchName={searchName} copiedName={copiedName} setCopiedName={setCopiedName} commence={match.commence} worstPrice={worstPrice} />
                       <div className="vs-line"><span className="vs-word">vs.</span>{opponentName}</div>
                     </div>
                   ) : (
@@ -877,13 +913,13 @@
                       <div className="name-band" style={{display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '4px', marginBottom: '8px'}}>
                         <span>{match.home}</span>
                       </div>
-                      <BestCell pick={bestOf(homeML)} player={match.home} sur={match.homeSur} searchName={searchName} copiedName={copiedName} setCopiedName={setCopiedName} commence={match.commence} />
+                      <BestCell pick={bestOf(homeML)} player={match.home} sur={match.homeSur} searchName={searchName} copiedName={copiedName} setCopiedName={setCopiedName} commence={match.commence} worstPrice={worstPrice} />
                     </div>
                     <div className="card-col">
                       <div className="name-band" style={{display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '4px', marginBottom: '8px'}}>
                         <span>{match.away}</span>
                       </div>
-                      <BestCell pick={bestOf(awayML)} player={match.away} sur={match.awaySur} searchName={searchName} copiedName={copiedName} setCopiedName={setCopiedName} commence={match.commence} />
+                      <BestCell pick={bestOf(awayML)} player={match.away} sur={match.awaySur} searchName={searchName} copiedName={copiedName} setCopiedName={setCopiedName} commence={match.commence} worstPrice={worstPrice} />
                     </div>
                   </div>
                   )}
@@ -901,7 +937,7 @@
           {tab === 'odds' && matches.length > 0 && (
             <div className="search-bottom">
               <div className="input-group" style={{position: 'relative', marginBottom: '0', padding: '0'}}>
-                <input ref={searchInputRef} type="text" style={{paddingLeft: '12px', paddingTop: '10px', paddingBottom: '10px', fontSize: '14px', fontWeight: 600}} placeholder="Search player..." value={searchName} onChange={(e) => handleSearchChange(e.target.value)} spellCheck="false" autoCorrect="off" autoCapitalize="off" autoComplete="off" />
+                <input ref={searchInputRef} type="text" style={{paddingLeft: '12px', paddingTop: '10px', paddingBottom: '10px', fontSize: '14px', fontWeight: 600}} placeholder="Search player..." value={searchName} onChange={(e) => handleSearchChange(e.target.value)} onPaste={handleSearchPaste} spellCheck="false" autoCorrect="off" autoCapitalize="off" autoComplete="off" />
                 <button className={`clear-btn ${searchName ? 'show' : ''}`} onClick={clearSearch}>✕</button>
                 {suggestions.length > 0 && <div className="autocomplete-list show" style={{bottom: '100%', top: 'auto', borderTop: '2px solid rgba(var(--glass-rgb), 0.2)', borderBottom: 'none', borderRadius: '12px 12px 0 0'}}>
                   {suggestions.map((suggestion, idx) => (
