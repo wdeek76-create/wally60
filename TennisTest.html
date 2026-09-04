@@ -3064,9 +3064,17 @@ function parseBotBlock(text){
   if(dateLine) result.date = dateLine;
 
   // Odds + Book line: "+256 Pinnacle" or "-105 Pinnacle (6.29%)"
-  const oddsLine = lines.find(l => /^[+\-]\d{2,4}(\s+\w|\s*$)/.test(l) && !/Win%/i.test(l) && !/Worst/i.test(l));
+  // Accepts "-333 Pinnacle" and "Pinnacle -333" — our copy output uses the
+  // second form, so a copied line must paste back in cleanly.
+  const oddsLine = lines.find(l =>
+    (/^[+\-]\d{2,4}(\s+\w|\s*$)/.test(l) || /^[A-Za-z][A-Za-z0-9 ]*\s[+\-]\d{2,4}\b/.test(l))
+    && !/Win%/i.test(l) && !/Worst/i.test(l));
   if(oddsLine){
-    const om = oddsLine.match(/^([+\-]\d{2,4})(?:\s+([A-Za-z0-9]+))?/);
+    let om = oddsLine.match(/^([+\-]\d{2,4})(?:\s+([A-Za-z0-9]+))?/);
+    if(!om){
+      const flipped = oddsLine.match(/^([A-Za-z][A-Za-z0-9 ]*?)\s([+\-]\d{2,4})\b/);
+      if(flipped) om = [flipped[0], flipped[2], flipped[1].trim()];
+    }
     if(om){ result.odds = om[1]; if(om[2]) result.book = om[2]; }
     const evM = oddsLine.match(/\(([0-9.]+)%\)/);
     if(evM) result._ev = parseFloat(evM[1]);
@@ -3204,6 +3212,20 @@ function normName(n){
 function surnameKey(n){
   const parts = normName(n).toLowerCase().split(/\s+/);
   return parts.length ? parts[parts.length - 1] : '';
+}
+
+// Tournament level from the title. Order matters: Slam names are checked before
+// the ITF number codes, since a title can contain both a city and a code.
+function tourLevelOf(b){
+  const t = String((b && b.tourney) || '').toLowerCase();
+  if(!t) return null;
+  if(/\b(u\.?s\.? open|australian open|wimbledon|roland garros|french open)\b/.test(t)) return 'Grand Slam';
+  if(/\bchallenger\b/.test(t) || /\bch\d{2,3}\b/.test(t)) return 'Challenger';
+  // ITF circuit codes: M15/M25 and W15/W25/W35/W50/W75/W100
+  if(/\b[mw]\d{2,3}\b/.test(t)) return 'ITF';
+  if(/\bitf\b/.test(t)) return 'ITF';
+  if(/\b(atp|wta)\b/.test(t)) return 'Tour';
+  return 'Tour';
 }
 
 // Word-prefix match: every word in the query must prefix some word in the name.
@@ -3995,7 +4017,8 @@ function buildPlayText(name, opp, mktOdds, evPct, tourney, winPct, bookOdds, mat
     const sorted = [...bookOdds].sort((a,b)=>b.odds - a.odds);
     text += '\n'+sorted.map(b=>{
       const oddsStr = (b.odds>=0?'+':'')+b.odds;
-      let line = oddsStr+' '+b.label;
+      // Book first: "Pinnacle +165 starts 21hr 55m"
+      let line = b.label+' '+oddsStr;
       if(b.liq){
         line += ' $'+b.liq.toLocaleString('en-US');
       }
@@ -4022,6 +4045,30 @@ function copyToClipboard(text, btnEl){
   }).catch(()=>{ prompt('Copy this:', text); });
 }
 
+// Entry-page copy: one line, nothing else.
+//   "Pinnacle +165 starts 21hr 55m"
+//   "Pinnacle +165, FanDuel +130 starts 21hr 55m"   (multiple in range)
+// Only books at or better than the worst price are listed — a book below the
+// floor is not a bet, so it does not belong in the posted line.
+function buildEntryCopyLine(){
+  const wp = parseFloat(document.getElementById('iWinPct').value);
+  const books = (typeof getBookOdds === 'function') ? getBookOdds() : [];
+  if(!books.length) return '';
+
+  const worst = (_importedWorst !== null)
+    ? _importedWorst
+    : parseInt(String(worstOddsAt5pct(wp)).replace('+',''), 10);
+
+  const inRange = books
+    .filter(b => isNaN(worst) ? true : b.odds >= worst)
+    .sort((a,b) => b.odds - a.odds);
+  const use = inRange.length ? inRange : [books.slice().sort((a,b)=>b.odds-a.odds)[0]];
+
+  const parts = use.map(b => b.label + ' ' + (b.odds >= 0 ? '+' : '') + b.odds);
+  const cd = _entryCommence ? startsIn(_entryCommence, 'copy') : '';
+  return parts.join(', ') + (cd ? ' starts ' + cd : '');
+}
+
 function copyEntry(){
   const name = cleanName(document.getElementById('iName').value);
   const opp = document.getElementById('iOpp').value.trim();
@@ -4045,7 +4092,7 @@ function copyEntry(){
   }
 
   const r = calcEV(wp, mo, 100);
-  const text = buildPlayText(name, opp, mo, r.evPct, tourney, wp, getBookOdds(), document.getElementById('iMatchTime').value || null, _entryCommence, (_importedWorst !== null ? _importedWorst : undefined));
+  const text = buildEntryCopyLine();
   const btn = document.getElementById('copyEntryBtn');
   copyToClipboard(text, btn);
 }
@@ -4815,10 +4862,21 @@ function liveCalc(){
   if(wp){
     const fairOdds = winPctToAmer(wp);
     const fairStr = (fairOdds>=0?'+':'')+fairOdds;
-    const playTo = worstOddsAt5pct(wp);
+    // The pasted Worst Price is the model's own floor and takes precedence.
+    // When ours disagrees, show both — the gap is the difference between the
+    // two devigs, which is worth seeing rather than hiding behind one number.
+    const ourPlayTo = worstOddsAt5pct(wp);
+    const playTo = (_importedWorst !== null)
+      ? ((_importedWorst >= 0 ? '+' : '') + _importedWorst)
+      : ourPlayTo;
     document.getElementById('fairOddsDisp').textContent = fairStr;
     const playEl = document.getElementById('playToDisp');
-    playEl.textContent = playTo;
+    if(_importedWorst !== null && String(ourPlayTo) !== String(playTo)){
+      playEl.innerHTML = playTo +
+        '<span style="font-size:11px;font-weight:600;color:var(--text2)"> · ours ' + ourPlayTo + '</span>';
+    } else {
+      playEl.textContent = playTo;
+    }
     // Determine if current market odds beat the threshold (lower implied % = better odds)
     let beatsThreshold = false;
     if(mo){
@@ -4974,7 +5032,7 @@ function liveCalc(){
   const copyBtn = document.getElementById('copyEntryBtn');
   const copyPreview = document.getElementById('copyEntryPreview');
   if(name){
-    const txt = buildPlayText(name, opp, mo, r.evPct, tourney, wp, getBookOdds(), document.getElementById('iMatchTime').value || null, _entryCommence, (_importedWorst !== null ? _importedWorst : undefined));
+    const txt = buildEntryCopyLine();
     copyBtn.style.display='inline-block';
     copyPreview.style.display='block';
     copyPreview.textContent = txt;
@@ -7309,9 +7367,29 @@ function renderSettleBreakdown(){
     womens.length ? statCard('Womens', womens) : ''
   ].filter(Boolean).join('');
 
+  // Level: Grand Slam / Tour / Challenger / ITF, with a Mens/Womens split under it
+  const levels = ['Grand Slam','Tour','Challenger','ITF'];
+  const levelCards = levels.map(lv => {
+    const g = arr.filter(b => tourLevelOf(b) === lv);
+    return g.length ? statCard(lv, g) : '';
+  }).filter(Boolean).join('');
+  const levelGenderCards = levels.map(lv => {
+    const g = arr.filter(b => tourLevelOf(b) === lv);
+    if(!g.length) return '';
+    const m = g.filter(b => getGenderForBet(b) === 'mens');
+    const w = g.filter(b => getGenderForBet(b) === 'womens');
+    return (m.length ? statCard(lv + ' · M', m) : '') + (w.length ? statCard(lv + ' · W', w) : '');
+  }).filter(Boolean).join('');
+
   let html = '';
   if(tourCards){
     html += `<div class="bk-title" style="margin-top:4px">Tour</div><div class="breakdown-row">${tourCards}</div>`;
+  }
+  if(levelCards){
+    html += `<div class="bk-title">Level</div><div class="breakdown-row">${levelCards}</div>`;
+  }
+  if(levelGenderCards){
+    html += `<div class="bk-title">Level · Mens vs Womens</div><div class="breakdown-row">${levelGenderCards}</div>`;
   }
   if(surfaceCards){
     html += `<div class="bk-title">Surface</div><div class="breakdown-row">${surfaceCards}</div>`;
