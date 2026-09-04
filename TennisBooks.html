@@ -73,6 +73,7 @@
     .out-of-range { color: #ff3b3b; font-size: 10px; font-weight: 900; text-transform: uppercase; letter-spacing: 0.3px; margin-left: 6px; font-family: 'JetBrains Mono', monospace; text-shadow: 0 0 10px rgba(255, 59, 59, 0.5); }
     @keyframes copyPop { 0% { opacity: 0; transform: translateY(6px) scale(0.96); } 15% { opacity: 1; transform: translateY(0) scale(1); } 82% { opacity: 1; transform: translateY(0) scale(1); } 100% { opacity: 0; transform: translateY(-4px) scale(0.98); } }
     .paste-copied-toast { position: absolute; left: 12px; right: 12px; bottom: 100%; margin-bottom: 8px; animation: copyPop 1.6s ease forwards; background: rgba(20, 25, 45, 0.98); border: 1px solid rgba(34, 197, 94, 0.4); color: #22c55e; font-family: 'JetBrains Mono', monospace; font-size: 12px; font-weight: 800; padding: 10px 12px; border-radius: 10px; text-align: center; letter-spacing: 0.3px; z-index: 101; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4); backdrop-filter: blur(16px); pointer-events: none;}
+    .paste-warn-toast { animation-duration: 2.6s; border-color: rgba(255, 59, 59, 0.5); color: #ff5c5c; }
     .live-dot { width: 6px; height: 6px; border-radius: 50%; background: #ff3b3b; animation: livePulse 1.2s ease-in-out infinite; }
     @keyframes livePulse { 0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(255, 59, 59, 0.6); } 50% { opacity: 0.4; box-shadow: 0 0 0 4px rgba(255, 59, 59, 0); } }
     .col-heads { display: grid; grid-template-columns: 1fr 44px 1fr; gap: 8px; margin-bottom: 8px; }
@@ -243,16 +244,18 @@
     };
     const parsePastedPick = (text) => {
       const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
-      let player = null, worstPrice = null;
+      let player = null, opponent = null, worstPrice = null;
       for (const line of lines) {
         if (!player && line.includes('>')) {
-          const left = line.split('>')[0].replace(/\*/g, '').trim();
-          if (left) player = left;
+          const parts = line.split('>');
+          const left = parts[0].replace(/\*/g, '').trim();
+          const right = (parts[1] || '').replace(/\*/g, '').trim();
+          if (left) { player = left; opponent = right || null; }
         }
         const wpMatch = line.match(/worst\s*price\s*([+-]?\d+)/i);
         if (wpMatch) worstPrice = parseInt(wpMatch[1], 10);
       }
-      return player ? { player, worstPrice } : null;
+      return player ? { player, opponent, worstPrice } : null;
     };
     const startsInCopy = (isoString) => {
       try {
@@ -366,6 +369,8 @@
       const [suggestions, setSuggestions] = useState([]);
       const [worstPrice, setWorstPrice] = useState(null);
       const [pasteCopied, setPasteCopied] = useState(null);
+      const [pastedOpponent, setPastedOpponent] = useState(null);
+      const [pasteWarning, setPasteWarning] = useState(null);
       const [prices, setPrices] = useState([]);
       const [modalOpen, setModalOpen] = useState(false);
       const searchInputRef = useRef(null);
@@ -428,6 +433,8 @@
 
       const handleSearchChange = (val) => {
         setSearchName(val);
+        setPastedOpponent(null);
+        setPasteWarning(null);
         if (val.trim().length > 0) {
           const playerNames = new Set();
           matches.forEach(m => {
@@ -455,6 +462,8 @@
         const playerName = typeof suggestion === 'string' ? suggestion : suggestion.name;
         setSearchName(playerName);
         setSuggestions([]);
+        setPastedOpponent(null);
+        setPasteWarning(null);
         fetchOdds(true);
       };
 
@@ -463,6 +472,8 @@
         setSearchName('');
         setSuggestions([]);
         setWorstPrice(null);
+        setPastedOpponent(null);
+        setPasteWarning(null);
         if (searchInputRef.current) searchInputRef.current.focus();
       };
 
@@ -474,31 +485,38 @@
           e.preventDefault();
           setSearchName(parsed.player);
           setWorstPrice(parsed.worstPrice);
+          setPastedOpponent(parsed.opponent);
+          setPasteWarning(null);
 
-          const playerNames = new Set();
-          matches.forEach(m => {
-            playerNames.add(m.home);
-            playerNames.add(m.away);
+          // Find the specific matchup: pasted player on one side AND pasted opponent on the other.
+          // If the opponent doesn't line up, it's the wrong match — don't pull it.
+          const matchup = matches.find(m => {
+            const homeP = nameMatches(m.home, parsed.player), awayP = nameMatches(m.away, parsed.player);
+            if (!parsed.opponent) return homeP || awayP;
+            return (homeP && nameMatches(m.away, parsed.opponent)) || (awayP && nameMatches(m.home, parsed.opponent));
           });
-          const filtered = Array.from(playerNames)
-            .filter(name => nameMatches(name, parsed.player))
-            .sort();
-          const suggestionsWithOdds = filtered.map(name => {
-            const playerOdds = prices.filter(p => p.selection === name && p.market_type === 'moneyline');
-            const bestOdds = playerOdds.length > 0 ? Math.max(...playerOdds.map(o => o.odds_american)) : null;
-            const bookCount = new Set(playerOdds.map(o => o.sportsbook)).size;
-            return { name, bestOdds, bookCount };
-          });
-          setSuggestions(suggestionsWithOdds);
+
+          if (!matchup) {
+            setSuggestions([]);
+            const oppo = parsed.opponent ? ` vs ${parsed.opponent}` : '';
+            setPasteWarning(`No matchup found: ${parsed.player}${oppo}`);
+            setTimeout(() => setPasteWarning(null), 2600);
+            fetchOdds(true);
+            return;
+          }
+
+          const exactName = nameMatches(matchup.home, parsed.player) ? matchup.home : matchup.away;
+          const playerOdds = prices.filter(p => p.selection === exactName && p.market_type === 'moneyline' && p.event_id === matchup.eventId);
+          const bestOdds = playerOdds.length > 0 ? Math.max(...playerOdds.map(o => o.odds_american)) : null;
+          const bookCount = new Set(playerOdds.map(o => o.sportsbook)).size;
+          setSuggestions([{ name: exactName, bestOdds, bookCount }]);
 
           // Auto-copy Pinnacle's price (never a different book, even if another book is better) when in range
           if (parsed.worstPrice != null) {
-            const exactName = filtered.find(name => name.toLowerCase() === parsed.player.toLowerCase()) || filtered[0];
-            const pinnacleOdds = prices.find(p => p.selection === exactName && p.market_type === 'moneyline' && p.sportsbook === 'pinnacle');
+            const pinnacleOdds = playerOdds.find(p => p.sportsbook === 'pinnacle');
             if (pinnacleOdds && pinnacleOdds.odds_american >= parsed.worstPrice) {
               const oddsStr = pinnacleOdds.odds_american > 0 ? `+${pinnacleOdds.odds_american}` : `${pinnacleOdds.odds_american}`;
-              const match = matches.find(m => m.home === exactName || m.away === exactName);
-              const countdown = match ? startsInCopy(match.commence) : '';
+              const countdown = startsInCopy(matchup.commence);
               const copyText = countdown ? `Pinnacle ${oddsStr} starts ${countdown}` : `Pinnacle ${oddsStr}`;
               navigator.clipboard.writeText(copyText);
               setPasteCopied(copyText);
@@ -840,9 +858,20 @@
         } catch { return ''; }
       };
 
+      // When a pasted pick set an opponent, a match only counts if the player AND opponent both line up.
+      const sideMatches = (m) => {
+        const homeP = nameMatches(m.home, searchName), awayP = nameMatches(m.away, searchName);
+        if (!pastedOpponent) return { home: homeP, away: awayP };
+        return {
+          home: homeP && nameMatches(m.away, pastedOpponent),
+          away: awayP && nameMatches(m.home, pastedOpponent)
+        };
+      };
+
       const filteredMatches = matches.filter(m => {
         if (!searchName.trim()) return true;
-        return nameMatches(m.home, searchName) || nameMatches(m.away, searchName);
+        const s = sideMatches(m);
+        return s.home || s.away;
       });
 
       const getOddsForPlayer = (match, playerSur, market = 'moneyline') => {
@@ -933,8 +962,9 @@
               if (Object.keys(homeML).length + Object.keys(awayML).length === 0) return null;
               const nBooks = BOOKMAKERS.filter(b => homeML[b] || awayML[b]).length;
               const isOpen = !!expanded[match.eventId];
-              const homeIsMatch = nameMatches(match.home, searchName);
-              const awayIsMatch = nameMatches(match.away, searchName);
+              const sides = sideMatches(match);
+              const homeIsMatch = sides.home;
+              const awayIsMatch = sides.away;
               const hasFocus = homeIsMatch || awayIsMatch;
               const primaryIsHome = homeIsMatch;
               const primaryName = primaryIsHome ? match.home : match.away;
@@ -985,6 +1015,7 @@
           {tab === 'odds' && matches.length > 0 && (
             <div className="search-bottom">
               {pasteCopied && <div className="paste-copied-toast">✓ Copied: {pasteCopied}</div>}
+              {pasteWarning && <div className="paste-copied-toast paste-warn-toast">⚠ {pasteWarning}</div>}
               <div className="input-group" style={{position: 'relative', marginBottom: '0', padding: '0'}}>
                 <input ref={searchInputRef} type="text" style={{paddingLeft: '44px', paddingTop: '10px', paddingBottom: '10px', fontSize: '14px', fontWeight: 600}} placeholder="Search player..." value={searchName} onChange={(e) => handleSearchChange(e.target.value)} onPaste={handleSearchPaste} spellCheck="false" autoCorrect="off" autoCapitalize="off" autoComplete="off" />
                 <button className={`clear-btn ${searchName ? 'show' : ''}`} onClick={clearSearch}>✕</button>
