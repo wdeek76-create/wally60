@@ -3696,6 +3696,17 @@ function cfbSetManual(id, result) {
   b.manualResult = b.manualResult === result ? null : result;
   cfbSave(); cfbRender();
 }
+function cfbEditDate(id) {
+  const b = cfbBets.find(x => x.id === id);
+  if (!b) return;
+  const v = prompt('Date (M/D):', b.date.replace('/2026',''));
+  if (v === null) return;
+  const m = v.trim().match(/^(\d{1,2})\/(\d{1,2})$/);
+  if (!m) { alert('Use M/D format, e.g. 9/6'); return; }
+  b.date = m[1] + '/' + m[2] + '/2026';
+  cfbSave(); cfbRender();
+}
+
 function cfbDelete(id) {
   if (!confirm('Delete this bet?')) return;
   cfbBets = cfbBets.filter(x => x.id !== id);
@@ -3752,7 +3763,7 @@ function cfbRender() {
     const resTxt = r === 'win' ? 'WIN' : (r === 'loss' ? 'LOSS' : (r === 'push' ? 'PUSH' : '—'));
     const resColor = r === 'win' ? 'var(--win)' : (r === 'loss' ? 'var(--loss)' : (r === 'push' ? 'var(--push)' : 'var(--sub)'));
     return '<tr>' +
-      '<td>' + b.date.replace('/2026','') + '</td>' +
+      '<td><span style="cursor:pointer;text-decoration:underline dotted;" title="Click to change date" onclick="cfbEditDate(' + b.id + ')">' + b.date.replace('/2026','') + '</span></td>' +
       '<td style="font-weight:600;">' + (b.logo ? '<img src="' + b.logo + '" style="width:16px;height:16px;vertical-align:-3px;margin-right:5px;" onerror="this.style.display=\'none\'">' : '') + cfbBetLabel(b) + (b.opponent ? '<div style="font-size:10px;color:var(--sub);">' + (b.oppLogo ? '<img src="' + b.oppLogo + '" style="width:11px;height:11px;vertical-align:-2px;margin-right:3px;" onerror="this.style.display=\'none\'">' : '') + 'vs ' + b.opponent + '</div>' : '') + '</td>' +
       '<td>' + b.betType + (b.is1H ? ' 1H' : '') + '</td>' +
       '<td>' + (b.odds > 0 ? '+' : '') + b.odds + '</td>' +
@@ -4018,7 +4029,6 @@ async function cfbFetchScoreboard(ymd) {
 function cfbExtractGame(ev) {
   const comp = (ev.competitions && ev.competitions[0]) || {};
   const st = (comp.status && comp.status.type) || (ev.status && ev.status.type) || {};
-  if (!st.completed) return null;
   let home = null, away = null;
   (comp.competitors || []).forEach(c => { if (c.homeAway === 'home') home = c; else if (c.homeAway === 'away') away = c; });
   if (!home || !away) return null;
@@ -4038,7 +4048,14 @@ function cfbExtractGame(ev) {
     if (t.id) return 'https://a.espncdn.com/i/teamlogos/ncaa/500/' + t.id + '.png';
     return null;
   }
+  let dateStr = null;
+  if (ev.date) {
+    const d = new Date(ev.date);
+    if (!isNaN(d)) dateStr = (d.getMonth() + 1) + '/' + d.getDate() + '/' + d.getFullYear();
+  }
   return {
+    completed: !!st.completed,
+    dateStr: dateStr,
     homeName: (home.team && (home.team.displayName || home.team.location)) || '',
     awayName: (away.team && (away.team.displayName || away.team.location)) || '',
     homeNames: nameSet(home), awayNames: nameSet(away),
@@ -4070,6 +4087,7 @@ function cfbGradeBet(b, games) {
   b.opponent = isHome ? g.awayName : g.homeName;
   b.logo = isHome ? g.homeLogo : g.awayLogo;
   b.oppLogo = isHome ? g.awayLogo : g.homeLogo;
+  if (g.dateStr && b.date !== g.dateStr) { b.date = g.dateStr; b._dateFixed = true; }
 
   let my, opp;
   if (b.is1H) {
@@ -4112,35 +4130,49 @@ async function cfbGradeAll() {
   if (!pending.length && !needLogo.length) { document.getElementById('cfbStatus').textContent = 'Nothing to grade'; return; }
   btn.disabled = true; btn.textContent = '⏳ GRADING...';
 
+  // fetch each relevant date ±1 day so off-by-one paste dates self-correct
   const dates = {};
-  pending.concat(needLogo).forEach(b => { dates[cfbYmd(b)] = true; });
+  pending.concat(needLogo).forEach(b => {
+    const parts = b.date.split('/').map(Number);
+    for (let off = -1; off <= 1; off++) {
+      const nd = new Date(parts[2], parts[0] - 1, parts[1] + off);
+      dates[nd.getFullYear() + String(nd.getMonth() + 1).padStart(2, '0') + String(nd.getDate()).padStart(2, '0')] = true;
+    }
+  });
 
-  let graded = 0, logosAdded = 0;
+  cfbBets.forEach(b => { delete b._dateFixed; });
+  const pool = [];
   for (const ymd of Object.keys(dates)) {
     const events = await cfbFetchScoreboard(ymd);
-    const games = events.map(cfbExtractGame).filter(Boolean);
-    document.getElementById('cfbStatus').textContent = ymd + ': ' + games.length + ' completed games';
-    pending.forEach(b => {
-      if (cfbYmd(b) !== ymd || b.apiResult) return;
-      const res = cfbGradeBet(b, games);
-      if (res) { b.apiResult = res; graded++; }
-    });
-    // backfill logos/opponent on already-graded bets from this date
-    cfbBets.forEach(b => {
-      if (cfbYmd(b) !== ymd || b.logo) return;
-      for (const g of games) {
-        const isHome = cfbSideMatches(g.homeNames, g.homeAbbr, b.team);
-        const isAway = cfbSideMatches(g.awayNames, g.awayAbbr, b.team);
-        if (!isHome && !isAway) continue;
-        b.logo = isHome ? g.homeLogo : g.awayLogo;
-        b.oppLogo = isHome ? g.awayLogo : g.homeLogo;
-        if (!b.opponent) b.opponent = isHome ? g.awayName : g.homeName;
-        if (b.logo) logosAdded++;
-        break;
-      }
-    });
+    events.map(cfbExtractGame).filter(Boolean).forEach(g => pool.push(g));
+    document.getElementById('cfbStatus').textContent = 'Fetched ' + pool.length + ' games...';
   }
+  const finals = pool.filter(g => g.completed);
 
+  let graded = 0, logosAdded = 0;
+  pending.forEach(b => {
+    if (b.apiResult) return;
+    const res = cfbGradeBet(b, finals);
+    if (res) { b.apiResult = res; graded++; }
+  });
+
+  // logo + date backfill from ALL games (scheduled included)
+  cfbBets.forEach(b => {
+    if (b.logo) return;
+    for (const g of pool) {
+      const isHome = cfbSideMatches(g.homeNames, g.homeAbbr, b.team);
+      const isAway = cfbSideMatches(g.awayNames, g.awayAbbr, b.team);
+      if (!isHome && !isAway) continue;
+      b.logo = isHome ? g.homeLogo : g.awayLogo;
+      b.oppLogo = isHome ? g.awayLogo : g.homeLogo;
+      if (!b.opponent) b.opponent = isHome ? g.awayName : g.homeName;
+      if (!b.apiResult && !b.manualResult && g.dateStr && b.date !== g.dateStr) { b.date = g.dateStr; b._dateFixed = true; }
+      if (b.logo) logosAdded++;
+      break;
+    }
+  });
+
+  const dateFixes = cfbBets.filter(b => b._dateFixed).length;
   cfbBets.forEach(b => {
     b.conflict = b.apiResult && b.loggedResult && b.loggedResult !== 'pending' && b.apiResult !== b.loggedResult && !b.manualResult;
   });
@@ -4148,7 +4180,10 @@ async function cfbGradeAll() {
   cfbSave();
   cfbRender();
   const conflicts = cfbBets.filter(b => b.conflict).length;
-  document.getElementById('cfbStatus').textContent = '✅ Graded ' + graded + '/' + pending.length + (logosAdded ? ' · ' + logosAdded + ' logos added' : '') + (conflicts ? ' · ⚠ ' + conflicts + ' conflicts with logged results' : '');
+  document.getElementById('cfbStatus').textContent = '✅ Graded ' + graded + '/' + pending.length +
+    (logosAdded ? ' · ' + logosAdded + ' logos added' : '') +
+    (dateFixes ? ' · ' + dateFixes + ' dates auto-fixed' : '') +
+    (conflicts ? ' · ⚠ ' + conflicts + ' conflicts with logged results' : '');
   btn.disabled = false; btn.textContent = '⚡ GRADE ALL (ESPN)';
 }
 
