@@ -11447,6 +11447,72 @@ async function shareOpenPropsAsImageDiscord(betList) {
 // source agreed with the user's pick. "ev" (default) checks if the source's
 // projection produces positive expected value at the bet's price. "directional"
 // only checks which side of the line the projection sits on.
+// Copy a source's full record to the clipboard: overall, by market, and the
+// over/under split within each market. Reads the same snapshot the tables
+// render from, so the text can't drift from what's on screen.
+function copySrcStats(key){
+  const s = window._srcSnapshot;
+  if(!s){ showToast("Open Source Analytics first"); return; }
+  const k = key || _srcAnalyticsOnly || "rotowire";
+  const label = s.SRC_LABELS[k] || k;
+  const fmt = (st) => {
+    if(!st || !st.total) return null;
+    const roi = st.staked>0 ? (st.pl/st.staked)*100 : 0;
+    const pct = Math.round((st.hits/st.total)*100);
+    return { line: `${st.hits}-${st.total-st.hits}${st.pushes?`-${st.pushes}`:""}  ${pct}%  ${st.pl>=0?"+":""}${st.pl.toFixed(2)}u  ${roi>=0?"+":""}${roi.toFixed(1)}%`,
+             roi, total: st.total };
+  };
+  const out = [];
+  out.push(`${label} \u2014 source record`);
+  out.push(`${s.mode==="ev"?"+EV":"Directional"} mode \u00b7 ${s.settledCount} settled bets`);
+  out.push("");
+  const overall = fmt(s.solo[k]);
+  out.push(`OVERALL   ${overall ? overall.line : "no qualifying bets"}`);
+  out.push("");
+  // Per market, with the over/under split underneath.
+  const stats = Object.keys(s.byStat||{}).sort();
+  const rows = [];
+  stats.forEach(stat => {
+    const m = fmt(s.byStat[stat][k]);
+    if(!m) return;
+    rows.push({ stat, m,
+      over: fmt(s.byStatSide[stat] && s.byStatSide[stat].over[k]),
+      under: fmt(s.byStatSide[stat] && s.byStatSide[stat].under[k]) });
+  });
+  if(rows.length){
+    out.push("BY MARKET");
+    rows.sort((a,b)=>b.m.roi-a.m.roi).forEach(r => {
+      out.push(`  ${r.stat.padEnd(6)} ${r.m.line}`);
+      if(r.over)  out.push(`    over   ${r.over.line}`);
+      if(r.under) out.push(`    under  ${r.under.line}`);
+    });
+    out.push("");
+    // Side totals across every market.
+    const sideTotal = (side) => {
+      const t = { total:0, hits:0, pushes:0, staked:0, pl:0 };
+      stats.forEach(stat => {
+        const st = s.byStatSide[stat] && s.byStatSide[stat][side][k];
+        if(!st) return;
+        t.total+=st.total; t.hits+=st.hits; t.pushes+=st.pushes;
+        t.staked+=st.staked; t.pl+=st.pl;
+      });
+      return fmt(t);
+    };
+    const o = sideTotal("over"), u = sideTotal("under");
+    if(o||u){
+      out.push("ALL MARKETS BY SIDE");
+      if(o) out.push(`  over    ${o.line}`);
+      if(u) out.push(`  under   ${u.line}`);
+      out.push("");
+    }
+  }
+  out.push("W-L  win%  P&L  ROI");
+  const text = out.join("\n");
+  copyTextToClipboard(text,
+    () => showToast(`Copied ${label} stats`),
+    () => { console.log(text); showToast("Copy blocked \u2014 text in console"); });
+}
+
 let _srcAnalyticsOnly = null;
 function setSrcOnly(key){
   _srcAnalyticsOnly = (_srcAnalyticsOnly === key) ? null : key;
@@ -12579,6 +12645,11 @@ function renderSrcAnalytics() {
   const modeIsEV = _srcAnalyticsMode === "ev";
   const modePillStyle = (active) => `background:${active ? "rgba(125,211,252,0.18)" : "transparent"};color:${active ? "#7dd3fc" : "#8b93a0"};border:1px solid ${active ? "rgba(125,211,252,0.4)" : "#1a1d22"};padding:5px 12px;font-size:10px;font-weight:700;letter-spacing:0.8px;text-transform:uppercase;border-radius:4px;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;`;
 
+  // Snapshot for the clipboard copy — the same aggregates the tables render
+  // from, so the copied text can never disagree with what's on screen.
+  window._srcSnapshot = { SRC_KEYS, SRC_LABELS, solo, byStat, byStatSide,
+                          mode: _srcAnalyticsMode, only: _srcAnalyticsOnly,
+                          settledCount: settled.length };
   root.innerHTML = `<div style="padding:0;">
     <div style="display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:14px;gap:12px;flex-wrap:wrap;">
       <div>
@@ -12592,6 +12663,8 @@ function renderSrcAnalytics() {
         <span style="width:10px;display:inline-block;"></span>
         <button onclick="setSrcOnly('rotowire')" title="Show RotoWire on its own" style="${modePillStyle(_srcAnalyticsOnly==='rotowire')}">RW ONLY</button>
         <button onclick="setSrcOnly('roto')" title="Show RotoGrinders on its own" style="${modePillStyle(_srcAnalyticsOnly==='roto')}">RG ONLY</button>
+        <span style="width:10px;display:inline-block;"></span>
+        <button onclick="copySrcStats('rotowire')" title="Copy RotoWire's full record" style="${modePillStyle(false)}">\u2398 COPY RW</button>
       </div>
     </div>
 
