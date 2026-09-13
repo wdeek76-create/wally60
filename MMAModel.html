@@ -324,7 +324,7 @@
 <header>
   <div>
     <h1><span class="a">UFC</span> Model</h1>
-    <div class="sub">Auto-log ≥1% edge · ML devig · per-stream tracking <span class="meta" style="margin-left:8px; font-size:10px; opacity:0.6;">build 2026.08.15-cons-clean</span></div>
+    <div class="sub">Auto-log ≥1% edge · ML devig · per-stream tracking <span class="meta" style="margin-left:8px; font-size:10px; opacity:0.6;">build 2026.08.15-cons-real</span></div>
   </div>
   <div style="margin-left:auto; display:flex; align-items:center; gap:8px;">
     <label class="meta" style="display:flex; align-items:center; gap:6px; cursor:pointer; font-size:11px; letter-spacing:0.04em; text-transform:uppercase;" title="Hide Arena source from every tab and exclude it from consensus/combo math">
@@ -556,8 +556,8 @@
 <!-- ============ CONSENSUS ============ -->
 <section id="tab-consensus" class="hidden">
   <div class="panel consensus">
-    <h2>Consensus · 2 of 3 (Eye / Arena / Saber)</h2>
-    <p class="meta" style="margin:0 0 12px 0;">At least 2 of 3 sources must clear ≥1% edge. The 3rd can disagree — bet still fires and the disagreement shows in the row. Your Number = lowest qualifying source.</p>
+    <h2>Consensus · Eye + Saber (Action excluded)</h2>
+    <p class="meta" style="margin:0 0 12px 0;">Bets where Eye + Saber both cleared ≥1% edge. Arena counts too when the Arena toggle is on. Action-agreement bets are hidden from this tab — they don't reflect the "real" consensus you're using.</p>
     <div class="filter-bar">
       <select id="consCardFilter"><option value="all">All cards</option></select>
       <select id="consStatusFilter">
@@ -585,6 +585,11 @@
       </div>
     </div>
     <div id="consTable"></div>
+  </div>
+
+  <div class="panel">
+    <h2 style="margin:0 0 12px 0;">Consensus performance</h2>
+    <div id="consPerformance"></div>
   </div>
 
   <div class="panel">
@@ -628,6 +633,11 @@
   </div>
 
   <div class="panel">
+    <h2 style="margin:0 0 12px 0;">Eye performance</h2>
+    <div id="eyePerformance"></div>
+  </div>
+
+  <div class="panel">
     <h2>Eye breakdowns</h2>
     <div id="eyeBreakdowns"></div>
   </div>
@@ -657,6 +667,11 @@
   </div>
 
   <div class="panel">
+    <h2 style="margin:0 0 12px 0;">Arena performance</h2>
+    <div id="arenaPerformance"></div>
+  </div>
+
+  <div class="panel">
     <h2>Arena breakdowns</h2>
     <div id="arenaBreakdowns"></div>
   </div>
@@ -683,6 +698,11 @@
       <button class="ghost" id="copySaberBtn-new" style="background:rgba(34,197,94,0.12); border-color:rgba(34,197,94,0.35); color:var(--green);">📋 Copy NEW only</button> <button class="ghost" id="copySaberBtn">📋 Copy all</button>
     </div>
     <div id="saberTable"></div>
+  </div>
+
+  <div class="panel">
+    <h2 style="margin:0 0 12px 0;">Saber performance</h2>
+    <div id="saberPerformance"></div>
   </div>
 
   <div class="panel">
@@ -745,6 +765,11 @@
       </div>
     </div>
     <div id="actionTable"></div>
+  </div>
+
+  <div class="panel">
+    <h2 style="margin:0 0 12px 0;">Action performance</h2>
+    <div id="actionPerformance"></div>
   </div>
 
   <div class="panel">
@@ -3119,6 +3144,276 @@ function unitStake(bet) {
   if (bet.ml == null) return 1;
   return bet.ml > 0 ? 1 : Math.abs(bet.ml) / 100;
 }
+// ============================================================
+// PERFORMANCE PANEL — cumulative units chart + weekly performance
+// Renders into any container id. Used by every solo tab + consensus.
+// ============================================================
+
+// Get the fight date (YYYY-MM-DD) for a bet by looking up its card.
+function getBetDate(bet) {
+  const card = STATE.cards.find(c => c.id === bet.cardId);
+  return card?.date || '';
+}
+
+// Get the Sunday-start ISO date (YYYY-MM-DD) for the week containing `dateStr`.
+function weekStartOf(dateStr) {
+  if (!dateStr) return '';
+  const d = new Date(dateStr + 'T12:00:00');
+  d.setDate(d.getDate() - d.getDay());  // rewind to Sunday
+  return d.toISOString().slice(0, 10);
+}
+
+// "Sep 7 – 13" style label for a week starting on `startISO`
+function formatWeekLabel(startISO) {
+  const start = new Date(startISO + 'T12:00:00');
+  const end = new Date(start);
+  end.setDate(end.getDate() + 6);
+  const startFmt = start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  const endFmt = start.getMonth() === end.getMonth()
+    ? end.getDate()
+    : end.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  return `${startFmt} – ${endFmt}`;
+}
+
+// Group a bet list into weekly buckets keyed by Sunday-start.
+function computeWeeklyBuckets(bets) {
+  const buckets = {};
+  bets.forEach(b => {
+    const d = getBetDate(b);
+    if (!d) return;
+    const wk = weekStartOf(d);
+    if (!buckets[wk]) buckets[wk] = { startISO: wk, wins: 0, losses: 0, units: 0, byDay: {}, n: 0 };
+    if (b.status === 'win') buckets[wk].wins++;
+    else if (b.status === 'loss') buckets[wk].losses++;
+    else return;
+    buckets[wk].n++;
+    buckets[wk].units += unitProfit(b);
+    // Track units per day-of-week
+    const dow = new Date(d + 'T12:00:00').getDay();
+    if (buckets[wk].byDay[dow] == null) buckets[wk].byDay[dow] = 0;
+    buckets[wk].byDay[dow] += unitProfit(b);
+  });
+  return Object.values(buckets).sort((a, b) => b.startISO.localeCompare(a.startISO));
+}
+
+// Build an SVG cumulative-units chart from bets. `range` = '7d' | '30d' | 'all'.
+function buildCumulativeSVG(bets, range = 'all', width = 720, height = 240) {
+  const graded = bets.filter(b => b.status === 'win' || b.status === 'loss');
+  if (!graded.length) return '<div class="empty" style="padding:32px 0;">No graded bets yet.</div>';
+
+  // Sort by date, then cumulative running total
+  const withDates = graded
+    .map(b => ({ ...b, _date: getBetDate(b) }))
+    .filter(b => b._date)
+    .sort((a, b) => a._date.localeCompare(b._date));
+  if (!withDates.length) return '<div class="empty" style="padding:32px 0;">No dated bets yet.</div>';
+
+  // Apply range filter based on last date
+  const lastDate = withDates[withDates.length - 1]._date;
+  let filtered = withDates;
+  if (range === '7d' || range === '30d') {
+    const days = range === '7d' ? 7 : 30;
+    const cutoff = new Date(lastDate + 'T12:00:00');
+    cutoff.setDate(cutoff.getDate() - days);
+    const cutoffISO = cutoff.toISOString().slice(0, 10);
+    filtered = withDates.filter(b => b._date >= cutoffISO);
+    if (!filtered.length) return '<div class="empty" style="padding:32px 0;">No bets in this range.</div>';
+  }
+
+  // Cumulative points — one per unique date
+  const pts = [];
+  let running = 0;
+  const byDate = {};
+  filtered.forEach(b => { running += unitProfit(b); byDate[b._date] = running; });
+  Object.keys(byDate).sort().forEach(d => pts.push({ date: d, units: byDate[d] }));
+
+  if (pts.length < 2) {
+    // Single point — just show the number
+    return `<div class="empty" style="padding:32px 0;">Only 1 dated bet in range · ${pts[0].units >= 0 ? '+' : ''}${pts[0].units.toFixed(2)}u</div>`;
+  }
+
+  // Chart geometry
+  const padL = 40, padR = 40, padT = 24, padB = 32;
+  const cW = width - padL - padR;
+  const cH = height - padT - padB;
+  const minU = Math.min(0, ...pts.map(p => p.units));
+  const maxU = Math.max(0, ...pts.map(p => p.units));
+  const uSpan = Math.max(1, maxU - minU);
+  const xOf = (i) => padL + (i / (pts.length - 1)) * cW;
+  const yOf = (u) => padT + cH - ((u - minU) / uSpan) * cH;
+
+  // Line + area paths
+  const linePath = pts.map((p, i) => `${i === 0 ? 'M' : 'L'} ${xOf(i).toFixed(1)} ${yOf(p.units).toFixed(1)}`).join(' ');
+  const areaPath = linePath + ` L ${xOf(pts.length - 1).toFixed(1)} ${yOf(minU).toFixed(1)} L ${xOf(0).toFixed(1)} ${yOf(minU).toFixed(1)} Z`;
+
+  // Baseline (zero line)
+  const zeroY = yOf(0);
+  const showZero = minU < 0 && maxU > 0;
+
+  // Endpoint labels + markers (min low point, latest)
+  const lastPt = pts[pts.length - 1];
+  const minPt = pts.reduce((m, p) => p.units < m.units ? p : m, pts[0]);
+
+  // Sparse x-axis labels — 4-5 dates across
+  const nLabels = Math.min(5, pts.length);
+  const xLabels = [];
+  for (let i = 0; i < nLabels; i++) {
+    const idx = Math.round((i / (nLabels - 1)) * (pts.length - 1));
+    const dParts = pts[idx].date.split('-');
+    xLabels.push({ x: xOf(idx), label: `${+dParts[1]}/${+dParts[2]}` });
+  }
+
+  const gradId = 'perfGrad_' + Math.random().toString(36).slice(2, 8);
+  const lineColor = lastPt.units >= 0 ? '#00d68f' : '#ef4444';
+  return `<svg viewBox="0 0 ${width} ${height}" style="width:100%; height:${height}px; display:block;" preserveAspectRatio="none">
+    <defs>
+      <linearGradient id="${gradId}" x1="0" x2="0" y1="0" y2="1">
+        <stop offset="0" stop-color="${lineColor}" stop-opacity="0.28"/>
+        <stop offset="1" stop-color="${lineColor}" stop-opacity="0"/>
+      </linearGradient>
+    </defs>
+    <path d="${areaPath}" fill="url(#${gradId})"/>
+    <path d="${linePath}" fill="none" stroke="${lineColor}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+    ${showZero ? `<line x1="${padL}" y1="${zeroY}" x2="${padL + cW}" y2="${zeroY}" stroke="var(--border)" stroke-width="1" stroke-dasharray="4,4" opacity="0.5"/>` : ''}
+    <circle cx="${xOf(pts.length - 1)}" cy="${yOf(lastPt.units)}" r="5" fill="${lineColor}"/>
+    <text x="${xOf(pts.length - 1)}" y="${yOf(lastPt.units) - 10}" fill="${lineColor}" font-size="13" font-weight="700" text-anchor="end">${lastPt.units >= 0 ? '+' : ''}${lastPt.units.toFixed(2)}u</text>
+    ${minPt !== lastPt && minPt.units < 0 ? `<circle cx="${xOf(pts.indexOf(minPt))}" cy="${yOf(minPt.units)}" r="4" fill="#ef4444"/>
+    <text x="${xOf(pts.indexOf(minPt))}" y="${yOf(minPt.units) + 18}" fill="#ef4444" font-size="12" font-weight="600" text-anchor="middle">${minPt.units.toFixed(2)}u</text>` : ''}
+    ${xLabels.map(x => `<text x="${x.x}" y="${height - 8}" fill="var(--muted)" font-size="11" text-anchor="middle">${x.label}</text>`).join('')}
+  </svg>`;
+}
+
+// Render the full performance panel (chart + weekly summary side-by-side) into
+// a container. Adds toggle buttons that swap chart ranges without re-rendering
+// the whole panel.
+function renderPerformancePanel(containerId, bets) {
+  const el = document.getElementById(containerId);
+  if (!el) return;
+  const graded = bets.filter(b => b.status === 'win' || b.status === 'loss');
+
+  if (!graded.length) {
+    el.innerHTML = '<div class="empty">No graded bets yet — chart + weekly performance build up as bets settle.</div>';
+    return;
+  }
+
+  // Weekly buckets (sorted newest first)
+  const weeks = computeWeeklyBuckets(graded);
+  const totalUnits = graded.reduce((s, b) => s + unitProfit(b), 0);
+  const totalWins = graded.filter(b => b.status === 'win').length;
+  const totalN = graded.length;
+  const winRate = (totalWins / totalN * 100).toFixed(1);
+  const avgWk = weeks.length ? (totalUnits / weeks.length).toFixed(1) : '0.0';
+
+  // "This week" = current calendar week Sun–Sat
+  const nowISO = new Date().toISOString().slice(0, 10);
+  const thisWkStart = weekStartOf(nowISO);
+  const thisWk = weeks.find(w => w.startISO === thisWkStart) || { startISO: thisWkStart, wins: 0, losses: 0, units: 0, byDay: {} };
+  const thisWkColor = thisWk.units >= 0 ? 'var(--green)' : 'var(--red)';
+  const seasonColor = totalUnits >= 0 ? 'var(--green)' : 'var(--red)';
+
+  // Day-of-week grid for current week
+  const dayLabels = ['SUN','MON','TUE','WED','THU','FRI','SAT'];
+  const dayCells = dayLabels.map((lbl, i) => {
+    const u = thisWk.byDay[i];
+    const disp = u == null ? '—' : (u >= 0 ? '+' : '') + u.toFixed(1);
+    const color = u == null ? 'var(--muted)' : (u >= 0 ? 'var(--green)' : 'var(--red)');
+    return `<div style="background:var(--bg2); border:1px solid var(--border); border-radius:6px; padding:8px 4px; text-align:center;">
+      <div class="meta" style="font-size:10px; letter-spacing:0.05em; margin-bottom:4px;">${lbl}</div>
+      <div style="font-size:12px; font-weight:700; color:${color};">${disp}</div>
+    </div>`;
+  }).join('');
+
+  // Weekly history — skip the current week (shown above), show past 5
+  const history = weeks.filter(w => w.startISO !== thisWkStart).slice(0, 5);
+  const histHtml = history.length
+    ? history.map(w => {
+        const c = w.units >= 0 ? 'var(--green)' : 'var(--red)';
+        return `<div style="display:flex; justify-content:space-between; align-items:center; padding:10px 0; border-bottom:1px solid var(--border); gap:12px;">
+          <div style="font-weight:600;">${formatWeekLabel(w.startISO)}</div>
+          <div style="display:flex; gap:14px; align-items:center; font-size:12px;">
+            <span class="meta">${w.wins}W-${w.losses}L</span>
+            <span style="color:${c}; font-weight:700; min-width:52px; text-align:right;">${w.units >= 0 ? '+' : ''}${w.units.toFixed(1)}u</span>
+          </div>
+        </div>`;
+      }).join('')
+    : '<div class="meta" style="padding:10px 0;">No prior weeks yet.</div>';
+
+  el.innerHTML = `<div style="display:grid; grid-template-columns:1fr 340px; gap:16px;" class="perf-panel-grid">
+    <!-- LEFT: Cumulative chart -->
+    <div style="background:var(--bg2); border:1px solid var(--border); border-radius:10px; padding:16px;">
+      <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:6px; gap:12px; flex-wrap:wrap;">
+        <div>
+          <div style="font-weight:700; font-size:14px;">Cumulative Units</div>
+          <div class="meta" style="font-size:11px;">Performance over time by game date</div>
+        </div>
+        <div style="display:flex; gap:4px;" data-perf-container="${containerId}">
+          <button class="perf-range-btn" data-range="7d" style="background:var(--bg); border:1px solid var(--border); border-radius:6px; padding:5px 10px; color:var(--muted); font-size:11px; font-weight:600; cursor:pointer;">7D</button>
+          <button class="perf-range-btn" data-range="30d" style="background:var(--bg); border:1px solid var(--border); border-radius:6px; padding:5px 10px; color:var(--muted); font-size:11px; font-weight:600; cursor:pointer;">30D</button>
+          <button class="perf-range-btn" data-range="all" data-active="1" style="background:rgba(0,214,143,0.15); border:1px solid var(--green); border-radius:6px; padding:5px 10px; color:var(--green); font-size:11px; font-weight:700; cursor:pointer;">All Time</button>
+        </div>
+      </div>
+      <div style="font-size:26px; font-weight:800; color:${seasonColor}; margin:4px 0 2px 0;">${totalUnits >= 0 ? '+' : ''}${totalUnits.toFixed(2)}u</div>
+      <div class="meta" style="font-size:11px; margin-bottom:12px;">cumulative · all time</div>
+      <div class="perf-chart-slot" data-perf-bets-cache="1">${buildCumulativeSVG(graded, 'all')}</div>
+    </div>
+
+    <!-- RIGHT: This week + weekly history -->
+    <div style="display:flex; flex-direction:column; gap:12px;">
+      <div style="background:var(--bg2); border:1px solid var(--border); border-radius:10px; padding:14px;">
+        <div style="display:flex; justify-content:space-between; align-items:baseline; margin-bottom:4px;">
+          <div>
+            <div style="font-weight:700; font-size:13px;">This Week</div>
+            <div class="meta" style="font-size:11px;">Rolling weekly performance</div>
+          </div>
+          <div class="meta" style="font-size:11px;">${formatWeekLabel(thisWkStart)}</div>
+        </div>
+        <div style="display:flex; align-items:baseline; gap:10px; margin:6px 0 4px 0;">
+          <div style="font-size:22px; font-weight:800; color:${thisWkColor};">${thisWk.units >= 0 ? '+' : ''}${thisWk.units.toFixed(1)}u</div>
+          <div class="meta" style="font-size:12px;">${thisWk.wins}W-${thisWk.losses}L</div>
+        </div>
+        <div class="meta" style="font-size:11px; margin-bottom:10px;">Season: <b style="color:${seasonColor};">${totalUnits >= 0 ? '+' : ''}${totalUnits.toFixed(2)}u</b></div>
+        <div style="display:grid; grid-template-columns:repeat(7, 1fr); gap:4px;">${dayCells}</div>
+      </div>
+
+      <div style="background:var(--bg2); border:1px solid var(--border); border-radius:10px; padding:14px;">
+        <div style="font-weight:700; font-size:12px; margin-bottom:8px;">
+          <span style="font-size:14px;">${winRate}%</span> <span class="meta" style="font-weight:400;">Win Rate</span> · <span style="font-size:14px;">${totalN}</span> <span class="meta" style="font-weight:400;">Bets</span> · <span style="font-size:14px;">${avgWk}u/wk</span> <span class="meta" style="font-weight:400;">Avg</span>
+        </div>
+      </div>
+
+      <div style="background:var(--bg2); border:1px solid var(--border); border-radius:10px; padding:14px;">
+        <div style="font-weight:700; font-size:13px; margin-bottom:6px;">Weekly History</div>
+        ${histHtml}
+      </div>
+    </div>
+  </div>`;
+
+  // Wire up range toggle buttons
+  const rangeContainer = el.querySelector(`[data-perf-container="${containerId}"]`);
+  const chartSlot = el.querySelector('.perf-chart-slot');
+  if (rangeContainer && chartSlot) {
+    rangeContainer.querySelectorAll('.perf-range-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        // Update button styles
+        rangeContainer.querySelectorAll('.perf-range-btn').forEach(b => {
+          b.style.background = 'var(--bg)';
+          b.style.borderColor = 'var(--border)';
+          b.style.color = 'var(--muted)';
+          b.style.fontWeight = '600';
+          b.removeAttribute('data-active');
+        });
+        btn.style.background = 'rgba(0,214,143,0.15)';
+        btn.style.borderColor = 'var(--green)';
+        btn.style.color = 'var(--green)';
+        btn.style.fontWeight = '700';
+        btn.setAttribute('data-active', '1');
+        // Re-render chart with new range
+        chartSlot.innerHTML = buildCumulativeSVG(graded, btn.dataset.range);
+      });
+    });
+  }
+}
+
 function unitProfit(bet) {
   if (bet.status === 'win') {
     // dog: payout = ml/100 ; fav: payout = 1
@@ -5507,6 +5802,8 @@ function renderConsensus() {
   }
 
   let bets = getAllBets().filter(b => b.stream === 'consensus');
+  // Strip Action-involved consensus bets — user's real consensus is Eye+Saber only
+  bets = bets.filter(b => !/action/i.test(comboLabel(liveComboSources(b))));
   if (cardId !== 'all') bets = bets.filter(b => b.cardId === cardId);
   if (status === 'graded') bets = bets.filter(b => b.status === 'win' || b.status === 'loss');
   if (status === 'pending') bets = bets.filter(b => b.status === 'pending');
@@ -5514,6 +5811,7 @@ function renderConsensus() {
   renderStats('consStats', summarize(bets));
   renderBetsTable('consTable', bets, { showStream: false, showEye: true, showSplit: true });
   renderBreakdowns('consBreakdowns', bets, 'consensus');
+  renderPerformancePanel('consPerformance', bets);
   renderComboTable('consCombos', 'consComboCardFilter');
 }
 
@@ -5532,6 +5830,7 @@ function renderSolo(stream) {
   renderStats(stream+'Stats', summarize(bets));
   renderBetsTable(stream+'Table', bets, { showStream: false });
   renderBreakdowns(stream+'Breakdowns', bets, stream);
+  renderPerformancePanel(stream+'Performance', bets);
 }
 
 // ---- Breakdowns: edge buckets, odds buckets, fav vs dog
@@ -7617,6 +7916,8 @@ function buildPartnersCopy() {
   const status = statusSel.value;
 
   let bets = getAllBets().filter(b => b.stream === 'consensus');
+  // Strip Action-involved consensus bets — user's real consensus is Eye+Saber only
+  bets = bets.filter(b => !/action/i.test(comboLabel(liveComboSources(b))));
   if (cardId !== 'all') bets = bets.filter(b => b.cardId === cardId);
   if (status === 'graded') bets = bets.filter(b => b.status === 'win' || b.status === 'loss');
   if (status === 'pending') bets = bets.filter(b => b.status === 'pending');
