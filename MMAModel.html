@@ -324,7 +324,7 @@
 <header>
   <div>
     <h1><span class="a">UFC</span> Model</h1>
-    <div class="sub">Auto-log ≥1% edge · ML devig · per-stream tracking <span class="meta" style="margin-left:8px; font-size:10px; opacity:0.6;">build 2026.08.15-cons-real</span></div>
+    <div class="sub">Auto-log ≥1% edge · ML devig · per-stream tracking <span class="meta" style="margin-left:8px; font-size:10px; opacity:0.6;">build 2026.08.15-chart-hover</span></div>
   </div>
   <div style="margin-left:auto; display:flex; align-items:center; gap:8px;">
     <label class="meta" style="display:flex; align-items:center; gap:6px; cursor:pointer; font-size:11px; letter-spacing:0.04em; text-transform:uppercase;" title="Hide Arena source from every tab and exclude it from consensus/combo math">
@@ -3201,60 +3201,88 @@ function buildCumulativeSVG(bets, range = 'all', width = 720, height = 240) {
   const graded = bets.filter(b => b.status === 'win' || b.status === 'loss');
   if (!graded.length) return '<div class="empty" style="padding:32px 0;">No graded bets yet.</div>';
 
-  // Sort by date, then cumulative running total
-  const withDates = graded
-    .map(b => ({ ...b, _date: getBetDate(b) }))
-    .filter(b => b._date)
-    .sort((a, b) => a._date.localeCompare(b._date));
-  if (!withDates.length) return '<div class="empty" style="padding:32px 0;">No dated bets yet.</div>';
+  // Aggregate bets per card so each point on the chart is one event/card.
+  // Each card carries its label, date, W-L, and units.
+  const cardsById = {};
+  (STATE.cards || []).forEach(c => { cardsById[c.id] = c; });
+  const byCard = {};
+  graded.forEach(b => {
+    const c = cardsById[b.cardId];
+    if (!c || !c.date) return;
+    if (!byCard[b.cardId]) byCard[b.cardId] = {
+      cardId: b.cardId,
+      label: c.label || 'Unknown card',
+      date: c.date,
+      wins: 0, losses: 0, units: 0, n: 0,
+    };
+    if (b.status === 'win') byCard[b.cardId].wins++;
+    else byCard[b.cardId].losses++;
+    byCard[b.cardId].n++;
+    byCard[b.cardId].units += unitProfit(b);
+  });
 
-  // Apply range filter based on last date
-  const lastDate = withDates[withDates.length - 1]._date;
-  let filtered = withDates;
+  const allCards = Object.values(byCard).sort((a, b) => a.date.localeCompare(b.date));
+  if (!allCards.length) return '<div class="empty" style="padding:32px 0;">No dated bets yet.</div>';
+
+  // Range filter
+  const lastDate = allCards[allCards.length - 1].date;
+  let filteredCards = allCards;
   if (range === '7d' || range === '30d') {
     const days = range === '7d' ? 7 : 30;
     const cutoff = new Date(lastDate + 'T12:00:00');
     cutoff.setDate(cutoff.getDate() - days);
     const cutoffISO = cutoff.toISOString().slice(0, 10);
-    filtered = withDates.filter(b => b._date >= cutoffISO);
-    if (!filtered.length) return '<div class="empty" style="padding:32px 0;">No bets in this range.</div>';
+    filteredCards = allCards.filter(c => c.date >= cutoffISO);
+    if (!filteredCards.length) return '<div class="empty" style="padding:32px 0;">No cards in this range.</div>';
   }
 
-  // Cumulative points — one per unique date
-  const pts = [];
+  // Cumulative units after each card (running total picks up wherever the
+  // range starts — so 7D view shows the +/- delta of just the last 7 days,
+  // NOT the season total).
   let running = 0;
-  const byDate = {};
-  filtered.forEach(b => { running += unitProfit(b); byDate[b._date] = running; });
-  Object.keys(byDate).sort().forEach(d => pts.push({ date: d, units: byDate[d] }));
+  const pts = filteredCards.map(c => {
+    running += c.units;
+    return { ...c, cumUnits: running };
+  });
 
   if (pts.length < 2) {
-    // Single point — just show the number
-    return `<div class="empty" style="padding:32px 0;">Only 1 dated bet in range · ${pts[0].units >= 0 ? '+' : ''}${pts[0].units.toFixed(2)}u</div>`;
+    return `<div class="empty" style="padding:32px 0;">Only 1 card in range · <b style="color:${pts[0].cumUnits >= 0 ? 'var(--green)' : 'var(--red)'};">${pts[0].cumUnits >= 0 ? '+' : ''}${pts[0].cumUnits.toFixed(2)}u</b></div>`;
   }
 
   // Chart geometry
   const padL = 40, padR = 40, padT = 24, padB = 32;
   const cW = width - padL - padR;
   const cH = height - padT - padB;
-  const minU = Math.min(0, ...pts.map(p => p.units));
-  const maxU = Math.max(0, ...pts.map(p => p.units));
+  const minU = Math.min(0, ...pts.map(p => p.cumUnits));
+  const maxU = Math.max(0, ...pts.map(p => p.cumUnits));
   const uSpan = Math.max(1, maxU - minU);
   const xOf = (i) => padL + (i / (pts.length - 1)) * cW;
   const yOf = (u) => padT + cH - ((u - minU) / uSpan) * cH;
 
   // Line + area paths
-  const linePath = pts.map((p, i) => `${i === 0 ? 'M' : 'L'} ${xOf(i).toFixed(1)} ${yOf(p.units).toFixed(1)}`).join(' ');
+  const linePath = pts.map((p, i) => `${i === 0 ? 'M' : 'L'} ${xOf(i).toFixed(1)} ${yOf(p.cumUnits).toFixed(1)}`).join(' ');
   const areaPath = linePath + ` L ${xOf(pts.length - 1).toFixed(1)} ${yOf(minU).toFixed(1)} L ${xOf(0).toFixed(1)} ${yOf(minU).toFixed(1)} Z`;
 
-  // Baseline (zero line)
   const zeroY = yOf(0);
   const showZero = minU < 0 && maxU > 0;
-
-  // Endpoint labels + markers (min low point, latest)
   const lastPt = pts[pts.length - 1];
-  const minPt = pts.reduce((m, p) => p.units < m.units ? p : m, pts[0]);
+  const lineColor = lastPt.cumUnits >= 0 ? '#00d68f' : '#ef4444';
 
-  // Sparse x-axis labels — 4-5 dates across
+  // Circles at each card — small dot always visible, larger invisible hit-target
+  // for easy hover. The dataset carries the tooltip payload so the outer render
+  // can wire up hover without re-parsing anything.
+  const circles = pts.map((p, i) => {
+    const cx = xOf(i);
+    const cy = yOf(p.cumUnits);
+    const dotColor = p.units >= 0 ? '#00d68f' : '#ef4444';
+    // Escape pipes + backslashes in labels since we use | as delimiter
+    const safeLabel = (p.label || '').replace(/\\/g, '\\\\').replace(/\|/g, '\\|');
+    const tipData = `${safeLabel}|${p.date}|${p.wins}|${p.losses}|${p.n}|${p.units.toFixed(2)}|${p.cumUnits.toFixed(2)}`;
+    return `<circle cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="3.5" fill="${dotColor}" stroke="var(--bg)" stroke-width="1.5"/>
+      <circle cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="12" fill="transparent" style="cursor:pointer;" class="perf-hit" data-tip="${tipData}"/>`;
+  }).join('');
+
+  // Sparse x-axis date labels — 4-5 across
   const nLabels = Math.min(5, pts.length);
   const xLabels = [];
   for (let i = 0; i < nLabels; i++) {
@@ -3264,23 +3292,71 @@ function buildCumulativeSVG(bets, range = 'all', width = 720, height = 240) {
   }
 
   const gradId = 'perfGrad_' + Math.random().toString(36).slice(2, 8);
-  const lineColor = lastPt.units >= 0 ? '#00d68f' : '#ef4444';
-  return `<svg viewBox="0 0 ${width} ${height}" style="width:100%; height:${height}px; display:block;" preserveAspectRatio="none">
-    <defs>
-      <linearGradient id="${gradId}" x1="0" x2="0" y1="0" y2="1">
-        <stop offset="0" stop-color="${lineColor}" stop-opacity="0.28"/>
-        <stop offset="1" stop-color="${lineColor}" stop-opacity="0"/>
-      </linearGradient>
-    </defs>
-    <path d="${areaPath}" fill="url(#${gradId})"/>
-    <path d="${linePath}" fill="none" stroke="${lineColor}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
-    ${showZero ? `<line x1="${padL}" y1="${zeroY}" x2="${padL + cW}" y2="${zeroY}" stroke="var(--border)" stroke-width="1" stroke-dasharray="4,4" opacity="0.5"/>` : ''}
-    <circle cx="${xOf(pts.length - 1)}" cy="${yOf(lastPt.units)}" r="5" fill="${lineColor}"/>
-    <text x="${xOf(pts.length - 1)}" y="${yOf(lastPt.units) - 10}" fill="${lineColor}" font-size="13" font-weight="700" text-anchor="end">${lastPt.units >= 0 ? '+' : ''}${lastPt.units.toFixed(2)}u</text>
-    ${minPt !== lastPt && minPt.units < 0 ? `<circle cx="${xOf(pts.indexOf(minPt))}" cy="${yOf(minPt.units)}" r="4" fill="#ef4444"/>
-    <text x="${xOf(pts.indexOf(minPt))}" y="${yOf(minPt.units) + 18}" fill="#ef4444" font-size="12" font-weight="600" text-anchor="middle">${minPt.units.toFixed(2)}u</text>` : ''}
-    ${xLabels.map(x => `<text x="${x.x}" y="${height - 8}" fill="var(--muted)" font-size="11" text-anchor="middle">${x.label}</text>`).join('')}
-  </svg>`;
+  return `<div style="position:relative;">
+    <svg viewBox="0 0 ${width} ${height}" style="width:100%; height:${height}px; display:block;" preserveAspectRatio="none" class="perf-svg">
+      <defs>
+        <linearGradient id="${gradId}" x1="0" x2="0" y1="0" y2="1">
+          <stop offset="0" stop-color="${lineColor}" stop-opacity="0.28"/>
+          <stop offset="1" stop-color="${lineColor}" stop-opacity="0"/>
+        </linearGradient>
+      </defs>
+      <path d="${areaPath}" fill="url(#${gradId})"/>
+      <path d="${linePath}" fill="none" stroke="${lineColor}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+      ${showZero ? `<line x1="${padL}" y1="${zeroY.toFixed(1)}" x2="${padL + cW}" y2="${zeroY.toFixed(1)}" stroke="var(--border)" stroke-width="1" stroke-dasharray="4,4" opacity="0.5"/>` : ''}
+      ${circles}
+      <text x="${xOf(pts.length - 1).toFixed(1)}" y="${(yOf(lastPt.cumUnits) - 10).toFixed(1)}" fill="${lineColor}" font-size="13" font-weight="700" text-anchor="end">${lastPt.cumUnits >= 0 ? '+' : ''}${lastPt.cumUnits.toFixed(2)}u</text>
+      ${xLabels.map(x => `<text x="${x.x.toFixed(1)}" y="${height - 8}" fill="var(--muted)" font-size="11" text-anchor="middle">${x.label}</text>`).join('')}
+    </svg>
+    <div class="perf-tooltip" style="position:absolute; display:none; background:var(--bg2); border:1px solid var(--border); border-radius:8px; padding:9px 12px; font-size:11px; pointer-events:none; z-index:100; box-shadow:0 4px 14px rgba(0,0,0,0.4); min-width:180px; max-width:280px;"></div>
+  </div>`;
+}
+
+// Attach hover handlers to the invisible hit-target circles inside a chart.
+// Extracted so it can be re-run after range toggles swap the chart HTML.
+function wirePerfChartHover(chartSlot) {
+  if (!chartSlot) return;
+  const svg = chartSlot.querySelector('.perf-svg');
+  const tip = chartSlot.querySelector('.perf-tooltip');
+  if (!svg || !tip) return;
+  const wrap = svg.parentElement;
+  svg.querySelectorAll('circle.perf-hit').forEach(c => {
+    c.addEventListener('mouseenter', () => {
+      // Parse tooltip data (escape-aware split on |)
+      const raw = c.dataset.tip;
+      // Simple split — labels with escaped pipes/backslashes work since we escaped at build
+      const parts = raw.split(/(?<!\\)\|/).map(s => s.replace(/\\\|/g, '|').replace(/\\\\/g, '\\'));
+      const [label, date, wins, losses, n, cardU, cumU] = parts;
+      const cardColor = +cardU >= 0 ? 'var(--green)' : 'var(--red)';
+      const cumColor  = +cumU  >= 0 ? 'var(--green)' : 'var(--red)';
+      tip.innerHTML = `
+        <div style="font-weight:700; margin-bottom:3px; line-height:1.2;">${label}</div>
+        <div class="meta" style="margin-bottom:7px; font-size:10px;">${date} · ${wins}W-${losses}L on ${n} ${n === '1' ? 'bet' : 'bets'}</div>
+        <div style="display:flex; justify-content:space-between; gap:14px; padding:3px 0;">
+          <span class="meta">This card:</span>
+          <b style="color:${cardColor};">${+cardU >= 0 ? '+' : ''}${cardU}u</b>
+        </div>
+        <div style="display:flex; justify-content:space-between; gap:14px; padding:3px 0;">
+          <span class="meta">Cumulative:</span>
+          <b style="color:${cumColor};">${+cumU >= 0 ? '+' : ''}${cumU}u</b>
+        </div>
+      `;
+      tip.style.display = 'block';
+    });
+    c.addEventListener('mousemove', (e) => {
+      const rect = wrap.getBoundingClientRect();
+      let x = e.clientX - rect.left + 14;
+      let y = e.clientY - rect.top - 20;
+      // Keep tooltip inside the wrap horizontally
+      const tipW = tip.offsetWidth || 200;
+      if (x + tipW > rect.width) x = e.clientX - rect.left - tipW - 14;
+      if (y < 0) y = 0;
+      tip.style.left = x + 'px';
+      tip.style.top = y + 'px';
+    });
+    c.addEventListener('mouseleave', () => {
+      tip.style.display = 'none';
+    });
+  });
 }
 
 // Render the full performance panel (chart + weekly summary side-by-side) into
@@ -3391,6 +3467,8 @@ function renderPerformancePanel(containerId, bets) {
   // Wire up range toggle buttons
   const rangeContainer = el.querySelector(`[data-perf-container="${containerId}"]`);
   const chartSlot = el.querySelector('.perf-chart-slot');
+  // Attach hover handlers to the initial chart render
+  wirePerfChartHover(chartSlot);
   if (rangeContainer && chartSlot) {
     rangeContainer.querySelectorAll('.perf-range-btn').forEach(btn => {
       btn.addEventListener('click', () => {
@@ -3407,8 +3485,9 @@ function renderPerformancePanel(containerId, bets) {
         btn.style.color = 'var(--green)';
         btn.style.fontWeight = '700';
         btn.setAttribute('data-active', '1');
-        // Re-render chart with new range
+        // Re-render chart with new range + re-attach hover on the new circles
         chartSlot.innerHTML = buildCumulativeSVG(graded, btn.dataset.range);
+        wirePerfChartHover(chartSlot);
       });
     });
   }
