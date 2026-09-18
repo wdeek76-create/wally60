@@ -68,6 +68,8 @@ main{flex:1;padding:12px 12px 110px}
 /* book board: a row per book — its own line, both sides, tap to open */
 .bgrid{--bcols:minmax(0,1.05fr) 30px minmax(66px,.9fr) minmax(66px,.9fr) 13px}
 .mk.single .bgrid{--bcols:minmax(0,1.3fr) 30px minmax(86px,1fr) 13px}
+.bgrid.noline{--bcols:minmax(0,1fr) minmax(70px,.9fr) minmax(70px,.9fr) 13px}
+.mk.single .bgrid.noline{--bcols:minmax(0,1.2fr) minmax(96px,1fr) 13px}
 .bhead,.brow{display:grid;grid-template-columns:var(--bcols);gap:5px;align-items:center;padding:0 10px}
 .bhead{padding-top:7px;padding-bottom:6px;font-size:8.5px;font-weight:800;letter-spacing:.7px;text-transform:uppercase;color:#fff;opacity:.42;border-bottom:1px solid var(--line)}
 .bhead .c{text-align:center}
@@ -280,6 +282,9 @@ const NBA_MKTS = [
   ['pa','P+A',       m=>has(m,'point','assist')&&!has(m,'rebound')],
   ['ra','R+A',       m=>has(m,'rebound','assist')&&!has(m,'point')],
 ];
+// Straight fight winner, matched by exact name only: anything with a suffix
+// (3-way, a round, a method, a distance) is a different bet.
+const MMA_ML = new Set(['moneyline','fight winner','to win fight','winner']);
 const SPORTS = {
   nfl:  { label:'NFL',  sport:'football',   league:'nfl',  days:7, markets:[
           ['pass_yds','Pass Yds', m=>has(m,'passing yards')&&!m.includes('+')],
@@ -301,7 +306,7 @@ const SPORTS = {
           ['a','Assists',   m=>!m.includes('+')&&has(m,'assist')],
           ['sv','Saves',    m=>!m.includes('+')&&has(m,'save')],
         ]},
-  ufc:  { label:'UFC',  sport:'mma',        league:'ufc',  ml:true, markets:[['ml','Moneyline', m=>m==='moneyline'||m.startsWith('moneyline')]] },
+  ufc:  { label:'UFC',  sport:'mma',        league:'ufc',  ml:true, markets:[['ml','Moneyline', m=>MMA_ML.has(m)]] },
 };
 const marketKeyFor = (sportKey, name) => {
   const m = String(name||'').toLowerCase();
@@ -441,6 +446,7 @@ async function loadSport(force){
       const sel=cleanSel(o.selection||o.name); if(!sel) return;
       if(!S.ml && !o.player_id) return;
       if(isCombo(sel)) return;                       // two-player combos are not players
+      if(S.ml && /^(draw|tie|no contest|neither|either)\b/.test(normName(sel))) return;
       const key=normName(sel); if(!key) return;
       if(!idx[key]) idx[key]={ key, name:sel, pid:o.player_id||null, pids:new Set(), fixtureId:o._fx, marketKeys:new Set() };
       if(o.player_id){ idx[key].pids.add(o.player_id); if(!idx[key].pid) idx[key].pid=o.player_id; }
@@ -450,7 +456,8 @@ async function loadSport(force){
     players.filter(p=>p.pids.size>1).slice(0,3).forEach(p=>console.log('[props] same name, multiple player_ids:', p.name, [...p.pids]));
     loadedAt=Date.now();
     console.log('[props] deep links present:', mainRows.some(o=>o.deep_link && (o.deep_link.ios||o.deep_link.desktop)));
-    const seenMk=[...new Set(mainRows.map(o=>o.market))]; console.log('[props] markets seen:',seenMk); console.log('[props] books seen:',[...new Set(mainRows.map(o=>o.sportsbook))]);
+    const seenMk=[...new Set(mainRows.map(o=>o.market))]; console.log('[props] markets seen:',seenMk);
+    if(S.ml) console.log('[props] moneyline-ish markets seen:', seenMk.filter(m=>/moneyline|winner|win /i.test(m)), '| kept:', seenMk.filter(m=>MMA_ML.has(String(m).toLowerCase()))); console.log('[props] books seen:',[...new Set(mainRows.map(o=>o.sportsbook))]);
     stat.textContent= S.ml ? `UFC · ${[...new Set(fixtures.map(f=>f.card))].join(' + ')} · ${players.length} fighters`
                            : `${S.label} · ${fixtures.length} games · ${[...new Set(fixtures.map(f=>etDateKey(f.start)))].length}d · ${players.length} players`;
     if(current){ const again=players.find(p=>p.key===current.key); if(again) openPlayer(again, curMktIdx); }
@@ -524,8 +531,9 @@ function boardHtml(rows, p, mkey, ctxKey, mainLine, pt){
   const list=bookBoard(rows);
   if(!list.length) return `<div class="bempty">No books posting this one.</div>`;
   const single=list.every(b=>!b.over&&!b.under);
+  const noLine=list.every(b=>b.line==null);
   const tO=topPrice(list,single?'single':'over',mainLine), tU=topPrice(list,'under',mainLine);
-  const head=`<div class="bhead"><span>Book</span><span class="c">Line</span>${single?'<span class="c">Price</span>':'<span class="c">Over</span><span class="c">Under</span>'}<span></span></div>`;
+  const head=`<div class="bhead"><span>Book</span>${noLine?'':'<span class="c">Line</span>'}${single?'<span class="c">Price</span>':'<span class="c">Over</span><span class="c">Under</span>'}<span></span></div>`;
   const body=list.map((b,i)=>{
     const lg=bookLogo(b.key);
     const atMain = mainLine==null || b.line===mainLine;
@@ -533,9 +541,9 @@ function boardHtml(rows, p, mkey, ctxKey, mainLine, pt){
       ? priceCell(b.single,'o','',atMain&&tO!=null&&Number(b.single?.price)===tO,pt,b.ex)
       : priceCell(b.over,'o','O',atMain&&tO!=null&&Number(b.over?.price)===tO,pt,b.ex)+priceCell(b.under,'u','U',atMain&&tU!=null&&Number(b.under?.price)===tU,pt,b.ex);
     const det = detailLine(b,b.over,'o','Over '+(b.line??''))+detailLine(b,b.under,'u','Under '+(b.line??''))+detailLine(b,b.single,'o','Price');
-    return `<div class="brow" data-brow="${ctxKey}|${i}"><span class="bnm">${lg?`<img src="${esc(lg)}" alt="">`:''}<b>${esc(b.name)}</b></span><span class="bln">${b.line??'—'}</span>${cells}<span class="bchev">›</span></div><div class="bdet" data-bdet="${ctxKey}|${i}" style="display:none">${det||'<div class="bdl">No extra detail.</div>'}</div>`;
+    return `<div class="brow" data-brow="${ctxKey}|${i}"><span class="bnm">${lg?`<img src="${esc(lg)}" alt="">`:''}<b>${esc(b.name)}</b></span>${noLine?'':`<span class="bln">${b.line??'—'}</span>`}${cells}<span class="bchev">›</span></div><div class="bdet" data-bdet="${ctxKey}|${i}" style="display:none">${det||'<div class="bdl">No extra detail.</div>'}</div>`;
   }).join('');
-  return `<div class="bgrid">${head}${body}</div>${footHtml(list,p,mkey,ctxKey,mainLine,single)}`;
+  return `<div class="bgrid${noLine?' noline':''}">${head}${body}</div>${footHtml(list,p,mkey,ctxKey,mainLine,single)}`;
 }
 function footHtml(list, p, mkey, ctxKey, line, single){
   const grp=(label,tag,cls)=>`<span class="grp"><span class="tag ${cls}">${tag}</span><button class="cp" data-copy="${ctxKey}|${label}">Copy</button><button class="trk${isTracked(p,mkey,label,line)?' on':''}" data-track="${ctxKey}|${label}|${line??''}">${isTracked(p,mkey,label,line)?'Tracked':'Track'}</button></span>`;
