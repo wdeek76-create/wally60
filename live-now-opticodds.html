@@ -1003,7 +1003,10 @@ function computeRows(fxs, byFx) {
       });
     });
   });
-  // seen-since + EV trend, so you can tell fresh from stale and rising from fading
+  // seen-since + EV trend, so you can tell fresh from stale and rising from fading. We also
+  // track which side actually moved — Pinnacle's same-side price, the book you'd bet, or both —
+  // since that's what the gap between them (the edge) is measured off, so "why" can say whose
+  // move is driving it instead of just "better/worse".
   const now = Date.now(); const keep = new Set();
   out.forEach(r => {
     keep.add(r.key); const prev = seen[r.key];
@@ -1013,7 +1016,10 @@ function computeRows(fxs, byFx) {
     r.priceMove = (prev && prev.price != null && Number(prev.price) !== Number(r.best.price))
       ? (Number(r.best.price) > Number(prev.price) ? 'good' : 'bad') : null;
     r.priceWas = prev ? prev.price : null;
-    seen[r.key] = { since: r.since, ev: r.best.ev, price: r.best.price };
+    const pinChanged = prev && prev.pin != null && Number(prev.pin) !== Number(r.pin.mine);
+    const bookChanged = prev && prev.price != null && Number(prev.price) !== Number(r.best.price);
+    r.moveSource = !prev ? null : (pinChanged && bookChanged) ? 'both' : pinChanged ? 'pin' : bookChanged ? 'book' : null;
+    seen[r.key] = { since: r.since, ev: r.best.ev, price: r.best.price, pin: r.pin.mine, arb: r.best.arb };
   });
   Object.keys(seen).forEach(k => { if (!keep.has(k)) delete seen[k]; });
   // highest edge always on top; ties → the one that's been on the board longest first
@@ -1295,7 +1301,12 @@ function render() {
     const moreRows = r.books.slice(1, 6).map(b => `<div class="bookrow">${logoOf(b.book) ? `<img src="${esc(logoOf(b.book))}" alt="">` : `<span class="bk">${esc(b.book.slice(0,3))}</span>`}<span class="bkname">${esc(b.book)}</span><span class="bkprice">${fmtAm(b.price)}</span><span class="bkmeta">${b.exch ? `${Math.round(imp(b.price)*100)}%${b.depth ? ` · ${usd(b.depth.total)} avg ${fmtAm(b.depth.avg)}` : b.liq ? ` · $${Math.round(b.liq)}` : ''}` : `+${(b.ev*100).toFixed(1)}%`}</span></div>`).join('');
     const st = stateOf(f);
     const age = Math.max(0, Math.round((Date.now() - r.since) / 1000)); const ageTxt = age < 60 ? `${age}s` : `${Math.floor(age/60)}m${age%60 ? (age%60)+'s' : ''}`;
-    const why = isArb ? `locked ${arbPct.toFixed(2)}% arb vs ${refBook}` : st.brk ? `${st.brk} · books slow to move` : evPct >= 3 ? 'edge ≥ 3%' : r.trend > 0 ? 'edge climbing' : r.trend < 0 ? 'edge fading' : 'holding';
+    // Attribute the move: Pinnacle re-pricing this side (sharp money catching up) reads
+    // differently than the book you'd bet drifting toward or away from Pinnacle's number.
+    const gapWord = r.trend > 0 ? 'opening up' : r.trend < 0 ? 'closing' : null;
+    const sourceWord = r.moveSource === 'pin' ? `${refBook} moving` : r.moveSource === 'book' ? `${r.best.book} moving` : r.moveSource === 'both' ? 'both sides moving' : null;
+    const moveWhy = gapWord && sourceWord ? `${gapWord} · ${sourceWord}` : gapWord === 'opening up' ? 'edge climbing' : gapWord === 'closing' ? 'edge fading' : 'holding';
+    const why = isArb ? (r.trend ? moveWhy : `locked ${arbPct.toFixed(2)}% arb vs ${refBook}`) : st.brk ? `${st.brk} · books slow to move` : evPct >= 3 ? 'edge ≥ 3%' : moveWhy;
     // Live score context for total / team-total bets, so you can see where the number stands.
     const curTotal = (!isNaN(st.home) && !isNaN(st.away)) ? (Number(st.home) + Number(st.away)) : null;
     const totalNote = r.mk.key === 'total' && curTotal != null ? `<div class="curtot">Live total <b>${curTotal}</b></div>`
@@ -1361,20 +1372,43 @@ function renderTracker() {
     const resultBtns = settled
       ? `<button data-res="${esc(e.key)}|pending">↺ Re-open</button>`
       : `<button data-res="${esc(e.key)}|won">WON</button><button data-res="${esc(e.key)}|lost">LOST</button><button data-res="${esc(e.key)}|push">PUSH</button>`;
-    // OddsJam-style progress bar for over/under bets — actual value so far vs the line, with a
-    // tick marking the line itself. Only makes sense for numeric-line markets (total/team total);
-    // moneyline and spread don't have a single number to bar-chart against.
+    // OddsJam-style progress bar — actual value so far vs the line, with a tick marking the
+    // line itself. Covers every tracked market, not just totals: total/team-total bar against
+    // the number directly, spread bars the live margin against the cover threshold, and
+    // moneyline bars the live score split.
     let prog = '';
-    if ((e.mkKey === 'total' || e.mkKey === 'tt') && e.pickPoints != null) {
-      const L = Number(e.pickPoints);
-      const actual = e.mkKey === 'total'
-        ? (e.curHome != null && e.curAway != null ? e.curHome + e.curAway : null)
-        : (e.pickSide === 'home' ? e.curHome : e.curAway);
-      const pct = actual == null ? 0 : Math.min(100, Math.round(actual / (L * 1.25) * 100));
-      const mark = Math.round(100 / 1.25);
-      const winningNow = actual != null && (e.overUnder === 'over' ? actual > L : actual < L);
-      const cls = settled ? (e.status === 'won' ? 'g' : e.status === 'lost' ? 'r' : '') : (actual != null ? (winningNow ? 'g' : 'r') : '');
-      prog = `<div class="prog"><div class="nums"><span><b>${actual == null ? '—' : actual}</b> <span class="dim">/ ${L} ${esc(e.market)}</span></span></div><div class="bar"><i class="${cls}" style="width:${pct}%"></i><em style="left:${mark}%"></em></div></div>`;
+    {
+      const own = e.pickSide === 'home' ? e.curHome : e.pickSide === 'away' ? e.curAway : null;
+      const opp = e.pickSide === 'home' ? e.curAway : e.pickSide === 'away' ? e.curHome : null;
+      let big = null, small = '', pct = 0, mark = 50, winningNow = null;
+      if ((e.mkKey === 'total' || e.mkKey === 'tt') && e.pickPoints != null) {
+        const L = Number(e.pickPoints);
+        const actual = e.mkKey === 'total' ? (e.curHome != null && e.curAway != null ? e.curHome + e.curAway : null) : own;
+        if (actual != null) {
+          big = actual; small = `/ ${L} ${e.market}`;
+          pct = Math.min(100, Math.round(actual / (L * 1.25) * 100));
+          mark = Math.round(100 / 1.25);
+          winningNow = e.overUnder === 'over' ? actual > L : actual < L;
+        }
+      } else if (e.mkKey === 'spread' && e.pickPoints != null && own != null && opp != null) {
+        const L = Number(e.pickPoints); // the points you took, e.g. -7.5 or +15.5
+        const margin = own - opp; // your side's current lead; negative = trailing
+        const span = Math.max(20, Math.abs(L) * 1.5, Math.abs(margin) * 1.3);
+        big = `${margin >= 0 ? '+' : ''}${margin}`; small = `margin · cover ${L >= 0 ? '+' : ''}${L}`;
+        pct = Math.min(100, Math.max(0, Math.round(((margin + span) / (span * 2)) * 100)));
+        mark = Math.round((((-L) + span) / (span * 2)) * 100);
+        winningNow = margin > -L;
+      } else if (e.mkKey === 'ml' && own != null && opp != null) {
+        const total = own + opp;
+        big = `${own}-${opp}`; small = 'current score';
+        pct = total > 0 ? Math.round((own / total) * 100) : 50;
+        mark = 50;
+        winningNow = own > opp;
+      }
+      if (big != null) {
+        const cls = settled ? (e.status === 'won' ? 'g' : e.status === 'lost' ? 'r' : '') : (winningNow ? 'g' : 'r');
+        prog = `<div class="prog"><div class="nums"><span><b>${big}</b> <span class="dim">${esc(small)}</span></span></div><div class="bar"><i class="${cls}" style="width:${pct}%"></i><em style="left:${mark}%"></em></div></div>`;
+      }
     }
     // Live progress — how the number has moved since you bet, on both the reference book and
     // the book you actually took. Higher American odds is always better, so a plain numeric
