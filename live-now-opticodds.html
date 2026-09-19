@@ -155,7 +155,7 @@ header{padding:14px 16px 10px;padding-top:calc(14px + env(safe-area-inset-top))}
 .gm{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}
 .gm .t{display:flex;align-items:center;gap:6px;font-weight:900;font-size:13px;text-transform:uppercase;letter-spacing:.2px}
 .gm .t img{width:18px;height:18px;object-fit:contain}
-.gm .qtr{font-size:10px;font-weight:800;color:var(--red);letter-spacing:.2px;white-space:nowrap;font-variant-numeric:tabular-nums;text-transform:none}
+.gm .qtr{font-size:10px;font-weight:800;color:#fff;letter-spacing:.2px;white-space:nowrap;font-variant-numeric:tabular-nums;text-transform:none;background:rgba(255,255,255,.08);border:1px solid var(--border);border-radius:6px;padding:2px 7px}
 .gm .st{font-size:10px;font-weight:800;color:#fff;white-space:nowrap;font-variant-numeric:tabular-nums}
 .gm .st.live{color:var(--red)}
 .gm .lg{font-size:9px;font-weight:800;letter-spacing:.6px;padding:2px 7px;border-radius:6px;border:1px solid var(--border);color:#fff}
@@ -214,6 +214,14 @@ header{padding:14px 16px 10px;padding-top:calc(14px + env(safe-area-inset-top))}
 .tk{border-radius:12px;padding:10px 12px;margin:0 16px 8px;font-size:12px}
 .tk .h{display:flex;justify-content:space-between;gap:8px;font-weight:800}
 .tk .m{font-size:11px;color:#fff;margin-top:4px;line-height:1.6;font-variant-numeric:tabular-nums}
+.mv{margin-top:8px;padding:8px 10px;border-radius:9px;background:rgba(255,255,255,.04);border:1px solid var(--border)}
+.mvrow{display:flex;align-items:center;gap:8px;font-size:11px;font-weight:700;padding:2px 0;font-variant-numeric:tabular-nums}
+.mvrow+.mvrow{border-top:1px solid var(--border);margin-top:3px;padding-top:5px}
+.mvl{color:var(--sub);font-weight:800;letter-spacing:.3px;text-transform:uppercase;font-size:9px;flex-shrink:0;width:56px}
+.mvv{color:#fff;flex:1}
+.mvup{color:var(--green);font-weight:800;white-space:nowrap}
+.mvdn{color:var(--red);font-weight:800;white-space:nowrap}
+.mvflat{color:var(--sub);font-weight:700;white-space:nowrap}
 .tk .m b{color:var(--green)}
 
 /* ── INSIGHT BAR: "when to bet" ── */
@@ -964,7 +972,10 @@ function markBet(key) {
     betAt:now, betBook:r.best.book, betPrice:r.best.price, betEv:ev, arb:r.best.arb*100, hedge:r.pin.other, fair:r.fair, pinLim:r.pin.lim,
     stateAtFirst:[st.label, st.brk].filter(Boolean).join(' · '), status:'pending', bet:true,
     // Grading metadata, so this settles itself once the fixture is final — no manual tap needed.
-    fid:r.f.id, mkKey:r.mk.key, pickSide:r.pickSide, pickPoints:r.pickPoints, overUnder:r.overUnder };
+    fid:r.f.id, mkKey:r.mk.key, pickSide:r.pickSide, pickPoints:r.pickPoints, overUnder:r.overUnder,
+    // Live-progress metadata — lets the tracker re-pull this exact side later and show whether
+    // the bet is still holding up (same idea as the props-screen tracker's price movement).
+    pinAtBet:r.pin.mine, refBook:r.refBook || REF_BOOK, refBookShort:r.refBookShort || 'PIN', homeId:r.f.home.id, awayId:r.f.away.id };
   toast(`Logged: ${r.sideLabel} ${fmtAm(r.best.price)} ${r.best.book}`);
   saveLog(); render();
 }
@@ -1036,6 +1047,49 @@ async function autoGradeTracked() {
     });
     if (changed) { saveLog(); if (viewMode === 'tracker') renderTracker(); }
   } finally { _autoGradeBusy = false; }
+}
+const ALL_MARKET_NAMES = ['moneyline','point spread','total points','run line','puck line','total goals','total runs','team total'];
+let _trackProgressBusy = false;
+// Re-pulls the reference book (Pinnacle, or Kalshi for UFC) and the book you actually bet,
+// on the exact side you took, so a pending tracked play shows whether the number is still
+// holding up as the game goes — same idea as the props-screen tracker's price movement.
+async function refreshTrackedProgress() {
+  if (_trackProgressBusy) return;
+  const pending = Object.values(log).filter(e => e.status === 'pending' && e.fid && e.mkKey);
+  if (!pending.length) return;
+  _trackProgressBusy = true;
+  try {
+    const ids = [...new Set(pending.map(e => e.fid))];
+    const books = [...new Set(pending.flatMap(e => [e.refBook || REF_BOOK, e.betBook]))];
+    const byFx = {};
+    for (const idBatch of chunk(ids, 5)) {
+      for (const bkBatch of chunk(books, 5)) {
+        try {
+          const r = await oo('/fixtures/odds', { fixture_id: idBatch, sportsbook: bkBatch, market: ALL_MARKET_NAMES });
+          (r?.data || []).forEach(d => { (byFx[d.id] = byFx[d.id] || []).push(...(d.odds || [])); });
+        } catch(e) { console.warn('[live] tracker progress fetch failed', e.message); }
+      }
+    }
+    let changed = false;
+    pending.forEach(e => {
+      const odds = byFx[e.fid]; if (!odds) return;
+      const M = MARKET.find(m => m.key === e.mkKey); if (!M) return;
+      const teamId = e.pickSide === 'home' ? e.homeId : e.pickSide === 'away' ? e.awayId : null;
+      const matchesSide = o => {
+        if (e.mkKey === 'total') return String(o.selection_line || o.selection || '').toLowerCase() === e.overUnder && Number(o.points) === e.pickPoints;
+        if (e.mkKey === 'tt') return String(o.team_id) === String(teamId) && String(o.selection_line || '').toLowerCase() === e.overUnder && Number(o.points) === e.pickPoints;
+        if (e.mkKey === 'spread') return String(o.team_id) === String(teamId) && Number(o.points) === e.pickPoints;
+        return String(o.team_id) === String(teamId); // ml
+      };
+      const candidates = odds.filter(o => o.price != null && M.test(o.market || '') && matchesSide(o));
+      const pinO = candidates.find(o => String(o.sportsbook).toLowerCase() === String(e.refBook || REF_BOOK).toLowerCase());
+      const bkO = candidates.find(o => String(o.sportsbook).toLowerCase() === String(e.betBook).toLowerCase());
+      const newPinNow = pinO ? Number(pinO.price) : e.pinNow;
+      const newBookNow = bkO ? Number(bkO.price) : e.betBookNow;
+      if (newPinNow !== e.pinNow || newBookNow !== e.betBookNow) { e.pinNow = newPinNow; e.betBookNow = newBookNow; changed = true; }
+    });
+    if (changed) { saveLog(); if (viewMode === 'tracker') renderTracker(); }
+  } finally { _trackProgressBusy = false; }
 }
 
 // ───────────────────────────── header / status strip ─────────────────────────────
@@ -1235,9 +1289,22 @@ function renderTracker() {
     const resultBtns = settled
       ? `<button data-res="${esc(e.key)}|pending">↺ Re-open</button>`
       : `<button data-res="${esc(e.key)}|won">WON</button><button data-res="${esc(e.key)}|lost">LOST</button><button data-res="${esc(e.key)}|push">PUSH</button>`;
+    // Live progress — how the number has moved since you bet, on both the reference book and
+    // the book you actually took. Higher American odds is always better, so a plain numeric
+    // compare works across the whole range (see priceMove elsewhere in this file).
+    const moveTag = (from, to) => {
+      if (from == null || to == null) return '<span class="mvflat">—</span>';
+      const d = Number(to) - Number(from);
+      return d === 0 ? '<span class="mvflat">flat</span>' : d > 0 ? '<span class="mvup">▲ better</span>' : '<span class="mvdn">▼ worse</span>';
+    };
+    const progress = !settled ? `<div class="mv">
+      <div class="mvrow"><span class="mvl">${esc(e.refBookShort || 'PIN')}</span><span class="mvv">${fmtAm(e.pinAtBet ?? e.betPrice)} → ${e.pinNow != null ? fmtAm(e.pinNow) : '—'}</span>${moveTag(e.pinAtBet, e.pinNow)}</div>
+      <div class="mvrow"><span class="mvl">${esc(e.betBook)}</span><span class="mvv">${fmtAm(e.betPrice)} → ${e.betBookNow != null ? fmtAm(e.betBookNow) : '—'}</span>${moveTag(e.betPrice, e.betBookNow)}</div>
+    </div>` : '';
     return `<div class="tk glass"><div class="h"><span>${esc(e.game)} <span style="color:var(--sub);font-size:10px">${esc(e.league)}</span></span><span>${t(e.betAt)}</span></div>
     <div style="font-weight:800;font-size:14px;margin-top:3px">${esc(e.market)} · ${esc(e.side)}</div>
     <div class="m">bet <b>${fmtAm(e.betPrice)}</b> ${esc(e.betBook)} · EV <b>+${(e.betEv||0).toFixed(1)}%</b> · fair ${fmtAm(probToAm(e.fair))} · lim ${e.pinLim != null ? usd(e.pinLim) : 'n/a'}</div>
+    ${progress}
     ${resultLine}
     <div class="acts" style="margin-top:8px">${resultBtns}<button data-del="${esc(e.key)}">✕</button></div></div>`;
   };
@@ -1259,7 +1326,7 @@ let busy = false, lastFixAt = 0, lastGradeAt = 0;
 async function load(force) {
   if (busy) return; busy = true; setSync('busy'); $('#reload').classList.add('spinning');
   // Fire-and-forget, throttled — doesn't block the odds refresh above.
-  if (Date.now() - lastGradeAt > 30000) { lastGradeAt = Date.now(); autoGradeTracked(); }
+  if (Date.now() - lastGradeAt > 30000) { lastGradeAt = Date.now(); autoGradeTracked(); refreshTrackedProgress(); }
   try {
     if (force || !fixtures.length || Date.now() - lastFixAt > 60e3) { fixtures = await loadFixtures(); lastFixAt = Date.now(); }
     renderChips();
