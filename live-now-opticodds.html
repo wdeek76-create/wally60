@@ -323,6 +323,14 @@ header{padding:14px 16px 10px;padding-top:calc(14px + env(safe-area-inset-top))}
 .splash-badge .plus{position:absolute;top:6px;right:4px;font-size:13px;font-weight:900;color:var(--accent)}
 .splash-ring{position:absolute;inset:0;width:92px;height:92px;transform:rotate(-90deg);animation:splashSpin 1s linear infinite}
 .splash-ring circle{fill:none;stroke:var(--accent);stroke-width:5;stroke-linecap:round;stroke-dasharray:264;stroke-dashoffset:200}
+/* smaller reuse of the splash mark for the "still searching" empty state */
+.splash-icon.mini,.splash-ring.mini{width:52px;height:52px}
+.splash-badge.mini{width:38px;height:38px;border-radius:12px}
+.splash-badge.mini .pletter{font-size:19px}
+.splash-badge.mini .plus{font-size:9px}
+.searching{text-align:center;padding:36px 20px 40px;color:var(--sub);font-size:13px;font-weight:600;line-height:1.6}
+.searching .splash-icon{margin:0 auto 14px}
+.searching .searching-title{color:var(--text);font-size:15px;font-weight:800;margin-bottom:4px}
 .splash-text{color:#eef1f7;font-size:19px;font-weight:700;font-family:var(--font);letter-spacing:.2px}
 @keyframes splashSpin{to{transform:rotate(270deg)}}
 </style>
@@ -1287,7 +1295,16 @@ function render() {
   const view = $('#view');
   if (viewMode === 'tracker') { renderTracker(); return; }
   const rowsV = rows.filter(r => !hidden[r.key]);
-  if (!rowsV.length) { view.innerHTML = `<div class="empty">No live arbs vs Pinnacle right now.<br>${fixtures.length} live game${fixtures.length===1?'':'s'} · Pinnacle limit ≥ ${usd(Number($('#minLim').value)||0)} · min arb ${$('#minArb').value}% · checking every 2s</div>`; return; }
+  if (!rowsV.length) {
+    const searchHtml = `<div class="searching">
+      <div class="splash-icon mini"><svg class="splash-ring mini" viewBox="0 0 100 100"><circle cx="50" cy="50" r="42"></circle></svg><div class="splash-badge mini"><span class="pletter">P</span><span class="plus">+</span></div></div>
+      <div class="searching-title">Pick The Ass is searching…</div>
+      <div>No live arbs vs Pinnacle right now.<br>${fixtures.length} live game${fixtures.length===1?'':'s'} · Pinnacle limit ≥ ${usd(Number($('#minLim').value)||0)} · min arb ${$('#minArb').value}% · checking every 2s</div>
+    </div>`;
+    setViewHtml(view, searchHtml);
+    updateStatusStrip();
+    return;
+  }
   function rowCard(r) {
     const f = r.f; const dl = deepLink(r.best.o);
     const moveCls = r.priceMove === 'good' ? ' pricegood' : r.priceMove === 'bad' ? ' pricebad' : '';
@@ -1300,7 +1317,6 @@ function render() {
     const evPct = (r.best.ev * 100); const arbPct = (r.best.arb * 100); const isArb = arbPct > 0;
     const moreRows = r.books.slice(1, 6).map(b => `<div class="bookrow">${logoOf(b.book) ? `<img src="${esc(logoOf(b.book))}" alt="">` : `<span class="bk">${esc(b.book.slice(0,3))}</span>`}<span class="bkname">${esc(b.book)}</span><span class="bkprice">${fmtAm(b.price)}</span><span class="bkmeta">${b.exch ? `${Math.round(imp(b.price)*100)}%${b.depth ? ` · ${usd(b.depth.total)} avg ${fmtAm(b.depth.avg)}` : b.liq ? ` · $${Math.round(b.liq)}` : ''}` : `+${(b.ev*100).toFixed(1)}%`}</span></div>`).join('');
     const st = stateOf(f);
-    const age = Math.max(0, Math.round((Date.now() - r.since) / 1000)); const ageTxt = age < 60 ? `${age}s` : `${Math.floor(age/60)}m${age%60 ? (age%60)+'s' : ''}`;
     // Attribute the move: Pinnacle re-pricing this side (sharp money catching up) reads
     // differently than the book you'd bet drifting toward or away from Pinnacle's number.
     const gapWord = r.trend > 0 ? 'opening up' : r.trend < 0 ? 'closing' : null;
@@ -1333,7 +1349,7 @@ function render() {
         <div class="fs-stat">${isArb ? `${arbPct.toFixed(2)}%` : `${evPct.toFixed(1)}%`}<span>${isArb ? 'Arb' : 'EV'}</span></div>
         <button class="fs-bet${log[r.key]?.bet ? ' on' : ''}" data-bet="${esc(r.key)}">${log[r.key]?.bet ? '✓ BET' : 'I BET THIS'}</button>
       </div>
-      <div class="sig"><span>${esc(why)}</span><span>on board ${ageTxt} <span class="trend ${r.trend > 0 ? 'up' : r.trend < 0 ? 'dn' : ''}">${r.trend > 0 ? '▲' : r.trend < 0 ? '▼' : '—'}</span></span></div>
+      <div class="sig"><span>${esc(why)}</span><span>on board <span class="ageval" data-since="${r.since}"></span> <span class="trend ${r.trend > 0 ? 'up' : r.trend < 0 ? 'dn' : ''}">${r.trend > 0 ? '▲' : r.trend < 0 ? '▼' : '—'}</span></span></div>
     </div>`;
   }
   // pinned rows (double-click/double-tap a row to pin) float above the ranked list, in their own
@@ -1355,7 +1371,19 @@ function render() {
     togglePin(el.dataset.key);
   }));
   updateStatusStrip();
+  tickAges();
 }
+// "On board Ns" ticks on its own 1s clock instead of being baked into each row's HTML — that
+// was the biggest source of the poll feeling "shaky": since it changed on literally every 2s
+// cycle, setViewHtml's identical-HTML skip could never fire, so the whole list tore down and
+// rebuilt (losing scroll feel, mid-flight animations, etc.) even when nothing else changed.
+function tickAges() {
+  document.querySelectorAll('.ageval[data-since]').forEach(el => {
+    const age = Math.max(0, Math.round((Date.now() - Number(el.dataset.since)) / 1000));
+    el.textContent = age < 60 ? `${age}s` : `${Math.floor(age / 60)}m${age % 60 ? (age % 60) + 's' : ''}`;
+  });
+}
+setInterval(tickAges, 1000);
 // ───────────────────────────── tracker view ─────────────────────────────
 let viewMode = 'live';
 function renderTracker() {
@@ -1460,7 +1488,12 @@ async function load(force) {
       rows = []; if (viewMode === 'tracker') { renderTracker(); busy = false; setSync('idle'); $('#reload').classList.remove('spinning'); return; }
       setLastUpdated(new Date().toLocaleTimeString([], { hour:'numeric', minute:'2-digit' }));
       const lines = Object.entries(diag).map(([lg, d]) => d.error ? `${lg}: error — ${esc(d.error)}` : `${lg}: ${d.n} fixtures (${Object.entries(d.st).map(([k, v]) => k + ' ' + v).join(', ') || 'none'})${d.next ? ' · next ' + etDay(d.next) + ' ' + etTime(d.next) : ''}`);
-      $('#view').innerHTML = `<div class="empty">No live games right now.<br><br><div style="font-size:11px;text-align:left;display:inline-block;line-height:1.8">${lines.join('<br>')}</div><br><br>Re-checking every 2s.</div>`;
+      const searchHtml = `<div class="searching">
+        <div class="splash-icon mini"><svg class="splash-ring mini" viewBox="0 0 100 100"><circle cx="50" cy="50" r="42"></circle></svg><div class="splash-badge mini"><span class="pletter">P</span><span class="plus">+</span></div></div>
+        <div class="searching-title">Pick The Ass is searching…</div>
+        <div>No live games right now.<br><br><div style="font-size:11px;text-align:left;display:inline-block;line-height:1.8">${lines.join('<br>')}</div><br><br>Re-checking every 2s.</div>
+      </div>`;
+      setViewHtml($('#view'), searchHtml);
       updateStatusStrip();
       busy = false; setSync('idle'); $('#reload').classList.remove('spinning'); return;
     }
