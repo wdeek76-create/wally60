@@ -473,7 +473,11 @@ async function loadFixtures() {
         // insight bar: every future, non-live fixture — no window cap here (renderInsight bounds the window it displays)
         if (!live && t > now) {
           const hc0 = f.home_competitors?.[0] || {}, ac0 = f.away_competitors?.[0] || {};
-          upcomingNext.push({ id:f.id, lk:k, label:L.label, start:t, home:hc0.abbreviation || (hc0.name||'').slice(0,3).toUpperCase(), away:ac0.abbreviation || (ac0.name||'').slice(0,3).toUpperCase() });
+          // Team abbreviations read fine in the action window ("NYY @ BOS"), but a 3-letter
+          // truncation of a fighter's name doesn't — show UFC fighters by their full name instead.
+          const home = k === 'ufc' ? (hc0.name || 'TBD') : (hc0.abbreviation || (hc0.name||'').slice(0,3).toUpperCase());
+          const away = k === 'ufc' ? (ac0.name || 'TBD') : (ac0.abbreviation || (ac0.name||'').slice(0,3).toUpperCase());
+          upcomingNext.push({ id:f.id, lk:k, label:L.label, start:t, home, away });
         }
         if (!live) return;                                                   // LIVE ONLY
         const hc = f.home_competitors?.[0] || {}, ac = f.away_competitors?.[0] || {};
@@ -526,6 +530,7 @@ const nyWeekdayShort = ms => new Date(ms).toLocaleDateString('en-US', { weekday:
 const nyHourLabel = ms => { const h = Number(new Date(ms).toLocaleTimeString('en-US', { hour:'numeric', hour12:false, timeZone:'America/New_York' })) % 24; const hh = h % 12 || 12, ap = h >= 12 ? 'p' : 'a'; return `${hh}${ap}`; };
 let insightDayOffset = 0;
 let insightCollapsed = LS.get('live_insight_collapsed', '0') === '1';
+let insightSelectedSlot = null; // survives the poll's re-render so an open slot detail doesn't keep snapping shut
 function renderInsight(liveFixtures, upcoming) {
   const bar = $('#insight-bar'); if (!bar) return;
   const now = Date.now();
@@ -552,6 +557,7 @@ function renderInsight(liveFixtures, upcoming) {
 function cycleDay(dir) {
   const days = window._tlDays || []; if (days.length < 2) return;
   insightDayOffset = Math.max(0, Math.min(days.length - 1, insightDayOffset + dir));
+  insightSelectedSlot = null;
   renderInsightDay();
 }
 function renderInsightDay() {
@@ -649,6 +655,10 @@ function renderInsightDay() {
       <div id="tl-detail" class="tl-detail"></div>
     </div>`;
   bar.querySelectorAll('.tl-slot').forEach(el => el.addEventListener('click', () => showSlot(Number(el.dataset.slot))));
+  // Re-open whatever slot was already selected before this rebuild (a poll refresh, not a
+  // user action) so tapping a bar to see its games doesn't get silently closed a couple
+  // seconds later.
+  if (insightSelectedSlot != null && slice[insightSelectedSlot]?.moments.length) showSlot(insightSelectedSlot);
   $('#tlPrev')?.addEventListener('click', ev => { ev.stopPropagation(); cycleDay(-1); });
   $('#tlNext')?.addEventListener('click', ev => { ev.stopPropagation(); cycleDay(1); });
   $('#tlHeader')?.addEventListener('click', () => {
@@ -658,7 +668,8 @@ function renderInsightDay() {
 }
 function showSlot(i) {
   const slots = window._tlSlots || []; const s = slots[i]; const detail = $('#tl-detail'); if (!detail) return;
-  if (!s || !s.moments.length) { detail.innerHTML = ''; detail.classList.remove('open'); return; }
+  if (!s || !s.moments.length) { detail.innerHTML = ''; detail.classList.remove('open'); insightSelectedSlot = null; return; }
+  insightSelectedSlot = i;
   document.querySelectorAll('.tl-slot').forEach((el, idx) => el.classList.toggle('sel', idx === i));
   const fmtTime = ms => { const d = new Date(ms); const rounded = Math.round(d.getMinutes()/10)*10; d.setMinutes(rounded,0,0); const h = d.getHours(), m = String(d.getMinutes()).padStart(2,'0'); const ampm = h>=12?'PM':'AM', h12 = h%12||12; return m==='00'?`${h12} ${ampm}`:`${h12}:${m} ${ampm}`; };
   const rows = s.moments.slice().sort((a,b) => a.ms - b.ms).map(m => `<div class="tl-drow"><span class="tl-dleague">${esc(m.g.label)}</span><span class="tl-dteam">${m.live ? 'LIVE now' : `${esc(m.g.away)} @ ${esc(m.g.home)}`}</span><span class="tl-dtime">${m.live ? '' : fmtTime(m.ms)}</span></div>`).join('');
