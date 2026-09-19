@@ -362,6 +362,7 @@ const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;
 const toDec = a => { a = Number(a); return a > 0 ? 1 + a/100 : 1 + 100/Math.abs(a); };
 const imp = a => 1/toDec(a);
 const fmtAm = a => { a = Number(a); return a > 0 ? '+' + a : String(a); };
+const toAm = dec => dec >= 2 ? Math.round((dec - 1) * 100) : Math.round(-100 / (dec - 1));
 const probToAm = p => { if (!(p > 0 && p < 1)) return 0; return p >= 0.5 ? -Math.round(100 * p / (1 - p)) : Math.round(100 * (1 - p) / p); };
 const usd = n => n >= 1000 ? '$' + (n/1000).toFixed(1).replace(/\.0$/,'') + 'k' : '$' + Math.round(n);
 // Tracker staking convention, display-only: risk 1u on underdogs (win more than 1u),
@@ -773,12 +774,23 @@ function centsDiff(a, b) { a = Number(a); b = Number(b); if ((a < 0) === (b < 0)
 // shape is present — unknown liquidity should never be treated as "no liquidity."
 function liqOf(o) {
   if (o.limits?.max != null) return Number(o.limits.max);
+  const d = liqDepth(o);
+  return d ? d.total : null;
+}
+// Full order-book depth for an exchange quote: total size resting plus the size-weighted
+// average price across every level — so a thin top-of-book quote doesn't overstate what's
+// actually fillable at that number. Used for display only, never to gate a row.
+function liqDepth(o) {
   const ob = Array.isArray(o.order_book) ? o.order_book.filter(l => Array.isArray(l) && l.length >= 2) : [];
   if (!ob.length) return null;
   const top = Number(o.price);
   const priceFirst = Math.abs(Number(ob[0][0]) - top) <= Math.abs(Number(ob[0][1]) - top);
-  const total = ob.reduce((sum, l) => sum + Number(priceFirst ? l[1] : l[0]), 0);
-  return isNaN(total) ? null : total;
+  const levels = ob.map(l => ({ price: Number(priceFirst ? l[0] : l[1]), size: Number(priceFirst ? l[1] : l[0]) }))
+    .filter(l => !isNaN(l.price) && !isNaN(l.size) && l.size > 0);
+  if (!levels.length) return null;
+  const total = levels.reduce((sum, l) => sum + l.size, 0);
+  const wdec = levels.reduce((sum, l) => sum + toDec(l.price) * l.size, 0) / total;
+  return { total, avg: toAm(wdec) };
 }
 const ALIGN_CENTS = 10;
 // ───────────────────────────── math ─────────────────────────────
@@ -850,7 +862,8 @@ function computeRows(fxs, byFx) {
           const pr = Number(o.price); if (pr < pMin || pr > pMax) return null;
           const ev = fp * toDec(pr) - 1;
           const arb = 1 - (imp(pr) + imp(pin[1-idx].price));   // this side here + other side at the reference book
-          return { book:b, price:pr, ev, arb, o, exch: EXCH.has(b.toLowerCase()), liq: liqOf(o) };
+          const exch = EXCH.has(b.toLowerCase());
+          return { book:b, price:pr, ev, arb, o, exch, liq: liqOf(o), depth: exch ? liqDepth(o) : null };
         }).filter(x => x && x.ev * 100 <= 25 && x.arb * 100 >= minArb && (!arbsOnly || x.arb > 0)).sort((a, b) => b.price - a.price);
         if (!books.length) return;
         const s = P.samples[sid];
@@ -864,7 +877,8 @@ function computeRows(fxs, byFx) {
         const pickSide = P.mk.key === 'total' ? null : P.mk.key === 'tt' ? ttSide : (isHomeSide(s, f) ? 'home' : 'away');
         const pickPoints = (P.mk.key === 'spread' || P.mk.key === 'total' || P.mk.key === 'tt') ? Number(s.points) : null;
         const overUnder = (P.mk.key === 'total' || P.mk.key === 'tt') ? (/under/i.test(String(s.selection_line || s.selection || '')) ? 'under' : 'over') : null;
-        out.push({ key, f, mk:P.mk, sideLabel, ttSide, pickSide, pickPoints, overUnder, fair:fp, aligned, refLabel, refBook, refBookShort: refBook==='Kalshi'?'Kalshi':'PIN', fdPrice: aligned ? fd[idx].price : null, pin:{ mine:pin[idx].price, other:pin[1-idx].price, lim }, books, best:books[0] });
+        const pinDepth = EXCH.has(refBook.toLowerCase()) ? liqDepth(pin[idx]) : null;
+        out.push({ key, f, mk:P.mk, sideLabel, ttSide, pickSide, pickPoints, overUnder, fair:fp, aligned, refLabel, refBook, refBookShort: refBook==='Kalshi'?'Kalshi':'PIN', fdPrice: aligned ? fd[idx].price : null, pin:{ mine:pin[idx].price, other:pin[1-idx].price, lim, depth:pinDepth }, books, best:books[0] });
       });
     });
   });
@@ -1099,7 +1113,7 @@ function render() {
     const refBook = r.refBook || REF_BOOK, refShort = r.refBookShort || 'PIN';
     const pinLg = logoOf(refBook);
     const evPct = (r.best.ev * 100); const arbPct = (r.best.arb * 100); const isArb = arbPct > 0;
-    const more = r.books.slice(1, 6).map(b => `<span class="b">${logoOf(b.book) ? `<img src="${esc(logoOf(b.book))}" alt="">` : esc(b.book.slice(0,3))} ${fmtAm(b.price)}${b.exch ? `(${Math.round(imp(b.price)*100)}%)${b.liq ? ' $' + Math.round(b.liq) : ''}` : ''} · +${(b.ev*100).toFixed(1)}%</span>`).join('');
+    const more = r.books.slice(1, 6).map(b => `<span class="b">${logoOf(b.book) ? `<img src="${esc(logoOf(b.book))}" alt="">` : esc(b.book.slice(0,3))} ${fmtAm(b.price)}${b.exch ? `(${Math.round(imp(b.price)*100)}%)${b.depth ? ` ${usd(b.depth.total)} avg ${fmtAm(b.depth.avg)}` : b.liq ? ' $' + Math.round(b.liq) : ''}` : ''} · +${(b.ev*100).toFixed(1)}%</span>`).join('');
     const st = stateOf(f);
     const age = Math.max(0, Math.round((Date.now() - r.since) / 1000)); const ageTxt = age < 60 ? `${age}s` : `${Math.floor(age/60)}m${age%60 ? (age%60)+'s' : ''}`;
     const why = isArb ? `locked ${arbPct.toFixed(2)}% arb vs ${refBook}` : st.brk ? `${st.brk} · books slow to move` : evPct >= 3 ? 'edge ≥ 3%' : r.trend > 0 ? 'edge climbing' : r.trend < 0 ? 'edge fading' : 'holding';
@@ -1124,7 +1138,7 @@ function render() {
         ${pinLg ? `<img src="${esc(pinLg)}" alt="${esc(refBook)}" title="${esc(refBook)}">` : `<span class="bk">${esc(refShort)}</span>`}
         ${fmtAm(probToAm(r.fair))}<span class="fairlbl">Fair</span>
         <span class="pct${isArb ? ' arb' : ''}">(${isArb ? `${arbPct.toFixed(2)}% Arb / ` : ''}${evPct.toFixed(1)}% EV)</span>
-        <span class="lim">${r.pin.lim != null ? usd(r.pin.lim) + ' lim' : 'lim n/a'}</span>
+        <span class="lim">${r.pin.depth ? `${usd(r.pin.depth.total)} avg ${fmtAm(r.pin.depth.avg)}` : r.pin.lim != null ? usd(r.pin.lim) + ' lim' : 'lim n/a'}</span>
       </div>
       ${r.aligned ? `<div style="margin-top:8px"><span class="agree">✓ FD &amp; PIN AGREE <b>FD ${fmtAm(r.fdPrice)}</b> · <b>PIN ${fmtAm(r.pin.mine)}</b> → fading ${esc(r.best.book === 'DraftKings' ? 'DK' : r.best.book)}</span></div>` : ''}
       ${more ? `<div class="more">${more}</div>` : ''}
