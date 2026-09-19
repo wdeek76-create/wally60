@@ -660,7 +660,19 @@ function stateOf(f) {
     const on2 = raw.on_second ?? raw.onSecond ?? raw.runner_on_second ?? raw.second_base ?? raw.bases?.second;
     const on3 = raw.on_third ?? raw.onThird ?? raw.runner_on_third ?? raw.third_base ?? raw.bases?.third;
     const outs = raw.outs ?? null;
-    if (on1 != null || on2 != null || on3 != null) sit = { on1: !!on1, on2: !!on2, on3: !!on3, outs: outs != null ? Number(outs) : null };
+    // Who's actually AT BAT — a baserunner is only good news for whichever team is hitting.
+    // Best-effort: an explicit half/top-bottom field, an explicit batting-team id, or the
+    // play-by-play text ("Top of the 7th"). Left null (and the note simply doesn't show on
+    // an ML row) if none of these are present, rather than guessing and misattributing it.
+    let battingSide = null;
+    const half = String(raw.half ?? raw.top_bottom ?? raw.inning_half ?? '').toLowerCase();
+    if (/^top\b|top of/.test(half) || /top of the/.test(desc)) battingSide = 'away';
+    else if (/^bot(tom)?\b|bottom of/.test(half) || /bottom of the/.test(desc)) battingSide = 'home';
+    else if (raw.batting_team_id != null) {
+      if (String(raw.batting_team_id) === String(f.home.id)) battingSide = 'home';
+      else if (String(raw.batting_team_id) === String(f.away.id)) battingSide = 'away';
+    }
+    if (on1 != null || on2 != null || on3 != null) sit = { on1: !!on1, on2: !!on2, on3: !!on3, outs: outs != null ? Number(outs) : null, battingSide };
   }
   return { away, home, period, clock, brk, hot, sit, label: [pLabel, clock].filter(Boolean).join(' ') };
 }
@@ -686,8 +698,13 @@ function situationNote(r, f, st) {
     const n = [st.sit.on1, st.sit.on2, st.sit.on3].filter(Boolean).length;
     const risp = st.sit.on2 || st.sit.on3;
     const outsTxt = st.sit.outs != null ? `, ${st.sit.outs} out${st.sit.outs===1?'':'s'}` : '';
-    if (r.mk.key === 'ml') bits.push(`${n} on${risp ? ' · scoring position' : ''}${outsTxt}`);
-    else if (r.mk.key === 'total' || r.mk.key === 'tt') bits.push(`${n} on base${risp ? ' · scoring position' : ''}${outsTxt}`);
+    // A runner on base only helps the team actually hitting — never attach it to a specific
+    // team's side (ML, or a team total) unless we actually know who's up. A whole-game total
+    // doesn't care which team is batting, so that one shows regardless.
+    const battingKnown = st.sit.battingSide != null;
+    if (r.mk.key === 'ml' && battingKnown && st.sit.battingSide === r.pickSide) bits.push(`${n} on${risp ? ' · scoring position' : ''}${outsTxt} (batting)`);
+    else if (r.mk.key === 'tt' && battingKnown && st.sit.battingSide === r.ttSide) bits.push(`${n} on${risp ? ' · scoring position' : ''}${outsTxt} (batting)`);
+    else if (r.mk.key === 'total') bits.push(`${n} on base${risp ? ' · scoring position' : ''}${outsTxt}`);
   }
   if ((r.mk.key === 'total' || r.mk.key === 'tt') && r.pickPoints != null && r.overUnder && !isNaN(st.home) && !isNaN(st.away)) {
     const frac = gameFraction(f, st);
