@@ -170,15 +170,17 @@ header{padding:14px 16px 10px;padding-top:calc(14px + env(safe-area-inset-top))}
 @keyframes priceFlashGood{0%{color:var(--green);text-shadow:0 0 12px rgba(39,192,113,.9)}70%{color:var(--green);text-shadow:0 0 12px rgba(39,192,113,.9)}100%{color:#fff;text-shadow:none}}
 @keyframes priceFlashBad{0%{color:var(--red);text-shadow:0 0 12px rgba(255,59,59,.9)}70%{color:var(--red);text-shadow:0 0 12px rgba(255,59,59,.9)}100%{color:#fff;text-shadow:none}}
 .pwrap{position:relative;display:inline-flex}
-.pricepop{position:absolute;top:-9px;right:-6px;font-size:8.5px;font-weight:900;letter-spacing:.2px;padding:3px 7px;border-radius:999px;white-space:nowrap;pointer-events:none;z-index:5;animation:popOff 1.7s cubic-bezier(.25,.9,.35,1) forwards}
-.pricepop.good{background:var(--green);color:#04140b}
-.pricepop.bad{background:var(--red);color:#2a0505}
-@keyframes popOff{
-  0%{transform:scale(.3) translate(0,0);opacity:0}
-  12%{transform:scale(1.2) translate(0,0);opacity:1}
-  22%{transform:scale(1) translate(0,0);opacity:1}
-  70%{transform:scale(1) translate(0,0);opacity:1}
-  100%{transform:scale(.85) translate(120%,-40%);opacity:0}
+/* A tiny "still good vs Pinnacle" dot — sits at the corner, never over the digits, and just
+   fades away on its own. No "bad" variant: if it's not good anymore, nothing shows at all
+   (the row itself drops off once the arb closes; the red number-flash covers "got worse"). */
+.pricepop{position:absolute;top:-6px;right:-6px;width:14px;height:14px;display:flex;align-items:center;justify-content:center;font-size:8px;font-weight:900;border-radius:50%;pointer-events:none;z-index:5;animation:popFade 1.8s ease-out forwards}
+.pricepop.good{background:var(--green);color:#04140b;box-shadow:0 0 6px rgba(39,192,113,.7)}
+@keyframes popFade{
+  0%{transform:scale(.4);opacity:0}
+  20%{transform:scale(1.1);opacity:1}
+  30%{transform:scale(1);opacity:1}
+  75%{opacity:1}
+  100%{transform:scale(.8);opacity:0}
 }
 .curtot{font-size:11px;font-weight:700;color:var(--sub);margin-top:3px;font-variant-numeric:tabular-nums}
 .curtot b{color:#fff}
@@ -188,7 +190,7 @@ header{padding:14px 16px 10px;padding-top:calc(14px + env(safe-area-inset-top))}
 .conf-pill{font-size:9px;font-weight:800;letter-spacing:.2px;color:var(--green);background:var(--green-dim);border:1px solid rgba(39,192,113,.4);border-radius:999px;padding:2px 7px;font-variant-numeric:tabular-nums}
 .cmp{display:flex;align-items:center;flex-wrap:wrap;gap:5px;margin-top:9px;font-size:13px;font-weight:800;color:#fff;font-variant-numeric:tabular-nums}
 .cmp img{width:15px;height:15px;border-radius:4px;object-fit:cover;vertical-align:middle}
-.cmp .bestpick{display:inline-flex;align-items:center;gap:6px;background:rgba(39,192,113,.12);border:1.5px solid rgba(39,192,113,.5);border-radius:9px;padding:5px 10px}
+.cmp .bestpick{display:inline-flex;align-items:center;gap:6px;background:rgba(39,192,113,.12);border:1.5px solid rgba(39,192,113,.5);border-radius:9px;padding:5px 10px;box-shadow:0 0 14px rgba(39,192,113,.32),inset 0 1px 0 rgba(255,255,255,.12)}
 .cmp .bk{font-size:9px;font-weight:800;letter-spacing:.3px;color:var(--sub)}
 .cmp .vs{font-size:10px;font-weight:700;color:var(--sub);margin:0 1px}
 .cmp .fairlbl{font-size:9px;font-weight:800;letter-spacing:.3px;color:var(--sub);margin-left:1px}
@@ -1060,7 +1062,8 @@ async function refreshTrackedProgress() {
   _trackProgressBusy = true;
   try {
     const ids = [...new Set(pending.map(e => e.fid))];
-    const books = [...new Set(pending.flatMap(e => [e.refBook || REF_BOOK, e.betBook]))];
+    const toggledExtra = [...extraBooks].map(k => EXTRA_BOOKS.find(b => b.key === k)?.name).filter(Boolean);
+    const books = [...new Set(pending.flatMap(e => [e.refBook || REF_BOOK, e.betBook]).concat(toggledExtra))];
     const byFx = {};
     for (const idBatch of chunk(ids, 5)) {
       for (const bkBatch of chunk(books, 5)) {
@@ -1086,7 +1089,13 @@ async function refreshTrackedProgress() {
       const bkO = candidates.find(o => String(o.sportsbook).toLowerCase() === String(e.betBook).toLowerCase());
       const newPinNow = pinO ? Number(pinO.price) : e.pinNow;
       const newBookNow = bkO ? Number(bkO.price) : e.betBookNow;
-      if (newPinNow !== e.pinNow || newBookNow !== e.betBookNow) { e.pinNow = newPinNow; e.betBookNow = newBookNow; changed = true; }
+      // every currently-toggled book's live price at this same side, for the full "books now" row
+      const seenBooks = new Set();
+      const booksNow = candidates.filter(o => { const b = String(o.sportsbook); if (seenBooks.has(b.toLowerCase())) return false; seenBooks.add(b.toLowerCase()); return true; })
+        .map(o => ({ book:String(o.sportsbook), price:Number(o.price) })).sort((a, b) => b.price - a.price);
+      if (newPinNow !== e.pinNow || newBookNow !== e.betBookNow || JSON.stringify(booksNow) !== JSON.stringify(e.booksNow)) {
+        e.pinNow = newPinNow; e.betBookNow = newBookNow; e.booksNow = booksNow; changed = true;
+      }
     });
     if (changed) { saveLog(); if (viewMode === 'tracker') renderTracker(); }
   } finally { _trackProgressBusy = false; }
@@ -1215,7 +1224,7 @@ function render() {
     const f = r.f; const dl = deepLink(r.best.o);
     const moveCls = r.priceMove === 'good' ? ' pricegood' : r.priceMove === 'bad' ? ' pricebad' : '';
     const priceInner = dl ? `<a class="p${moveCls}" href="${esc(dl)}" target="_blank" rel="noopener">${fmtAm(r.best.price)}</a>` : `<span class="p${moveCls}">${fmtAm(r.best.price)}</span>`;
-    const pop = r.priceMove ? `<span class="pricepop ${r.priceMove}">${r.priceMove==='good'?'▲ GOOD':'▼ NO GOOD'}</span>` : '';
+    const pop = r.priceMove === 'good' ? `<span class="pricepop good">✓</span>` : '';
     const price = `<span class="pwrap">${priceInner}${pop}</span>`;
     const lg = logoOf(r.best.book);
     const refBook = r.refBook || REF_BOOK, refShort = r.refBookShort || 'PIN';
@@ -1301,10 +1310,14 @@ function renderTracker() {
       <div class="mvrow"><span class="mvl">${esc(e.refBookShort || 'PIN')}</span><span class="mvv">${fmtAm(e.pinAtBet ?? e.betPrice)} → ${e.pinNow != null ? fmtAm(e.pinNow) : '—'}</span>${moveTag(e.pinAtBet, e.pinNow)}</div>
       <div class="mvrow"><span class="mvl">${esc(e.betBook)}</span><span class="mvv">${fmtAm(e.betPrice)} → ${e.betBookNow != null ? fmtAm(e.betBookNow) : '—'}</span>${moveTag(e.betPrice, e.betBookNow)}</div>
     </div>` : '';
+    // Every currently-toggled book's live price on this same side, same pill treatment as the
+    // live rows' "more books" line — the full picture, not just PIN + your book.
+    const booksNow = (!settled && e.booksNow?.length) ? `<div class="more">${e.booksNow.map(b => `<span class="b">${logoOf(b.book) ? `<img src="${esc(logoOf(b.book))}" alt="">` : esc(b.book.slice(0,3))} ${fmtAm(b.price)}</span>`).join('')}</div>` : '';
     return `<div class="tk glass"><div class="h"><span>${esc(e.game)} <span style="color:var(--sub);font-size:10px">${esc(e.league)}</span></span><span>${t(e.betAt)}</span></div>
     <div style="font-weight:800;font-size:14px;margin-top:3px">${esc(e.market)} · ${esc(e.side)}</div>
     <div class="m">bet <b>${fmtAm(e.betPrice)}</b> ${esc(e.betBook)} · EV <b>+${(e.betEv||0).toFixed(1)}%</b> · fair ${fmtAm(probToAm(e.fair))} · lim ${e.pinLim != null ? usd(e.pinLim) : 'n/a'}</div>
     ${progress}
+    ${booksNow}
     ${resultLine}
     <div class="acts" style="margin-top:8px">${resultBtns}<button data-del="${esc(e.key)}">✕</button></div></div>`;
   };
