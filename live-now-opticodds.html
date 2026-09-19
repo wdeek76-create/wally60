@@ -190,8 +190,11 @@ header{padding:14px 16px 10px;padding-top:calc(14px + env(safe-area-inset-top))}
 .footstrip{display:flex;gap:6px;margin-top:10px}
 .footstrip .fs-stat{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;background:rgba(39,192,113,.10);border:1px solid rgba(39,192,113,.35);border-radius:13px;padding:7px 4px;font-size:13px;font-weight:900;color:var(--green);font-variant-numeric:tabular-nums}
 .footstrip .fs-stat span{font-size:8px;font-weight:800;letter-spacing:.4px;text-transform:uppercase;color:var(--sub);margin-top:1px}
-.footstrip .fs-bet{flex:1.6;background:var(--green);color:#04140b;border:none;border-radius:13px;font-weight:900;font-size:12px;letter-spacing:.2px;font-family:var(--font);cursor:pointer}
-.footstrip .fs-bet.on{background:#0d3b23;color:var(--green);border:1.5px solid var(--green)}
+.footstrip .fs-bet{flex:1.6;display:flex;align-items:center;justify-content:center;background:var(--green);color:#04140b;border:none;border-radius:13px;font-weight:900;font-size:12px;letter-spacing:.2px;font-family:var(--font);cursor:pointer;text-decoration:none;text-align:center}
+.footstrip .fs-bet.fs-bet-off{background:rgba(255,255,255,.06);color:var(--sub);cursor:default}
+.trackrow{display:flex;justify-content:center;margin-top:8px}
+.track-btn{background:none;border:1.5px solid rgba(39,192,113,.5);color:var(--green);border-radius:20px;padding:6px 16px;font-weight:800;font-size:11px;letter-spacing:.2px;font-family:var(--font);cursor:pointer;-webkit-tap-highlight-color:transparent}
+.track-btn.on{background:var(--green-dim);border-color:var(--green)}
 .pick{display:flex;align-items:center;justify-content:space-between;gap:10px}
 .pick .side{min-width:0}
 .pick .side .m{font-size:10px;font-weight:800;letter-spacing:.6px;text-transform:uppercase;color:var(--accent)}
@@ -248,6 +251,7 @@ header{padding:14px 16px 10px;padding-top:calc(14px + env(safe-area-inset-top))}
 .tk{border-radius:18px;padding:10px 12px;margin:0 16px 8px;font-size:12px}
 .tk .h{display:flex;justify-content:space-between;gap:8px;font-weight:800}
 .tk .m{font-size:11px;color:var(--text);margin-top:4px;line-height:1.6;font-variant-numeric:tabular-nums}
+.tk-score{margin-top:5px;font-size:13px;font-weight:900;color:var(--text);font-variant-numeric:tabular-nums;display:flex;align-items:center;gap:6px;flex-wrap:wrap;text-transform:uppercase;letter-spacing:.2px}
 .mv{margin-top:8px;padding:9px 11px;border-radius:14px;background:rgba(255,255,255,.04);border:1px solid var(--border)}
 .mvrow{display:flex;align-items:center;gap:8px;font-size:11px;font-weight:700;padding:2px 0;font-variant-numeric:tabular-nums}
 .mvrow+.mvrow{border-top:1px solid rgba(255,255,255,.06);margin-top:3px;padding-top:5px}
@@ -1044,7 +1048,7 @@ function markBet(key) {
   if (existing) { delete log[key]; toast('Un-marked'); saveLog(); render(); return; }
   const r = rows.find(x => x.key === key); if (!r) return;
   const st = stateOf(r.f); const ev = r.best.ev * 100; const now = Date.now();
-  log[key] = { key, game:`${r.f.away.ab} @ ${r.f.home.ab}`, league:r.f.league.label, market:r.mk.label, side:r.sideLabel,
+  log[key] = { key, game:`${r.f.away.ab} @ ${r.f.home.ab}`, awayAb:r.f.away.ab, homeAb:r.f.home.ab, league:r.f.league.label, market:r.mk.label, side:r.sideLabel,
     betAt:now, betBook:r.best.book, betPrice:r.best.price, betEv:ev, arb:r.best.arb*100, hedge:r.pin.other, fair:r.fair, pinLim:r.pin.lim,
     stateAtFirst:[st.label, st.brk].filter(Boolean).join(' · '), status:'pending', bet:true,
     // Grading metadata, so this settles itself once the fixture is final — no manual tap needed.
@@ -1068,6 +1072,23 @@ function togglePin(key) {
 // Uses the grading metadata (fid/mkKey/pickSide/pickPoints/overUnder) stashed on the bet at
 // log time in markBet(); older bets logged before this existed just stay pending forever
 // (nothing to grade them against) and can still be settled by hand.
+// Same period/clock read as stateOf(), but off a raw /fixtures/results object instead of a
+// fixture in the live feed — a tracked bet's game may no longer be in the active leagues list.
+function periodClockLabel(R, leagueLabel) {
+  const ip = R?.in_play || {}; const L = leagueLabel || '';
+  const status = String(R?.fixture?.status || '').toLowerCase();
+  if (/completed|closed|final|ended/.test(status)) return 'FINAL';
+  const period = Number(ip.period || ip.quarter || ip.inning || 0) || 0;
+  const clock = String(ip.clock || ip.time || '').trim();
+  const desc = String(ip.status || ip.description || ip.last_play || status || '').toLowerCase();
+  let brk = null;
+  if (status === 'half' || /half.?time/.test(desc)) brk = 'HALFTIME';
+  else if (/^0?0:00$/.test(clock) && period) brk = L === 'NHL' ? 'INTERMISSION' : (L === 'MLB' ? 'BETWEEN INNINGS' : 'END OF ' + (L === 'NFL' || /NBA|CBB|WNBA/.test(L) ? 'QUARTER' : 'PERIOD'));
+  else if (/^(mid|middle|end)/.test(desc) && L === 'MLB') brk = 'BETWEEN INNINGS';
+  else if (/timeout/.test(desc)) brk = 'TIMEOUT';
+  const pLabel = period ? (L === 'MLB' ? (period + (['th','st','nd','rd'][period % 10 > 3 || (period % 100 - period % 10 === 10) ? 0 : period % 10])) : L === 'NHL' ? 'P' + period : 'Q' + period) : '';
+  return brk || [pLabel, clock].filter(Boolean).join(' ') || null;
+}
 function gradeOutcome(e, R) {
   const status = String(R?.fixture?.status || '').toLowerCase();
   if (!/completed|closed|final|ended/.test(status)) return null; // not final yet
@@ -1115,9 +1136,12 @@ async function autoGradeTracked() {
     let changed = false;
     pending.forEach(e => {
       const R = resultsById[e.fid]; if (!R) return;
-      // Live score, kept even before the game is final — feeds the tracker's progress bar.
+      // Live score + period/clock, kept even before the game is final — feeds the tracker's
+      // progress bar and its "what's happening right now" line.
       const ch = Number(R?.scores?.home?.total), ca = Number(R?.scores?.away?.total);
       if (!isNaN(ch) && !isNaN(ca) && (e.curHome !== ch || e.curAway !== ca)) { e.curHome = ch; e.curAway = ca; changed = true; }
+      const label = periodClockLabel(R, e.league);
+      if (label !== e.curLabel) { e.curLabel = label; changed = true; }
       const outcome = gradeOutcome(e, R); if (!outcome) return;
       e.status = outcome; e.gradedAt = Date.now();
       if (!isNaN(ch) && !isNaN(ca)) e.finalScore = `${ca}-${ch}`;
@@ -1347,8 +1371,9 @@ function render() {
       <div class="footstrip">
         <div class="fs-stat">${r.pin.depth ? `${usd(r.pin.depth.total)} avg` : r.pin.lim != null ? usd(r.pin.lim) : 'n/a'}<span>${r.pin.depth ? 'Avg $' : 'Lim'}</span></div>
         <div class="fs-stat">${isArb ? `${arbPct.toFixed(2)}%` : `${evPct.toFixed(1)}%`}<span>${isArb ? 'Arb' : 'EV'}</span></div>
-        <button class="fs-bet${log[r.key]?.bet ? ' on' : ''}" data-bet="${esc(r.key)}">${log[r.key]?.bet ? '✓ BET' : 'I BET THIS'}</button>
+        ${dl ? `<a class="fs-bet" href="${esc(dl)}" target="_blank" rel="noopener">I BET THIS</a>` : `<span class="fs-bet fs-bet-off">No Link</span>`}
       </div>
+      <div class="trackrow"><button class="track-btn${log[r.key]?.bet ? ' on' : ''}" data-bet="${esc(r.key)}">${log[r.key]?.bet ? '✓ Tracked' : '+ Track this bet'}</button></div>
       <div class="sig"><span>${esc(why)}</span><span>on board <span class="ageval" data-since="${r.since}"></span> <span class="trend ${r.trend > 0 ? 'up' : r.trend < 0 ? 'dn' : ''}">${r.trend > 0 ? '▲' : r.trend < 0 ? '▼' : '—'}</span></span></div>
     </div>`;
   }
@@ -1453,7 +1478,13 @@ function renderTracker() {
     // Every currently-toggled book's live price on this same side, same pill treatment as the
     // live rows' "more books" line — the full picture, not just PIN + your book.
     const booksNow = (!settled && e.booksNow?.length) ? `<div class="more">${e.booksNow.map(b => `<span class="b">${logoOf(b.book) ? `<img src="${esc(logoOf(b.book))}" alt="">` : esc(b.book.slice(0,3))} ${fmtAm(b.price)}</span>`).join('')}</div>` : '';
+    // Live score + period/clock, same "AWAY 31 @ HOME 27 · Q2 6:57" shape as the live rows —
+    // blank until the first auto-grade/progress cycle has actually pulled a result.
+    const scoreLine = (e.awayAb && e.homeAb && e.curHome != null && e.curAway != null)
+      ? `<div class="tk-score">${esc(e.awayAb)} <b>${e.curAway}</b> <span style="color:var(--sub)">@</span> ${esc(e.homeAb)} <b>${e.curHome}</b>${e.curLabel ? ` <span class="qtr">${esc(e.curLabel)}</span>` : ''}</div>`
+      : '';
     return `<div class="tk glass"><div class="h"><span>${esc(e.game)} <span style="color:var(--sub);font-size:10px">${esc(e.league)}</span></span><span>${t(e.betAt)}</span></div>
+    ${scoreLine}
     <div style="font-weight:800;font-size:14px;margin-top:3px">${esc(e.market)} · ${esc(e.side)}</div>
     <div class="m">bet <b>${fmtAm(e.betPrice)}</b> ${esc(e.betBook)} · EV <b>+${(e.betEv||0).toFixed(1)}%</b> · fair ${fmtAm(probToAm(e.fair))} · lim ${e.pinLim != null ? usd(e.pinLim) : 'n/a'}</div>
     ${prog}
