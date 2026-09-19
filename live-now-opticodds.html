@@ -766,6 +766,20 @@ function ufcPills(r, f, st) {
 
 // cents between two American prices (handles the -100/+100 gap: -105 vs +105 = 10c)
 function centsDiff(a, b) { a = Number(a); b = Number(b); if ((a < 0) === (b < 0)) return Math.abs(a - b); return Math.abs(Math.abs(a) - 100) + Math.abs(Math.abs(b) - 100); }
+// Liquidity for a book that doesn't post a flat limits.max — an exchange like Kalshi typically
+// reports depth as an order_book of [price,size] levels instead. Sum the size column (detected
+// by comparing each level's first value against the quoted top price) so the Pin-limit filter
+// isn't silently starved to 0 for exchange-referenced rows. Returns null, not 0, when neither
+// shape is present — unknown liquidity should never be treated as "no liquidity."
+function liqOf(o) {
+  if (o.limits?.max != null) return Number(o.limits.max);
+  const ob = Array.isArray(o.order_book) ? o.order_book.filter(l => Array.isArray(l) && l.length >= 2) : [];
+  if (!ob.length) return null;
+  const top = Number(o.price);
+  const priceFirst = Math.abs(Number(ob[0][0]) - top) <= Math.abs(Number(ob[0][1]) - top);
+  const total = ob.reduce((sum, l) => sum + Number(priceFirst ? l[1] : l[0]), 0);
+  return isNaN(total) ? null : total;
+}
 const ALIGN_CENTS = 10;
 // ───────────────────────────── math ─────────────────────────────
 // Pair sides at the same line. key: market|line ; sideId: team id / over|under
@@ -814,8 +828,9 @@ function computeRows(fxs, byFx) {
       const bookOn = (sid, name) => Object.entries(P.sides[sid]).find(([b]) => b.toLowerCase() === name.toLowerCase())?.[1];
       const pin = sideIds.map(sid => bookOn(sid, refBook));
       if (!pin[0] || !pin[1]) return;
-      const lim = Math.min(Number(pin[0].limits?.max || 0), Number(pin[1].limits?.max || 0));
-      if (lim < minLim) return;
+      const limA = liqOf(pin[0]), limB = liqOf(pin[1]);
+      const lim = (limA == null && limB == null) ? null : Math.min(limA ?? Infinity, limB ?? Infinity);
+      if (lim != null && lim < minLim) return;
       const hold = imp(pin[0].price) + imp(pin[1].price);
       if (hold < 0.97 || hold > 1.15) { console.warn(`[live] skipped implausible ${refBook} pair`, f.away.ab, f.home.ab, P.mk.key, pin[0].price, pin[1].price, 'hold', hold.toFixed(3)); return; }
       const devig = (a, b) => { const x = imp(a), y = imp(b); return [x/(x+y), y/(x+y)]; };
@@ -833,7 +848,7 @@ function computeRows(fxs, byFx) {
           const pr = Number(o.price); if (pr < pMin || pr > pMax) return null;
           const ev = fp * toDec(pr) - 1;
           const arb = 1 - (imp(pr) + imp(pin[1-idx].price));   // this side here + other side at the reference book
-          return { book:b, price:pr, ev, arb, o, exch: EXCH.has(b.toLowerCase()), liq: o.limits?.max ?? null };
+          return { book:b, price:pr, ev, arb, o, exch: EXCH.has(b.toLowerCase()), liq: liqOf(o) };
         }).filter(x => x && x.ev * 100 <= 25 && x.arb * 100 >= minArb && (!arbsOnly || x.arb > 0)).sort((a, b) => b.price - a.price);
         if (!books.length) return;
         const s = P.samples[sid];
@@ -1107,7 +1122,7 @@ function render() {
         ${pinLg ? `<img src="${esc(pinLg)}" alt="${esc(refBook)}" title="${esc(refBook)}">` : `<span class="bk">${esc(refShort)}</span>`}
         ${fmtAm(probToAm(r.fair))}<span class="fairlbl">Fair</span>
         <span class="pct${isArb ? ' arb' : ''}">(${isArb ? `${arbPct.toFixed(2)}% Arb / ` : ''}${evPct.toFixed(1)}% EV)</span>
-        <span class="lim">${usd(r.pin.lim)} lim</span>
+        <span class="lim">${r.pin.lim != null ? usd(r.pin.lim) + ' lim' : 'lim n/a'}</span>
       </div>
       ${r.aligned ? `<div style="margin-top:8px"><span class="agree">✓ FD &amp; PIN AGREE <b>FD ${fmtAm(r.fdPrice)}</b> · <b>PIN ${fmtAm(r.pin.mine)}</b> → fading ${esc(r.best.book === 'DraftKings' ? 'DK' : r.best.book)}</span></div>` : ''}
       ${more ? `<div class="more">${more}</div>` : ''}
@@ -1153,7 +1168,7 @@ function renderTracker() {
       : `<button data-res="${esc(e.key)}|won">WON</button><button data-res="${esc(e.key)}|lost">LOST</button><button data-res="${esc(e.key)}|push">PUSH</button>`;
     return `<div class="tk glass"><div class="h"><span>${esc(e.game)} <span style="color:var(--sub);font-size:10px">${esc(e.league)}</span></span><span>${t(e.betAt)}</span></div>
     <div style="font-weight:800;font-size:14px;margin-top:3px">${esc(e.market)} · ${esc(e.side)}</div>
-    <div class="m">bet <b>${fmtAm(e.betPrice)}</b> ${esc(e.betBook)} · EV <b>+${(e.betEv||0).toFixed(1)}%</b> · fair ${fmtAm(probToAm(e.fair))} · lim ${usd(e.pinLim)}</div>
+    <div class="m">bet <b>${fmtAm(e.betPrice)}</b> ${esc(e.betBook)} · EV <b>+${(e.betEv||0).toFixed(1)}%</b> · fair ${fmtAm(probToAm(e.fair))} · lim ${e.pinLim != null ? usd(e.pinLim) : 'n/a'}</div>
     ${resultLine}
     <div class="acts" style="margin-top:8px">${resultBtns}<button data-del="${esc(e.key)}">✕</button></div></div>`;
   };
