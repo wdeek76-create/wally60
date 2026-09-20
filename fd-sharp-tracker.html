@@ -449,13 +449,13 @@ function computeRows(fxs, byFx) {
   // 3-of-3 arbs (the strongest signal) float to the top, then by best individual arb %.
   return out.sort((a, b) => (b.arbCount - a.arbCount) || (b.bestArb - a.bestArb));
 }
-// Alt lines ("5+ Receptions") are single-sided, so there's no opposite side to arb — and since
-// we're betting ON FD (not hedging against another book), FD's own price does NOT need to be
-// close to consensus; the whole point is capturing data on whether FD is generous or stingy
-// relative to a trustworthy line. The only gate is that the 3 consensus books agree with EACH
-// OTHER within ALT_ALIGN_CENTS — that's what makes their price a credible baseline to bet FD
-// against — then FD is tracked on that threshold regardless of how far its own price sits from it.
-// Tracked and graded completely separately from the arb-based main rows.
+// Alt lines ("5+ Receptions") are single-sided, so there's no opposite side within one book to
+// devig against — there's no clean two-way no-vig calc here. Instead: blend the 3 consensus
+// books' own implied probabilities into a "fair" estimate (their individual vig mostly cancels
+// out across 3 independent books), then score FD's price as real +EV against that fair number —
+// same idea as the main arb rule, just devigged-by-consensus instead of devigged-by-opposite-side.
+// The 3 books must still agree with EACH OTHER within ALT_ALIGN_CENTS first — averaging books
+// that don't agree wouldn't produce a trustworthy fair number to begin with.
 function computeAltRows(fxs, byFx) {
   const out = [];
   fxs.forEach(f => {
@@ -477,15 +477,17 @@ function computeAltRows(fxs, byFx) {
         CONSENSUS_BOOKS.slice(i + 1).every(bk2 => centsDiff(G.books[bk1].price, G.books[bk2].price) <= ALT_ALIGN_CENTS)
       );
       if (!consensusAgrees) return;
-      // FD's spread from each consensus book is kept for display only — it's not a qualifying gate.
+      const fairProb = CONSENSUS_BOOKS.reduce((sum, bk) => sum + imp(G.books[bk].price), 0) / CONSENSUS_BOOKS.length;
+      const evPct = fairProb * toDec(fd.price) - 1; // FD's payout vs the devigged-fair win probability
+      if (evPct <= 0) return; // only track when FD is actually +EV against the fair line, not just different from it
       const vsConsensus = CONSENSUS_BOOKS.map(bk => ({ book: bk, price: Number(G.books[bk].price), centsDiff: centsDiff(fd.price, G.books[bk].price) }));
       out.push({
         key: `${key}|alt`, fid: f.id, f, mkey: G.mkey, marketNames: [G.marketName], player: G.player, line: G.line,
-        fdPrice: Number(fd.price), aligned: vsConsensus,
+        fdPrice: Number(fd.price), aligned: vsConsensus, fairProb, evPct,
       });
     });
   });
-  return out.sort((a, b) => a.player.localeCompare(b.player));
+  return out.sort((a, b) => b.evPct - a.evPct);
 }
 
 // ───────────────────────────── auto-track + grading ─────────────────────────────
@@ -529,7 +531,7 @@ function autoTrackAlt(altRows) {
     altLog[r.key] = {
       key: r.key, fid: r.fid, game: `${r.f.away.ab} @ ${r.f.home.ab}`,
       market: marketLabel(r.mkey), mkey: r.mkey, marketNames: r.marketNames, player: r.player, playerKey: normName(r.player),
-      side: 'over', line: r.line, fdPrice: r.fdPrice, aligned: r.aligned,
+      side: 'over', line: r.line, fdPrice: r.fdPrice, aligned: r.aligned, fairProb: r.fairProb, evPct: r.evPct,
       stakeUnits: 1, betAt: Date.now(), status: 'pending',
     };
     seenPlayerStat.add(statKey);
@@ -739,22 +741,24 @@ function renderTracker() {
       ? `<div class="m" style="color:var(--sub)">Pending · grades itself when the game is final</div>`
       : `<div class="m"><b style="color:${clr};font-size:12px">${e.status.toUpperCase()}</b> <b style="color:${clr}">${units}</b>${e.actual != null ? ` · actual ${e.actual}` : ''}</div>`;
     const thresholdLabel = `${e.line + 0.5}+ ${e.market}`;
-    const maxCents = e.aligned && e.aligned.length ? Math.max(...e.aligned.map(a => a.centsDiff)) : 0;
+    const evStr = e.evPct != null ? `${(e.evPct*100).toFixed(2)}%` : '—';
+    const fairStr = e.fairProb != null ? `${(e.fairProb*100).toFixed(1)}%` : '—';
     const resultBtns = settled
       ? `<button data-ares="${esc(e.key)}|pending">↺ Re-open</button>`
       : `<button data-ares="${esc(e.key)}|won">WON</button><button data-ares="${esc(e.key)}|lost">LOST</button><button data-ares="${esc(e.key)}|push">PUSH</button>`;
     return `<div class="tk glass"><div class="h"><span>${esc(e.game)} <span style="color:var(--sub);font-size:10px">NFL ALT</span></span><span>${t(e.betAt)}</span></div>
     <div style="font-weight:800;font-size:14px;margin-top:3px">${esc(e.player)} — ${esc(thresholdLabel)}</div>
     <div class="rawmkt">source: "${esc((e.marketNames||[])[0] || '')}"</div>
-    <div class="m">FD <b>${fmtAm(e.fdPrice)}</b> · consensus tight (3/3 agree within ${ALT_ALIGN_CENTS}c) · FD off by up to ${maxCents}c · 1u</div>
+    <div class="m">FD <b>${fmtAm(e.fdPrice)}</b> · <b style="color:var(--green)">+${evStr} EV</b> vs devigged fair (${fairStr}) · 3/3 consensus tight · 1u</div>
     ${resultLine}
     <div class="acts" style="margin-top:8px">${resultBtns}<button data-adel="${esc(e.key)}">✕</button></div></div>`;
   };
   const altBreakdowns = altBets.length ? `<div class="bdwrap">
     ${breakdownHtml('Alt: By Prop Type', groupRecords(altBets, e => e.market))}
     ${breakdownHtml('Alt: By FD Odds', groupRecords(altBets, e => oddsBucket(e.fdPrice)))}
+    ${breakdownHtml('Alt: By EV %', groupRecords(altBets, e => arbBucket(e.evPct)))}
   </div>` : '';
-  const altCardsHtml = altBets.length ? '<div class="cards-grid">' + altBets.map(altCard).join('') + '</div>' : '<div class="empty">No alt-line picks yet — auto-tracks when FD sits within 10c of all 3 books on the same threshold.</div>';
+  const altCardsHtml = altBets.length ? '<div class="cards-grid">' + altBets.map(altCard).join('') + '</div>' : '<div class="empty">No alt-line picks yet — auto-tracks when FD is +EV against the devigged fair price from all 3 books.</div>';
   const altSection = sectionLabel('info', 'Alt Line Picks', altBets.length) + altBreakdowns + altCardsHtml;
 
   const html = sectionLabel('info', 'Tracked Picks', bets.length) + breakdowns + cardsHtml + altSection;
