@@ -84,11 +84,13 @@ header{padding:16px 16px 10px}
 
 /* ── ROW CARD ── */
 .row{border-radius:20px;padding:12px;margin:0 16px 8px;-webkit-user-select:none;user-select:none;animation:fadein .18s ease}
+.row.strong{border-color:rgba(245,166,35,.45);box-shadow:inset 0 1px 0 rgba(255,255,255,.10),0 0 16px rgba(245,166,35,.15)}
 .cardhead{margin:-12px -12px 10px -12px;padding:9px 14px;display:flex;align-items:center;justify-content:space-between;gap:8px;background:rgba(255,255,255,.05);border-bottom:1px solid var(--border)}
 .cardhead .chleft{display:flex;align-items:center;gap:7px;font-weight:900;font-size:12px;text-transform:uppercase;letter-spacing:.6px;color:var(--text)}
 .cardhead .st.live{color:var(--red);font-size:10px;font-weight:800}
 .cardhead .lg{font-size:9px;font-weight:800;letter-spacing:.6px;padding:2px 8px;border-radius:20px;border:1px solid var(--border);color:var(--text)}
 .autobadge{font-size:9px;font-weight:900;letter-spacing:.4px;padding:2px 8px;border-radius:20px;background:rgba(94,194,255,.16);border:1px solid rgba(94,194,255,.5);color:var(--accent)}
+.autobadge.strong{background:rgba(245,166,35,.18);border-color:rgba(245,166,35,.6);color:var(--amber)}
 .hidebtn{background:none;border:none;color:var(--sub);font-size:13px;font-weight:900;cursor:pointer;padding:2px 4px;line-height:1}
 .gm{font-weight:900;font-size:13px;text-transform:uppercase;letter-spacing:.2px;margin-bottom:8px}
 .gm .qtr{font-size:10px;font-weight:800;color:var(--text);letter-spacing:.2px;text-transform:none;background:rgba(255,255,255,.08);border:1px solid var(--border);border-radius:20px;padding:2px 8px;margin-left:6px}
@@ -149,7 +151,7 @@ header{padding:16px 16px 10px}
       <button id="reload" class="refresh-btn" title="Refresh">↻</button>
     </div>
   </div>
-  <div class="tagline">NFL live player props · FanDuel vs <b>Caesars · DK · Fliff</b> · aligned ≤10¢</div>
+  <div class="tagline">NFL live player props · FanDuel arb vs 2+ of <b>Caesars · DK · Fliff</b></div>
 </header>
 
 <div class="date-toggle">
@@ -158,7 +160,7 @@ header{padding:16px 16px 10px}
 </div>
 
 <div class="record-bar">
-  <div class="record-cell"><span class="record-val" id="sumAligned">—</span><span class="record-label">Aligned</span></div>
+  <div class="record-cell"><span class="record-val" id="sumAligned">—</span><span class="record-label">Arbs</span></div>
   <div class="record-cell"><span class="record-val" id="sumTracked">—</span><span class="record-label">Tracked</span></div>
   <div class="record-cell"><span class="record-val" id="sumRecord">—</span><span class="record-label">W-L-P</span></div>
   <div class="record-cell"><span class="record-val" id="sumUnits">—</span><span class="record-label">Units</span></div>
@@ -195,7 +197,6 @@ function toast(msg) { const t = $('#toast'); t.textContent = msg; t.classList.ad
 const TARGET_BOOK = 'FanDuel';
 const CONSENSUS_BOOKS = ['Caesars', 'DraftKings', 'Fliff'];
 const ALL_BOOKS = [TARGET_BOOK, ...CONSENSUS_BOOKS];
-const ALIGN_CENTS = 10;
 // NFL player-prop markets — matched by substring against whatever /fixtures/odds returns,
 // same approach as the props tracker: request is_main:true (standard lines only) and classify
 // client-side rather than guessing exact API market-name strings.
@@ -260,9 +261,12 @@ async function loadOdds(fxs) {
   return byFx;
 }
 
-// ───────────────────────────── consensus math ─────────────────────────────
+// ───────────────────────────── arb math ─────────────────────────────
 // Build player-prop pairs per fixture: bucket by market+player+line, each bucket holding
-// per-side (over/under, or a single 'yes' side for markets like Anytime TD) per-book prices.
+// per-side (over/under) per-book prices. Anytime TD and other single-sided props have no
+// opposite side to arb against, so they can never qualify under this rule and drop out
+// naturally below.
+const MIN_ARB_BOOKS = 2; // FD must form a genuine arb against at least this many of the 3
 function computeRows(fxs, byFx) {
   const out = [];
   fxs.forEach(f => {
@@ -284,31 +288,29 @@ function computeRows(fxs, byFx) {
         const fd = books[TARGET_BOOK]; if (!fd) return;
         const oppSide = side === 'over' ? 'under' : side === 'under' ? 'over' : null;
         const oppBooks = oppSide ? (P.sides[oppSide] || {}) : null;
-        // Consensus: devig each consensus book that has both sides of this line (proper fair
-        // probability); for a single-sided market (no opposite side posted, e.g. Anytime TD)
-        // fall back to a plain implied-probability average of whichever consensus books quote it.
-        const fairs = [];
+        if (!oppBooks) return; // no opposite side posted anywhere — can't arb a single-sided market
+        // Real arb, book by book: FD's price on this side + that book's price on the OTHER side.
+        // Qualifying requires at least MIN_ARB_BOOKS of the 3 to individually arb against FD —
+        // not just an average/consensus alignment.
+        const arbBooks = [];
         CONSENSUS_BOOKS.forEach(bk => {
-          const a = books[bk]; if (!a) return;
-          const b = oppBooks ? oppBooks[bk] : null;
-          if (b) { const x = imp(a.price), y = imp(b.price); fairs.push(x / (x + y)); }
-          else fairs.push(imp(a.price));
+          const opp = oppBooks[bk]; if (!opp) return;
+          const arbPct = 1 - (imp(fd.price) + imp(opp.price));
+          if (arbPct > 0) arbBooks.push({ book: bk, oppPrice: Number(opp.price), arbPct });
         });
-        if (!fairs.length) return;
-        const consensusFair = fairs.reduce((s, x) => s + x, 0) / fairs.length;
-        const consensusPrice = probToAm(consensusFair);
-        const aligned = centsDiff(fd.price, consensusPrice) <= ALIGN_CENTS;
-        if (!aligned) return;
+        if (arbBooks.length < MIN_ARB_BOOKS) return;
+        arbBooks.sort((a, b) => b.arbPct - a.arbPct);
+        const bestArb = arbBooks[0].arbPct;
         const key = `${bucketKey}|${side}`;
         out.push({
           key, fid: f.id, f, mkey: P.mkey, marketNames: [P.marketName], player: P.player, line: P.line, side,
-          fdPrice: Number(fd.price), fdO: fd, consensusPrice, consensusN: fairs.length,
-          books: CONSENSUS_BOOKS.map(bk => books[bk] ? { book: bk, price: Number(books[bk].price) } : null).filter(Boolean),
+          fdPrice: Number(fd.price), arbBooks, arbCount: arbBooks.length, bestArb,
         });
       });
     });
   });
-  return out.sort((a, b) => a.f.id.localeCompare ? 0 : 0).sort((a, b) => centsDiff(a.fdPrice, a.consensusPrice) - centsDiff(b.fdPrice, b.consensusPrice));
+  // 3-of-3 arbs (the strongest signal) float to the top, then by best individual arb %.
+  return out.sort((a, b) => (b.arbCount - a.arbCount) || (b.bestArb - a.bestArb));
 }
 
 // ───────────────────────────── auto-track + grading ─────────────────────────────
@@ -325,7 +327,7 @@ function autoTrack(rows) {
     log[r.key] = {
       key: r.key, fid: r.fid, game: `${r.f.away.ab} @ ${r.f.home.ab}`, awayAb: r.f.away.ab, homeAb: r.f.home.ab,
       market: marketLabel(r.mkey), mkey: r.mkey, marketNames: r.marketNames, player: r.player, playerKey: normName(r.player),
-      side: r.side, line: r.line, fdPrice: r.fdPrice, consensusPrice: r.consensusPrice, consensusN: r.consensusN,
+      side: r.side, line: r.line, fdPrice: r.fdPrice, arbBooks: r.arbBooks, arbCount: r.arbCount, bestArb: r.bestArb,
       favDog: isFav ? 'favorite' : 'underdog', stakeUnits: 1, betAt: Date.now(), status: 'pending',
     };
     changed = true;
@@ -413,21 +415,22 @@ function render() {
   function rowCard(r) {
     const st = stateOf(r.f);
     const sideLabel = r.side === 'over' ? `Over ${r.line}` : r.side === 'under' ? `Under ${r.line}` : 'Yes';
-    const fdRow = `<div class="bookrow best"><span class="bkname">FanDuel</span><span class="bkprice">${fmtAm(r.fdPrice)}</span><span class="bkmeta">TARGET</span></div>`;
-    const consRow = `<div class="bookrow"><span class="bkname">Consensus (${r.consensusN}/3)</span><span class="bkprice">${fmtAm(r.consensusPrice)}</span><span class="bkmeta">Fair</span></div>`;
-    const otherRows = r.books.map(b => `<div class="bookrow"><span class="bkname">${esc(b.book)}</span><span class="bkprice">${fmtAm(b.price)}</span><span class="bkmeta"></span></div>`).join('');
-    return `<div class="row glass" data-key="${esc(r.key)}">
+    const oppSideLabel = r.side === 'over' ? `Under ${r.line}` : `Over ${r.line}`;
+    const strong = r.arbCount >= 3;
+    const fdRow = `<div class="bookrow best"><span class="bkname">FanDuel</span><span class="bkprice">${fmtAm(r.fdPrice)}</span><span class="bkmeta">TARGET · ${esc(sideLabel)}</span></div>`;
+    const arbRows = r.arbBooks.map(b => `<div class="bookrow"><span class="bkname">${esc(b.book)}</span><span class="bkprice">${fmtAm(b.oppPrice)}</span><span class="bkmeta">${esc(oppSideLabel)} · ${(b.arbPct*100).toFixed(2)}% arb</span></div>`).join('');
+    return `<div class="row glass${strong ? ' strong' : ''}" data-key="${esc(r.key)}">
       <div class="cardhead">
         <div class="chleft"><span class="lg">NFL</span><span class="st live">LIVE</span></div>
-        <div class="chleft"><span class="autobadge">✓ AUTO-TRACKED</span></div>
+        <div class="chleft"><span class="autobadge${strong ? ' strong' : ''}">${strong ? '★ 3/3 ARB' : `✓ ${r.arbCount}/3 ARB`}</span></div>
       </div>
       <div class="gm">${esc(r.f.away.ab)} <span>${isNaN(st.away)?'':st.away}</span> @ ${esc(r.f.home.ab)} <span>${isNaN(st.home)?'':st.home}</span>${st.label ? `<span class="qtr">${esc(st.label)}</span>` : ''}</div>
       <div class="pick"><div class="m">${esc(marketLabel(r.mkey))}</div><div class="s">${esc(r.player)} — ${esc(sideLabel)}</div></div>
-      <div class="booklist">${fdRow}${consRow}${otherRows}</div>
-      <div class="sig"><span>aligned ${centsDiff(r.fdPrice, r.consensusPrice)}¢ vs consensus</span></div>
+      <div class="booklist">${fdRow}${arbRows}</div>
+      <div class="sig"><span>✓ auto-tracked · best ${(r.bestArb*100).toFixed(2)}% arb</span></div>
     </div>`;
   }
-  const html = sectionLabel('live', 'Aligned Now', rows.length) + rows.map(rowCard).join('');
+  const html = sectionLabel('live', 'Arbs Now', rows.length) + rows.map(rowCard).join('');
   setViewHtml(view, html);
   updateRecordBar();
 }
@@ -457,7 +460,7 @@ function renderTracker() {
       : `<button data-res="${esc(e.key)}|won">WON</button><button data-res="${esc(e.key)}|lost">LOST</button><button data-res="${esc(e.key)}|push">PUSH</button>`;
     return `<div class="tk glass"><div class="h"><span>${esc(e.game)} <span style="color:var(--sub);font-size:10px">NFL</span></span><span>${t(e.betAt)}</span></div>
     <div style="font-weight:800;font-size:14px;margin-top:3px">${esc(e.market)} · ${esc(e.player)} ${esc(sideLabel)}</div>
-    <div class="m">FD <b>${fmtAm(e.fdPrice)}</b> · consensus ${fmtAm(e.consensusPrice)} (${e.consensusN}/3) · ${esc(e.favDog)} · 1u</div>
+    <div class="m">FD <b>${fmtAm(e.fdPrice)}</b> · arb vs ${e.arbCount}/3 books (best ${(e.bestArb*100).toFixed(2)}%) · ${esc(e.favDog)} · 1u</div>
     ${prog}
     ${resultLine}
     <div class="acts" style="margin-top:8px">${resultBtns}<button data-del="${esc(e.key)}">✕</button></div></div>`;
