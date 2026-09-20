@@ -139,6 +139,13 @@ header{padding:16px 16px 10px}
 .bar i.g{background:var(--green)}
 .bar i.r{background:var(--red)}
 .bar em{position:absolute;top:-3px;bottom:-3px;width:2px;background:#fff;opacity:.75}
+.mv{margin-top:8px;padding:8px 10px;border-radius:12px;background:rgba(255,255,255,.04);border:1px solid var(--border)}
+.mvrow{display:flex;align-items:center;gap:8px;font-size:11px;font-weight:700;font-variant-numeric:tabular-nums}
+.mvl{color:var(--sub);font-weight:800;letter-spacing:.3px;text-transform:uppercase;font-size:9px;flex-shrink:0;width:24px}
+.mvv{color:var(--text);flex:1}
+.mvup{color:var(--green);font-weight:800;white-space:nowrap}
+.mvdn{color:var(--red);font-weight:800;white-space:nowrap}
+.mvflat{color:var(--sub);font-weight:700;white-space:nowrap}
 .acts{display:flex;gap:6px}
 .acts button{border:1px solid var(--border);background:rgba(255,255,255,.06);color:var(--text);border-radius:12px;padding:5px 11px;font-weight:800;font-size:11px;font-family:var(--font)}
 
@@ -528,16 +535,15 @@ let log = (() => { try { return JSON.parse(LS.get('fdst_log', '{}')) || {}; } ca
 const saveLog = () => { LS.set('fdst_log', JSON.stringify(log)); const el = $('#trackN'); if (el) el.textContent = Object.keys(log).length; };
 // Every currently-aligned row auto-tracks itself the moment it's first seen — no button, no
 // manual step. Once a key has been tracked it's never re-logged, even if it drops out of
-// alignment and comes back later (that would double-count the same signal).
+// alignment and comes back later (that would double-count the same signal). A player+stat can
+// ladder across multiple lines/games just fine (e.g. Over 39.5 AND Over 49.5 both tracked) —
+// the key is already unique per game+player+stat+line+side, so that's all the dedup needs;
+// the only thing still blocked is taking both sides of the exact same line (handled upstream,
+// in computeRows'/computeAltRows' "first side only" selection).
 function autoTrack(rows) {
   let changed = false;
-  // Skip a pick if we already have ANY tracked entry for this same player + same stat
-  // (regardless of line or side) — one shot per player/market, not one per line variant.
-  const seenPlayerStat = new Set(Object.values(log).map(e => `${e.fid}|${e.mkey}|${e.playerKey}`));
   rows.forEach(r => {
     if (log[r.key]) return;
-    const statKey = `${r.fid}|${r.mkey}|${normName(r.player)}`;
-    if (seenPlayerStat.has(statKey)) return;
     const isFav = r.fdPrice < 0;
     log[r.key] = {
       key: r.key, fid: r.fid, game: `${r.f.away.ab} @ ${r.f.home.ab}`, awayAb: r.f.away.ab, homeAb: r.f.home.ab,
@@ -546,7 +552,6 @@ function autoTrack(rows) {
       valueBooks: r.valueBooks, fairProb: r.fairProb, evPct: r.evPct, qualKind: r.qualKind,
       favDog: isFav ? 'favorite' : 'underdog', stakeUnits: 1, betAt: Date.now(), status: 'pending',
     };
-    seenPlayerStat.add(statKey);
     changed = true;
   });
   if (changed) { saveLog(); if (viewMode === 'tracker') renderTracker(); }
@@ -557,23 +562,26 @@ let altLog = (() => { try { return JSON.parse(LS.get('fdst_alt_log', '{}')) || {
 const saveAltLog = () => { LS.set('fdst_alt_log', JSON.stringify(altLog)); };
 function autoTrackAlt(altRows) {
   let changed = false;
-  const seenPlayerStat = new Set(Object.values(altLog).map(e => `${e.fid}|${e.mkey}|${e.playerKey}`));
   altRows.forEach(r => {
     if (altLog[r.key]) return;
-    const statKey = `${r.fid}|${r.mkey}|${normName(r.player)}`;
-    if (seenPlayerStat.has(statKey)) return;
     altLog[r.key] = {
       key: r.key, fid: r.fid, game: `${r.f.away.ab} @ ${r.f.home.ab}`,
       market: marketLabel(r.mkey), mkey: r.mkey, marketNames: r.marketNames, player: r.player, playerKey: normName(r.player),
       side: 'over', line: r.line, fdPrice: r.fdPrice, aligned: r.aligned, fairProb: r.fairProb, evPct: r.evPct,
       stakeUnits: 1, betAt: Date.now(), status: 'pending',
     };
-    seenPlayerStat.add(statKey);
     changed = true;
   });
   if (changed) { saveAltLog(); if (viewMode === 'tracker') renderTracker(); }
 }
 function unitsFor(price, stake) { price = Number(price); return price > 0 ? stake * price / 100 : stake * 100 / Math.abs(price); }
+// Higher American odds is always better regardless of sign, so a plain numeric compare works
+// across the whole range — same idea as live-now-opticodds.html's tracker price movement.
+const moveTag = (from, to) => {
+  if (from == null || to == null) return '<span class="mvflat">—</span>';
+  const d = Number(to) - Number(from);
+  return d === 0 ? '<span class="mvflat">flat</span>' : d > 0 ? '<span class="mvup">▲ better</span>' : '<span class="mvdn">▼ worse</span>';
+};
 // ───────────────────────────── breakdowns ─────────────────────────────
 // "who's sharp in this market" needs more than one overall record — slice it by prop type,
 // side, price range, and which combo of consensus books actually formed the arb.
@@ -670,6 +678,54 @@ async function autoGrade() {
     if (changedAlt) saveAltLog();
     if ((changedMain || changedAlt) && viewMode === 'tracker') renderTracker();
   } finally { _gradeBusy = false; }
+}
+let _progressBusy = false;
+// Re-pulls FanDuel's own current price on each pending pick's exact market/player/line/side, so
+// the tracker can show how the number has moved since the bet was tracked — same idea as
+// live-now-opticodds.html's tracker price movement, just against FD instead of a reference book.
+async function refreshTrackedProgress() {
+  if (_progressBusy) return;
+  const pendingMain = Object.values(log).filter(e => e.status === 'pending' && e.fid);
+  const pendingAlt = Object.values(altLog).filter(e => e.status === 'pending' && e.fid);
+  if (!pendingMain.length && !pendingAlt.length) return;
+  _progressBusy = true;
+  try {
+    const fetchFd = async (fids, isMain) => {
+      const byFx = {};
+      for (const idBatch of chunk(fids, 5)) {
+        try {
+          const r = await oo('/fixtures/odds', { fixture_id: idBatch, sportsbook: [TARGET_BOOK], is_main: isMain });
+          (r?.data || []).forEach(d => { (byFx[d.id] = byFx[d.id] || []).push(...(d.odds || [])); });
+        } catch(e) { console.warn('[fd-sharp] progress fetch failed', e.message); }
+      }
+      return byFx;
+    };
+    const [mainByFx, altByFx] = await Promise.all([
+      pendingMain.length ? fetchFd([...new Set(pendingMain.map(e => e.fid))], true) : Promise.resolve({}),
+      pendingAlt.length ? fetchFd([...new Set(pendingAlt.map(e => e.fid))], false) : Promise.resolve({}),
+    ]);
+    let changed = false;
+    const applyMatch = (list, byFx, isAlt) => {
+      list.forEach(e => {
+        const odds = byFx[e.fid]; if (!odds) return;
+        const found = odds.find(o => {
+          if (o.price == null || String(o.sportsbook) !== TARGET_BOOK) return false;
+          const mkey = isAlt ? altMarketKeyFor(o.market || '') : marketKeyFor(o.market || '');
+          if (mkey !== e.mkey) return false;
+          if (normName(cleanSel(o.selection || o.name || '')) !== e.playerKey) return false;
+          const line = isAlt ? altThresholdLine(o) : (o.points != null ? Number(o.points) : null);
+          if (line !== e.line) return false;
+          if (isAlt) return true;
+          const side = /over|under/i.test(String(o.selection_line || '')) ? String(o.selection_line).toLowerCase() : 'yes';
+          return side === e.side;
+        });
+        if (found) { const p = Number(found.price); if (p !== e.fdNow) { e.fdNow = p; changed = true; } }
+      });
+    };
+    applyMatch(pendingMain, mainByFx, false);
+    applyMatch(pendingAlt, altByFx, true);
+    if (changed) { saveLog(); saveAltLog(); if (viewMode === 'tracker') renderTracker(); }
+  } finally { _progressBusy = false; }
 }
 
 // ───────────────────────────── render ─────────────────────────────
@@ -770,11 +826,13 @@ function renderTracker() {
     const arbPart = e.arbCount > 0 ? `arb vs ${e.arbCount}/3 books (best ${(e.bestArb*100).toFixed(2)}%)` : null;
     const valuePart = e.evPct != null ? `+${(e.evPct*100).toFixed(2)}% EV vs devigged fair (${(e.fairProb*100).toFixed(1)}%)` : null;
     const edgeLine = [arbPart, valuePart].filter(Boolean).join(' · ');
+    const moveRow = (!settled && e.fdNow != null) ? `<div class="mv"><div class="mvrow"><span class="mvl">FD</span><span class="mvv">${fmtAm(e.fdPrice)} → ${fmtAm(e.fdNow)}</span>${moveTag(e.fdPrice, e.fdNow)}</div></div>` : '';
     return `<div class="tk glass"><div class="h"><span>${esc(e.game)} <span style="color:var(--sub);font-size:10px">NFL</span></span><span>${t(e.betAt)}</span></div>
     <div style="font-weight:800;font-size:14px;margin-top:3px">${esc(e.market)} · ${esc(e.player)} ${esc(sideLabel)}</div>
     <div class="rawmkt">source: "${esc((e.marketNames||[])[0] || '')}"</div>
     <div class="m">FD <b>${fmtAm(e.fdPrice)}</b> · ${edgeLine} · ${esc(e.favDog)} · 1u</div>
     ${prog}
+    ${moveRow}
     ${resultLine}
     <div class="acts" style="margin-top:8px">${resultBtns}<button data-del="${esc(e.key)}">✕</button></div></div>`;
   };
@@ -805,10 +863,12 @@ function renderTracker() {
     const resultBtns = settled
       ? `<button data-ares="${esc(e.key)}|pending">↺ Re-open</button>`
       : `<button data-ares="${esc(e.key)}|won">WON</button><button data-ares="${esc(e.key)}|lost">LOST</button><button data-ares="${esc(e.key)}|push">PUSH</button>`;
+    const moveRow = (!settled && e.fdNow != null) ? `<div class="mv"><div class="mvrow"><span class="mvl">FD</span><span class="mvv">${fmtAm(e.fdPrice)} → ${fmtAm(e.fdNow)}</span>${moveTag(e.fdPrice, e.fdNow)}</div></div>` : '';
     return `<div class="tk glass"><div class="h"><span>${esc(e.game)} <span style="color:var(--sub);font-size:10px">NFL ALT</span></span><span>${t(e.betAt)}</span></div>
     <div style="font-weight:800;font-size:14px;margin-top:3px">${esc(e.player)} — ${esc(thresholdLabel)}</div>
     <div class="rawmkt">source: "${esc((e.marketNames||[])[0] || '')}"</div>
     <div class="m">FD <b>${fmtAm(e.fdPrice)}</b> · <b style="color:var(--green)">+${evStr} EV</b> vs devigged fair (${fairStr}) · 3/3 consensus tight · 1u</div>
+    ${moveRow}
     ${resultLine}
     <div class="acts" style="margin-top:8px">${resultBtns}<button data-adel="${esc(e.key)}">✕</button></div></div>`;
   };
@@ -842,7 +902,7 @@ function setView(m) { viewMode = m; $('#vLive').classList.toggle('active', m ===
 let busy = false, lastGradeAt = 0;
 async function load(force) {
   if (busy) return; busy = true; setSync('busy'); $('#reload').classList.add('spinning');
-  if (Date.now() - lastGradeAt > 30000) { lastGradeAt = Date.now(); autoGrade(); }
+  if (Date.now() - lastGradeAt > 30000) { lastGradeAt = Date.now(); autoGrade(); refreshTrackedProgress(); }
   try {
     fixtures = await loadFixtures();
     $('#liveN').textContent = fixtures.length ? fixtures.length : '';
