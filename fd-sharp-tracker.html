@@ -342,6 +342,7 @@ async function loadFixtures() {
   return out;
 }
 let gameState = {};
+let liveActuals = {};
 async function loadState(fxs) {
   const out = {};
   for (const ids of chunk(fxs.map(f => f.id), 5)) {
@@ -356,6 +357,25 @@ function stateOf(f) {
   const clock = String(ip.clock || ip.time || '').trim();
   const pLabel = period ? 'Q' + period : '';
   return { away, home, label: [pLabel, clock].filter(Boolean).join(' ') };
+}
+// The quarter a fixture is in RIGHT NOW — captured at auto-track time and frozen onto the pick,
+// so "was FD softer in the 4th quarter" can be measured later regardless of how the game state
+// has moved on since.
+function periodOf(fid) {
+  const ip = (gameState[fid] || {}).in_play || {};
+  return Number(ip.period || ip.quarter || 0) || null;
+}
+function periodLabel(period) {
+  if (period == null) return 'Unknown';
+  if (period === 1) return '1st Quarter';
+  if (period === 2) return '2nd Quarter';
+  if (period === 3) return '3rd Quarter';
+  if (period === 4) return '4th Quarter';
+  return 'OT';
+}
+function halfLabel(period) {
+  if (period == null) return 'Unknown';
+  return period <= 2 ? '1st Half' : '2nd Half';
 }
 // ───────────────────────────── score ticker ─────────────────────────────
 function tickerItemState(f) {
@@ -417,6 +437,29 @@ async function loadAltOdds(fxs) {
     }
   }
   return byFx;
+}
+// Current live stat count for every player showing on the "Arbs Now" page, not just tracked
+// picks — same player-results feed autoGrade uses, just pulled for every live fixture up front
+// so any qualifying row can show "(current)" next to its line before it's even tracked.
+async function loadLiveActuals(fxs) {
+  const out = {};
+  for (const ids of chunk(fxs.map(f => f.id), 5)) {
+    try {
+      const r = await oo('/fixtures/player-results', { fixture_id: ids });
+      (r?.data || []).forEach(x => {
+        const fid = x?.fixture?.id; if (!fid) return;
+        (x.results || []).forEach(res => {
+          const playerKey = normName(cleanSel(res.player?.name || ''));
+          if (!playerKey) return;
+          NFL_MARKETS.forEach(([mkey]) => {
+            const v = statFor(res, mkey);
+            if (v != null && !isNaN(v)) out[`${fid}|${mkey}|${playerKey}`] = v;
+          });
+        });
+      });
+    } catch(e) { console.warn('[fd-sharp] live actuals fetch failed', e.message); }
+  }
+  return out;
 }
 
 // ───────────────────────────── arb + value math ─────────────────────────────
@@ -575,7 +618,7 @@ function autoTrack(rows) {
       awayLogo: r.f.away.logo || '', homeLogo: r.f.home.logo || '',
       market: marketLabel(r.mkey), mkey: r.mkey, marketNames: r.marketNames, player: r.player, playerKey: normName(r.player),
       side: r.side, line: r.line, fdPrice: r.fdPrice, arbBooks: r.arbBooks, arbCount: r.arbCount, bestArb: r.bestArb,
-      valueBooks: r.valueBooks, fairProb: r.fairProb, evPct: r.evPct, qualKind: r.qualKind,
+      valueBooks: r.valueBooks, fairProb: r.fairProb, evPct: r.evPct, qualKind: r.qualKind, betPeriod: periodOf(r.fid),
       favDog: isFav ? 'favorite' : 'underdog', stakeUnits: 1, betAt: Date.now(), status: 'pending',
     };
     changed = true;
@@ -594,7 +637,7 @@ function autoTrackAlt(altRows) {
       key: r.key, fid: r.fid, game: `${r.f.away.ab} @ ${r.f.home.ab}`, awayAb: r.f.away.ab, homeAb: r.f.home.ab,
       awayLogo: r.f.away.logo || '', homeLogo: r.f.home.logo || '',
       market: marketLabel(r.mkey), mkey: r.mkey, marketNames: r.marketNames, player: r.player, playerKey: normName(r.player),
-      side: 'over', line: r.line, fdPrice: r.fdPrice, aligned: r.aligned, fairProb: r.fairProb, evPct: r.evPct,
+      side: 'over', line: r.line, fdPrice: r.fdPrice, aligned: r.aligned, fairProb: r.fairProb, evPct: r.evPct, betPeriod: periodOf(r.fid),
       stakeUnits: 1, betAt: Date.now(), status: 'pending',
     };
     changed = true;
@@ -940,13 +983,15 @@ function render() {
     const arbPart = hasArbInfo ? `best ${(r.bestArb*100).toFixed(2)}% arb` : null;
     const valuePart = hasValueInfo ? `+${(r.evPct*100).toFixed(2)}% EV vs devigged fair (${fmtAm(probToAm(r.fairProb))})` : null;
     const sigText = `✓ auto-tracked · ${[arbPart, valuePart].filter(Boolean).join(' · ')}`;
+    const liveActual = liveActuals[`${r.fid}|${r.mkey}|${normName(r.player)}`];
+    const sideLabelNow = liveActual != null ? `${sideLabel} (${liveActual})` : sideLabel;
     return `<div class="row glass${strong ? ' strong' : ''}" data-key="${esc(r.key)}">
       <div class="cardhead">
         <div class="chleft"><span class="lg">NFL</span><span class="st live">LIVE</span></div>
         <div class="chleft"><span class="autobadge${strong ? ' strong' : ''}">${esc(badge)}</span></div>
       </div>
       <div class="gm">${teamLogo(r.f.away.logo)}${esc(r.f.away.ab)} <span>${isNaN(st.away)?'':st.away}</span> @ ${teamLogo(r.f.home.logo)}${esc(r.f.home.ab)} <span>${isNaN(st.home)?'':st.home}</span>${st.label ? `<span class="qtr">${esc(st.label)}</span>` : ''}</div>
-      <div class="pick"><div class="m">${esc(marketLabel(r.mkey))}</div><div class="s">${esc(r.player)} — ${esc(sideLabel)}</div><div class="rawmkt">source: "${esc(r.marketNames[0])}"</div></div>
+      <div class="pick"><div class="m">${esc(marketLabel(r.mkey))}</div><div class="s">${esc(r.player)} — ${esc(sideLabelNow)}</div><div class="rawmkt">source: "${esc(r.marketNames[0])}"</div></div>
       <div class="booklist">${fdRow}${detailRows}</div>
       <div class="sig"><span>${sigText}</span></div>
     </div>`;
@@ -1013,6 +1058,8 @@ function renderTracker() {
     ${breakdownHtml('By Arb %', groupRecords(bets.filter(e => e.arbCount >= MIN_ARB_BOOKS), e => arbBucket(e.bestArb)))}
     ${breakdownHtml('By EV %', groupRecords(bets.filter(e => e.evPct != null), e => arbBucket(e.evPct)))}
     ${breakdownHtml('By Consensus Combo', groupRecords(bets, comboFor))}
+    ${breakdownHtml('By Quarter (bet timing)', groupRecords(bets, e => periodLabel(e.betPeriod)))}
+    ${breakdownHtml('By Half (bet timing)', groupRecords(bets, e => halfLabel(e.betPeriod)))}
   </div>` : '';
   const cardsHtml = bets.length ? '<div class="cards-grid">' + bets.map(card).join('') + '</div>' : '<div class="empty">Nothing tracked yet — auto-tracks the moment an FD prop aligns with consensus.</div>';
 
@@ -1044,6 +1091,8 @@ function renderTracker() {
     ${breakdownHtml('Alt: By Prop Type', groupRecords(altBets, e => e.market))}
     ${breakdownHtml('Alt: By FD Odds', groupRecords(altBets, e => oddsBucket(e.fdPrice)))}
     ${breakdownHtml('Alt: By EV %', groupRecords(altBets, e => arbBucket(e.evPct)))}
+    ${breakdownHtml('Alt: By Quarter (bet timing)', groupRecords(altBets, e => periodLabel(e.betPeriod)))}
+    ${breakdownHtml('Alt: By Half (bet timing)', groupRecords(altBets, e => halfLabel(e.betPeriod)))}
   </div>` : '';
   const altCardsHtml = altBets.length ? '<div class="cards-grid">' + altBets.map(altCard).join('') + '</div>' : '<div class="empty">No alt-line picks yet — auto-tracks when FD is +EV against the devigged fair price from all 3 books.</div>';
   const altSection = sectionLabel('info', 'Alt Line Picks', altBets.length) + altBreakdowns + altCardsHtml;
@@ -1088,12 +1137,14 @@ async function load(force) {
     fixtures = await loadFixtures();
     $('#liveN').textContent = fixtures.length ? fixtures.length : '';
     // State covers the whole slate (ticker needs scheduled/final games too), not just live props fixtures.
-    const [byFx, altByFx, state] = await Promise.all([
+    const [byFx, altByFx, state, actuals] = await Promise.all([
       fixtures.length ? loadOdds(fixtures) : Promise.resolve({}),
       fixtures.length ? loadAltOdds(fixtures) : Promise.resolve({}),
       slate.length ? loadState(slate) : Promise.resolve({}),
+      fixtures.length ? loadLiveActuals(fixtures) : Promise.resolve({}),
     ]);
     gameState = state;
+    liveActuals = actuals;
     renderTicker();
     if (!fixtures.length) { rows = []; altRows = []; render(); busy = false; setSync('idle'); $('#reload').classList.remove('spinning'); return; }
     rows = computeRows(fixtures, byFx);
