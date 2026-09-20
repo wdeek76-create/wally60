@@ -396,6 +396,12 @@ async function loadAltOdds(fxs) {
 // per-side (over/under) per-book prices. Anytime TD and other single-sided props have no
 // opposite side, so they can never qualify under either rule below and drop out naturally.
 const MIN_ARB_BOOKS = 2; // at least this many of the 3 consensus books required, for EITHER rule
+// A genuine live-market edge against a real book is almost always a few percent — a 40%+ "arb"
+// (FanDuel showing something like +1700/+2000 on a low-usage guy's prop while consensus prices
+// it completely differently) is essentially never real free money; it's a stale/misfired FD quote
+// that hasn't refreshed. Cap what counts as a signal so implausible outliers get treated as bad
+// data, not tracked as a bet.
+const MAX_PLAUSIBLE_EDGE = 0.20;
 function computeRows(fxs, byFx) {
   const out = [];
   fxs.forEach(f => {
@@ -427,7 +433,7 @@ function computeRows(fxs, byFx) {
         CONSENSUS_BOOKS.forEach(bk => {
           const opp = oppBooks[bk]; if (!opp) return;
           const arbPct = 1 - (imp(fd.price) + imp(opp.price));
-          if (arbPct > 0) arbBooks.push({ book: bk, oppPrice: Number(opp.price), arbPct });
+          if (arbPct > 0 && arbPct <= MAX_PLAUSIBLE_EDGE) arbBooks.push({ book: bk, oppPrice: Number(opp.price), arbPct });
         });
         arbBooks.sort((a, b) => b.arbPct - a.arbPct);
 
@@ -444,17 +450,20 @@ function computeRows(fxs, byFx) {
         });
         let fairProb = null, evPct = null;
         if (valueBooks.length >= MIN_ARB_BOOKS) {
-          fairProb = valueBooks.reduce((s, b) => s + b.fairProb, 0) / valueBooks.length;
-          evPct = fairProb * toDec(fd.price) - 1;
+          const fp = valueBooks.reduce((s, b) => s + b.fairProb, 0) / valueBooks.length;
+          const ev = fp * toDec(fd.price) - 1;
+          // Suppress an implausible EV outright, not just as a qualifying gate — an arb-qualified
+          // pick displaying a wildly-wrong EV number alongside it is just as misleading as
+          // tracking that number on its own would be.
+          if (ev <= MAX_PLAUSIBLE_EDGE) { fairProb = fp; evPct = ev; }
         }
 
         const hasArb = arbBooks.length >= MIN_ARB_BOOKS;
         const hasValue = evPct != null && evPct > 0;
         if (!hasArb && !hasValue) return;
-        candidates.push({
-          side, fd, arbBooks, bestArb: arbBooks[0]?.arbPct ?? null,
-          valueBooks, fairProb, evPct, qualKind: hasArb ? 'arb' : 'value',
-        });
+        // A pick can satisfy both rules at once — surface that instead of picking just one label.
+        const qualKind = hasArb && hasValue ? 'both' : hasArb ? 'arb' : 'value';
+        candidates.push({ side, fd, arbBooks, bestArb: arbBooks[0]?.arbPct ?? null, valueBooks, fairProb, evPct, qualKind });
       });
       if (!candidates.length) return;
       // Over and under can both qualify against each other — that's a counter bet, not a signal.
@@ -503,7 +512,7 @@ function computeAltRows(fxs, byFx) {
       if (!consensusAgrees) return;
       const fairProb = CONSENSUS_BOOKS.reduce((sum, bk) => sum + imp(G.books[bk].price), 0) / CONSENSUS_BOOKS.length;
       const evPct = fairProb * toDec(fd.price) - 1; // FD's payout vs the devigged-fair win probability
-      if (evPct <= 0) return; // only track when FD is actually +EV against the fair line, not just different from it
+      if (evPct <= 0 || evPct > MAX_PLAUSIBLE_EDGE) return; // real value, not a stale/misfired FD quote
       const vsConsensus = CONSENSUS_BOOKS.map(bk => ({ book: bk, price: Number(G.books[bk].price), centsDiff: centsDiff(fd.price, G.books[bk].price) }));
       out.push({
         key: `${key}|alt`, fid: f.id, f, mkey: G.mkey, marketNames: [G.marketName], player: G.player, line: G.line,
@@ -582,14 +591,14 @@ const propSideFor = e => `${e.market} ${sideLabelFor(e)}`;
 // Picks tracked before the value rule existed have no qualKind field — they were all arb-only,
 // so infer it from arbCount rather than let old entries render as NaN/undefined value picks.
 const qualKindOf = e => e.qualKind || (e.arbCount > 0 ? 'arb' : 'value');
-const edgePctFor = e => qualKindOf(e) === 'arb' ? e.bestArb : e.evPct;
 function arbBucket(pct) {
   pct = Number(pct) * 100;
   if (pct < 1) return '<1%';
   if (pct < 2) return '1-2%';
   if (pct < 3) return '2-3%';
   if (pct < 5) return '3-5%';
-  return '5%+';
+  if (pct < 10) return '5-10%';
+  return '10-20% ++EV'; // top of the plausible range (capped at MAX_PLAUSIBLE_EDGE) — the strongest signal
 }
 function groupRecords(bets, keyFn) {
   const groups = {};
@@ -700,14 +709,23 @@ function render() {
     const st = stateOf(r.f);
     const sideLabel = r.side === 'over' ? `Over ${r.line}` : r.side === 'under' ? `Under ${r.line}` : 'Yes';
     const oppSideLabel = r.side === 'over' ? `Under ${r.line}` : `Over ${r.line}`;
-    const isArb = r.qualKind === 'arb';
-    const strong = isArb && r.arbCount >= 3;
+    const hasArbInfo = r.arbCount > 0, hasValueInfo = r.evPct != null;
+    const strong = hasArbInfo && r.arbCount >= 3;
     const fdRow = `<div class="bookrow best"><span class="bkname">FanDuel</span><span class="bkprice">${fmtAm(r.fdPrice)}</span><span class="bkmeta">TARGET · ${esc(sideLabel)}</span></div>`;
-    const detailRows = isArb
+    // Arb evidence (the opposite side's price) is the more concrete detail to list per book —
+    // fall back to the devigged-fair listing only when there's no arb backing it at all.
+    const detailRows = hasArbInfo
       ? r.arbBooks.map(b => `<div class="bookrow"><span class="bkname">${esc(b.book)}</span><span class="bkprice">${fmtAm(b.oppPrice)}</span><span class="bkmeta">${esc(oppSideLabel)} · ${(b.arbPct*100).toFixed(2)}% arb</span></div>`).join('')
       : r.valueBooks.map(b => `<div class="bookrow"><span class="bkname">${esc(b.book)}</span><span class="bkprice">${fmtAm(b.price)}</span><span class="bkmeta">${esc(sideLabel)} · devigged fair ${(b.fairProb*100).toFixed(1)}%</span></div>`).join('');
-    const badge = isArb ? (strong ? '★ 3/3 ARB' : `✓ ${r.arbCount}/3 ARB`) : `$ +${(r.evPct*100).toFixed(1)}% VALUE`;
-    const sigText = isArb ? `✓ auto-tracked · best ${(r.bestArb*100).toFixed(2)}% arb` : `✓ auto-tracked · +${(r.evPct*100).toFixed(2)}% EV vs devigged fair (${(r.fairProb*100).toFixed(1)}%)`;
+    // Show both stats whenever both are known — a pick that's a real arb AND separately +EV is
+    // strictly a stronger signal than either alone, so say so instead of picking just one label.
+    let badge;
+    if (hasArbInfo && hasValueInfo) badge = `${strong ? '★' : '✓'} ${r.arbCount}/3 ARB +${(r.evPct*100).toFixed(1)}% EV`;
+    else if (hasArbInfo) badge = strong ? '★ 3/3 ARB' : `✓ ${r.arbCount}/3 ARB`;
+    else badge = `$ +${(r.evPct*100).toFixed(1)}% VALUE`;
+    const arbPart = hasArbInfo ? `best ${(r.bestArb*100).toFixed(2)}% arb` : null;
+    const valuePart = hasValueInfo ? `+${(r.evPct*100).toFixed(2)}% EV vs devigged fair (${(r.fairProb*100).toFixed(1)}%)` : null;
+    const sigText = `✓ auto-tracked · ${[arbPart, valuePart].filter(Boolean).join(' · ')}`;
     return `<div class="row glass${strong ? ' strong' : ''}" data-key="${esc(r.key)}">
       <div class="cardhead">
         <div class="chleft"><span class="lg">NFL</span><span class="st live">LIVE</span></div>
@@ -747,9 +765,11 @@ function renderTracker() {
     const resultBtns = settled
       ? `<button data-res="${esc(e.key)}|pending">↺ Re-open</button>`
       : `<button data-res="${esc(e.key)}|won">WON</button><button data-res="${esc(e.key)}|lost">LOST</button><button data-res="${esc(e.key)}|push">PUSH</button>`;
-    const edgeLine = qualKindOf(e) === 'arb'
-      ? `arb vs ${e.arbCount}/3 books (best ${(e.bestArb*100).toFixed(2)}%)`
-      : `+${(e.evPct*100).toFixed(2)}% EV vs devigged fair (${(e.fairProb*100).toFixed(1)}%)`;
+    // Show both stats when both are known — a pick can be a real arb AND separately +EV, and
+    // hiding one just because the other qualified it first throws away useful information.
+    const arbPart = e.arbCount > 0 ? `arb vs ${e.arbCount}/3 books (best ${(e.bestArb*100).toFixed(2)}%)` : null;
+    const valuePart = e.evPct != null ? `+${(e.evPct*100).toFixed(2)}% EV vs devigged fair (${(e.fairProb*100).toFixed(1)}%)` : null;
+    const edgeLine = [arbPart, valuePart].filter(Boolean).join(' · ');
     return `<div class="tk glass"><div class="h"><span>${esc(e.game)} <span style="color:var(--sub);font-size:10px">NFL</span></span><span>${t(e.betAt)}</span></div>
     <div style="font-weight:800;font-size:14px;margin-top:3px">${esc(e.market)} · ${esc(e.player)} ${esc(sideLabel)}</div>
     <div class="rawmkt">source: "${esc((e.marketNames||[])[0] || '')}"</div>
@@ -763,8 +783,9 @@ function renderTracker() {
     ${breakdownHtml('Over vs Under', groupRecords(bets, sideLabelFor))}
     ${breakdownHtml('Prop Type + Side', groupRecords(bets, propSideFor))}
     ${breakdownHtml('By FD Odds', groupRecords(bets, e => oddsBucket(e.fdPrice)))}
-    ${breakdownHtml('Arb vs Value', groupRecords(bets, e => qualKindOf(e) === 'arb' ? 'Arb' : 'Value'))}
-    ${breakdownHtml('By Edge %', groupRecords(bets, e => arbBucket(edgePctFor(e))))}
+    ${breakdownHtml('Arb vs Value', groupRecords(bets, e => { const k = qualKindOf(e); return k === 'both' ? 'Arb + Value' : k === 'arb' ? 'Arb' : 'Value'; }))}
+    ${breakdownHtml('By Arb %', groupRecords(bets.filter(e => e.arbCount > 0), e => arbBucket(e.bestArb)))}
+    ${breakdownHtml('By EV %', groupRecords(bets.filter(e => e.evPct != null), e => arbBucket(e.evPct)))}
     ${breakdownHtml('By Consensus Combo', groupRecords(bets, comboFor))}
   </div>` : '';
   const cardsHtml = bets.length ? '<div class="cards-grid">' + bets.map(card).join('') + '</div>' : '<div class="empty">Nothing tracked yet — auto-tracks the moment an FD prop aligns with consensus.</div>';
