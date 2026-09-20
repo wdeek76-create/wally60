@@ -593,12 +593,15 @@ function oddsBucket(price) {
   if (price < 200) return 'Dog (+110/+199)';
   return 'Big Dog (200+)';
 }
-const comboFor = e => ((e.arbBooks && e.arbBooks.length ? e.arbBooks : e.valueBooks) || []).map(b => b.book).sort().join(' + ') || '—';
+// A single book forming an arb against FD doesn't mean anything on its own — the tool's own bar
+// is MIN_ARB_BOOKS (2 of 3). Below that, show the books that actually backed the pick (value),
+// not a coincidental 1-book arb that never qualified anything.
+const comboFor = e => ((e.arbBooks && e.arbBooks.length >= MIN_ARB_BOOKS ? e.arbBooks : e.valueBooks) || []).map(b => b.book).sort().join(' + ') || '—';
 const sideLabelFor = e => e.side === 'over' ? 'Over' : e.side === 'under' ? 'Under' : 'Yes';
 const propSideFor = e => `${e.market} ${sideLabelFor(e)}`;
 // Picks tracked before the value rule existed have no qualKind field — they were all arb-only,
 // so infer it from arbCount rather than let old entries render as NaN/undefined value picks.
-const qualKindOf = e => e.qualKind || (e.arbCount > 0 ? 'arb' : 'value');
+const qualKindOf = e => e.qualKind || (e.arbCount >= MIN_ARB_BOOKS ? 'arb' : 'value');
 function arbBucket(pct) {
   pct = Number(pct) * 100;
   if (pct < 1) return '<1%';
@@ -765,7 +768,9 @@ function render() {
     const st = stateOf(r.f);
     const sideLabel = r.side === 'over' ? `Over ${r.line}` : r.side === 'under' ? `Under ${r.line}` : 'Yes';
     const oppSideLabel = r.side === 'over' ? `Under ${r.line}` : `Over ${r.line}`;
-    const hasArbInfo = r.arbCount > 0, hasValueInfo = r.evPct != null;
+    // A 1-of-3 (or 0-of-3) arb doesn't clear the tool's own MIN_ARB_BOOKS bar, so it never
+    // actually qualified anything — don't badge/detail it as "arb" just because the number exists.
+    const hasArbInfo = r.arbCount >= MIN_ARB_BOOKS, hasValueInfo = r.evPct != null;
     const strong = hasArbInfo && r.arbCount >= 3;
     const fdRow = `<div class="bookrow best"><span class="bkname">FanDuel</span><span class="bkprice">${fmtAm(r.fdPrice)}</span><span class="bkmeta">TARGET · ${esc(sideLabel)}</span></div>`;
     // Arb evidence (the opposite side's price) is the more concrete detail to list per book —
@@ -822,10 +827,13 @@ function renderTracker() {
       ? `<button data-res="${esc(e.key)}|pending">↺ Re-open</button>`
       : `<button data-res="${esc(e.key)}|won">WON</button><button data-res="${esc(e.key)}|lost">LOST</button><button data-res="${esc(e.key)}|push">PUSH</button>`;
     // Show both stats when both are known — a pick can be a real arb AND separately +EV, and
-    // hiding one just because the other qualified it first throws away useful information.
-    const arbPart = e.arbCount > 0 ? `arb vs ${e.arbCount}/3 books (best ${(e.bestArb*100).toFixed(2)}%)` : null;
+    // hiding one just because the other qualified it first throws away useful information. A
+    // sub-threshold arbCount (below MIN_ARB_BOOKS) never actually qualified anything, so it's
+    // left out here rather than shown as if it were a real arb signal.
+    const arbPart = e.arbCount >= MIN_ARB_BOOKS ? `arb vs ${e.arbCount}/3 books (best ${(e.bestArb*100).toFixed(2)}%)` : null;
     const valuePart = e.evPct != null ? `+${(e.evPct*100).toFixed(2)}% EV vs devigged fair (${(e.fairProb*100).toFixed(1)}%)` : null;
-    const edgeLine = [arbPart, valuePart].filter(Boolean).join(' · ');
+    const booksPart = `vs ${esc(comboFor(e))}`;
+    const edgeLine = [arbPart, valuePart, booksPart].filter(Boolean).join(' · ');
     const moveRow = (!settled && e.fdNow != null) ? `<div class="mv"><div class="mvrow"><span class="mvl">FD</span><span class="mvv">${fmtAm(e.fdPrice)} → ${fmtAm(e.fdNow)}</span>${moveTag(e.fdPrice, e.fdNow)}</div></div>` : '';
     return `<div class="tk glass"><div class="h"><span>${esc(e.game)} <span style="color:var(--sub);font-size:10px">NFL</span></span><span>${t(e.betAt)}</span></div>
     <div style="font-weight:800;font-size:14px;margin-top:3px">${esc(e.market)} · ${esc(e.player)} ${esc(sideLabel)}</div>
@@ -842,7 +850,7 @@ function renderTracker() {
     ${breakdownHtml('Prop Type + Side', groupRecords(bets, propSideFor))}
     ${breakdownHtml('By FD Odds', groupRecords(bets, e => oddsBucket(e.fdPrice)))}
     ${breakdownHtml('Arb vs Value', groupRecords(bets, e => { const k = qualKindOf(e); return k === 'both' ? 'Arb + Value' : k === 'arb' ? 'Arb' : 'Value'; }))}
-    ${breakdownHtml('By Arb %', groupRecords(bets.filter(e => e.arbCount > 0), e => arbBucket(e.bestArb)))}
+    ${breakdownHtml('By Arb %', groupRecords(bets.filter(e => e.arbCount >= MIN_ARB_BOOKS), e => arbBucket(e.bestArb)))}
     ${breakdownHtml('By EV %', groupRecords(bets.filter(e => e.evPct != null), e => arbBucket(e.evPct)))}
     ${breakdownHtml('By Consensus Combo', groupRecords(bets, comboFor))}
   </div>` : '';
@@ -867,7 +875,7 @@ function renderTracker() {
     return `<div class="tk glass"><div class="h"><span>${esc(e.game)} <span style="color:var(--sub);font-size:10px">NFL ALT</span></span><span>${t(e.betAt)}</span></div>
     <div style="font-weight:800;font-size:14px;margin-top:3px">${esc(e.player)} — ${esc(thresholdLabel)}</div>
     <div class="rawmkt">source: "${esc((e.marketNames||[])[0] || '')}"</div>
-    <div class="m">FD <b>${fmtAm(e.fdPrice)}</b> · <b style="color:var(--green)">+${evStr} EV</b> vs devigged fair (${fairStr}) · 3/3 consensus tight · 1u</div>
+    <div class="m">FD <b>${fmtAm(e.fdPrice)}</b> · <b style="color:var(--green)">+${evStr} EV</b> vs devigged fair (${fairStr}) · 3/3 tight: ${esc((e.aligned||[]).map(a=>a.book).sort().join(' + '))} · 1u</div>
     ${moveRow}
     ${resultLine}
     <div class="acts" style="margin-top:8px">${resultBtns}<button data-adel="${esc(e.key)}">✕</button></div></div>`;
