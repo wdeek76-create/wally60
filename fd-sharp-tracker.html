@@ -391,12 +391,11 @@ async function loadAltOdds(fxs) {
   return byFx;
 }
 
-// ───────────────────────────── arb math ─────────────────────────────
+// ───────────────────────────── arb + value math ─────────────────────────────
 // Build player-prop pairs per fixture: bucket by market+player+line, each bucket holding
 // per-side (over/under) per-book prices. Anytime TD and other single-sided props have no
-// opposite side to arb against, so they can never qualify under this rule and drop out
-// naturally below.
-const MIN_ARB_BOOKS = 2; // FD must form a genuine arb against at least this many of the 3
+// opposite side, so they can never qualify under either rule below and drop out naturally.
+const MIN_ARB_BOOKS = 2; // at least this many of the 3 consensus books required, for EITHER rule
 function computeRows(fxs, byFx) {
   const out = [];
   fxs.forEach(f => {
@@ -420,19 +419,42 @@ function computeRows(fxs, byFx) {
         const fd = books[TARGET_BOOK]; if (!fd) return;
         const oppSide = side === 'over' ? 'under' : side === 'under' ? 'over' : null;
         const oppBooks = oppSide ? (P.sides[oppSide] || {}) : null;
-        if (!oppBooks) return; // no opposite side posted anywhere — can't arb a single-sided market
-        // Real arb, book by book: FD's price on this side + that book's price on the OTHER side.
-        // Qualifying requires at least MIN_ARB_BOOKS of the 3 to individually arb against FD —
-        // not just an average/consensus alignment.
+        if (!oppBooks) return; // no opposite side posted anywhere — can't arb OR devig a single-sided market
+
+        // Rule 1: real arb, book by book — FD's price on this side + that book's price on the
+        // OTHER side. Requires at least MIN_ARB_BOOKS of the 3 to individually arb against FD.
         const arbBooks = [];
         CONSENSUS_BOOKS.forEach(bk => {
           const opp = oppBooks[bk]; if (!opp) return;
           const arbPct = 1 - (imp(fd.price) + imp(opp.price));
           if (arbPct > 0) arbBooks.push({ book: bk, oppPrice: Number(opp.price), arbPct });
         });
-        if (arbBooks.length < MIN_ARB_BOOKS) return;
         arbBooks.sort((a, b) => b.arbPct - a.arbPct);
-        candidates.push({ side, fd, arbBooks, bestArb: arbBooks[0].arbPct });
+
+        // Rule 2: plain value — a real arb is rare, but FD can still be a good bet on its own
+        // merits even with no hedge available. Unlike alt lines, main lines actually have both
+        // sides, so each consensus book can be devigged properly (its own over+under, no
+        // approximation needed), then blended into a fair probability and scored as real EV.
+        const valueBooks = [];
+        CONSENSUS_BOOKS.forEach(bk => {
+          const thisSide = books[bk], otherSide = oppBooks[bk];
+          if (!thisSide || !otherSide) return;
+          const impThis = imp(thisSide.price), impOther = imp(otherSide.price);
+          valueBooks.push({ book: bk, price: Number(thisSide.price), fairProb: impThis / (impThis + impOther) });
+        });
+        let fairProb = null, evPct = null;
+        if (valueBooks.length >= MIN_ARB_BOOKS) {
+          fairProb = valueBooks.reduce((s, b) => s + b.fairProb, 0) / valueBooks.length;
+          evPct = fairProb * toDec(fd.price) - 1;
+        }
+
+        const hasArb = arbBooks.length >= MIN_ARB_BOOKS;
+        const hasValue = evPct != null && evPct > 0;
+        if (!hasArb && !hasValue) return;
+        candidates.push({
+          side, fd, arbBooks, bestArb: arbBooks[0]?.arbPct ?? null,
+          valueBooks, fairProb, evPct, qualKind: hasArb ? 'arb' : 'value',
+        });
       });
       if (!candidates.length) return;
       // Over and under can both qualify against each other — that's a counter bet, not a signal.
@@ -443,11 +465,13 @@ function computeRows(fxs, byFx) {
       out.push({
         key, fid: f.id, f, mkey: P.mkey, marketNames: [P.marketName], player: P.player, line: P.line, side: chosen.side,
         fdPrice: Number(chosen.fd.price), arbBooks: chosen.arbBooks, arbCount: chosen.arbBooks.length, bestArb: chosen.bestArb,
+        valueBooks: chosen.valueBooks, fairProb: chosen.fairProb, evPct: chosen.evPct, qualKind: chosen.qualKind,
       });
     });
   });
-  // 3-of-3 arbs (the strongest signal) float to the top, then by best individual arb %.
-  return out.sort((a, b) => (b.arbCount - a.arbCount) || (b.bestArb - a.bestArb));
+  // 3-of-3 arbs (the strongest signal) float to the top, then by best individual arb %, then
+  // value picks sorted by EV% (bestArb/evPct are null on the other kind, so default to 0).
+  return out.sort((a, b) => (b.arbCount - a.arbCount) || ((b.bestArb||0) - (a.bestArb||0)) || ((b.evPct||0) - (a.evPct||0)));
 }
 // Alt lines ("5+ Receptions") are single-sided, so there's no opposite side within one book to
 // devig against — there's no clean two-way no-vig calc here. Instead: blend the 3 consensus
@@ -510,6 +534,7 @@ function autoTrack(rows) {
       key: r.key, fid: r.fid, game: `${r.f.away.ab} @ ${r.f.home.ab}`, awayAb: r.f.away.ab, homeAb: r.f.home.ab,
       market: marketLabel(r.mkey), mkey: r.mkey, marketNames: r.marketNames, player: r.player, playerKey: normName(r.player),
       side: r.side, line: r.line, fdPrice: r.fdPrice, arbBooks: r.arbBooks, arbCount: r.arbCount, bestArb: r.bestArb,
+      valueBooks: r.valueBooks, fairProb: r.fairProb, evPct: r.evPct, qualKind: r.qualKind,
       favDog: isFav ? 'favorite' : 'underdog', stakeUnits: 1, betAt: Date.now(), status: 'pending',
     };
     seenPlayerStat.add(statKey);
@@ -551,9 +576,13 @@ function oddsBucket(price) {
   if (price < 200) return 'Dog (+110/+199)';
   return 'Big Dog (200+)';
 }
-const comboFor = e => (e.arbBooks || []).map(b => b.book).sort().join(' + ') || '—';
+const comboFor = e => ((e.arbBooks && e.arbBooks.length ? e.arbBooks : e.valueBooks) || []).map(b => b.book).sort().join(' + ') || '—';
 const sideLabelFor = e => e.side === 'over' ? 'Over' : e.side === 'under' ? 'Under' : 'Yes';
 const propSideFor = e => `${e.market} ${sideLabelFor(e)}`;
+// Picks tracked before the value rule existed have no qualKind field — they were all arb-only,
+// so infer it from arbCount rather than let old entries render as NaN/undefined value picks.
+const qualKindOf = e => e.qualKind || (e.arbCount > 0 ? 'arb' : 'value');
+const edgePctFor = e => qualKindOf(e) === 'arb' ? e.bestArb : e.evPct;
 function arbBucket(pct) {
   pct = Number(pct) * 100;
   if (pct < 1) return '<1%';
@@ -671,18 +700,23 @@ function render() {
     const st = stateOf(r.f);
     const sideLabel = r.side === 'over' ? `Over ${r.line}` : r.side === 'under' ? `Under ${r.line}` : 'Yes';
     const oppSideLabel = r.side === 'over' ? `Under ${r.line}` : `Over ${r.line}`;
-    const strong = r.arbCount >= 3;
+    const isArb = r.qualKind === 'arb';
+    const strong = isArb && r.arbCount >= 3;
     const fdRow = `<div class="bookrow best"><span class="bkname">FanDuel</span><span class="bkprice">${fmtAm(r.fdPrice)}</span><span class="bkmeta">TARGET · ${esc(sideLabel)}</span></div>`;
-    const arbRows = r.arbBooks.map(b => `<div class="bookrow"><span class="bkname">${esc(b.book)}</span><span class="bkprice">${fmtAm(b.oppPrice)}</span><span class="bkmeta">${esc(oppSideLabel)} · ${(b.arbPct*100).toFixed(2)}% arb</span></div>`).join('');
+    const detailRows = isArb
+      ? r.arbBooks.map(b => `<div class="bookrow"><span class="bkname">${esc(b.book)}</span><span class="bkprice">${fmtAm(b.oppPrice)}</span><span class="bkmeta">${esc(oppSideLabel)} · ${(b.arbPct*100).toFixed(2)}% arb</span></div>`).join('')
+      : r.valueBooks.map(b => `<div class="bookrow"><span class="bkname">${esc(b.book)}</span><span class="bkprice">${fmtAm(b.price)}</span><span class="bkmeta">${esc(sideLabel)} · devigged fair ${(b.fairProb*100).toFixed(1)}%</span></div>`).join('');
+    const badge = isArb ? (strong ? '★ 3/3 ARB' : `✓ ${r.arbCount}/3 ARB`) : `$ +${(r.evPct*100).toFixed(1)}% VALUE`;
+    const sigText = isArb ? `✓ auto-tracked · best ${(r.bestArb*100).toFixed(2)}% arb` : `✓ auto-tracked · +${(r.evPct*100).toFixed(2)}% EV vs devigged fair (${(r.fairProb*100).toFixed(1)}%)`;
     return `<div class="row glass${strong ? ' strong' : ''}" data-key="${esc(r.key)}">
       <div class="cardhead">
         <div class="chleft"><span class="lg">NFL</span><span class="st live">LIVE</span></div>
-        <div class="chleft"><span class="autobadge${strong ? ' strong' : ''}">${strong ? '★ 3/3 ARB' : `✓ ${r.arbCount}/3 ARB`}</span></div>
+        <div class="chleft"><span class="autobadge${strong ? ' strong' : ''}">${esc(badge)}</span></div>
       </div>
       <div class="gm">${esc(r.f.away.ab)} <span>${isNaN(st.away)?'':st.away}</span> @ ${esc(r.f.home.ab)} <span>${isNaN(st.home)?'':st.home}</span>${st.label ? `<span class="qtr">${esc(st.label)}</span>` : ''}</div>
       <div class="pick"><div class="m">${esc(marketLabel(r.mkey))}</div><div class="s">${esc(r.player)} — ${esc(sideLabel)}</div><div class="rawmkt">source: "${esc(r.marketNames[0])}"</div></div>
-      <div class="booklist">${fdRow}${arbRows}</div>
-      <div class="sig"><span>✓ auto-tracked · best ${(r.bestArb*100).toFixed(2)}% arb</span></div>
+      <div class="booklist">${fdRow}${detailRows}</div>
+      <div class="sig"><span>${sigText}</span></div>
     </div>`;
   }
   const html = sectionLabel('live', 'Arbs Now', rows.length) + '<div class="cards-grid">' + rows.map(rowCard).join('') + '</div>';
@@ -713,10 +747,13 @@ function renderTracker() {
     const resultBtns = settled
       ? `<button data-res="${esc(e.key)}|pending">↺ Re-open</button>`
       : `<button data-res="${esc(e.key)}|won">WON</button><button data-res="${esc(e.key)}|lost">LOST</button><button data-res="${esc(e.key)}|push">PUSH</button>`;
+    const edgeLine = qualKindOf(e) === 'arb'
+      ? `arb vs ${e.arbCount}/3 books (best ${(e.bestArb*100).toFixed(2)}%)`
+      : `+${(e.evPct*100).toFixed(2)}% EV vs devigged fair (${(e.fairProb*100).toFixed(1)}%)`;
     return `<div class="tk glass"><div class="h"><span>${esc(e.game)} <span style="color:var(--sub);font-size:10px">NFL</span></span><span>${t(e.betAt)}</span></div>
     <div style="font-weight:800;font-size:14px;margin-top:3px">${esc(e.market)} · ${esc(e.player)} ${esc(sideLabel)}</div>
     <div class="rawmkt">source: "${esc((e.marketNames||[])[0] || '')}"</div>
-    <div class="m">FD <b>${fmtAm(e.fdPrice)}</b> · arb vs ${e.arbCount}/3 books (best ${(e.bestArb*100).toFixed(2)}%) · ${esc(e.favDog)} · 1u</div>
+    <div class="m">FD <b>${fmtAm(e.fdPrice)}</b> · ${edgeLine} · ${esc(e.favDog)} · 1u</div>
     ${prog}
     ${resultLine}
     <div class="acts" style="margin-top:8px">${resultBtns}<button data-del="${esc(e.key)}">✕</button></div></div>`;
@@ -726,7 +763,8 @@ function renderTracker() {
     ${breakdownHtml('Over vs Under', groupRecords(bets, sideLabelFor))}
     ${breakdownHtml('Prop Type + Side', groupRecords(bets, propSideFor))}
     ${breakdownHtml('By FD Odds', groupRecords(bets, e => oddsBucket(e.fdPrice)))}
-    ${breakdownHtml('By Arb %', groupRecords(bets, e => arbBucket(e.bestArb)))}
+    ${breakdownHtml('Arb vs Value', groupRecords(bets, e => qualKindOf(e) === 'arb' ? 'Arb' : 'Value'))}
+    ${breakdownHtml('By Edge %', groupRecords(bets, e => arbBucket(edgePctFor(e))))}
     ${breakdownHtml('By Consensus Combo', groupRecords(bets, comboFor))}
   </div>` : '';
   const cardsHtml = bets.length ? '<div class="cards-grid">' + bets.map(card).join('') + '</div>' : '<div class="empty">Nothing tracked yet — auto-tracks the moment an FD prop aligns with consensus.</div>';
