@@ -230,9 +230,10 @@ function toast(msg) { const t = $('#toast'); t.textContent = msg; t.classList.ad
 const TARGET_BOOK = 'FanDuel';
 const CONSENSUS_BOOKS = ['Caesars', 'DraftKings', 'Fliff'];
 const ALL_BOOKS = [TARGET_BOOK, ...CONSENSUS_BOOKS];
-// Alt lines ("5+ Receptions" etc.) are single-sided — there's no opposite side to arb against —
-// so they qualify on plain price alignment instead: FD must be within this many cents of ALL 3
-// consensus books (not just 2 of 3, since there's no arb math backing this one up).
+// Alt lines ("5+ Receptions" etc.) are single-sided — there's no opposite side to arb against,
+// and we're betting ON FD here, not hedging against another book, so FD's own price is never
+// required to match consensus. This margin instead gates whether the 3 CONSENSUS books agree
+// with EACH OTHER closely enough to trust as a baseline — FD is then tracked against it as-is.
 const ALT_ALIGN_CENTS = 10;
 // NFL player-prop markets — matched by substring against whatever /fixtures/odds returns,
 // same approach as the props tracker: request is_main:true (standard lines only) and classify
@@ -444,10 +445,12 @@ function computeRows(fxs, byFx) {
   // 3-of-3 arbs (the strongest signal) float to the top, then by best individual arb %.
   return out.sort((a, b) => (b.arbCount - a.arbCount) || (b.bestArb - a.bestArb));
 }
-// Alt lines ("5+ Receptions") are single-sided, so there's no opposite side to arb — they
-// qualify instead when FD sits within ALT_ALIGN_CENTS of ALL 3 consensus books on that exact
-// threshold AND the 3 consensus books agree with EACH OTHER within the same margin — a trio
-// that's just individually near FD but spread out among themselves isn't a real consensus.
+// Alt lines ("5+ Receptions") are single-sided, so there's no opposite side to arb — and since
+// we're betting ON FD (not hedging against another book), FD's own price does NOT need to be
+// close to consensus; the whole point is capturing data on whether FD is generous or stingy
+// relative to a trustworthy line. The only gate is that the 3 consensus books agree with EACH
+// OTHER within ALT_ALIGN_CENTS — that's what makes their price a credible baseline to bet FD
+// against — then FD is tracked on that threshold regardless of how far its own price sits from it.
 // Tracked and graded completely separately from the arb-based main rows.
 function computeAltRows(fxs, byFx) {
   const out = [];
@@ -465,22 +468,16 @@ function computeAltRows(fxs, byFx) {
     });
     Object.entries(groups).forEach(([key, G]) => {
       const fd = G.books[TARGET_BOOK]; if (!fd) return;
-      const aligned = [];
-      const allWithin = CONSENSUS_BOOKS.every(bk => {
-        const b = G.books[bk]; if (!b) return false;
-        const cd = centsDiff(fd.price, b.price);
-        if (cd > ALT_ALIGN_CENTS) return false;
-        aligned.push({ book: bk, price: Number(b.price), centsDiff: cd });
-        return true;
-      });
-      if (!allWithin) return;
+      if (!CONSENSUS_BOOKS.every(bk => G.books[bk])) return; // need all 3 present to trust it as a consensus
       const consensusAgrees = CONSENSUS_BOOKS.every((bk1, i) =>
         CONSENSUS_BOOKS.slice(i + 1).every(bk2 => centsDiff(G.books[bk1].price, G.books[bk2].price) <= ALT_ALIGN_CENTS)
       );
       if (!consensusAgrees) return;
+      // FD's spread from each consensus book is kept for display only — it's not a qualifying gate.
+      const vsConsensus = CONSENSUS_BOOKS.map(bk => ({ book: bk, price: Number(G.books[bk].price), centsDiff: centsDiff(fd.price, G.books[bk].price) }));
       out.push({
         key: `${key}|alt`, fid: f.id, f, mkey: G.mkey, marketNames: [G.marketName], player: G.player, line: G.line,
-        fdPrice: Number(fd.price), aligned,
+        fdPrice: Number(fd.price), aligned: vsConsensus,
       });
     });
   });
@@ -743,7 +740,7 @@ function renderTracker() {
       : `<button data-ares="${esc(e.key)}|won">WON</button><button data-ares="${esc(e.key)}|lost">LOST</button><button data-ares="${esc(e.key)}|push">PUSH</button>`;
     return `<div class="tk glass"><div class="h"><span>${esc(e.game)} <span style="color:var(--sub);font-size:10px">NFL ALT</span></span><span>${t(e.betAt)}</span></div>
     <div style="font-weight:800;font-size:14px;margin-top:3px">${esc(e.player)} — ${esc(thresholdLabel)}</div>
-    <div class="m">FD <b>${fmtAm(e.fdPrice)}</b> · aligned within ${maxCents}c of ${e.aligned.length}/3 books · 1u</div>
+    <div class="m">FD <b>${fmtAm(e.fdPrice)}</b> · consensus tight (3/3 agree within ${ALT_ALIGN_CENTS}c) · FD off by up to ${maxCents}c · 1u</div>
     ${resultLine}
     <div class="acts" style="margin-top:8px">${resultBtns}<button data-adel="${esc(e.key)}">✕</button></div></div>`;
   };
