@@ -67,6 +67,21 @@ header{padding:16px 16px 10px}
 .date-btn.active{border-color:rgba(39,192,113,.5);color:var(--green);background:var(--green-dim)}
 .dt-n{font-variant-numeric:tabular-nums;margin-left:3px}
 
+/* ── SCORE TICKER ── */
+.ticker-wrap{overflow:hidden;margin:0 0 10px;padding:8px 0;background:rgba(255,255,255,.03);border-top:1px solid var(--border);border-bottom:1px solid var(--border)}
+.ticker-track{display:flex;width:max-content;animation:tickerScroll linear infinite}
+.ticker-wrap.static .ticker-track{animation:none}
+.ticker-wrap:hover .ticker-track{animation-play-state:paused}
+@keyframes tickerScroll{from{transform:translateX(0)}to{transform:translateX(-50%)}}
+.tk-item{display:flex;align-items:center;gap:7px;flex-shrink:0;padding:0 16px;border-right:1px solid var(--border);white-space:nowrap;font-variant-numeric:tabular-nums}
+.tk-item:last-child{border-right:none}
+.tk-item-teams{font-size:11px;font-weight:900;letter-spacing:.3px;color:var(--text)}
+.tk-item-score{font-size:13px;font-weight:900;color:var(--text)}
+.tk-item-time{font-size:11px;font-weight:700;color:var(--sub)}
+.tk-item-tag{font-size:9px;font-weight:800;letter-spacing:.4px;padding:1px 6px;border-radius:10px}
+.tk-item-tag.live{color:var(--red);background:rgba(255,77,77,.14);animation:blink 1.6s infinite}
+.tk-item-tag.final{color:var(--sub);background:rgba(255,255,255,.08)}
+
 /* ── RECORD BAR ── */
 .record-bar{display:flex;align-items:center;margin:0 16px 12px;gap:8px}
 .record-cell{flex:1;display:flex;flex-direction:column;align-items:center;padding:9px 4px;border-radius:14px;background:var(--card);border:1px solid var(--border)}
@@ -168,6 +183,10 @@ header{padding:16px 16px 10px}
   <div class="tagline">NFL live player props · FanDuel arb vs 2+ of <b>Caesars · DK · Fliff</b></div>
 </header>
 
+<div class="ticker-wrap" id="tickerWrap" style="display:none">
+  <div class="ticker-track" id="tickerTrack"></div>
+</div>
+
 <div class="date-toggle">
   <button class="date-btn active" id="vLive">Live <span class="dt-n" id="liveN"></span></button>
   <button class="date-btn" id="vTrack">Tracker <span class="dt-n" id="trackN">0</span></button>
@@ -231,6 +250,7 @@ const STAT_CANDS = { pass_yds:['passing_yards'], pass_td:['passing_touchdowns'],
 
 // ───────────────────────────── fetch ─────────────────────────────
 const isLiveStatus = st => /live|progress|half|in_play|playing|ongoing/i.test(String(st || ''));
+let slate = []; // the day's full NFL schedule (scheduled + live + just-finished) for the score ticker
 async function loadFixtures() {
   const now = Date.now(); const out = [];
   let page = 1; const raw = [];
@@ -244,6 +264,14 @@ async function loadFixtures() {
       home:{ id:hc.id, name:hc.name || '', ab:hc.abbreviation || (hc.name||'').slice(0,3).toUpperCase() },
       away:{ id:ac.id, name:ac.name || '', ab:ac.abbreviation || (ac.name||'').slice(0,3).toUpperCase() } });
   });
+  // Same raw fetch, wider window — the ticker shows the whole day's slate, not just live games.
+  const lower = now - 16*3600e3, upper = now + 16*3600e3;
+  slate = raw.filter(f => { const t = new Date(f.start_date).getTime(); return t >= lower && t <= upper && !/cancelled/i.test(String(f.status || '')); })
+    .map(f => { const hc = f.home_competitors?.[0] || {}, ac = f.away_competitors?.[0] || {};
+      return { id:f.id, start:f.start_date, status:f.status, is_live:!!f.is_live,
+        home:{ ab: hc.abbreviation || (hc.name||'').slice(0,3).toUpperCase() },
+        away:{ ab: ac.abbreviation || (ac.name||'').slice(0,3).toUpperCase() } }; })
+    .sort((a, b) => new Date(a.start) - new Date(b.start));
   return out;
 }
 let gameState = {};
@@ -261,6 +289,43 @@ function stateOf(f) {
   const clock = String(ip.clock || ip.time || '').trim();
   const pLabel = period ? 'Q' + period : '';
   return { away, home, label: [pLabel, clock].filter(Boolean).join(' ') };
+}
+// ───────────────────────────── score ticker ─────────────────────────────
+function tickerItemState(f) {
+  const R = gameState[f.id] || {};
+  const rawStatus = String(R?.fixture?.status || f.status || '').toLowerCase();
+  const sc = R.scores || {};
+  const away = Number(sc.away?.total), home = Number(sc.home?.total);
+  const hasScore = !isNaN(away) && !isNaN(home);
+  const final = /completed|closed|final|ended/.test(rawStatus);
+  if (final) return { kind:'final', away, home };
+  const live = f.is_live || isLiveStatus(rawStatus) || hasScore;
+  if (live) {
+    const ip = R.in_play || {}; const period = Number(ip.period || ip.quarter || 0) || 0;
+    const clock = String(ip.clock || ip.time || '').trim();
+    const label = [period ? 'Q' + period : '', clock].filter(Boolean).join(' ') || 'LIVE';
+    return { kind:'live', away, home, label };
+  }
+  return { kind:'scheduled', time: new Date(f.start).toLocaleTimeString([], { hour:'numeric', minute:'2-digit' }) };
+}
+function renderTicker() {
+  const wrap = $('#tickerWrap'), track = $('#tickerTrack');
+  if (!wrap || !track) return;
+  if (!slate.length) { wrap.style.display = 'none'; track.innerHTML = ''; return; }
+  wrap.style.display = '';
+  const itemHtml = slate.map(f => {
+    const st = tickerItemState(f);
+    const teams = `<span class="tk-item-teams">${esc(f.away.ab)} @ ${esc(f.home.ab)}</span>`;
+    if (st.kind === 'final') return `<div class="tk-item">${teams}<span class="tk-item-score">${st.away}-${st.home}</span><span class="tk-item-tag final">FINAL</span></div>`;
+    if (st.kind === 'live') return `<div class="tk-item">${teams}<span class="tk-item-score">${isNaN(st.away)?'–':st.away}-${isNaN(st.home)?'–':st.home}</span><span class="tk-item-tag live">${esc(st.label)}</span></div>`;
+    return `<div class="tk-item">${teams}<span class="tk-item-time">${esc(st.time)}</span></div>`;
+  }).join('');
+  const html = itemHtml + itemHtml; // duplicated for a seamless scroll loop
+  if (track.dataset.lastHtml === html) return;
+  track.dataset.lastHtml = html;
+  track.innerHTML = html;
+  wrap.classList.toggle('static', slate.length <= 3);
+  track.style.animationDuration = Math.max(20, slate.length * 6) + 's';
 }
 async function loadOdds(fxs) {
   const byFx = {};
@@ -563,9 +628,14 @@ async function load(force) {
   try {
     fixtures = await loadFixtures();
     $('#liveN').textContent = fixtures.length ? fixtures.length : '';
-    if (!fixtures.length) { rows = []; render(); busy = false; setSync('idle'); $('#reload').classList.remove('spinning'); return; }
-    const [byFx, state] = await Promise.all([loadOdds(fixtures), loadState(fixtures)]);
+    // State covers the whole slate (ticker needs scheduled/final games too), not just live props fixtures.
+    const [byFx, state] = await Promise.all([
+      fixtures.length ? loadOdds(fixtures) : Promise.resolve({}),
+      slate.length ? loadState(slate) : Promise.resolve({}),
+    ]);
     gameState = state;
+    renderTicker();
+    if (!fixtures.length) { rows = []; render(); busy = false; setSync('idle'); $('#reload').classList.remove('spinning'); return; }
     rows = computeRows(fixtures, byFx);
     autoTrack(rows);
     setLastUpdated();
