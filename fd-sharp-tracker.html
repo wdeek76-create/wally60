@@ -125,6 +125,20 @@ header{padding:16px 16px 10px}
 .acts{display:flex;gap:6px}
 .acts button{border:1px solid var(--border);background:rgba(255,255,255,.06);color:var(--text);border-radius:12px;padding:5px 11px;font-weight:800;font-size:11px;font-family:var(--font)}
 
+/* ── BREAKDOWNS ── */
+.bdwrap{margin:0 16px 12px;display:flex;flex-direction:column;gap:8px}
+.bdgroup{border-radius:16px;padding:10px 12px;background:var(--card);border:1px solid var(--border)}
+.bdtitle{font-size:9px;font-weight:800;letter-spacing:1px;text-transform:uppercase;color:var(--sub);margin-bottom:6px}
+.bdrow{display:flex;align-items:center;gap:8px;padding:4px 0;font-size:11px;font-weight:700}
+.bdrow+.bdrow{border-top:1px solid rgba(255,255,255,.06)}
+.bdname{flex:1;min-width:0;font-weight:800;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bdstat{flex-shrink:0;font-variant-numeric:tabular-nums;color:var(--text)}
+.bdstat .dim{color:var(--sub);font-weight:600}
+.bdunits{flex-shrink:0;width:52px;text-align:right;font-variant-numeric:tabular-nums;font-weight:900;color:var(--text)}
+.bdunits.pos{color:var(--green)}
+.bdunits.neg{color:var(--red)}
+.bdpct{flex-shrink:0;width:36px;text-align:right;font-variant-numeric:tabular-nums;color:var(--accent);font-weight:900}
+
 .empty,.searching{text-align:center;padding:36px 20px 40px;color:var(--sub);font-size:13px;font-weight:600;line-height:1.6}
 .searching .splash-icon{margin:0 auto 14px}
 .searching-title{color:var(--text);font-size:15px;font-weight:800;margin-bottom:4px}
@@ -335,6 +349,38 @@ function autoTrack(rows) {
   if (changed) { saveLog(); if (viewMode === 'tracker') renderTracker(); }
 }
 function unitsFor(price, stake) { price = Number(price); return price > 0 ? stake * price / 100 : stake * 100 / Math.abs(price); }
+// ───────────────────────────── breakdowns ─────────────────────────────
+// "who's sharp in this market" needs more than one overall record — slice it by prop type,
+// side, price range, and which combo of consensus books actually formed the arb.
+function oddsBucket(price) {
+  price = Number(price);
+  if (price <= -200) return 'Big Fav (≤-200)';
+  if (price <= -110) return 'Fav (-199/-110)';
+  if (price < 110) return 'Even (-109/+109)';
+  if (price < 200) return 'Dog (+110/+199)';
+  return 'Big Dog (200+)';
+}
+const comboFor = e => (e.arbBooks || []).map(b => b.book).sort().join(' + ') || '—';
+function groupRecords(bets, keyFn) {
+  const groups = {};
+  bets.forEach(e => {
+    const k = keyFn(e); const g = (groups[k] = groups[k] || { key: k, n: 0, won: 0, lost: 0, push: 0, pending: 0, units: 0 });
+    g.n++;
+    if (e.status === 'won') { g.won++; g.units += unitsFor(e.fdPrice, e.stakeUnits); }
+    else if (e.status === 'lost') { g.lost++; g.units -= e.stakeUnits; }
+    else if (e.status === 'push') { g.push++; }
+    else g.pending++;
+  });
+  return Object.values(groups).sort((a, b) => b.n - a.n);
+}
+function breakdownHtml(title, groups) {
+  if (!groups.length) return '';
+  const rows = groups.map(g => {
+    const decided = g.won + g.lost; const winPct = decided ? Math.round(g.won / decided * 100) : null;
+    return `<div class="bdrow"><span class="bdname">${esc(g.key)}</span><span class="bdstat">${g.won}-${g.lost}-${g.push}${g.pending ? ` <span class="dim">(${g.pending} open)</span>` : ''}</span><span class="bdunits ${g.units>0?'pos':g.units<0?'neg':''}">${g.units>=0?'+':''}${g.units.toFixed(2)}u</span><span class="bdpct">${winPct==null?'—':winPct+'%'}</span></div>`;
+  }).join('');
+  return `<div class="bdgroup"><div class="bdtitle">${esc(title)}</div>${rows}</div>`;
+}
 function gradeOutcome(e, actual) {
   if (actual == null) return null;
   if (e.side === 'over') return actual > e.line ? 'won' : actual === e.line ? 'push' : 'lost';
@@ -465,7 +511,13 @@ function renderTracker() {
     ${resultLine}
     <div class="acts" style="margin-top:8px">${resultBtns}<button data-del="${esc(e.key)}">✕</button></div></div>`;
   };
-  const html = sectionLabel('info', 'Tracked Picks', bets.length) + (bets.map(card).join('') || '<div class="empty">Nothing tracked yet — auto-tracks the moment an FD prop aligns with consensus.</div>');
+  const breakdowns = bets.length ? `<div class="bdwrap">
+    ${breakdownHtml('By Prop Type', groupRecords(bets, e => e.market))}
+    ${breakdownHtml('Over vs Under', groupRecords(bets, e => e.side === 'over' ? 'Over' : e.side === 'under' ? 'Under' : 'Yes'))}
+    ${breakdownHtml('By FD Odds', groupRecords(bets, e => oddsBucket(e.fdPrice)))}
+    ${breakdownHtml('By Consensus Combo', groupRecords(bets, comboFor))}
+  </div>` : '';
+  const html = sectionLabel('info', 'Tracked Picks', bets.length) + breakdowns + (bets.map(card).join('') || '<div class="empty">Nothing tracked yet — auto-tracks the moment an FD prop aligns with consensus.</div>');
   if (!setViewHtml(view, html)) { updateRecordBar(); return; }
   view.querySelectorAll('[data-res]').forEach(b => b.addEventListener('click', () => {
     const [k, r] = b.dataset.res.split('|'); if (!log[k]) return;
