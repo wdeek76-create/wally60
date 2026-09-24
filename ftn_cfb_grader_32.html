@@ -1845,7 +1845,11 @@ function toDataUri(url) {
     };
     img.onerror = fetchFallback;
     function fetchFallback() {
-      fetch(url).then(function(r) { return r.blob(); }).then(function(blob) {
+      // fetch() only rejects on a network-level failure (CORS block, DNS, etc) — an HTTP error
+      // status like a proxy's 400 still resolves normally, so without this check a failed
+      // request's error-page body gets silently "converted" into a bogus data URI instead of
+      // correctly falling through to null.
+      fetch(url).then(function(r) { if (!r.ok) throw new Error('http ' + r.status); return r.blob(); }).then(function(blob) {
         var fr = new FileReader();
         fr.onloadend = function() { finish(fr.result); };
         fr.onerror = function() { finish(null); };
@@ -2084,9 +2088,13 @@ async function makeDiscordCard() {
     // fetch both get blocked by the browser and quietly return null — route through a public
     // CORS-friendly image proxy as a fallback so the badge still embeds for the export.
     var uri = await toDataUri(raw);
-    if (!uri) {
-      try { uri = await toDataUri('https://images.weserv.nl/?url=' + encodeURIComponent(raw.replace(/^https?:\/\//, ''))); } catch (e) {}
-    }
+    var stripped = raw.replace(/^https?:\/\//, '');
+    // weserv.nl's own docs give the url param unencoded (e.g. ?url=cdn.example.com/x.png) —
+    // encodeURIComponent-ing it turned every '/' into %2F, which their parser 400'd on. Try
+    // their documented form first, then the encoded form as a second attempt just in case a
+    // particular URL needs it (e.g. one with a literal '&' or space in the path).
+    if (!uri) { try { uri = await toDataUri('https://images.weserv.nl/?url=' + stripped); } catch (e) {} }
+    if (!uri) { try { uri = await toDataUri('https://images.weserv.nl/?url=' + encodeURIComponent(stripped)); } catch (e) {} }
     if (uri) cardBookLogos[ob.key] = uri; else logoFails.push(ob.display + ' (' + raw + ')');
   }));
   console.log('Card book logos: ' + Object.keys(cardBookLogos).length + '/' + OO_BOOKS.length + ' resolved to data-URI' + (logoFails.length ? ' | failed: ' + logoFails.join(', ') : ''));
@@ -2121,10 +2129,17 @@ async function makeDiscordCard() {
       files.push(new File([blob], fname, { type: 'image/png' }));
     }
 
+    // All the async work above (market check, logo fetch/conversion, html2canvas render) can
+    // easily run long enough that the browser no longer treats this click as a "fresh" user
+    // gesture — share() then throws NotAllowedError even though the images rendered fine. Only
+    // an actual user-cancelled share should end with nothing: any other failure here (including
+    // that gesture-expiry case) falls back to a plain download so the images always reach you.
+    var shared = false;
     if (navigator.canShare && navigator.canShare({ files: files })) {
-      try { await navigator.share({ files: files }); }
-      catch (err) { if (err.name !== 'AbortError') throw err; }
-    } else {
+      try { await navigator.share({ files: files }); shared = true; }
+      catch (err) { if (err.name === 'AbortError') { shared = true; } }
+    }
+    if (!shared) {
       for (var fi = 0; fi < files.length; fi++) {
         var url = URL.createObjectURL(files[fi]);
         var a = document.createElement('a');
