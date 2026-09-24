@@ -177,6 +177,7 @@ select option { background: #1a1d24; color: #e4e6eb; }
     <div id="deepDiveStats"></div>
     <div class="section">
       <h2>All Plays <span style="float:right;"><button class="btn secondary" id="copyOpenBtn" onclick="copyOpen()">COPY OPEN</button> <button class="btn secondary" id="copyPartnersBtn" onclick="copyPartners()">SEND TO PARTNERS</button> <button class="btn secondary" id="copyUndersBtn" onclick="copyUnders()">COPY UNDERS</button> <button class="btn secondary" onclick="copyBreakdown()">COPY BREAKDOWN</button> <button class="btn secondary" onclick="copyRecap()">COPY RECAP</button> <button class="btn secondary" id="discordBtn" onclick="makeDiscordCard()">DISCORD PIC</button></span></h2>
+      <div id="cardLogoDebug" style="font-size:11px;color:rgba(228,230,235,0.5);margin-bottom:8px;"></div>
       <div class="scroll-table">
         <table>
           <thead>
@@ -1948,98 +1949,92 @@ function betHeadline(p) {
   return { main: shortTeam(p.betTeam || p.team1), tag: 'MONEYLINE' };
 }
 
+// Implied win% from American odds — shown tight next to exchange (Novig/Kalshi/Prophet
+// X/Polymarket) prices only, same convention as the other odds tools' book pills; flat-limit
+// books don't get one since their price already reflects the book's own vig.
+function ooWinPct(odds) { return Math.round(impliedProb(Number(odds)) * 100) + '%'; }
+
+// One qualifying book for a row: badge, odds, win% (exchanges only, tight spacing), liquidity.
+// No edge shown here — edge stays in the copy text output, the picture is meant to be a clean
+// read of what's live right now.
+function bookChipHtml(bk, cardBookLogos) {
+  var winHtml = bk.exch ? '<span style="font-family:\'JetBrains Mono\',ui-monospace,Menlo,monospace;font-size:10px;font-weight:700;color:#9ca3af;margin-left:1px;">(' + ooWinPct(bk.odds) + ')</span>' : '';
+  var liqTxt = ooLiqStr(bk).trim();
+  var liqHtml = liqTxt ? '<span style="font-family:\'JetBrains Mono\',ui-monospace,Menlo,monospace;font-size:10px;font-weight:700;color:#27c071;margin-left:6px;">' + liqTxt + '</span>' : '';
+  return '<span style="display:inline-flex;align-items:center;gap:4px;background:#0b0d12;border:1px solid #232838;border-radius:8px;padding:4px 8px;margin:0 6px 6px 0;">' +
+    bookBadge(bk.key, bk.book, cardBookLogos) +
+    '<span style="font-family:\'JetBrains Mono\',ui-monospace,Menlo,monospace;font-size:13px;font-weight:800;color:#fff;">' + fmtOdds(bk.odds) + '</span>' + winHtml + liqHtml +
+    '</span>';
+}
+
+// One play = one row: matchup, the bet itself + play-to, then every qualifying book as a chip.
+function buildCardRow(p, logos, cardBookLogos) {
+  var books = p._marketBooks || [];
+  if (!books.length) return '';
+  var head = betHeadline(p);
+  var playTo = (p.ftnProb !== null && p.ftnProb !== undefined) ? playToOdds(p.ftnProb) : null;
+  var timeStr = (p.gameDate || '').replace(/^\d{2}\/\d{2}\s+/, '');
+
+  var matchupCell = '<div style="display:flex;align-items:center;gap:8px;min-width:0;">' +
+    logoTag(logos[p.t1Logo], p.team1, 24) +
+    '<div style="min-width:0;">' +
+      '<div style="font-size:12px;font-weight:800;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + shortTeam(p.team1) + ' vs ' + shortTeam(p.team2) + '</div>' +
+      '<div style="font-size:10px;color:#6b7280;font-family:\'JetBrains Mono\',ui-monospace,Menlo,monospace;margin-top:2px;">' + timeStr + '</div>' +
+    '</div></div>';
+
+  var betCell = '<div style="font-size:13px;font-weight:800;color:#fff;white-space:nowrap;">' + head.main + '</div>' +
+    '<div style="font-size:10px;font-weight:700;color:#7dd3fc;letter-spacing:0.5px;margin-top:2px;">' + head.tag + '</div>' +
+    (playTo !== null ? '<div style="display:flex;align-items:center;gap:4px;margin-top:5px;">' + STOP_SVG + '<span style="font-family:\'JetBrains Mono\',ui-monospace,Menlo,monospace;font-size:10px;font-weight:700;color:#9ca3af;">play to ' + fmtOdds(playTo) + '</span></div>' : '');
+
+  var booksCell = '<div style="display:flex;flex-wrap:wrap;">' + books.map(function(bk) { return bookChipHtml(bk, cardBookLogos); }).join('') + '</div>';
+
+  return '<div style="display:grid;grid-template-columns:230px 150px 1fr;gap:18px;align-items:center;padding:12px 6px;border-bottom:1px solid #1a1d22;">' +
+    '<div>' + matchupCell + '</div><div>' + betCell + '</div><div>' + booksCell + '</div></div>';
+}
+
 function buildCardHtml(plays, logos, part, totalParts, cardBookLogos) {
   var dts = plays.map(function(p) { return parseGameDate(p.gameDate); }).filter(Boolean).sort(function(a, b) { return a - b; });
   var DOW = ['SUN','MON','TUE','WED','THU','FRI','SAT'], MON = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
   function dLabel(d) { return DOW[d.getDay()] + ', ' + MON[d.getMonth()] + ' ' + d.getDate(); }
-  var title = '';
+  var rangeLabel = '';
   if (dts.length) {
     var first = dts[0], last = dts[dts.length - 1];
-    title = (first.toDateString() === last.toDateString()) ? dLabel(first) : dLabel(first) + ' \u2013 ' + dLabel(last);
+    rangeLabel = (first.toDateString() === last.toDateString()) ? dLabel(first) : dLabel(first) + ' – ' + dLabel(last);
   }
 
   var nT = plays.filter(function(p) { return p.betType.indexOf('Total') >= 0; }).length;
   var nS = plays.filter(function(p) { return p.betType === 'Spread'; }).length;
   var nM = plays.length - nT - nS;
-  var sub = [plays.length + ' PLAY' + (plays.length === 1 ? '' : 'S')];
-  if (nT) sub.push(nT + ' TOTAL' + (nT === 1 ? '' : 'S'));
-  if (nS) sub.push(nS + ' SPREAD' + (nS === 1 ? '' : 'S'));
-  if (nM) sub.push(nM + ' ML');
-  if (totalParts && totalParts > 1) sub.push('PART ' + part + '/' + totalParts);
+  var subBits = [];
+  if (nT) subBits.push(nT + ' TOTAL' + (nT === 1 ? '' : 'S'));
+  if (nS) subBits.push(nS + ' SPREAD' + (nS === 1 ? '' : 'S'));
+  if (nM) subBits.push(nM + ' ML');
+  if (totalParts && totalParts > 1) subBits.push('PART ' + part + '/' + totalParts);
 
-  // unique games for chip row
-  var games = {}, order = [];
-  plays.forEach(function(p) { var k = (p.team1 || '') + '|' + (p.team2 || ''); if (!games[k]) { games[k] = p; order.push(k); } });
+  var h = '<div style="background:#000;padding:26px 28px 22px;">';
+  h += '<div style="display:flex;justify-content:space-between;align-items:flex-end;padding-bottom:14px;border-bottom:1px solid #1a1d22;margin-bottom:4px;">' +
+       '<div><span style="font-size:19px;font-weight:800;color:#fff;letter-spacing:0.3px;">' + rangeLabel + '</span>' +
+       '<span style="font-size:12px;font-weight:700;color:#6b7280;letter-spacing:1px;margin-left:12px;">CFB FTN' + (subBits.length ? '  ·  ' + subBits.join(' · ') : '') + '</span></div>' +
+       '<div style="font-size:11px;font-weight:800;color:#6b7280;letter-spacing:1px;flex-shrink:0;">' + plays.length + ' PLAY' + (plays.length === 1 ? '' : 'S') + '</div>' +
+       '</div>';
 
-  var h = '<div style="background:#0b0d12;border:1px solid #232838;border-radius:18px;padding:22px 26px 26px;">';
-  // chip row
-  h += '<div style="display:flex;justify-content:center;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px;">' +
-       '<div style="border:1px solid #2a3040;border-radius:20px;padding:5px 12px;font-size:11px;font-weight:700;letter-spacing:1px;color:#c7cdd8;">' + order.length + ' GAME' + (order.length === 1 ? '' : 'S') + '</div>' +
-       order.map(function(k) {
-         var p = games[k];
-         return '<div style="display:flex;align-items:center;gap:7px;border:1px solid #2a3040;border-radius:12px;padding:6px 12px;background:#10131a;">' +
-           logoTag(logos[p.t1Logo], p.team1, 20) + '<span style="font-size:12px;font-weight:700;color:#fff;">' + shortTeam(p.team1) + '</span>' +
-           '<span style="font-size:11px;color:#5b6474;">vs.</span>' +
-           logoTag(logos[p.t2Logo], p.team2, 20) + '<span style="font-size:12px;font-weight:700;color:#fff;">' + shortTeam(p.team2) + '</span></div>';
-       }).join('') + '</div>';
-  // title
-  h += '<div style="text-align:center;margin-bottom:6px;">' + (title ? '<div style="font-size:24px;font-weight:800;color:#fff;letter-spacing:0.5px;">' + title + '</div>' : '') +
-       '<div style="font-size:12px;font-weight:700;color:#c7cdd8;letter-spacing:1px;margin-top:4px;">' + sub.join(' \u00b7 ') + '</div></div>';
-  h += '<div style="height:1px;background:#232838;margin:14px 0 20px;"></div>';
-
-  // cards
-  h += '<div style="display:flex;flex-wrap:wrap;justify-content:center;gap:18px;">';
+  var byDay = {}, order = [];
   plays.forEach(function(p) {
-    var head = betHeadline(p);
-    // Live market check already did the work: books at the play's exact tracked line, filtered
-    // to 5%+ edge and liquidity. No alt lines, no stale logged odds.
-    var sameLine = p._marketBooks || [];
-    var playTo = (p.ftnProb !== null && p.ftnProb !== undefined) ? playToOdds(p.ftnProb) : null;
-    var timeStr = (p.gameDate || '').replace(/^\d{2}\/\d{2}\s+/, '');
-
-    h += '<div style="width:300px;background:linear-gradient(180deg,#141821 0%,#0e1117 100%);border:1px solid #262c3a;border-radius:16px;padding:14px 14px 16px;box-sizing:border-box;">';
-    // header: team1 vs team2 + time
-    h += '<div style="display:flex;align-items:center;justify-content:center;gap:6px;font-size:11px;font-weight:700;padding-bottom:10px;border-bottom:1px solid #232838;white-space:nowrap;">' +
-         logoTag(logos[p.t1Logo], p.team1, 16) + '<span style="color:#7dd3fc;">' + shortTeam(p.team1) + '</span>' +
-         '<span style="color:#5b6474;font-weight:600;">vs.</span>' +
-         logoTag(logos[p.t2Logo], p.team2, 16) + '<span style="color:#7dd3fc;">' + shortTeam(p.team2) + '</span>' +
-         '<span style="color:#5b6474;font-weight:500;font-size:10px;margin-left:4px;">' + timeStr + '</span></div>';
-    // hero logos
-    var heroTeam = p.betType.indexOf('Total') >= 0 ? null : (p.betTeam || p.team1);
-    var heroLogo = heroTeam ? (teamsMatch(heroTeam, p.team1) ? logos[p.t1Logo] : logos[p.t2Logo]) : null;
-    h += '<div style="display:flex;justify-content:center;align-items:center;gap:14px;margin:16px 0 10px;">';
-    if (heroTeam) {
-      h += '<div style="width:74px;height:74px;border-radius:50%;background:#1a1f2b;border:2px solid #2f3646;display:flex;align-items:center;justify-content:center;">' + logoTag(heroLogo, heroTeam, 52) + '</div>';
-    } else {
-      h += '<div style="width:62px;height:62px;border-radius:50%;background:#1a1f2b;border:2px solid #2f3646;display:flex;align-items:center;justify-content:center;">' + logoTag(logos[p.t1Logo], p.team1, 44) + '</div>' +
-           '<span style="color:#5b6474;font-size:12px;font-weight:700;">+</span>' +
-           '<div style="width:62px;height:62px;border-radius:50%;background:#1a1f2b;border:2px solid #2f3646;display:flex;align-items:center;justify-content:center;">' + logoTag(logos[p.t2Logo], p.team2, 44) + '</div>';
-    }
-    h += '</div>';
-    // subject line
-    var subject = heroTeam ? shortTeam(heroTeam) : (shortTeam(p.team1) + ' / ' + shortTeam(p.team2));
-    h += '<div style="text-align:center;font-size:15px;font-weight:800;color:#fff;letter-spacing:0.3px;margin-bottom:10px;">' + subject + '</div>';
-    // bet pill
-    h += '<div style="display:flex;justify-content:center;margin-bottom:12px;"><div style="display:inline-flex;align-items:stretch;border:1px solid #2f3646;border-radius:22px;overflow:hidden;background:#10131a;">' +
-         '<span style="padding:6px 14px;font-size:12px;font-weight:800;color:#fff;">' + head.main + '</span>' +
-         '<span style="width:1px;background:#2f3646;"></span>' +
-         '<span style="padding:6px 14px;font-size:11px;font-weight:700;letter-spacing:1px;color:#7dd3fc;">' + head.tag + '</span></div></div>';
-    // book rows — edge already computed by the market check, off this line vs FTN's probability
-    sameLine.forEach(function(q, i) {
-      var e = q.edge;
-      var eHtml = e !== null && e !== undefined ? '<span style="font-family:\'JetBrains Mono\',ui-monospace,Menlo,monospace;font-size:12px;font-weight:700;color:' + (e >= 0 ? '#27c071' : '#ff6b6b') + ';">' + (e >= 0 ? '+' : '') + e.toFixed(1) + '%</span>' : '';
-      var liqTxt = ooLiqStr(q).trim();
-      var liqHtml = liqTxt ? '<span style="font-family:\'JetBrains Mono\',ui-monospace,Menlo,monospace;font-size:11px;font-weight:700;color:#27c071;">' + liqTxt + '</span>' : '';
-      h += '<div style="display:flex;align-items:center;justify-content:center;gap:10px;background:#0b0d12;border:1px solid ' + (i === 0 ? '#3b4a63' : '#232838') + ';border-radius:10px;padding:7px 10px;margin-bottom:6px;">' +
-           bookBadge(q.key, q.book, cardBookLogos) + '<span style="font-family:\'JetBrains Mono\',ui-monospace,Menlo,monospace;font-size:14px;font-weight:700;color:#9ec1ff;min-width:52px;text-align:left;">' + fmtOdds(q.odds) + '</span>' + liqHtml + eHtml + '</div>';
-    });
-    if (playTo !== null) {
-      h += '<div style="display:flex;align-items:center;justify-content:center;gap:12px;background:#0b0d12;border:1px solid #232838;border-radius:10px;padding:6px 10px;">' +
-           STOP_SVG + '<span style="font-family:\'JetBrains Mono\',ui-monospace,Menlo,monospace;font-size:14px;font-weight:700;color:#e5e7eb;min-width:52px;text-align:left;">' + fmtOdds(playTo) + '</span></div>';
-    }
-    h += '</div>';
+    var d = parseGameDate(p.gameDate);
+    var key = d ? (d.getFullYear() + '-' + d.getMonth() + '-' + d.getDate()) : '?';
+    if (!byDay[key]) { byDay[key] = { d: d, items: [] }; order.push(key); }
+    byDay[key].items.push(p);
   });
-  h += '</div></div>';
+  order.sort(function(a, b) { var da = byDay[a].d, db = byDay[b].d; return (da ? da.getTime() : 0) - (db ? db.getTime() : 0); });
+
+  order.forEach(function(key) {
+    var grp = byDay[key];
+    var label = grp.d ? dLabel(grp.d) : 'TBD';
+    h += '<div style="font-size:11px;font-weight:800;letter-spacing:1px;color:#9ca3af;background:#0b0d12;padding:7px 10px;border-radius:6px;margin:16px 0 4px;">' + label + '</div>';
+    grp.items.forEach(function(p) { h += buildCardRow(p, logos, cardBookLogos); });
+  });
+
+  h += '</div>';
   return h;
 }
 
@@ -2053,6 +2048,8 @@ async function makeDiscordCard() {
   if (typeof html2canvas === 'undefined') { alert('html2canvas failed to load \u2014 check connection'); return; }
   var btn = document.getElementById('discordBtn');
   if (btn) { btn.disabled = true; btn.textContent = 'CHECKING MARKET...'; }
+  var dbgElStart = document.getElementById('cardLogoDebug');
+  if (dbgElStart) dbgElStart.textContent = '';
 
   await loadBookLogos();
   await ooCheckMarket(open);
@@ -2093,8 +2090,14 @@ async function makeDiscordCard() {
     if (uri) cardBookLogos[ob.key] = uri; else logoFails.push(ob.display + ' (' + raw + ')');
   }));
   console.log('Card book logos: ' + Object.keys(cardBookLogos).length + '/' + OO_BOOKS.length + ' resolved to data-URI' + (logoFails.length ? ' | failed: ' + logoFails.join(', ') : ''));
+  var dbgEl = document.getElementById('cardLogoDebug');
+  if (dbgEl) {
+    var dbgTxt = 'Logos: ' + Object.keys(cardBookLogos).length + '/' + OO_BOOKS.length + ' resolved';
+    if (logoFails.length) dbgTxt += ' — failed: ' + logoFails.join(', ');
+    dbgEl.innerHTML = dbgTxt;
+  }
 
-  var PER_PAGE = 12;
+  var PER_PAGE = 20;
   var pages = [];
   for (var pi = 0; pi < open.length; pi += PER_PAGE) pages.push(open.slice(pi, pi + PER_PAGE));
 
@@ -2106,13 +2109,12 @@ async function makeDiscordCard() {
     for (var pg = 0; pg < pages.length; pg++) {
       if (btn) btn.textContent = 'BUILDING ' + (pg + 1) + '/' + pages.length + '...';
       var pagePlays = pages[pg];
-      var perRow = Math.min(4, Math.max(1, pagePlays.length));
-      var width = perRow * 300 + (perRow - 1) * 18 + 52 + 40;
+      var width = 1040;
       var panel = document.createElement('div');
-      panel.style.cssText = 'position:fixed;left:-99999px;top:0;width:' + width + 'px;padding:20px;background:#07080b;font-family:\'Plus Jakarta Sans\',-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;';
+      panel.style.cssText = 'position:fixed;left:-99999px;top:0;width:' + width + 'px;background:#000;font-family:\'Plus Jakarta Sans\',-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;';
       document.body.appendChild(panel);
       panel.innerHTML = buildCardHtml(pagePlays, logos, pg + 1, pages.length, cardBookLogos);
-      var canvas = await html2canvas(panel, { backgroundColor: '#07080b', scale: 2, logging: false, useCORS: true, allowTaint: false });
+      var canvas = await html2canvas(panel, { backgroundColor: '#000', scale: 2, logging: false, useCORS: true, allowTaint: false });
       document.body.removeChild(panel);
       var blob = await new Promise(function(res) { canvas.toBlob(res, 'image/png'); });
       var fname = 'cfb-' + slateTag + (pages.length > 1 ? '-p' + (pg + 1) : '') + '.png';
