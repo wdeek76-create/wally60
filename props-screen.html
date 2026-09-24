@@ -29,8 +29,10 @@ button{cursor:pointer;border:none;background:none;color:inherit}
 /* header */
 .hdr{position:sticky;top:0;z-index:20;background:rgba(23,27,36,.92);backdrop-filter:blur(12px);border-bottom:1px solid var(--line);padding:calc(var(--sat) + 8px) 12px 8px}
 .tabs{display:flex;gap:6px;overflow-x:auto;scrollbar-width:none}.tabs::-webkit-scrollbar{display:none}
-.tab{flex:0 0 auto;padding:7px 13px;border-radius:999px;border:1px solid var(--line2);background:var(--bg2);color:#fff;font-weight:700;font-size:12px;letter-spacing:.3px}
+.tab{flex:0 0 auto;display:inline-flex;align-items:center;gap:5px;padding:7px 13px;border-radius:999px;border:1px solid var(--line2);background:var(--bg2);color:#fff;font-weight:700;font-size:12px;letter-spacing:.3px}
 .tab.on{border-color:var(--purple);color:#fff;background:rgba(168,85,247,.16)}
+.tab .tcount{font-family:var(--mono);font-size:10px;font-weight:800;background:rgba(255,255,255,.14);padding:1px 6px;border-radius:999px;color:#fff}
+.tab.on .tcount{background:rgba(168,85,247,.35)}
 .status{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:8px;font-family:var(--mono);font-size:10px;color:#fff;letter-spacing:.4px;text-transform:uppercase}
 .status .r{display:flex;gap:6px;align-items:center}
 .ib{width:30px;height:30px;border-radius:50%;border:1px solid var(--line2);background:var(--bg2);display:flex;align-items:center;justify-content:center;color:#fff;font-size:13px}
@@ -1030,7 +1032,32 @@ function renderGame(fid){
   $('#view').querySelectorAll('.pl').forEach(el=>el.addEventListener('click',()=>{ const p=players.find(x=>x.key===el.dataset.k); if(p) openPlayer(p); }));
 }
 // ───────────────────────── wiring ─────────────────────────
-function renderTabs(){ $('#tabs').innerHTML=Object.entries(SPORTS).map(([k,s])=>`<button class="tab${viewMode==='sport'&&k===sportKey?' on':''}" data-k="${k}">${s.label}</button>`).join('')+`<button class="tab${viewMode==='tracker'?' on':''}" data-k="__tracker" style="margin-left:auto;border-color:rgba(34,197,94,.45);${viewMode==='tracker'?'background:rgba(34,197,94,.16);':''}">Tracker${tracked.length?' · '+tracked.filter(t=>!t.final).length:''}</button>`;
+let sportGameCounts = {};
+async function loadSportGameCounts(){
+  const now=Date.now();
+  await Promise.all(Object.entries(SPORTS).map(async ([k,S])=>{
+    try{
+      const raw=[]; let page=1;
+      for(let i=0;i<30;i++){ const r=await oo('/fixtures',{sport:S.sport,league:S.league,page}); (r?.data||[]).forEach(f=>raw.push(f)); if(!r?.has_more) break; page++; }
+      const upper = S.ml ? Infinity : now+(S.days||1)*24*3600e3;
+      let fx = raw.filter(f=>{ const t=new Date(f.start_date).getTime(); return t>=now-4*3600e3 && t<=upper && f.status!=='completed' && f.status!=='cancelled'; });
+      if(S.ml){
+        const cardOf=f=>(f.tournament?.name)||etDateKey(f.start_date);
+        const order=[]; fx.forEach(f=>{ const c=cardOf(f); if(!order.includes(c)) order.push(c); });
+        const keep=new Set(order.slice(0,2));
+        fx=fx.filter(f=>keep.has(cardOf(f)));
+      }
+      sportGameCounts[k]=fx.length;
+    }catch(e){ console.warn('[props] game count failed for',k,e.message); }
+  }));
+  renderTabs();
+}
+function renderTabs(){
+  const order=Object.entries(SPORTS).sort((a,b)=>(sportGameCounts[b[0]]??-1)-(sportGameCounts[a[0]]??-1));
+  $('#tabs').innerHTML=order.map(([k,s])=>{
+    const c=sportGameCounts[k];
+    return `<button class="tab${viewMode==='sport'&&k===sportKey?' on':''}" data-k="${k}">${s.label}${c!=null?`<span class="tcount">${c}</span>`:''}</button>`;
+  }).join('')+`<button class="tab${viewMode==='tracker'?' on':''}" data-k="__tracker" style="margin-left:auto;border-color:rgba(34,197,94,.45);${viewMode==='tracker'?'background:rgba(34,197,94,.16);':''}">Tracker${tracked.length?' · '+tracked.filter(t=>!t.final).length:''}</button>`;
   $('#tabs').querySelectorAll('.tab').forEach(b=>b.addEventListener('click',()=>{
     if(b.dataset.k==='__tracker'){ openTracker(); return; }
     clearInterval(trackerTimer); viewMode='sport'; $('.ftr').style.display='';
@@ -1048,6 +1075,7 @@ $('#reload').addEventListener('click',()=>loadSport(true));
 $('#cfg').addEventListener('click',()=>{ const u=prompt('OpticOdds backend URL (your Vercel /api/odds):',getBackend()); if(u!=null){ LS.set('oo_backend_url',u.trim()||BACKEND_DEFAULT); toast('Backend saved'); } });
 renderTabs();
 loadBookLogos();
+loadSportGameCounts();
 loadSport(false).then(()=>{ if(!current) renderSlate(); if(!sawDeepLinks) console.log('[props] no deep_link fields returned — key may not have deep-link permission'); });
 </script>
 </body>
