@@ -176,7 +176,7 @@ select option { background: #1a1d24; color: #e4e6eb; }
     </div>
     <div id="deepDiveStats"></div>
     <div class="section">
-      <h2>All Plays <span style="float:right;"><button class="btn secondary" onclick="copyOpen()">COPY OPEN</button> <button class="btn secondary" onclick="copyPartners()">SEND TO PARTNERS</button> <button class="btn secondary" onclick="copyUnders()">COPY UNDERS</button> <button class="btn secondary" onclick="copyBreakdown()">COPY BREAKDOWN</button> <button class="btn secondary" onclick="copyRecap()">COPY RECAP</button> <button class="btn secondary" id="discordBtn" onclick="makeDiscordCard()">DISCORD PIC</button></span></h2>
+      <h2>All Plays <span style="float:right;"><button class="btn secondary" id="copyOpenBtn" onclick="copyOpen()">COPY OPEN</button> <button class="btn secondary" id="copyPartnersBtn" onclick="copyPartners()">SEND TO PARTNERS</button> <button class="btn secondary" id="copyUndersBtn" onclick="copyUnders()">COPY UNDERS</button> <button class="btn secondary" onclick="copyBreakdown()">COPY BREAKDOWN</button> <button class="btn secondary" onclick="copyRecap()">COPY RECAP</button> <button class="btn secondary" id="discordBtn" onclick="makeDiscordCard()">DISCORD PIC</button></span></h2>
       <div class="scroll-table">
         <table>
           <thead>
@@ -195,9 +195,8 @@ select option { background: #1a1d24; color: #e4e6eb; }
     <div class="section">
       <h2>Grade Pending Plays</h2>
       <div class="input-group">
-        <button class="btn" style="margin-top:0;" onclick="gradeByDate()">AUTO-GRADE FINISHED GAMES</button>
-        <input type="date" id="gradeDate" title="Optional: force a specific date">
-        <small style="color:rgba(228,230,235,0.5);">Date optional &mdash; finished games found from each play's FTN date. Scores via ESPN, no key needed.</small>
+        <button class="btn" id="gradeBtn" style="margin-top:0;" onclick="gradeByDate()">AUTO-GRADE FINISHED GAMES</button>
+        <small style="color:rgba(228,230,235,0.5);">Matches every pending play to OpticOdds fixtures by team name, then grades whatever it reports final.</small>
       </div>
       <div id="gradeError"></div>
       <div id="gradeResults" style="display:none; margin-top:16px;">
@@ -300,15 +299,18 @@ async function oo(endpoint, params) {
 // Your books, matching the set the other odds tools scan. Exchanges (Novig/Kalshi/Prophet X/
 // Polymarket) don't post a flat bet limit the way FanDuel/BetOnline/Pinnacle/bet105 do — see
 // ooLiqOf() below, which reads limits.max where present and falls back to order-book depth.
+// `name` is the exact string OpticOdds expects for its `sportsbook` param; `display` is this
+// file's own badge/label convention (BOOK_STYLE keys, the BOOKS list) — they don't always match
+// (OpticOdds wants 'bet105'/'Prophet X', this file's badges use 'BET105'/'ProphetX').
 var OO_BOOKS = [
-  { key: 'fanduel',    name: 'FanDuel' },
-  { key: 'betonline',  name: 'BetOnline' },
-  { key: 'pinnacle',   name: 'Pinnacle' },
-  { key: 'bet105',     name: 'bet105' },
-  { key: 'novig',      name: 'Novig',      exch: true },
-  { key: 'kalshi',     name: 'Kalshi',     exch: true },
-  { key: 'prophetx',   name: 'Prophet X',  exch: true },
-  { key: 'polymarket', name: 'Polymarket', exch: true }
+  { key: 'fanduel',    name: 'FanDuel',    display: 'FanDuel' },
+  { key: 'betonline',  name: 'BetOnline',  display: 'BetOnline' },
+  { key: 'pinnacle',   name: 'Pinnacle',   display: 'Pinnacle' },
+  { key: 'bet105',     name: 'bet105',     display: 'BET105' },
+  { key: 'novig',      name: 'Novig',      display: 'Novig',    exch: true },
+  { key: 'kalshi',     name: 'Kalshi',     display: 'Kalshi',   exch: true },
+  { key: 'prophetx',   name: 'Prophet X',  display: 'ProphetX', exch: true },
+  { key: 'polymarket', name: 'Polymarket', display: 'Polymarket', exch: true }
 ];
 var OO_MARKET_NAMES = ['moneyline', 'point spread', 'total points'];
 
@@ -362,10 +364,141 @@ async function ooFetchCfbFixtures() {
       id: f.id,
       start: f.start_date,
       status: f.status,
-      home: { id: hc.id, name: hc.name || f.home_team_display || '' },
-      away: { id: ac.id, name: ac.name || f.away_team_display || '' }
+      home: { id: hc.id, name: hc.name || f.home_team_display || '', logo: hc.logo || '' },
+      away: { id: ac.id, name: ac.name || f.away_team_display || '', logo: ac.logo || '' }
     };
   });
+}
+
+// Final scores for completed fixtures — same /fixtures/results endpoint fd-sharp-tracker.html
+// uses, keyed off the same fixture ids ooFetchCfbFixtures() returns, so grading lines up with
+// exactly the team OpticOdds itself matched — no separate ESPN name-matching pass needed.
+async function ooFetchResults(fixtureIds) {
+  var out = {};
+  var chunks = ooChunk(fixtureIds, 5);
+  for (var i = 0; i < chunks.length; i++) {
+    try {
+      var r = await oo('/fixtures/results', { fixture_id: chunks[i] });
+      (r && r.data || []).forEach(function(x) {
+        var fid = x && x.fixture && x.fixture.id;
+        if (fid) out[fid] = x;
+      });
+    } catch (e) { console.warn('[ftn] results fetch failed', e.message); }
+  }
+  return out;
+}
+function ooIsFinal(resultEntry, fixtureStatus) {
+  var st = String((resultEntry && resultEntry.fixture && resultEntry.fixture.status) || fixtureStatus || '').toLowerCase();
+  return /completed|closed|final|ended/.test(st);
+}
+function ooFinalScore(resultEntry) {
+  var sc = (resultEntry && resultEntry.scores) || {};
+  var home = Number(sc.home && sc.home.total);
+  var away = Number(sc.away && sc.away.total);
+  if (isNaN(home) || isNaN(away)) return null;
+  return { home: home, away: away };
+}
+
+// Live market check for a batch of already-tracked plays: same fixture/line matching as
+// fetchApiLines(), but strict on the play's own tracked line (no alts — a different line is a
+// different bet) and filtered to our normal bar: 5%+ edge off FTN's probability, and liquidity
+// that clears OO_MIN_LIQ where known (an exchange/book with unknown liquidity still passes —
+// unknown is never treated as "no liquidity", same as the other odds tools). Attaches
+// play._marketBooks (sorted best price first) to each play; empty means nothing currently clears
+// the bar, and callers should drop that play from whatever they're building.
+var OO_MIN_EDGE = 5;
+var OO_MIN_LIQ = 1000;
+async function ooCheckMarket(plays) {
+  plays.forEach(function(p) { p._marketBooks = []; });
+  if (!plays.length) return plays;
+
+  var fixtures;
+  try { fixtures = await ooFetchCfbFixtures(); } catch (e) { console.warn('[ftn] market check: fixture fetch failed', e.message); return plays; }
+
+  var matchedFx = {};
+  plays.forEach(function(play, idx) {
+    for (var i = 0; i < fixtures.length; i++) {
+      var fx = fixtures[i];
+      var ok = (teamsMatch(fx.home.name, play.team1) && teamsMatch(fx.away.name, play.team2)) ||
+               (teamsMatch(fx.home.name, play.team2) && teamsMatch(fx.away.name, play.team1));
+      if (ok) { matchedFx[idx] = fx; break; }
+    }
+  });
+
+  var fxList = [];
+  var seenFx = {};
+  Object.keys(matchedFx).forEach(function(idx) {
+    var fx = matchedFx[idx];
+    if (!seenFx[fx.id]) { seenFx[fx.id] = true; fxList.push(fx); }
+  });
+  if (!fxList.length) return plays;
+
+  var byFx = {};
+  var bookNames = OO_BOOKS.map(function(b) { return b.name; });
+  var fxChunks = ooChunk(fxList, 5);
+  var bookChunks = ooChunk(bookNames, 5);
+  for (var fc = 0; fc < fxChunks.length; fc++) {
+    var batch = fxChunks[fc];
+    var calls = bookChunks.map(function(bk) {
+      return oo('/fixtures/odds', { fixture_id: batch.map(function(f) { return f.id; }), sportsbook: bk, market: OO_MARKET_NAMES })
+        .catch(function(e) { console.warn('[ftn] market check odds fetch failed', e.message); return null; });
+    });
+    var results = await Promise.all(calls);
+    results.forEach(function(r) {
+      (r && r.data || []).forEach(function(d) {
+        if (!byFx[d.id]) byFx[d.id] = [];
+        (d.odds || []).forEach(function(o) { byFx[d.id].push(o); });
+      });
+    });
+  }
+
+  plays.forEach(function(play, idx) {
+    var fx = matchedFx[idx];
+    if (!fx) return;
+    var odds = byFx[fx.id] || [];
+
+    var wantMarket;
+    if (play.betType.indexOf('Total') >= 0) wantMarket = /^total points$/i;
+    else if (play.betType === 'Spread') wantMarket = /^(point spread|spread)$/i;
+    else wantMarket = /^moneyline$/i;
+
+    var books = [];
+    odds.forEach(function(o) {
+      if (o.price == null || !wantMarket.test(o.market || '')) return;
+      var book = OO_BOOKS.filter(function(b) { return b.name.toLowerCase() === String(o.sportsbook || '').toLowerCase(); })[0];
+      if (!book) return;
+
+      if (play.betType.indexOf('Total') >= 0) {
+        var wantSide = play.betType.indexOf('O') >= 0 ? 'over' : 'under';
+        var side = String(o.selection_line || o.selection || '').toLowerCase();
+        if (side.indexOf(wantSide) < 0) return;
+        var pts = o.points == null ? null : Number(o.points);
+        if (pts === null || pts !== play.line) return;
+      } else if (play.betType === 'Spread') {
+        var home = ooIsHomeSide(o, fx);
+        var selTeam = home ? fx.home.name : fx.away.name;
+        if (!play.betTeam || !teamsMatch(selTeam, play.betTeam)) return;
+        var pts2 = o.points == null ? null : Number(o.points);
+        if (pts2 === null || pts2 !== play.line) return;
+      } else {
+        var home2 = ooIsHomeSide(o, fx);
+        var selTeam2 = home2 ? fx.home.name : fx.away.name;
+        if (!play.betTeam || !teamsMatch(selTeam2, play.betTeam)) return;
+      }
+
+      var liq = ooLiqOf(o);
+      if (liq !== null && liq < OO_MIN_LIQ) return;
+      var edge = (play.ftnProb !== null && play.ftnProb !== undefined) ? edgeFor(play.ftnProb, Number(o.price)) : null;
+      if (edge === null || edge < OO_MIN_EDGE) return;
+
+      books.push({ title: book.display, book: book.display, odds: Math.round(Number(o.price)), liq: liq, exch: !!book.exch, edge: edge });
+    });
+
+    books.sort(function(a, b) { return b.odds - a.odds; });
+    play._marketBooks = books;
+  });
+
+  return plays;
 }
 
 document.querySelectorAll('.tab-btn').forEach(function(btn) {
@@ -745,7 +878,7 @@ async function fetchApiLines() {
       if (!byLine[lineKey]) byLine[lineKey] = [];
       byLine[lineKey].push({
         bookmaker: book.key,
-        title: book.name,
+        title: book.display,
         line: lineKey === 'ML' ? null : parseFloat(lineKey),
         odds: Math.round(Number(o.price)),
         exch: !!book.exch,
@@ -846,13 +979,22 @@ function copyRecap(weekFilter) {
   copyText(out.join('\n').trim(), 'Copied recap: ' + graded.length + ' graded plays' + (weekFilter !== undefined && weekFilter !== null ? ' (week ' + weekFilter + ')' : ''));
 }
 
-function buildOpenList(showEdgeBook, typeFilter) {
+// Runs the live market check before building the text: a play only makes it into the list if
+// some book at its exact tracked line still clears OO_MIN_EDGE%+ edge and OO_MIN_LIQ liquidity
+// right now — the odds/book shown are that check's best price, not whatever was logged at parse
+// time. No alt lines, ever — a different number is a different bet.
+async function buildOpenList(showEdgeBook, typeFilter) {
   var open = getPlays().filter(function(p) {
     if (p.status !== 'Pending') return false;
     if (typeFilter === 'unders') return p.betType === 'Total U' && (p.ftnEdge || 0) >= 5;
     return p.betType.indexOf('Total') >= 0 || p.betType === 'Spread';
   });
   if (open.length === 0) return null;
+
+  await ooCheckMarket(open);
+  var dropped = open.filter(function(p) { return !p._marketBooks || !p._marketBooks.length; }).length;
+  open = open.filter(function(p) { return p._marketBooks && p._marketBooks.length; });
+  if (open.length === 0) return { text: '', count: 0, dropped: dropped };
 
   var byWeek = {};
   open.forEach(function(p) {
@@ -870,18 +1012,19 @@ function buildOpenList(showEdgeBook, typeFilter) {
     out.push('CFB FTN Week ' + w + ': (' + arr.length + ')');
     out.push('');
     arr.forEach(function(p, idx) {
-      var oddsStr = (p.odds > 0 ? '+' : '') + p.odds;
+      var best = p._marketBooks[0];
+      var oddsStr = (best.odds > 0 ? '+' : '') + best.odds;
       var lineDesc = (idx + 1) + '. ';
       if (p.gameDate) lineDesc += '[' + p.gameDate + ']  ';
       if (p.betType.indexOf('Total') >= 0) {
         var ou = p.betType.indexOf('O') >= 0 ? 'over' : 'under';
-        lineDesc += p.matchup + '  ' + ou + ' ' + p.line + ' ' + oddsStr + (showEdgeBook ? ' ' + p.bookmaker : '');
+        lineDesc += p.matchup + '  ' + ou + ' ' + p.line + ' ' + oddsStr + (showEdgeBook ? ' ' + best.title : '');
       } else {
         var team = p.betTeam || p.matchup;
         var lineStr = (p.line > 0 ? '+' : '') + p.line;
-        lineDesc += p.matchup + '  ' + team + ' ' + lineStr + ' ' + oddsStr + (showEdgeBook ? ' ' + p.bookmaker : '');
+        lineDesc += p.matchup + '  ' + team + ' ' + lineStr + ' ' + oddsStr + (showEdgeBook ? ' ' + best.title : '');
       }
-      if (showEdgeBook) lineDesc += '  edge ' + p.ftnEdge.toFixed(1) + '%';
+      if (showEdgeBook) lineDesc += '  edge ' + best.edge.toFixed(1) + '%';
       if (p.ftnProb !== null && p.ftnProb !== undefined && typeof playToOdds === 'function') {
         var pt = playToOdds(p.ftnProb);
         if (pt !== null) lineDesc += '  play to ' + (pt > 0 ? '+' : '') + pt;
@@ -890,19 +1033,37 @@ function buildOpenList(showEdgeBook, typeFilter) {
       out.push('');
     });
   });
-  return { text: out.join('\n').trim(), count: open.length };
+  return { text: out.join('\n').trim(), count: open.length, dropped: dropped };
 }
 
-function copyOpen() {
-  var r = buildOpenList(true);
-  if (!r) { alert('No open totals/spreads to copy'); return; }
-  copyText(r.text, 'Copied ' + r.count + ' open plays');
+async function copyOpen() {
+  var btn = document.getElementById('copyOpenBtn');
+  if (btn) { btn.disabled = true; btn.textContent = 'CHECKING MARKET…'; }
+  try {
+    var r = await buildOpenList(true);
+    if (!r || r.count === 0) {
+      alert((r && r.dropped) ? 'No open plays currently clear the ' + OO_MIN_EDGE + '%+ edge / liquidity bar (' + r.dropped + ' dropped)' : 'No open totals/spreads to copy');
+      return;
+    }
+    copyText(r.text, 'Copied ' + r.count + ' open plays' + (r.dropped ? ' (' + r.dropped + ' dropped — no book cleared ' + OO_MIN_EDGE + '%+ edge)' : ''));
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'COPY OPEN'; }
+  }
 }
 
-function copyPartners() {
-  var r = buildOpenList(false);
-  if (!r) { alert('No open totals/spreads to copy'); return; }
-  copyText(r.text, 'Copied ' + r.count + ' plays (partner format)');
+async function copyPartners() {
+  var btn = document.getElementById('copyPartnersBtn');
+  if (btn) { btn.disabled = true; btn.textContent = 'CHECKING MARKET…'; }
+  try {
+    var r = await buildOpenList(false);
+    if (!r || r.count === 0) {
+      alert((r && r.dropped) ? 'No open plays currently clear the ' + OO_MIN_EDGE + '%+ edge / liquidity bar (' + r.dropped + ' dropped)' : 'No open totals/spreads to copy');
+      return;
+    }
+    copyText(r.text, 'Copied ' + r.count + ' plays (partner format)' + (r.dropped ? ' (' + r.dropped + ' dropped)' : ''));
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'SEND TO PARTNERS'; }
+  }
 }
 
 function copyBreakdown(weekFilter) {
@@ -976,10 +1137,19 @@ function copyBreakdown(weekFilter) {
   copyText(out.join('\n').trim(), 'Copied breakdown' + (weekFilter !== undefined && weekFilter !== null ? ' (week ' + weekFilter + ')' : ' (all weeks + season)'));
 }
 
-function copyUnders() {
-  var r = buildOpenList(true, 'unders');
-  if (!r) { alert('No open 5%+ unders to copy'); return; }
-  copyText(r.text, 'Copied ' + r.count + ' unders (5%+)');
+async function copyUnders() {
+  var btn = document.getElementById('copyUndersBtn');
+  if (btn) { btn.disabled = true; btn.textContent = 'CHECKING MARKET…'; }
+  try {
+    var r = await buildOpenList(true, 'unders');
+    if (!r || r.count === 0) {
+      alert((r && r.dropped) ? 'No open 5%+ unders currently clear the market filters (' + r.dropped + ' dropped)' : 'No open 5%+ unders to copy');
+      return;
+    }
+    copyText(r.text, 'Copied ' + r.count + ' unders (5%+)' + (r.dropped ? ' (' + r.dropped + ' dropped)' : ''));
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'COPY UNDERS'; }
+  }
 }
 
 function altBooksHtml(p) {
@@ -1007,51 +1177,17 @@ function matchupHtml(p) {
 }
 
 
-// ── Standalone logo backfill: ESPN scoreboard for each play's date, any game status ──
+// ── Standalone logo backfill: OpticOdds fixtures, matched by team name ──
 var _logoBackfillRunning = false;
 async function backfillLogos() {
   if (_logoBackfillRunning) return;
   var plays = getPlays();
-  var missing = plays.filter(function(p) { return !p.t1Logo && p.gameDate; });
+  var missing = plays.filter(function(p) { return !p.t1Logo; });
   if (!missing.length) return;
   _logoBackfillRunning = true;
 
-  var dateSet = {};
-  missing.forEach(function(p) {
-    var d = parseGameDate(p.gameDate);
-    if (d) dateSet[d.getFullYear() + pad2(d.getMonth() + 1) + pad2(d.getDate())] = true;
-  });
-
-  var pool = [];
-  var dates = Object.keys(dateSet);
-  for (var i = 0; i < dates.length; i++) {
-    var groups = ['80', '81'];
-    for (var gi = 0; gi < groups.length; gi++) {
-      try {
-        var resp = await fetch('https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard?dates=' + dates[i] + '&groups=' + groups[gi] + '&limit=400');
-        if (!resp.ok) continue;
-        var data = await resp.json();
-        (data.events || []).forEach(function(ev) {
-          var comp = (ev.competitions && ev.competitions[0]) || {};
-          var home = null, away = null;
-          (comp.competitors || []).forEach(function(c) { if (c.homeAway === 'home') home = c; else if (c.homeAway === 'away') away = c; });
-          if (!home || !away) return;
-          function lg(c) {
-            var t = c.team || {};
-            if (t.logo) return t.logo;
-            if (t.logos && t.logos[0] && t.logos[0].href) return t.logos[0].href;
-            if (t.id) return 'https://a.espncdn.com/i/teamlogos/ncaa/500/' + t.id + '.png';
-            return null;
-          }
-          pool.push({
-            home_team: (home.team && (home.team.displayName || home.team.location)) || '',
-            away_team: (away.team && (away.team.displayName || away.team.location)) || '',
-            home_logo: lg(home), away_logo: lg(away)
-          });
-        });
-      } catch (e) {}
-    }
-  }
+  var pool;
+  try { pool = await ooFetchCfbFixtures(); } catch (e) { _logoBackfillRunning = false; return; }
 
   var added = 0;
   plays = getPlays();
@@ -1059,13 +1195,13 @@ async function backfillLogos() {
     if (p.t1Logo) return;
     for (var r = 0; r < pool.length; r++) {
       var g = pool[r];
-      var t1Home = teamsMatch(g.home_team, p.team1 || '');
-      var t1Away = teamsMatch(g.away_team, p.team1 || '');
-      var t2Home = teamsMatch(g.home_team, p.team2 || '');
-      var t2Away = teamsMatch(g.away_team, p.team2 || '');
+      var t1Home = teamsMatch(g.home.name, p.team1 || '');
+      var t1Away = teamsMatch(g.away.name, p.team1 || '');
+      var t2Home = teamsMatch(g.home.name, p.team2 || '');
+      var t2Away = teamsMatch(g.away.name, p.team2 || '');
       if ((t1Home && t2Away) || (t1Away && t2Home)) {
-        p.t1Logo = t1Home ? g.home_logo : g.away_logo;
-        p.t2Logo = t2Home ? g.home_logo : g.away_logo;
+        p.t1Logo = t1Home ? g.home.logo : g.away.logo;
+        p.t2Logo = t2Home ? g.home.logo : g.away.logo;
         if (p.t1Logo || p.t2Logo) added++;
         break;
       }
@@ -1493,8 +1629,6 @@ function parseGameDate(gd) {
   return d;
 }
 
-function pad2(n) { return (n < 10 ? '0' : '') + n; }
-
 async function gradeByDate() {
   clearError('gradeError');
 
@@ -1506,189 +1640,105 @@ async function gradeByDate() {
     return;
   }
 
-  var dates = [];
-  var manualDate = document.getElementById('gradeDate').value;
-  if (manualDate) {
-    dates = [manualDate];
-  } else {
-    var dateSet = {};
-    var notFinished = 0;
-    pending.forEach(function(p) {
-      var d = parseGameDate(p.gameDate);
-      if (!d) return;
-      if (Date.now() > d.getTime() + 4.5 * 3600 * 1000) {
-        dateSet[d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate())] = true;
-      } else {
-        notFinished++;
-      }
-    });
-    // logos come from the scoreboard for ANY date (scheduled games list logos too)
-    needLogos.forEach(function(p) {
-      var d = parseGameDate(p.gameDate);
-      if (!d) return;
-      dateSet[d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate())] = true;
-    });
-    dates = Object.keys(dateSet);
-    if (dates.length === 0) {
-      showError('gradeError', notFinished > 0 ? 'No finished games yet (' + notFinished + ' pending plays still upcoming or live)' : 'No pending plays have a usable FTN date \u2014 pick a date manually');
-      return;
-    }
+  var btn = document.getElementById('gradeBtn');
+  if (btn) { btn.disabled = true; btn.textContent = 'CHECKING OPTICODDS...'; }
+
+  var fixtures;
+  try {
+    fixtures = await ooFetchCfbFixtures();
+  } catch (e) {
+    showError('gradeError', 'Fixture fetch failed: ' + e.message);
+    if (btn) { btn.disabled = false; btn.textContent = 'AUTO-GRADE FINISHED GAMES'; }
+    return;
   }
 
-  var results = [];
-  var logoPool = [];
-  var seen = {};
-  for (var di = 0; di < dates.length; di++) {
-    var ymd = dates[di].replace(/-/g, '');
-    var groups = ['80', '81'];
-    for (var gi = 0; gi < groups.length; gi++) {
-      try {
-        var url = 'https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard?dates=' + ymd + '&groups=' + groups[gi] + '&limit=400';
-        var resp = await fetch(url);
-        if (!resp.ok) {
-          showError('gradeError', 'ESPN error ' + resp.status + ' on ' + dates[di] + ' (group ' + groups[gi] + ')');
-          continue;
-        }
-        var data = await resp.json();
-        (data.events || []).forEach(function(ev) {
-          if (seen[ev.id]) return;
-          seen[ev.id] = true;
-          var comp = (ev.competitions && ev.competitions[0]) || {};
-          var st = (comp.status && comp.status.type) || (ev.status && ev.status.type) || {};
-          var home = null, away = null;
-          (comp.competitors || []).forEach(function(c) {
-            if (c.homeAway === 'home') home = c;
-            else if (c.homeAway === 'away') away = c;
-          });
-          if (!home || !away) return;
-          function logoOf(c) {
-            var t = c.team || {};
-            if (t.logo) return t.logo;
-            if (t.logos && t.logos[0] && t.logos[0].href) return t.logos[0].href;
-            if (t.id) return 'https://a.espncdn.com/i/teamlogos/ncaa/500/' + t.id + '.png';
-            return null;
-          }
-          logoPool.push({
-            home_team: (home.team && (home.team.displayName || home.team.location)) || '',
-            away_team: (away.team && (away.team.displayName || away.team.location)) || '',
-            home_logo: logoOf(home),
-            away_logo: logoOf(away)
-          });
-          if (!st.completed) return;
-          results.push({
-            home_team: (home.team && (home.team.displayName || home.team.location)) || '',
-            away_team: (away.team && (away.team.displayName || away.team.location)) || '',
-            home_logo: logoOf(home),
-            away_logo: logoOf(away),
-            home_score: parseFloat(home.score),
-            away_score: parseFloat(away.score),
-            status: 'final'
-          });
-        });
-      } catch (e) {
-        showError('gradeError', 'ESPN fetch failed on ' + dates[di] + ': ' + e.message);
-        return;
-      }
+  // Match every play that needs a fixture (pending, for grading; or missing a logo) by team
+  // name against OpticOdds' own fixture list \u2014 the same source the odds/market-check calls use,
+  // so grading lines up with exactly the game those calls matched, no separate ESPN name pass.
+  var matchedFx = {};
+  var needFx = plays.filter(function(p) { return p.status === 'Pending' || !p.t1Logo; });
+  needFx.forEach(function(p) {
+    for (var i = 0; i < fixtures.length; i++) {
+      var fx = fixtures[i];
+      var ok = (teamsMatch(fx.home.name, p.team1) && teamsMatch(fx.away.name, p.team2)) ||
+               (teamsMatch(fx.home.name, p.team2) && teamsMatch(fx.away.name, p.team1));
+      if (ok) { matchedFx[p.id] = fx; break; }
     }
-  }
+  });
 
-  console.log('ESPN: ' + results.length + ' completed / ' + logoPool.length + ' total games across ' + dates.join(', '));
+  var logosAdded = 0;
+  plays.forEach(function(p) {
+    if (p.t1Logo) return;
+    var fx = matchedFx[p.id];
+    if (!fx) return;
+    var t1Home = teamsMatch(fx.home.name, p.team1 || '');
+    p.t1Logo = t1Home ? fx.home.logo : fx.away.logo;
+    p.t2Logo = t1Home ? fx.away.logo : fx.home.logo;
+    if (p.t1Logo || p.t2Logo) logosAdded++;
+  });
+
+  var fxIds = [];
+  var seenFx = {};
+  pending.forEach(function(p) {
+    var fx = matchedFx[p.id];
+    if (fx && !seenFx[fx.id]) { seenFx[fx.id] = true; fxIds.push(fx.id); }
+  });
+
+  var resultsById = {};
+  if (fxIds.length) {
+    if (btn) { btn.textContent = 'FETCHING RESULTS...'; }
+    resultsById = await ooFetchResults(fxIds);
+  }
 
   var gradedNow = [];
   var reasons = [];
 
   pending.forEach(function(play) {
-    var t1 = play.team1 || play.matchup.split(' vs ')[0] || '';
-    var t2 = play.team2 || play.matchup.split(' vs ')[1] || '';
+    var fx = matchedFx[play.id];
+    if (!fx) { reasons.push(play.matchup + ': no OpticOdds fixture match'); return; }
+    var res = resultsById[fx.id];
+    if (!res || !ooIsFinal(res, fx.status)) { reasons.push(play.matchup + ': game not final yet'); return; }
+    var score = ooFinalScore(res);
+    if (!score) { reasons.push(play.matchup + ': no final score in results'); return; }
 
-    var match = null;
-    for (var r = 0; r < results.length; r++) {
-      var home = results[r].home_team || '';
-      var away = results[r].away_team || '';
-      var ok = (teamsMatch(home, t1) || teamsMatch(away, t1)) &&
-               (teamsMatch(home, t2) || teamsMatch(away, t2));
-      if (ok) { match = results[r]; break; }
-    }
-    if (!match) { reasons.push(play.matchup + ': no game match'); return; }
-    if (match.status && /live|progress|scheduled|halftime|delayed/i.test(String(match.status))) { reasons.push(play.matchup + ': game not final (' + match.status + ')'); return; }
-
-    var homeScore = null, awayScore = null;
-    if (Array.isArray(match.scores)) {
-      match.scores.forEach(function(s) {
-        var n = (s.name || '').toLowerCase();
-        var v = parseFloat(s.score);
-        if (n && (match.home_team || '').toLowerCase() === n) homeScore = v;
-        else if (n && (match.away_team || '').toLowerCase() === n) awayScore = v;
-      });
-      if (homeScore === null && match.scores.length >= 2) {
-        homeScore = parseFloat(match.scores[0].score);
-        awayScore = parseFloat(match.scores[1].score);
-      }
-    } else {
-      if (match.home_score !== undefined) homeScore = parseFloat(match.home_score);
-      if (match.away_score !== undefined) awayScore = parseFloat(match.away_score);
-    }
-
-    if (homeScore === null || awayScore === null || isNaN(homeScore) || isNaN(awayScore)) { reasons.push(play.matchup + ': no scores in result'); return; }
-
+    var homeScore = score.home, awayScore = score.away;
     var total = homeScore + awayScore;
-    var res = null;
+    var result = null;
 
     if (play.betType === 'Total O') {
-      if (total === play.line) res = 'P';
-      else res = total > play.line ? 'W' : 'L';
+      result = total === play.line ? 'P' : (total > play.line ? 'W' : 'L');
     } else if (play.betType === 'Total U') {
-      if (total === play.line) res = 'P';
-      else res = total < play.line ? 'W' : 'L';
+      result = total === play.line ? 'P' : (total < play.line ? 'W' : 'L');
     } else if (play.betType === 'Spread' || play.betType === 'Moneyline' || play.betType === 'ML') {
       if (!play.betTeam) {
         reasons.push(play.matchup + ': no bet team recorded \u2014 manual grade');
       } else {
-        var betIsHome = teamsMatch(match.home_team, play.betTeam);
-        var betIsAway = teamsMatch(match.away_team, play.betTeam);
+        var betIsHome = teamsMatch(fx.home.name, play.betTeam);
+        var betIsAway = teamsMatch(fx.away.name, play.betTeam);
         if (!betIsHome && !betIsAway) {
-          reasons.push(play.matchup + ': bet team "' + play.betTeam + '" not found in game \u2014 manual grade');
+          reasons.push(play.matchup + ': bet team "' + play.betTeam + '" not found in fixture \u2014 manual grade');
         } else {
           var betScore = betIsHome ? homeScore : awayScore;
           var oppScore = betIsHome ? awayScore : homeScore;
           if (play.betType === 'Spread') {
             var adj = betScore + play.line - oppScore;
-            res = adj > 0 ? 'W' : (adj === 0 ? 'P' : 'L');
+            result = adj > 0 ? 'W' : (adj === 0 ? 'P' : 'L');
           } else {
-            res = betScore > oppScore ? 'W' : (betScore === oppScore ? 'P' : 'L');
+            result = betScore > oppScore ? 'W' : (betScore === oppScore ? 'P' : 'L');
           }
         }
       }
     }
 
-    if (res) {
-      applyResult(play, res);
+    if (result) {
+      applyResult(play, result);
       play.finalScore = homeScore + '-' + awayScore;
       play.actualTotal = total;
       gradedNow.push(play);
     }
   });
 
-  // backfill logos on any play missing them (graded or pending), aligned to team1/team2
-  var logosAdded = 0;
-  plays.forEach(function(p) {
-    if (p.t1Logo) return;
-    for (var r2 = 0; r2 < logoPool.length; r2++) {
-      var g2 = logoPool[r2];
-      var t1Home = teamsMatch(g2.home_team, p.team1 || '');
-      var t1Away = teamsMatch(g2.away_team, p.team1 || '');
-      var t2Home = teamsMatch(g2.home_team, p.team2 || '');
-      var t2Away = teamsMatch(g2.away_team, p.team2 || '');
-      if ((t1Home && t2Away) || (t1Away && t2Home)) {
-        p.t1Logo = t1Home ? g2.home_logo : g2.away_logo;
-        p.t2Logo = t2Home ? g2.home_logo : g2.away_logo;
-        if (p.t1Logo || p.t2Logo) logosAdded++;
-        break;
-      }
-    }
-  });
   if (logosAdded > 0) console.log('Backfilled logos for ' + logosAdded + ' plays');
-
   savePlays(plays);
 
   var rows = gradedNow.map(function(p) {
@@ -1709,23 +1759,18 @@ async function gradeByDate() {
   if (gradedNow.length === 0 && logosAdded > 0 && pending.length === 0) {
     showSuccess('gradeError', 'Backfilled logos for ' + logosAdded + ' plays.');
   } else if (gradedNow.length === 0) {
-    var diag = 'Fetched ' + results.length + ' game results for ' + dates.join(', ') + ' but graded 0.';
-    if (results.length > 0) {
-      diag += '<br>Sample API teams: ' + results.slice(0, 3).map(function(r) { return r.away_team + ' @ ' + r.home_team; }).join(' | ');
-    }
-    if (reasons.length > 0) {
-      diag += '<br>' + reasons.slice(0, 8).join('<br>');
-    }
+    var diag = 'Checked ' + pending.length + ' pending play(s) against OpticOdds \u2014 graded 0.';
+    if (reasons.length > 0) diag += '<br>' + reasons.slice(0, 8).join('<br>');
     if (logosAdded > 0) diag += '<br>Backfilled logos for ' + logosAdded + ' plays.';
     diag += '<br>Anything unmatched: manual grade below.';
     showError('gradeError', diag);
   } else {
-    var msg = 'Auto-graded ' + gradedNow.length + ' plays.' + (logosAdded > 0 ? ' Backfilled ' + logosAdded + ' logos.' : '');
+    var msg = 'Auto-graded ' + gradedNow.length + ' plays via OpticOdds.' + (logosAdded > 0 ? ' Backfilled ' + logosAdded + ' logos.' : '');
     if (reasons.length > 0) msg += ' Skipped: ' + reasons.slice(0, 5).join('; ');
-    msg += '';
     showSuccess('gradeError', msg);
   }
 
+  if (btn) { btn.disabled = false; btn.textContent = 'AUTO-GRADE FINISHED GAMES'; }
   updateTracker();
   renderManualGrade();
 }
@@ -1867,15 +1912,9 @@ function buildCardHtml(plays, logos, part, totalParts) {
   h += '<div style="display:flex;flex-wrap:wrap;justify-content:center;gap:18px;">';
   plays.forEach(function(p) {
     var head = betHeadline(p);
-    var all = [{ book: p.bookmaker, odds: p.odds, line: p.line }];
-    Object.keys(p.altBooks || {}).forEach(function(b) {
-      var a = p.altBooks[b];
-      if (a.odds === null || a.odds === undefined || isNaN(a.odds)) return;
-      all.push({ book: b, odds: a.odds, line: (a.line !== null && a.line !== undefined) ? a.line : p.line });
-    });
-    // Only books quoting the exact line this play is tracked at — a different line is a
-    // different bet, so it never belongs in this card, no matter how good the number is.
-    var sameLine = all.filter(function(q) { return q.line === p.line; }).sort(function(a, b) { return b.odds - a.odds; });
+    // Live market check already did the work: books at the play's exact tracked line, filtered
+    // to 5%+ edge and liquidity. No alt lines, no stale logged odds.
+    var sameLine = p._marketBooks || [];
     var playTo = (p.ftnProb !== null && p.ftnProb !== undefined) ? playToOdds(p.ftnProb) : null;
     var timeStr = (p.gameDate || '').replace(/^\d{2}\/\d{2}\s+/, '');
 
@@ -1906,10 +1945,10 @@ function buildCardHtml(plays, logos, part, totalParts) {
          '<span style="padding:6px 14px;font-size:12px;font-weight:800;color:#fff;">' + head.main + '</span>' +
          '<span style="width:1px;background:#2f3646;"></span>' +
          '<span style="padding:6px 14px;font-size:11px;font-weight:700;letter-spacing:1px;color:#7dd3fc;">' + head.tag + '</span></div></div>';
-    // book rows — edge is the line this play is tracked at, priced against FTN's own probability
+    // book rows — edge already computed by the market check, off this line vs FTN's probability
     sameLine.forEach(function(q, i) {
-      var e = (p.ftnProb !== null && p.ftnProb !== undefined) ? edgeFor(p.ftnProb, q.odds) : null;
-      var eHtml = e !== null ? '<span style="font-family:\'JetBrains Mono\',ui-monospace,Menlo,monospace;font-size:12px;font-weight:700;color:' + (e >= 0 ? '#27c071' : '#ff6b6b') + ';">' + (e >= 0 ? '+' : '') + e.toFixed(1) + '%</span>' : '';
+      var e = q.edge;
+      var eHtml = e !== null && e !== undefined ? '<span style="font-family:\'JetBrains Mono\',ui-monospace,Menlo,monospace;font-size:12px;font-weight:700;color:' + (e >= 0 ? '#27c071' : '#ff6b6b') + ';">' + (e >= 0 ? '+' : '') + e.toFixed(1) + '%</span>' : '';
       h += '<div style="display:flex;align-items:center;justify-content:center;gap:12px;background:#0b0d12;border:1px solid ' + (i === 0 ? '#3b4a63' : '#232838') + ';border-radius:10px;padding:7px 10px;margin-bottom:6px;">' +
            bookBadge(q.book) + '<span style="font-family:\'JetBrains Mono\',ui-monospace,Menlo,monospace;font-size:14px;font-weight:700;color:#9ec1ff;min-width:52px;text-align:left;">' + fmtOdds(q.odds) + '</span>' + eHtml + '</div>';
     });
@@ -1932,7 +1971,17 @@ async function makeDiscordCard() {
   });
   if (typeof html2canvas === 'undefined') { alert('html2canvas failed to load \u2014 check connection'); return; }
   var btn = document.getElementById('discordBtn');
-  if (btn) { btn.disabled = true; btn.textContent = 'BUILDING...'; }
+  if (btn) { btn.disabled = true; btn.textContent = 'CHECKING MARKET...'; }
+
+  await ooCheckMarket(open);
+  var dropped = open.filter(function(p) { return !p._marketBooks || !p._marketBooks.length; }).length;
+  open = open.filter(function(p) { return p._marketBooks && p._marketBooks.length; });
+  if (!open.length) {
+    alert('No open plays currently clear the ' + OO_MIN_EDGE + '%+ edge / liquidity bar (' + dropped + ' dropped)');
+    if (btn) { btn.disabled = false; btn.textContent = 'DISCORD PIC'; }
+    return;
+  }
+  if (btn) { btn.textContent = 'BUILDING...'; }
 
   var urls = {};
   open.forEach(function(p) { if (p.t1Logo) urls[p.t1Logo] = true; if (p.t2Logo) urls[p.t2Logo] = true; });
@@ -2251,69 +2300,59 @@ async function dimersGrade() {
   if (!pending.length) { showError('dimersMsg', 'No finished pending picks to grade'); return; }
   clearError('dimersMsg');
 
-  var dateSet = {};
-  pending.forEach(function(r) {
-    var d = parseGameDate(r.gameDate);
-    dateSet[d.getFullYear() + '' + pad2(d.getMonth() + 1) + pad2(d.getDate())] = true;
+  var fixtures;
+  try { fixtures = await ooFetchCfbFixtures(); } catch (e) { showError('dimersMsg', 'Fixture fetch failed: ' + e.message); return; }
+
+  var matchedFx = {};
+  pending.forEach(function(r, idx) {
+    for (var i = 0; i < fixtures.length; i++) {
+      var fx = fixtures[i];
+      var ok = (teamsMatch(fx.home.name, r.team1) && teamsMatch(fx.away.name, r.team2)) ||
+               (teamsMatch(fx.home.name, r.team2) && teamsMatch(fx.away.name, r.team1));
+      if (ok) { matchedFx[idx] = fx; break; }
+    }
   });
 
-  var games = [];
-  var dates = Object.keys(dateSet);
-  for (var i = 0; i < dates.length; i++) {
-    for (var gi = 0; gi < 2; gi++) {
-      try {
-        var resp = await fetch('https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard?dates=' + dates[i] + '&groups=' + ['80', '81'][gi] + '&limit=400');
-        if (!resp.ok) continue;
-        var data = await resp.json();
-        (data.events || []).forEach(function(ev) {
-          var comp = (ev.competitions && ev.competitions[0]) || {};
-          var st = (comp.status && comp.status.type) || {};
-          if (!st.completed) return;
-          var home = null, away = null;
-          (comp.competitors || []).forEach(function(c) { if (c.homeAway === 'home') home = c; else if (c.homeAway === 'away') away = c; });
-          if (!home || !away) return;
-          games.push({
-            home: (home.team && (home.team.displayName || home.team.location)) || '',
-            away: (away.team && (away.team.displayName || away.team.location)) || '',
-            hs: parseFloat(home.score), as: parseFloat(away.score)
-          });
-        });
-      } catch (e) {}
-    }
-  }
+  var fxIds = [];
+  var seenFx = {};
+  Object.keys(matchedFx).forEach(function(idx) {
+    var fx = matchedFx[idx];
+    if (!seenFx[fx.id]) { seenFx[fx.id] = true; fxIds.push(fx.id); }
+  });
+  var resultsById = fxIds.length ? await ooFetchResults(fxIds) : {};
 
   var graded = 0;
-  pending.forEach(function(r) {
-    var g = null;
-    for (var k = 0; k < games.length; k++) {
-      var t1ok = teamsMatch(games[k].home, r.team1) || teamsMatch(games[k].away, r.team1);
-      var t2ok = teamsMatch(games[k].home, r.team2) || teamsMatch(games[k].away, r.team2);
-      if (t1ok && t2ok) { g = games[k]; break; }
-    }
-    if (!g || isNaN(g.hs) || isNaN(g.as)) return;
-    var total = g.hs + g.as;
-    var res = null;
-    if (r.betType === 'Total O') res = total === r.line ? 'P' : (total > r.line ? 'W' : 'L');
-    else if (r.betType === 'Total U') res = total === r.line ? 'P' : (total < r.line ? 'W' : 'L');
+  pending.forEach(function(r, idx) {
+    var fx = matchedFx[idx];
+    if (!fx) return;
+    var res = resultsById[fx.id];
+    if (!res || !ooIsFinal(res, fx.status)) return;
+    var score = ooFinalScore(res);
+    if (!score) return;
+
+    var total = score.home + score.away;
+    var result = null;
+    if (r.betType === 'Total O') result = total === r.line ? 'P' : (total > r.line ? 'W' : 'L');
+    else if (r.betType === 'Total U') result = total === r.line ? 'P' : (total < r.line ? 'W' : 'L');
     else if (r.betTeam) {
-      var isHome = teamsMatch(g.home, r.betTeam);
-      var my = isHome ? g.hs : g.as, opp = isHome ? g.as : g.hs;
-      if (r.betType === 'Spread') { var adj = my + r.line - opp; res = adj === 0 ? 'P' : (adj > 0 ? 'W' : 'L'); }
-      else { res = my === opp ? 'P' : (my > opp ? 'W' : 'L'); }
+      var isHome = teamsMatch(fx.home.name, r.betTeam);
+      var my = isHome ? score.home : score.away, opp = isHome ? score.away : score.home;
+      if (r.betType === 'Spread') { var adj = my + r.line - opp; result = adj === 0 ? 'P' : (adj > 0 ? 'W' : 'L'); }
+      else { result = my === opp ? 'P' : (my > opp ? 'W' : 'L'); }
     }
-    if (res) {
-      r.result = res;
+    if (result) {
+      r.result = result;
       r.status = 'Graded';
-      if (res === 'W') r.profitLoss = r.odds < 0 ? 1 : r.odds / 100;
-      else if (res === 'L') r.profitLoss = -r.stake;
+      if (result === 'W') r.profitLoss = r.odds < 0 ? 1 : r.odds / 100;
+      else if (result === 'L') r.profitLoss = -r.stake;
       else r.profitLoss = 0;
-      r.finalScore = g.hs + '-' + g.as;
+      r.finalScore = score.home + '-' + score.away;
       graded++;
     }
   });
 
   dimersSave(rows);
-  showSuccess('dimersMsg', 'Graded ' + graded + ' of ' + pending.length + ' finished picks.');
+  showSuccess('dimersMsg', 'Graded ' + graded + ' of ' + pending.length + ' finished picks via OpticOdds.');
   dimersRender();
 }
 
