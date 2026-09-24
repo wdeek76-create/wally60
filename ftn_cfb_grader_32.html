@@ -1922,8 +1922,11 @@ var BOOK_STYLE = {
   'Fan Duel':   { bg: '#1e73ff', fg: '#fff', txt: 'FD' },
   'Caesars Sportbook': { bg: '#0f5132', fg: '#d4af37', txt: 'CZ' }
 };
-function bookBadge(key, displayName) {
-  var uri = logoOf(key);
+function bookBadge(key, displayName, logoMap) {
+  // Card build passes pre-resolved data-URI logos (see cardBookLogos in makeDiscordCard): an
+  // https:// logoOf() URL isn't guaranteed to finish loading before html2canvas snapshots the
+  // DOM, so a raw network URL here would just render blank in the exported PNG.
+  var uri = (logoMap && logoMap[key]) || '';
   if (uri) return '<img src="' + uri + '" style="width:22px;height:22px;object-fit:contain;flex-shrink:0;border-radius:5px;">';
   var s = BOOK_STYLE[displayName] || { bg: '#374151', fg: '#fff', txt: String(displayName || '?').slice(0, 2).toUpperCase() };
   var fs = s.txt.length > 2 ? 8 : 10;
@@ -1945,7 +1948,7 @@ function betHeadline(p) {
   return { main: shortTeam(p.betTeam || p.team1), tag: 'MONEYLINE' };
 }
 
-function buildCardHtml(plays, logos, part, totalParts) {
+function buildCardHtml(plays, logos, part, totalParts, cardBookLogos) {
   var dts = plays.map(function(p) { return parseGameDate(p.gameDate); }).filter(Boolean).sort(function(a, b) { return a - b; });
   var DOW = ['SUN','MON','TUE','WED','THU','FRI','SAT'], MON = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
   function dLabel(d) { return DOW[d.getDay()] + ', ' + MON[d.getMonth()] + ' ' + d.getDate(); }
@@ -2028,7 +2031,7 @@ function buildCardHtml(plays, logos, part, totalParts) {
       var liqTxt = ooLiqStr(q).trim();
       var liqHtml = liqTxt ? '<span style="font-family:\'JetBrains Mono\',ui-monospace,Menlo,monospace;font-size:11px;font-weight:700;color:#27c071;">' + liqTxt + '</span>' : '';
       h += '<div style="display:flex;align-items:center;justify-content:center;gap:10px;background:#0b0d12;border:1px solid ' + (i === 0 ? '#3b4a63' : '#232838') + ';border-radius:10px;padding:7px 10px;margin-bottom:6px;">' +
-           bookBadge(q.key, q.book) + '<span style="font-family:\'JetBrains Mono\',ui-monospace,Menlo,monospace;font-size:14px;font-weight:700;color:#9ec1ff;min-width:52px;text-align:left;">' + fmtOdds(q.odds) + '</span>' + liqHtml + eHtml + '</div>';
+           bookBadge(q.key, q.book, cardBookLogos) + '<span style="font-family:\'JetBrains Mono\',ui-monospace,Menlo,monospace;font-size:14px;font-weight:700;color:#9ec1ff;min-width:52px;text-align:left;">' + fmtOdds(q.odds) + '</span>' + liqHtml + eHtml + '</div>';
     });
     if (playTo !== null) {
       h += '<div style="display:flex;align-items:center;justify-content:center;gap:12px;background:#0b0d12;border:1px solid #232838;border-radius:10px;padding:6px 10px;">' +
@@ -2070,6 +2073,19 @@ async function makeDiscordCard() {
   var converted = Object.keys(urls).filter(function(u) { return logos[u] && logos[u].indexOf('data:') === 0; }).length;
   console.log('Card logos: ' + Object.keys(urls).length + ' urls, ' + converted + ' converted to data-URI, ' + missing + ' plays have no logo stored');
 
+  // Sportsbook badges same treatment as team logos: a raw https:// URL from logoOf() isn't
+  // guaranteed to finish loading before html2canvas snapshots the panel, so it'd render blank
+  // in the exported image. Pre-convert every book we're about to draw to a data URI first.
+  var cardBookLogos = {};
+  await Promise.all(OO_BOOKS.map(async function(ob) {
+    var raw = logoOf(ob.key);
+    if (!raw) return;
+    if (raw.indexOf('data:') === 0) { cardBookLogos[ob.key] = raw; return; }
+    var uri = await toDataUri(raw);
+    if (uri) cardBookLogos[ob.key] = uri;
+  }));
+  console.log('Card book logos: ' + Object.keys(cardBookLogos).length + '/' + OO_BOOKS.length + ' resolved to data-URI');
+
   var PER_PAGE = 12;
   var pages = [];
   for (var pi = 0; pi < open.length; pi += PER_PAGE) pages.push(open.slice(pi, pi + PER_PAGE));
@@ -2087,7 +2103,7 @@ async function makeDiscordCard() {
       var panel = document.createElement('div');
       panel.style.cssText = 'position:fixed;left:-99999px;top:0;width:' + width + 'px;padding:20px;background:#07080b;font-family:\'Plus Jakarta Sans\',-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;';
       document.body.appendChild(panel);
-      panel.innerHTML = buildCardHtml(pagePlays, logos, pg + 1, pages.length);
+      panel.innerHTML = buildCardHtml(pagePlays, logos, pg + 1, pages.length, cardBookLogos);
       var canvas = await html2canvas(panel, { backgroundColor: '#07080b', scale: 2, logging: false, useCORS: true, allowTaint: false });
       document.body.removeChild(panel);
       var blob = await new Promise(function(res) { canvas.toBlob(res, 'image/png'); });
