@@ -107,6 +107,18 @@ main{flex:1;padding:12px calc(var(--sar) + 12px) 160px calc(var(--sal) + 12px)}
 .rcell .rbl{display:block;font-size:8.5px;font-weight:800;padding:2px 6px;margin-top:3px;border-radius:999px;border:1px solid rgba(168,85,247,.55);background:rgba(168,85,247,.16);color:#fff;text-decoration:none;letter-spacing:.2px}
 .rcell .rmeta{display:flex;gap:6px;font-size:9.5px;font-weight:700;color:#fff;margin-top:2px}
 .rcell .rliqsum{display:inline-block;font-family:var(--mono);font-size:7.5px;font-weight:700;color:#fff;margin-top:2px;padding:1.5px 6px;border-radius:999px;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.12)}
+@keyframes flashUp{0%{background:rgba(74,222,128,.3);color:#4ade80;border-radius:6px}100%{background:transparent;color:inherit}}
+@keyframes flashDown{0%{background:rgba(248,113,113,.3);color:#f87171;border-radius:6px}100%{background:transparent;color:inherit}}
+.flash-up{animation:flashUp 1.1s ease-out}
+.flash-down{animation:flashDown 1.1s ease-out}
+@keyframes flashUpRv{0%{background:rgba(74,222,128,.35);color:#4ade80;transform:scale(1.16);border-radius:6px}55%{transform:scale(1.02)}100%{background:transparent;color:#fff;transform:scale(1)}}
+@keyframes flashDownRv{0%{background:rgba(248,113,113,.35);color:#f87171;transform:scale(1.16);border-radius:6px}55%{transform:scale(1.02)}100%{background:transparent;color:#fff;transform:scale(1)}}
+.rcell .rv.flash-up{animation:flashUpRv 1s ease-out;display:inline-block}
+.rcell .rv.flash-down{animation:flashDownRv 1s ease-out;display:inline-block}
+@keyframes flashUpPill{0%{background:rgba(74,222,128,.45);color:#4ade80}100%{background:rgba(255,255,255,.08);color:#fff}}
+@keyframes flashDownPill{0%{background:rgba(248,113,113,.45);color:#f87171}100%{background:rgba(255,255,255,.08);color:#fff}}
+.rcell .rliqsum.flash-up{animation:flashUpPill 1.1s ease-out}
+.rcell .rliqsum.flash-down{animation:flashDownPill 1.1s ease-out}
 .pdetail{margin:2px 10px 10px;padding:9px 10px;border-radius:10px;background:rgba(23,27,36,.4);border:1px solid var(--line);font-family:var(--mono);font-size:11px}
 .bdl{display:flex;align-items:center;gap:8px;flex-wrap:wrap;color:#fff}
 .bdl .s{font-weight:800}.bdl .s.o{color:#fff}.bdl .s.u{color:#fff}
@@ -292,6 +304,7 @@ const getBackend = () => LS.get('oo_backend_url', BACKEND_DEFAULT);
 const BOOKS = ['Props Builder','FanDuel','Novig','Prophet X','Kalshi','Pinnacle','bet105','DraftKings','Fliff','BetOnline'];
 const BOOK_REQ = [...BOOKS,'Courtside','Onyx Odds'];
 const EXCH = new Set(['novig','prophet x','kalshi']);
+const SHOW_MAX = new Set(['pinnacle','bet105']); // flat-limit books whose max we show under the odds too
 const SHORT = { 'props builder':'PB','fanduel':'FD','novig':'Novig','prophet x':'PX','kalshi':'Kalshi','pinnacle':'Pin','bet105':'b105','draftkings':'DK','fliff':'Fliff','betonline':'BOL' };
 const canonBook = n => { const k=String(n||'').toLowerCase(); if(k==='courtside'||k==='onyx odds') return 'draftkings'; return k; };
 const bookLabel = n => { const k=canonBook(n); return BOOKS.find(b=>b.toLowerCase()===k) || n; };
@@ -599,21 +612,38 @@ function depthSummary(o){
   const wdec=rest.reduce((a,l)=>a+toDec(l.price)*l.size,0)/size;
   return { top:lv[0].size, size, avg:toAm(wdec) };
 }
-// One side's cell within a book row: price, win% + top liq inline, full-depth weighted liq
-// summary underneath (same numbers pillDetail's expanded "blad" row computes, just always
+// Tracks the last value seen at each (ctx|side|book|field) slot so re-renders can tell
+// whether a price/liquidity number actually moved, and flash it green (up) or red (down)
+// if so. First sighting of a slot never flashes.
+const flashSeen = {};
+function flashCls(key, val, isPrice){
+  if(val==null) return '';
+  const prev = flashSeen[key];
+  flashSeen[key] = val;
+  if(prev==null) return '';
+  const delta = isPrice ? (toDec(val)-toDec(prev)) : (val-prev);
+  if(!delta) return '';
+  return delta>0 ? ' flash-up' : ' flash-down';
+}
+// One side's cell within a book row: price, win% + top liq inline (also shown for
+// Pinnacle/bet105 even though they're not exchanges), full-depth weighted liq summary
+// underneath (same numbers pillDetail's expanded "blad" row computes, just always
 // visible instead of needing a tap).
 function sideCellHtml(b, sd, o, pt, ctxKey, active){
   if(!o) return `<div class="rcell empty">–</div>`;
+  const base = `${ctxKey}|${sd}|${b.key}`;
   const pct = b.ex ? `<span>${Math.round(Number(winPct(o.price)))}%</span>` : '';
   const d = b.ex ? depthSummary(o) : null;
   const atTop = d ? d.top : (o.limits?.max!=null?Number(o.limits.max):null);
-  const liq = b.ex && atTop!=null ? `<span>${usd(atTop)}</span>` : '';
-  const liqSummary = (b.ex && d && d.size) ? `<div class="rliqsum">${usd(d.size)} @ ${fmtAm(d.avg)}</div>` : '';
+  const showMax = b.ex || SHOW_MAX.has(b.key);
+  const liq = showMax && atTop!=null ? `<span class="${flashCls(base+'|liq',atTop).trim()}">${usd(atTop)}</span>` : '';
+  const liqSummary = (b.ex && d && d.size) ? `<div class="rliqsum${flashCls(base+'|liqsum', d.size)}">${usd(d.size)} @ ${fmtAm(d.avg)}</div>` : '';
+  const priceCls = flashCls(base+'|price', Number(o.price), true);
   const key=`${sd}|${b.key}`;
   const dl=deepLinkFor(o); if(dl) sawDeepLinks=true;
   const bet = dl ? `<a class="rbl" href="${esc(dl)}" target="_blank" rel="noopener" data-betlink>Bet</a>` : '';
   return `<div class="rcell${playable(o.price,pt)?'':' bad'}${active===key?' active':''}" role="button" data-pill="${ctxKey}|${key}">
-    <span class="rv">${fmtAm(o.price)}</span>${bet}
+    <span class="rv${priceCls}">${fmtAm(o.price)}</span>${bet}
     ${(pct||liq)?`<div class="rmeta">${pct}${liq}</div>`:''}
     ${liqSummary}
   </div>`;
