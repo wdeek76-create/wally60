@@ -94,6 +94,15 @@ main{flex:1;padding:10px calc(var(--sar) + 12px) 40px calc(var(--sal) + 12px)}
 .bigr{text-align:right;flex:0 0 auto}
 .bigv{font-family:var(--mono);font-size:17px;font-weight:800;color:var(--amber)}
 .bigtag{font-size:8px;font-weight:800;letter-spacing:.4px;text-transform:uppercase;color:#fff;opacity:.5}
+.bigcard{flex-direction:column;align-items:stretch}
+.bigrow1{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.bigopp{margin-top:7px;padding-top:7px;border-top:1px dashed rgba(251,191,36,.25);font-family:var(--mono);font-size:10px;color:#fff;opacity:.7;display:flex;align-items:center;justify-content:space-between;gap:8px}
+.gradebadge{font-size:8.5px;font-weight:800;letter-spacing:.4px;text-transform:uppercase;padding:2px 7px;border-radius:999px;flex:0 0 auto}
+.gradebadge.pending{background:rgba(255,255,255,.08);color:#fff;opacity:.6}
+.gradebadge.live{background:rgba(125,211,252,.15);color:var(--cyan)}
+.gradebadge.win{background:rgba(34,197,94,.18);color:var(--green)}
+.gradebadge.loss{background:rgba(255,92,92,.18);color:var(--red)}
+.gradebadge.push{background:rgba(251,191,36,.18);color:var(--amber)}
 
 /* liquidity-building rollup: added (not taken) size compiled per player+game */
 .secl{display:flex;align-items:center;gap:6px;padding:12px 2px 6px}
@@ -284,9 +293,10 @@ async function loadFixtures(sk){
 // book pulled and re-quoted) rather than a fill, and nothing is counted for that poll.
 const REPRICE_GUARD_CENTS = 20;
 const REFRESH_MS = 30000;
-// Everything gets tracked and bucketed regardless of size — but a single fill or add this big,
-// in one poll, on one book, is the actual signal worth surfacing on its own, separate from
-// totals that can reach this size slowly through many small $50-$500 dribbles.
+// Everything gets tracked and bucketed regardless of size — real money shows up as many small
+// fills accumulating over a day, not one big single poll event, so "big" is judged on a prop's
+// running total (slot.totalSize), not any single fill. Props that cross this get pinned to a
+// Big Money section up top, e.g. "$30k ordered on Mahomes Over 275.5 Pass Yds today @ avg -138".
 const BIG_THRESHOLD = 10000;
 
 // slotKey = sk|fixtureId|mkey|playerKey|side|line   (one row in the report — flow is summed
@@ -299,24 +309,20 @@ let sessionStart = Date.now();
 // different markets/sides/lines, is the signal worth surfacing, so it's summed here and shown as
 // its own section above the per-prop report ("add it on top").
 let liqRollups = {};
-// Single-event big-money feed — every fill/add is already counted in slots/liqRollups above; this
-// is just a highlight reel of the individual events that cleared BIG_THRESHOLD on their own,
-// newest first, capped so it doesn't grow forever.
-let bigEvents = [];
 
 function loadState(){
   try{
     const raw = JSON.parse(LS.get('flow_state','null'));
-    if(raw && raw.slots){ slots=raw.slots; bookSnap=raw.bookSnap||{}; sessionStart=raw.sessionStart||Date.now(); liqRollups=raw.liqRollups||{}; bigEvents=raw.bigEvents||[]; }
+    if(raw && raw.slots){ slots=raw.slots; bookSnap=raw.bookSnap||{}; sessionStart=raw.sessionStart||Date.now(); liqRollups=raw.liqRollups||{}; }
   }catch(e){}
 }
 let saveT;
 function saveState(){
   clearTimeout(saveT);
-  saveT=setTimeout(()=>{ try{ LS.set('flow_state', JSON.stringify({slots,bookSnap,sessionStart,liqRollups,bigEvents})); }catch(e){} }, 800);
+  saveT=setTimeout(()=>{ try{ LS.set('flow_state', JSON.stringify({slots,bookSnap,sessionStart,liqRollups})); }catch(e){} }, 800);
 }
 function resetState(){
-  slots={}; bookSnap={}; liqRollups={}; bigEvents=[]; sessionStart=Date.now();
+  slots={}; bookSnap={}; liqRollups={}; sessionStart=Date.now();
   try{ localStorage.removeItem('flow_state'); }catch(e){}
   render();
   toast('Tracking reset');
@@ -390,7 +396,10 @@ function processOddsRows(sk, rows, fixtureMap){
       slot.recent.unshift({ at:Date.now(), bk, size:filledSize, price:avgFillAm });
       slot.recent = slot.recent.slice(0,6);
       slot._justUpdated = true;
-      if(filledSize >= BIG_THRESHOLD) pushBigEvent({ type:'fill', sk, playerName:titleCase(sel), game:slot.meta.game, start:slot.meta.start, mLabel, bk, size:filledSize, price:avgFillAm });
+      // Auto-track once a prop's running total clears BIG_THRESHOLD (once, on the crossing —
+      // not every poll after). It gets graded automatically once the game finishes (see
+      // refreshGrading), same win/loss/push logic the other tools use.
+      if(!slot.tracked && slot.totalSize>=BIG_THRESHOLD){ slot.tracked=true; slot.trackedAt=Date.now(); slot.gradeStatus='pending'; }
     }
     if(adds.length){
       if(slot.totalAdded==null){ slot.totalAdded=0; slot.addedNotionalDec=0; slot.recentAdds=[]; }
@@ -404,7 +413,6 @@ function processOddsRows(sk, rows, fixtureMap){
       const avgAddAm = toAm(avgAddDec);
       slot.recentAdds.unshift({ at:Date.now(), bk, size:addedSize, price:avgAddAm });
       slot.recentAdds = slot.recentAdds.slice(0,6);
-      if(addedSize >= BIG_THRESHOLD) pushBigEvent({ type:'add', sk, playerName:titleCase(sel), game:slot.meta.game, start:slot.meta.start, mLabel, bk, size:addedSize, price:avgAddAm });
 
       const rKey = `${sk}|${o._fx}|${playerKey}`;
       if(!liqRollups[rKey]) liqRollups[rKey] = { sk, fx:o._fx, playerKey, playerName:titleCase(sel),
@@ -419,16 +427,86 @@ function processOddsRows(sk, rows, fixtureMap){
   });
 }
 
-function pushBigEvent(ev){
-  bigEvents.unshift({ ...ev, at:Date.now() });
-  bigEvents = bigEvents.slice(0,40);
-}
 function avgPriceOf(slot){ return slot.totalSize ? toAm(slot.totalNotionalDec/slot.totalSize) : null; }
 function nearBooksFor(slot){
   const avg = avgPriceOf(slot); if(avg==null) return [];
   return Object.entries(slot.curBooks)
     .filter(([bk,v]) => centsDiff(v.price, avg) <= 10)
     .map(([bk,v]) => ({ bk, name:v.name, price:v.price }));
+}
+// The complementary side of a two-sided prop (Over<->Under) for the same player/line — its
+// current best price is shown alongside a tracked pick for context (a maker offering Over +140
+// is, in effect, the Under side of that trade; seeing where Under sits now is the useful check).
+// Single-sided markets (moneyline, anytime-TD "Yes") have no such pairing, so this returns null.
+function oppositeSlot(slot){
+  const m = slot.meta; if(m.side!=='over' && m.side!=='under') return null;
+  const oppSide = m.side==='over' ? 'under' : 'over';
+  const oppKey = slotKeyFor(m.sk, m.fx, m.mkey, m.playerKey, oppSide, m.line);
+  return slots[oppKey] || null;
+}
+function bestCurPrice(slot){
+  const entries = Object.entries(slot.curBooks); if(!entries.length) return null;
+  // Prefer a non-exchange consensus book if one is quoting, else whatever's there.
+  const flat = entries.find(([bk])=>!EXCH.has(bk));
+  const [bk,v] = flat || entries[0];
+  return { bk, price:v.price, name:v.name };
+}
+
+// ───────────────────────── auto-grading (same win/loss/push logic as the other tools) ─────────────────────────
+const STAT_CANDS = {
+  pts:['points','pts'], reb:['rebounds','total_rebounds','reb'], ast:['assists','ast'], '3pm':['three_point_field_goals_made','three_pointers_made','three_points_made','threes_made','3pm','three_pointers'],
+  pass_yds:['passing_yards'], pass_td:['passing_touchdowns'], pass_att:['passing_attempts'], pass_cmp:['passing_completions','completions'], rush_yds:['rushing_yards'], rush_att:['rushing_attempts'], rec_yds:['receiving_yards'], rec:['receptions'],
+  sog:['shots_on_goal','shots'], g:['goals'], a:['assists'], sv:['saves'],
+  hits:['hits'], xbh:['extra_base_hits'], tb:['total_bases'], hr:['home_runs'], rbi:['rbis','runs_batted_in'], runs:['runs'], bb:['walks'], sb:['stolen_bases'], k:['strikeouts'], pk:['pitcher_strikeouts','strikeouts'],
+};
+function statFor(r, mkey, sk){
+  const periods=Array.isArray(r.stats)?r.stats:[]; const all=(periods.find(x=>x.period==='all')||periods[0]||{}).stats||{};
+  const get=k=>{ for(const c of (STAT_CANDS[k]||[])) if(all[c]!=null) return Number(all[c]); const flat=k.replace(/_/g,''); const kk=Object.keys(all).find(x=>x.toLowerCase().replace(/_/g,'')===flat); return kk?Number(all[kk]):null; };
+  const sum=(...ks)=>{ const v=ks.map(get); return v.some(x=>x==null)?null:v.reduce((a,b)=>a+b,0); };
+  if(sk==='nfl') return mkey==='atd' ? sum('rushing_touchdowns','receiving_touchdowns') : get(mkey);
+  if(sk==='nhl') return mkey==='pts' ? get('points') : get(mkey);
+  if(mkey==='pra') return sum('pts','reb','ast'); if(mkey==='pr') return sum('pts','reb'); if(mkey==='pa') return sum('pts','ast'); if(mkey==='ra') return sum('reb','ast');
+  return get(mkey);
+}
+function gradeSideOutcome(slot){
+  if(slot.actual==null) return null;
+  if(slot.meta.side==='over') return slot.actual>slot.meta.line ? 'win' : slot.actual===slot.meta.line ? 'push' : 'loss';
+  if(slot.meta.side==='under') return slot.actual<slot.meta.line ? 'win' : slot.actual===slot.meta.line ? 'push' : 'loss';
+  return slot.result || null;
+}
+let gradingBusy = false;
+async function refreshGrading(){
+  const pending = Object.values(slots).filter(s=>s.tracked && s.gradeStatus!=='final');
+  if(gradingBusy || !pending.length) return;
+  gradingBusy = true;
+  try{
+    const fids = [...new Set(pending.map(s=>s.meta.fx))];
+    const res = {};
+    for(const ids of chunk(fids,5)){ try{ const r=await oo('/fixtures/results',{fixture_id:ids}); (r?.data||[]).forEach(x=>{ if(x?.fixture?.id) res[x.fixture.id]=x; }); }catch(e){ console.warn('[flow] grading results failed',e.message); } }
+    const liveOrDone = fids.filter(id=>{ const st=res[id]?.fixture?.status; return st && st!=='unplayed'; });
+    const pr = {};
+    for(const ids of chunk(liveOrDone,5)){ try{ const r=await oo('/fixtures/player-results',{fixture_id:ids}); (r?.data||[]).forEach(x=>{ if(x?.fixture?.id) pr[x.fixture.id]=x; }); }catch(e){ console.warn('[flow] grading player-results failed',e.message); } }
+    pending.forEach(s=>{
+      const R=res[s.meta.fx]; if(!R) return;
+      const st=R.fixture?.status; s.gradeStatus = st==='completed' ? 'final' : (st && st!=='unplayed' ? 'live' : 'pending');
+      const S=SPORTS[s.meta.sk];
+      if(S.ml){
+        if(st==='completed' && R.scores){
+          const aw=Number(R.scores.away?.total), hm=Number(R.scores.home?.total);
+          const iAmHome = normName(R.fixture?.home_competitors?.[0]?.name||'')===s.meta.playerKey;
+          if(!isNaN(aw) && !isNaN(hm)) s.result = (iAmHome?hm>aw:aw>hm) ? 'win' : (aw===hm ? 'push' : 'loss');
+        }
+        return;
+      }
+      const P=pr[s.meta.fx];
+      if(P){ const r=(P.results||[]).find(x=>normName(cleanSel(x.player?.name))===s.meta.playerKey);
+        if(r){ const v=statFor(r,s.meta.mkey,s.meta.sk); if(v!=null && !isNaN(v)) s.actual=v; } }
+      s.result = gradeSideOutcome(s);
+    });
+    saveState();
+    render();
+  }catch(e){ console.warn('[flow] grading pass failed', e.message); }
+  finally{ gradingBusy=false; }
 }
 
 // ───────────────────────── polling ─────────────────────────
@@ -506,23 +584,41 @@ function rollupCardHtml(key, roll){
   </div>`;
 }
 
-function bigEventHtml(ev){
+// A prop whose RUNNING total has crossed BIG_THRESHOLD — real size shows up as many small fills
+// accumulating over a day, not one giant single poll event, so this is judged on slot.totalSize
+// the same number the main report already tracks, not a separate single-event feed.
+function bigCardHtml(key, slot){
+  const m = slot.meta; const avg = avgPriceOf(slot);
+  const sideLabel = m.side!=='single' ? (m.side==='over'?'Over':'Under') : (SPORTS[m.sk].ml ? 'ML' : 'Yes');
+  // Opposite side of the SAME market/line (Over<->Under on this exact prop, never a different
+  // market) — its current price for context, since a maker on one side is effectively the other.
+  const opp = oppositeSlot(slot);
+  const oppPrice = opp ? bestCurPrice(opp) : null;
+  const oppLabel = m.side==='over' ? 'Under' : m.side==='under' ? 'Over' : null;
+  const grade = slot.tracked
+    ? (slot.result ? `<span class="gradebadge ${slot.result}">${slot.result}</span>` : `<span class="gradebadge ${slot.gradeStatus||'pending'}">${slot.gradeStatus==='live'?'Live':'Pending'}</span>`)
+    : '';
   return `<div class="bigcard">
-    <div class="bigl">
-      <div class="bigname">${esc(ev.playerName)}</div>
-      <div class="bigsub">${esc(ev.mLabel)}${ev.game?' · '+esc(ev.game):''}${ev.start?' · '+esc(etTime(ev.start)):''} · ${esc(bookShort(ev.bk))} @ ${fmtAm(ev.price)}</div>
+    <div class="bigrow1">
+      <div class="bigl">
+        <div class="bigname">${esc(m.playerName)}</div>
+        <div class="bigsub">${esc(marketLabel(m.sk,m.mkey))}${m.line!=null?' '+m.line:''}${SPORTS[m.sk].ml?'':' '+esc(sideLabel)}${m.game?' · '+esc(m.game):''}${m.start?' · '+esc(etTime(m.start)):''}${avg!=null?' · avg '+esc(fmtAm(avg)):''}</div>
+      </div>
+      <div class="bigr"><div class="bigv">${usd(slot.totalSize)}</div><div class="bigtag">Ordered today</div></div>
     </div>
-    <div class="bigr"><div class="bigv">${usd(ev.size)}</div><div class="bigtag">${ev.type==='fill'?'Ordered':'Added'}</div></div>
+    ${oppLabel||grade ? `<div class="bigopp"><span>${oppLabel&&oppPrice?`${esc(oppLabel)} now ${fmtAm(oppPrice.price)} (${esc(bookShort(oppPrice.bk))})`:(oppLabel?`${esc(oppLabel)}: no current price`:'')}</span>${grade}</div>` : ''}
   </div>`;
 }
 
 function render(){
-  // Big single events (one fill or one post >= BIG_THRESHOLD in a single poll) — the actual
-  // signal the running totals can bury under a lot of small $50-500 activity. Shown newest
-  // first, still scoped to the active sport and to games that haven't started.
-  const bigList = bigEvents.filter(ev => (activeSport==='all'||ev.sk===activeSport) && (!ev.start || new Date(ev.start).getTime()>Date.now()));
+  // Once a tracked game's start time passes, drop its cards from the report — this tool is
+  // pre-game only. Totals stay in localStorage in case the start time shifts, they just stop
+  // rendering and stop being polled (see pollOnce).
+  const list = Object.entries(slots).filter(([,s])=>s.totalSize>0 && (activeSport==='all'||s.meta.sk===activeSport) && (!s.meta.start || new Date(s.meta.start).getTime()>Date.now()));
+
+  const bigList = list.filter(([,s])=>s.totalSize>=BIG_THRESHOLD).slice().sort((a,b)=>b[1].totalSize-a[1].totalSize);
   $('#bigmoney').innerHTML = bigList.length
-    ? `<div class="secl big"><span class="dot"></span><span class="t">Big Money (${usd(BIG_THRESHOLD)}+)</span></div>${bigList.map(bigEventHtml).join('')}`
+    ? `<div class="secl big"><span class="dot"></span><span class="t">Big Money (${usd(BIG_THRESHOLD)}+ ordered)</span></div>${bigList.map(([k,s])=>bigCardHtml(k,s)).join('')}`
     : '';
 
   // Liquidity ADDED, compiled per player+game — shown above the main report regardless of
@@ -535,10 +631,6 @@ function render(){
   rollList.forEach(([,r])=>{ r._justUpdated=false; });
   document.querySelectorAll('.rcard.pop').forEach(el=>el.addEventListener('animationend',()=>el.classList.remove('pop'),{once:true}));
 
-  // Once a tracked game's start time passes, drop its cards from the report — this tool is
-  // pre-game only. Totals stay in localStorage in case the start time shifts, they just stop
-  // rendering and stop being polled (see pollOnce).
-  const list = Object.entries(slots).filter(([,s])=>s.totalSize>0 && (activeSport==='all'||s.meta.sk===activeSport) && (!s.meta.start || new Date(s.meta.start).getTime()>Date.now()));
   $('#sumTotal').textContent = usd(list.reduce((a,[,s])=>a+s.totalSize,0));
   $('#sumProps').textContent = list.length;
   $('#sumNear').textContent = list.filter(([,s])=>nearBooksFor(s).length>0).length;
@@ -585,7 +677,9 @@ $('#resetBtn').addEventListener('click',()=>{ if(confirm('Reset all tracked orde
   render();
   await loadBookLogos();
   await pollOnce(true);
+  refreshGrading();
   setInterval(()=>{ if(document.visibilityState==='visible') pollOnce(false); }, REFRESH_MS);
+  setInterval(()=>{ if(document.visibilityState==='visible') refreshGrading(); }, 120000);
 })();
 </script>
 </body>
