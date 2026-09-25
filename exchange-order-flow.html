@@ -82,7 +82,12 @@ main{flex:1;padding:10px calc(var(--sar) + 12px) 40px calc(var(--sal) + 12px)}
 .cnearbk{display:flex;align-items:center;gap:4px;background:rgba(125,211,252,.1);border:1px solid rgba(125,211,252,.3);border-radius:999px;padding:3px 8px 3px 4px;font-family:var(--mono);font-size:9.5px;font-weight:700;color:var(--cyan)}
 .cnearbk img{width:13px;height:13px;border-radius:3px;object-fit:cover;background:#fff}
 .cnone{font-size:10px;color:#fff;opacity:.45;font-style:italic}
-.crecent{margin-top:7px;font-family:var(--mono);font-size:9px;color:#fff;opacity:.4}
+.crecent{margin-top:7px;font-family:var(--mono);font-size:9px;color:#fff;opacity:.7}
+.crecent b{display:block;font-size:8px;font-weight:800;letter-spacing:.4px;text-transform:uppercase;opacity:.6;margin-bottom:3px}
+.crecent div{opacity:.85;padding:1px 0}
+.card, .bigcard, .rcard{cursor:pointer;transition:border-color .15s}
+.card.pinned, .bigcard.pinned, .rcard.pinned{border-color:var(--purple);box-shadow:0 0 0 1px var(--purple)}
+.ctap{margin-top:7px;font-size:8.5px;font-weight:700;color:var(--purple);opacity:.7;text-align:center}
 
 /* big money: single fills/adds that cleared BIG_THRESHOLD on their own, most urgent section */
 .secl.big .dot{background:var(--amber);box-shadow:0 0 6px var(--amber)}
@@ -513,6 +518,17 @@ async function refreshGrading(){
 let activeSport = 'all';
 let sortMode = 'flow';
 let polling = false;
+// Cards re-sort every poll as totals change, which makes them jump around mid-read — tapping a
+// card pins it to the top of its section (regardless of sort) and expands it with its full recent
+// activity, so you have something stable to look at instead of the whole list reshuffling under you.
+let pinned = new Set();
+document.addEventListener('click', ev=>{
+  const el = ev.target.closest('.card[data-key], .bigcard[data-key], .rcard[data-key]');
+  if(!el) return;
+  const key = el.dataset.key;
+  if(pinned.has(key)) pinned.delete(key); else pinned.add(key);
+  render();
+});
 async function pollOnce(showSpin){
   if(polling) return; polling=true;
   const spinBtn=$('#reload'); if(showSpin) spinBtn.classList.add('spin');
@@ -547,6 +563,7 @@ async function pollOnce(showSpin){
 // ───────────────────────── render ─────────────────────────
 function cardHtml(key, slot){
   const m = slot.meta; const avg = avgPriceOf(slot);
+  const isPinned = pinned.has(key);
   const sideLabel = m.side!=='single' ? (m.side==='over'?'Over':'Under') : (SPORTS[m.sk].ml ? 'ML' : 'Yes');
   const books = Object.entries(slot.byBook).filter(([,v])=>v>1).sort((a,b)=>b[1]-a[1]);
   const near = nearBooksFor(slot);
@@ -556,12 +573,16 @@ function cardHtml(key, slot){
   const nearHtml = near.length
     ? `<div class="cnearrow">${near.map(n=>{ const lg=bookLogo(n.bk); return `<span class="cnearbk">${lg?`<img src="${esc(lg)}" alt="">`:''}${esc(bookShort(n.bk))} ${fmtAm(n.price)}</span>`; }).join('')}</div>`
     : `<span class="cnone">No book still within 10¢</span>`;
-  const recent = slot.recent[0];
-  const recentHtml = recent ? `${usd(recent.size)} @ ${fmtAm(recent.price)} on ${esc(bookShort(recent.bk))} · ${Math.round((Date.now()-recent.at)/60000)}m ago` : '';
-  return `<div class="card${slot._justUpdated?' pop':''}" data-key="${esc(key)}">
+  // Collapsed: just the latest fill. Pinned/expanded: every fill this session, so a card you've
+  // tapped to hold still shows its whole recent history instead of only ever "last: ...".
+  const evList = isPinned ? slot.recent : slot.recent.slice(0,1);
+  const recentHtml = evList.length
+    ? evList.map(r=>`<div>${usd(r.size)} @ ${fmtAm(r.price)} on ${esc(bookShort(r.bk))} · ${Math.round((Date.now()-r.at)/60000)}m ago</div>`).join('')
+    : '';
+  return `<div class="card${slot._justUpdated?' pop':''}${isPinned?' pinned':''}" data-key="${esc(key)}">
     <div class="crow1">
       <span class="cname">${esc(m.playerName)}</span>
-      <span class="ctag">${esc(SPORTS[m.sk].label)}</span>
+      <span class="ctag">${isPinned?'📌 ':''}${esc(SPORTS[m.sk].label)}</span>
     </div>
     <div class="csub">${esc(marketLabel(m.sk,m.mkey))}${m.line!=null?' '+m.line:''}${SPORTS[m.sk].ml?'':' · '+esc(sideLabel)}${m.game?' · '+esc(m.game):''}${m.start?' · '+esc(etTime(m.start)):''}</div>
     <div class="cmain">
@@ -570,17 +591,20 @@ function cardHtml(key, slot){
     </div>
     ${bookBadges?`<div class="cbooks">${bookBadges}</div>`:''}
     <div class="cnear"><div class="cnearl">Still within 10¢ of avg</div>${nearHtml}</div>
-    ${recentHtml?`<div class="crecent">Last: ${recentHtml}</div>`:''}
+    ${recentHtml?`<div class="crecent"><b>${isPinned?'All recent activity':'Last'}</b>${recentHtml}</div>`:''}
+    <div class="ctap">${isPinned?'Tap to unpin':'Tap to pin & see full activity'}</div>
   </div>`;
 }
 
 function rollupCardHtml(key, roll){
+  const isPinned = pinned.has(key);
   const mkts = Object.entries(roll.byMarket).sort((a,b)=>b[1]-a[1])
     .map(([label,v])=>`<span class="rmk">${esc(label)} ${usd(v)}</span>`).join('');
-  return `<div class="rcard${roll._justUpdated?' pop':''}" data-key="${esc(key)}">
-    <div class="rrow1"><span class="rname">${esc(roll.playerName)}</span><span class="rv">${usd(roll.totalAdded)}</span></div>
+  return `<div class="rcard${roll._justUpdated?' pop':''}${isPinned?' pinned':''}" data-key="${esc(key)}">
+    <div class="rrow1"><span class="rname">${isPinned?'📌 ':''}${esc(roll.playerName)}</span><span class="rv">${usd(roll.totalAdded)}</span></div>
     <div class="rsub">${esc(roll.game||'')}${roll.start?' · '+esc(etTime(roll.start)):''} · liquidity added, ${Object.keys(roll.byMarket).length} market${Object.keys(roll.byMarket).length===1?'':'s'}</div>
     ${mkts?`<div class="rmkts">${mkts}</div>`:''}
+    <div class="ctap">${isPinned?'Tap to unpin':'Tap to pin'}</div>
   </div>`;
 }
 
@@ -589,6 +613,7 @@ function rollupCardHtml(key, roll){
 // the same number the main report already tracks, not a separate single-event feed.
 function bigCardHtml(key, slot){
   const m = slot.meta; const avg = avgPriceOf(slot);
+  const isPinned = pinned.has(key);
   const sideLabel = m.side!=='single' ? (m.side==='over'?'Over':'Under') : (SPORTS[m.sk].ml ? 'ML' : 'Yes');
   // Opposite side of the SAME market/line (Over<->Under on this exact prop, never a different
   // market) — its current price for context, since a maker on one side is effectively the other.
@@ -598,17 +623,31 @@ function bigCardHtml(key, slot){
   const grade = slot.tracked
     ? (slot.result ? `<span class="gradebadge ${slot.result}">${slot.result}</span>` : `<span class="gradebadge ${slot.gradeStatus||'pending'}">${slot.gradeStatus==='live'?'Live':'Pending'}</span>`)
     : '';
-  return `<div class="bigcard">
+  const evList = isPinned ? slot.recent : slot.recent.slice(0,1);
+  const recentHtml = evList.length
+    ? `<div class="crecent"><b>${isPinned?'All recent activity':'Last'}</b>${evList.map(r=>`<div>${usd(r.size)} @ ${fmtAm(r.price)} on ${esc(bookShort(r.bk))} · ${Math.round((Date.now()-r.at)/60000)}m ago</div>`).join('')}</div>`
+    : '';
+  return `<div class="bigcard${isPinned?' pinned':''}" data-key="${esc(key)}">
     <div class="bigrow1">
       <div class="bigl">
-        <div class="bigname">${esc(m.playerName)}</div>
+        <div class="bigname">${isPinned?'📌 ':''}${esc(m.playerName)}</div>
         <div class="bigsub">${esc(marketLabel(m.sk,m.mkey))}${m.line!=null?' '+m.line:''}${SPORTS[m.sk].ml?'':' '+esc(sideLabel)}${m.game?' · '+esc(m.game):''}${m.start?' · '+esc(etTime(m.start)):''}${avg!=null?' · avg '+esc(fmtAm(avg)):''}</div>
       </div>
       <div class="bigr"><div class="bigv">${usd(slot.totalSize)}</div><div class="bigtag">Ordered today</div></div>
     </div>
     ${oppLabel||grade ? `<div class="bigopp"><span>${oppLabel&&oppPrice?`${esc(oppLabel)} now ${fmtAm(oppPrice.price)} (${esc(bookShort(oppPrice.bk))})`:(oppLabel?`${esc(oppLabel)}: no current price`:'')}</span>${grade}</div>` : ''}
+    ${isPinned?recentHtml:''}
+    <div class="ctap">${isPinned?'Tap to unpin':'Tap to pin & see full activity'}</div>
   </div>`;
 }
+
+// A tapped/pinned card always sorts first in its section, whatever the sort mode — that's the
+// whole point of pinning one down while the rest of the list keeps reshuffling underneath it.
+const withPinned = cmp => (a,b) => {
+  const pa = pinned.has(a[0]), pb = pinned.has(b[0]);
+  if(pa !== pb) return pa ? -1 : 1;
+  return cmp(a,b);
+};
 
 function render(){
   // Once a tracked game's start time passes, drop its cards from the report — this tool is
@@ -616,7 +655,7 @@ function render(){
   // rendering and stop being polled (see pollOnce).
   const list = Object.entries(slots).filter(([,s])=>s.totalSize>0 && (activeSport==='all'||s.meta.sk===activeSport) && (!s.meta.start || new Date(s.meta.start).getTime()>Date.now()));
 
-  const bigList = list.filter(([,s])=>s.totalSize>=BIG_THRESHOLD).slice().sort((a,b)=>b[1].totalSize-a[1].totalSize);
+  const bigList = list.filter(([,s])=>s.totalSize>=BIG_THRESHOLD).slice().sort(withPinned((a,b)=>b[1].totalSize-a[1].totalSize));
   $('#bigmoney').innerHTML = bigList.length
     ? `<div class="secl big"><span class="dot"></span><span class="t">Big Money (${usd(BIG_THRESHOLD)}+ ordered)</span></div>${bigList.map(([k,s])=>bigCardHtml(k,s)).join('')}`
     : '';
@@ -624,7 +663,7 @@ function render(){
   // Liquidity ADDED, compiled per player+game — shown above the main report regardless of
   // whether that player has any taken/ordered flow yet, since building depth is its own signal.
   const rollList = Object.entries(liqRollups).filter(([,r])=>r.totalAdded>0 && (activeSport==='all'||r.sk===activeSport) && (!r.start || new Date(r.start).getTime()>Date.now()));
-  rollList.sort((a,b)=>b[1].totalAdded-a[1].totalAdded);
+  rollList.sort(withPinned((a,b)=>b[1].totalAdded-a[1].totalAdded));
   $('#rollups').innerHTML = rollList.length
     ? `<div class="secl"><span class="dot"></span><span class="t">Liquidity Building</span></div>${rollList.map(([k,r])=>rollupCardHtml(k,r)).join('')}`
     : '';
@@ -646,11 +685,11 @@ function render(){
 
   if(!list.length){ $('#view').innerHTML = `<div class="empty">No exchange order flow detected yet on upcoming (pre-game) player props — this builds up as Novig, Prophet X, and Kalshi order books move. Leave this open; reports appear as soon as size gets taken off a book, and a game drops off here once it goes live.</div>`; return; }
 
-  list.sort((a,b)=>{
+  list.sort(withPinned((a,b)=>{
     if(sortMode==='recent') return (b[1].recent[0]?.at||0) - (a[1].recent[0]?.at||0);
     if(sortMode==='near') return nearBooksFor(b[1]).length - nearBooksFor(a[1]).length || b[1].totalSize-a[1].totalSize;
     return b[1].totalSize - a[1].totalSize;
-  });
+  }));
 
   $('#view').innerHTML = list.map(([k,s])=>cardHtml(k,s)).join('');
   list.forEach(([k,s])=>{ if(s._justUpdated){ s._justUpdated=false; } });
