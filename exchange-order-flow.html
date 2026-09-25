@@ -84,6 +84,31 @@ main{flex:1;padding:10px calc(var(--sar) + 12px) 40px calc(var(--sal) + 12px)}
 .cnone{font-size:10px;color:#fff;opacity:.45;font-style:italic}
 .crecent{margin-top:7px;font-family:var(--mono);font-size:9px;color:#fff;opacity:.4}
 
+/* big money: single fills/adds that cleared BIG_THRESHOLD on their own, most urgent section */
+.secl.big .dot{background:var(--amber);box-shadow:0 0 6px var(--amber)}
+.secl.big .t{color:var(--amber)}
+.bigcard{background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.4);border-radius:14px;padding:10px 12px;margin-bottom:7px;display:flex;align-items:center;justify-content:space-between;gap:10px}
+.bigl{min-width:0}
+.bigname{font-weight:800;font-size:13px}
+.bigsub{font-family:var(--mono);font-size:9.5px;color:#fff;opacity:.65;margin-top:2px}
+.bigr{text-align:right;flex:0 0 auto}
+.bigv{font-family:var(--mono);font-size:17px;font-weight:800;color:var(--amber)}
+.bigtag{font-size:8px;font-weight:800;letter-spacing:.4px;text-transform:uppercase;color:#fff;opacity:.5}
+
+/* liquidity-building rollup: added (not taken) size compiled per player+game */
+.secl{display:flex;align-items:center;gap:6px;padding:12px 2px 6px}
+.secl .dot{width:7px;height:7px;border-radius:50%;background:var(--cyan);box-shadow:0 0 6px var(--cyan)}
+.secl .t{font-size:11px;font-weight:900;letter-spacing:1.4px;text-transform:uppercase;color:var(--cyan)}
+.rcard{background:rgba(125,211,252,.06);border:1px solid rgba(125,211,252,.3);border-radius:14px;padding:11px 12px;margin-bottom:8px}
+@keyframes rcardPop{0%{box-shadow:0 0 0 0 rgba(125,211,252,.8),0 0 20px 2px rgba(125,211,252,.4);border-color:var(--cyan)}100%{box-shadow:0 0 0 0 rgba(125,211,252,0),0 0 0 0 rgba(125,211,252,0);border-color:rgba(125,211,252,.3)}}
+.rcard.pop{animation:rcardPop 1.6s ease-out}
+.rrow1{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.rname{font-weight:800;font-size:13.5px}
+.rv{font-family:var(--mono);font-size:19px;font-weight:800;color:var(--cyan)}
+.rsub{font-family:var(--mono);font-size:10px;color:#fff;opacity:.6;margin-top:2px}
+.rmkts{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px}
+.rmk{background:rgba(255,255,255,.05);border:1px solid var(--line2);border-radius:999px;padding:3px 8px;font-family:var(--mono);font-size:9.5px;font-weight:700;color:#fff}
+
 .toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(var(--sab) + 16px);background:var(--bg3);border:1px solid var(--line2);color:#fff;padding:9px 14px;border-radius:10px;font-size:12px;z-index:50;opacity:0;transition:opacity .15s;pointer-events:none;max-width:88vw;text-align:center}
 .toast.on{opacity:1}
 </style>
@@ -116,7 +141,7 @@ main{flex:1;padding:10px calc(var(--sar) + 12px) 40px calc(var(--sal) + 12px)}
 </div>
 <div class="bkrow" id="bkrow"></div>
 
-<main id="view"><div class="loading"><div class="spin"></div>Loading fixtures…</div></main>
+<main><div id="bigmoney"></div><div id="rollups"></div><div id="view"><div class="loading"><div class="spin"></div>Loading fixtures…</div></div></main>
 <div class="toast" id="toast"></div>
 
 <script>
@@ -217,6 +242,7 @@ const SPORTS = {
         ['atd','Anytime TD',    m=>has(m,'anytime')&&has(m,'touchdown')],
       ]},
   nba: { label:'NBA', sport:'basketball', league:'nba', days:2, markets:NBA_MKTS },
+  wnba: { label:'WNBA', sport:'basketball', league:'wnba', days:2, markets:NBA_MKTS },
   nhl: { label:'NHL', sport:'hockey',     league:'nhl', days:2, markets:[
         ['sog','Shots',   m=>!m.includes('+')&&(has(m,'shots on goal')||has(m,'shots'))],
         ['pts','Points',  m=>!m.includes('+')&&has(m,'point')&&!has(m,'power')],
@@ -228,7 +254,7 @@ const SPORTS = {
   ufc: { label:'UFC', sport:'mma', league:'ufc', ml:true, days:21, markets:[['ml','Moneyline', m=>MMA_ML.has(m)]] },
 };
 const MMA_ML = new Set(['moneyline','fight winner','to win fight','winner']);
-const SPORT_KEYS = ['nfl','nba','nhl','mlb','ufc'];
+const SPORT_KEYS = ['nfl','nba','wnba','nhl','mlb','ufc'];
 const marketKeyFor = (sk, name) => { const m=String(name||'').toLowerCase(); if(!SPORTS[sk].ml && PERIOD.test(m)) return null; const hit=SPORTS[sk].markets.find(([,,t])=>t(m)); return hit?hit[0]:null; };
 const marketLabel = (sk, key) => (SPORTS[sk].markets.find(m=>m[0]===key)||[])[1] || key;
 
@@ -258,26 +284,39 @@ async function loadFixtures(sk){
 // book pulled and re-quoted) rather than a fill, and nothing is counted for that poll.
 const REPRICE_GUARD_CENTS = 20;
 const REFRESH_MS = 30000;
+// Everything gets tracked and bucketed regardless of size — but a single fill or add this big,
+// in one poll, on one book, is the actual signal worth surfacing on its own, separate from
+// totals that can reach this size slowly through many small $50-$500 dribbles.
+const BIG_THRESHOLD = 10000;
 
 // slotKey = sk|fixtureId|mkey|playerKey|side|line   (one row in the report — flow is summed
 // ACROSS the 3 exchanges for that exact prop+side+line; per-book breakdown kept alongside)
-let slots = {};             // slotKey -> { meta, totalSize, totalNotionalDec, byBook:{}, recent:[], curBooks:{} }
+let slots = {};             // slotKey -> { meta, totalSize, totalNotionalDec, byBook:{}, recent:[], curBooks:{}, totalAdded, addedNotionalDec, recentAdds }
 let bookSnap = {};          // slotKey|bookKey -> last-seen order_book levels
 let sessionStart = Date.now();
+// rollupKey = sk|fixtureId|playerKey — liquidity ADDED (not taken) compiled across every prop for
+// that player in that game. Repeated size getting posted on the same player, even across
+// different markets/sides/lines, is the signal worth surfacing, so it's summed here and shown as
+// its own section above the per-prop report ("add it on top").
+let liqRollups = {};
+// Single-event big-money feed — every fill/add is already counted in slots/liqRollups above; this
+// is just a highlight reel of the individual events that cleared BIG_THRESHOLD on their own,
+// newest first, capped so it doesn't grow forever.
+let bigEvents = [];
 
 function loadState(){
   try{
     const raw = JSON.parse(LS.get('flow_state','null'));
-    if(raw && raw.slots){ slots=raw.slots; bookSnap=raw.bookSnap||{}; sessionStart=raw.sessionStart||Date.now(); }
+    if(raw && raw.slots){ slots=raw.slots; bookSnap=raw.bookSnap||{}; sessionStart=raw.sessionStart||Date.now(); liqRollups=raw.liqRollups||{}; bigEvents=raw.bigEvents||[]; }
   }catch(e){}
 }
 let saveT;
 function saveState(){
   clearTimeout(saveT);
-  saveT=setTimeout(()=>{ try{ LS.set('flow_state', JSON.stringify({slots,bookSnap,sessionStart})); }catch(e){} }, 800);
+  saveT=setTimeout(()=>{ try{ LS.set('flow_state', JSON.stringify({slots,bookSnap,sessionStart,liqRollups,bigEvents})); }catch(e){} }, 800);
 }
 function resetState(){
-  slots={}; bookSnap={}; sessionStart=Date.now();
+  slots={}; bookSnap={}; liqRollups={}; bigEvents=[]; sessionStart=Date.now();
   try{ localStorage.removeItem('flow_state'); }catch(e){}
   render();
   toast('Tracking reset');
@@ -285,20 +324,27 @@ function resetState(){
 
 function slotKeyFor(sk, fx, mkey, playerKey, side, line){ return `${sk}|${fx}|${mkey}|${playerKey}|${side}|${line??''}`; }
 
-// Diff one exchange's order book against its last snapshot for this slot; returns filled size at
-// each price this poll (or [] if none / treated as a reprice).
+// Diff one exchange's order book against its last snapshot for this slot; returns both filled
+// size (fills — a price's size shrank) and posted size (adds — a price's size grew, including a
+// brand-new price level) for this poll, or both empty if treated as a reprice.
 function diffLevels(oldLevels, newLevels){
-  if(!oldLevels || !oldLevels.length) return [];
+  if(!oldLevels || !oldLevels.length) return { fills:[], adds:[] };
   const oldTop = oldLevels[0]?.price, newTop = newLevels[0]?.price;
-  if(newTop==null || oldTop==null || centsDiff(oldTop,newTop) > REPRICE_GUARD_CENTS) return [];
+  if(newTop==null || oldTop==null || centsDiff(oldTop,newTop) > REPRICE_GUARD_CENTS) return { fills:[], adds:[] };
+  const oldMap = {}; oldLevels.forEach(l=>{ oldMap[l.price] = (oldMap[l.price]||0) + l.size; });
   const newMap = {}; newLevels.forEach(l=>{ newMap[l.price] = (newMap[l.price]||0) + l.size; });
-  const fills = [];
+  const fills = [], adds = [];
   oldLevels.forEach(l=>{
     const nowSize = newMap[l.price] || 0;
     const filled = l.size - nowSize;
     if(filled > 0.5) fills.push({ price:l.price, size:filled });
   });
-  return fills;
+  Object.entries(newMap).forEach(([price,size])=>{
+    const wasSize = oldMap[price] || 0;
+    const added = size - wasSize;
+    if(added > 0.5) adds.push({ price:Number(price), size:added });
+  });
+  return { fills, adds };
 }
 
 function processOddsRows(sk, rows, fixtureMap){
@@ -329,24 +375,54 @@ function processOddsRows(sk, rows, fixtureMap){
     if(!isExch) return;
     const levels = levelsOf(o);
     const snapKey = key+'|'+bk;
-    const fills = diffLevels(bookSnap[snapKey], levels);
+    const { fills, adds } = diffLevels(bookSnap[snapKey], levels);
+    const mLabel = `${marketLabel(sk,mkey)}${line!=null?' '+line:''} ${side==='single'?(S.ml?'ML':'Yes'):(side==='over'?'Over':'Under')}`;
     if(fills.length){
-      let addedSize=0;
+      let filledSize=0;
       fills.forEach(f=>{
         slot.totalSize += f.size;
         slot.totalNotionalDec += f.size * toDec(f.price);
         slot.byBook[bk] = (slot.byBook[bk]||0) + f.size;
-        addedSize += f.size;
+        filledSize += f.size;
       });
       const avgFillDec = fills.reduce((a,f)=>a+toDec(f.price)*f.size,0) / fills.reduce((a,f)=>a+f.size,0);
-      slot.recent.unshift({ at:Date.now(), bk, size:addedSize, price:toAm(avgFillDec) });
+      const avgFillAm = toAm(avgFillDec);
+      slot.recent.unshift({ at:Date.now(), bk, size:filledSize, price:avgFillAm });
       slot.recent = slot.recent.slice(0,6);
       slot._justUpdated = true;
+      if(filledSize >= BIG_THRESHOLD) pushBigEvent({ type:'fill', sk, playerName:titleCase(sel), game:slot.meta.game, start:slot.meta.start, mLabel, bk, size:filledSize, price:avgFillAm });
+    }
+    if(adds.length){
+      if(slot.totalAdded==null){ slot.totalAdded=0; slot.addedNotionalDec=0; slot.recentAdds=[]; }
+      let addedSize=0;
+      adds.forEach(a=>{
+        slot.totalAdded += a.size;
+        slot.addedNotionalDec += a.size * toDec(a.price);
+        addedSize += a.size;
+      });
+      const avgAddDec = adds.reduce((a,f)=>a+toDec(f.price)*f.size,0) / adds.reduce((a,f)=>a+f.size,0);
+      const avgAddAm = toAm(avgAddDec);
+      slot.recentAdds.unshift({ at:Date.now(), bk, size:addedSize, price:avgAddAm });
+      slot.recentAdds = slot.recentAdds.slice(0,6);
+      if(addedSize >= BIG_THRESHOLD) pushBigEvent({ type:'add', sk, playerName:titleCase(sel), game:slot.meta.game, start:slot.meta.start, mLabel, bk, size:addedSize, price:avgAddAm });
+
+      const rKey = `${sk}|${o._fx}|${playerKey}`;
+      if(!liqRollups[rKey]) liqRollups[rKey] = { sk, fx:o._fx, playerKey, playerName:titleCase(sel),
+        game: slot.meta.game, start: slot.meta.start, totalAdded:0, byMarket:{}, recentAt:0 };
+      const roll = liqRollups[rKey];
+      roll.totalAdded += addedSize;
+      roll.byMarket[mLabel] = (roll.byMarket[mLabel]||0) + addedSize;
+      roll.recentAt = Date.now();
+      roll._justUpdated = true;
     }
     bookSnap[snapKey] = levels;
   });
 }
 
+function pushBigEvent(ev){
+  bigEvents.unshift({ ...ev, at:Date.now() });
+  bigEvents = bigEvents.slice(0,40);
+}
 function avgPriceOf(slot){ return slot.totalSize ? toAm(slot.totalNotionalDec/slot.totalSize) : null; }
 function nearBooksFor(slot){
   const avg = avgPriceOf(slot); if(avg==null) return [];
@@ -420,7 +496,45 @@ function cardHtml(key, slot){
   </div>`;
 }
 
+function rollupCardHtml(key, roll){
+  const mkts = Object.entries(roll.byMarket).sort((a,b)=>b[1]-a[1])
+    .map(([label,v])=>`<span class="rmk">${esc(label)} ${usd(v)}</span>`).join('');
+  return `<div class="rcard${roll._justUpdated?' pop':''}" data-key="${esc(key)}">
+    <div class="rrow1"><span class="rname">${esc(roll.playerName)}</span><span class="rv">${usd(roll.totalAdded)}</span></div>
+    <div class="rsub">${esc(roll.game||'')}${roll.start?' · '+esc(etTime(roll.start)):''} · liquidity added, ${Object.keys(roll.byMarket).length} market${Object.keys(roll.byMarket).length===1?'':'s'}</div>
+    ${mkts?`<div class="rmkts">${mkts}</div>`:''}
+  </div>`;
+}
+
+function bigEventHtml(ev){
+  return `<div class="bigcard">
+    <div class="bigl">
+      <div class="bigname">${esc(ev.playerName)}</div>
+      <div class="bigsub">${esc(ev.mLabel)}${ev.game?' · '+esc(ev.game):''}${ev.start?' · '+esc(etTime(ev.start)):''} · ${esc(bookShort(ev.bk))} @ ${fmtAm(ev.price)}</div>
+    </div>
+    <div class="bigr"><div class="bigv">${usd(ev.size)}</div><div class="bigtag">${ev.type==='fill'?'Ordered':'Added'}</div></div>
+  </div>`;
+}
+
 function render(){
+  // Big single events (one fill or one post >= BIG_THRESHOLD in a single poll) — the actual
+  // signal the running totals can bury under a lot of small $50-500 activity. Shown newest
+  // first, still scoped to the active sport and to games that haven't started.
+  const bigList = bigEvents.filter(ev => (activeSport==='all'||ev.sk===activeSport) && (!ev.start || new Date(ev.start).getTime()>Date.now()));
+  $('#bigmoney').innerHTML = bigList.length
+    ? `<div class="secl big"><span class="dot"></span><span class="t">Big Money (${usd(BIG_THRESHOLD)}+)</span></div>${bigList.map(bigEventHtml).join('')}`
+    : '';
+
+  // Liquidity ADDED, compiled per player+game — shown above the main report regardless of
+  // whether that player has any taken/ordered flow yet, since building depth is its own signal.
+  const rollList = Object.entries(liqRollups).filter(([,r])=>r.totalAdded>0 && (activeSport==='all'||r.sk===activeSport) && (!r.start || new Date(r.start).getTime()>Date.now()));
+  rollList.sort((a,b)=>b[1].totalAdded-a[1].totalAdded);
+  $('#rollups').innerHTML = rollList.length
+    ? `<div class="secl"><span class="dot"></span><span class="t">Liquidity Building</span></div>${rollList.map(([k,r])=>rollupCardHtml(k,r)).join('')}`
+    : '';
+  rollList.forEach(([,r])=>{ r._justUpdated=false; });
+  document.querySelectorAll('.rcard.pop').forEach(el=>el.addEventListener('animationend',()=>el.classList.remove('pop'),{once:true}));
+
   // Once a tracked game's start time passes, drop its cards from the report — this tool is
   // pre-game only. Totals stay in localStorage in case the start time shifts, they just stop
   // rendering and stop being polled (see pollOnce).
