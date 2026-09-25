@@ -89,6 +89,8 @@ main{flex:1;padding:12px calc(var(--sar) + 12px) 160px calc(var(--sal) + 12px)}
 /* Row-per-book board: one row per book, both sides side by side with the book's own logo in
    the middle — tighter and cleaner than two independently-stacked columns of per-side pills. */
 .bboard{padding:4px 10px 2px;border-left:1px solid var(--line2);border-right:1px solid var(--line2)}
+.seg.srt{display:flex;width:100%;margin-bottom:8px}
+.seg.srt button{flex:1;padding:5px 4px;font-size:9.5px}
 .bhead{display:flex;align-items:center;justify-content:space-between;padding:0 2px 5px;font-size:10px;font-weight:800;letter-spacing:.6px;text-transform:uppercase;color:#fff}
 .brow{display:grid;grid-template-columns:1fr 40px 1fr;align-items:center;gap:8px;padding:4px 2px;border-bottom:1px solid rgba(255,255,255,.06)}
 .brow:last-child{border-bottom:none}
@@ -648,18 +650,38 @@ function pillDetail(b, sd, o, label, ctxKey, p, mkey, opm, ro){
   }
   return `<div class="bdl"><span class="s ${cls}">${esc(b.name)} — ${label}${b.line!=null?' '+b.line:''}</span><span>${fmtAm(o.price)}</span>${pct}${liq}${opTxt}${clv}${trk}</div>${lad}`;
 }
+// Row's own reference price (Over if it has one, else Under, else the single side) — the value
+// "best"/"worst" sort by, since a two-sided row can't independently rank both columns.
+function bookPrimaryPrice(b){ const o=b.over||b.under||b.single; return o?Number(o.price):null; }
+// Total liquidity across whichever sides this book posts: flat max for traditional books,
+// summed order-book depth (every level, not just top) for exchanges.
+function bookLiqValue(b){
+  let total=0;
+  ['over','under','single'].forEach(sd=>{
+    const o=b[sd]; if(!o) return;
+    if(b.ex) total+=levelsOf(o).reduce((a,l)=>a+l.size,0);
+    else if(o.limits?.max!=null) total+=Number(o.limits.max);
+  });
+  return total;
+}
 function boardHtml(rows, p, mkey, ctxKey, mainLine, pt, ro){
   const list=bookBoard(rows);
   const opm=ro?null:openMap(p,mkey);
   if(!list.length) return `<div class="bempty">No books posting this one.</div>`;
   const single=list.every(b=>!b.over&&!b.under);
   const active=activePill[ctxKey]||null;
-  // Natural book order (same priority order the fetch already uses) rather than re-sorting —
-  // a single row order has to serve both side columns at once, so it can't be "sorted by
-  // price" for both sides simultaneously the way two independent columns could be.
+  const sortMode=boardSort[ctxKey]||'best';
+  const sorted=list.slice().sort((a,b)=>{
+    if(sortMode==='liq') return bookLiqValue(b)-bookLiqValue(a);
+    const av=bookPrimaryPrice(a), bv=bookPrimaryPrice(b);
+    if(av==null&&bv==null) return 0;
+    if(av==null) return 1; if(bv==null) return -1;
+    return sortMode==='worst' ? av-bv : bv-av;
+  });
+  const srt=`<span class="seg srt"><button class="sgb${sortMode==='best'?' on':''}" data-srt="best" data-ctx="${ctxKey}">Best</button><button class="sgb${sortMode==='worst'?' on':''}" data-srt="worst" data-ctx="${ctxKey}">Worst</button><button class="sgb${sortMode==='liq'?' on':''}" data-srt="liq" data-ctx="${ctxKey}">Liquidity</button></span>`;
   const cols = single
-    ? `<div class="bboard"><div class="bhead"><span>${SPORTS[sportKey].ml?'ML':'YES'}</span></div>${list.filter(b=>b.single).map((b,i)=>bookRowHtml(b,'single',b.single,null,null,pt,ctxKey,active,i)).join('')||'<div class="bempty">No books</div>'}</div>`
-    : `<div class="bboard"><div class="bhead"><span>O ${mainLine??''}</span><span>U ${mainLine??''}</span></div>${list.filter(b=>b.over||b.under).map((b,i)=>bookRowHtml(b,'over',b.over,'under',b.under,pt,ctxKey,active,i)).join('')||'<div class="bempty">No books</div>'}</div>`;
+    ? `<div class="bboard">${srt}<div class="bhead"><span>${SPORTS[sportKey].ml?'ML':'YES'}</span></div>${sorted.filter(b=>b.single).map((b,i)=>bookRowHtml(b,'single',b.single,null,null,pt,ctxKey,active,i)).join('')||'<div class="bempty">No books</div>'}</div>`
+    : `<div class="bboard">${srt}<div class="bhead"><span>O ${mainLine??''}</span><span>U ${mainLine??''}</span></div>${sorted.filter(b=>b.over||b.under).map((b,i)=>bookRowHtml(b,'over',b.over,'under',b.under,pt,ctxKey,active,i)).join('')||'<div class="bempty">No books</div>'}</div>`;
   let det='';
   if(active){
     const [sd,bk]=active.split('|'); const b=list.find(x=>x.key===bk);
@@ -811,7 +833,8 @@ function bindView(p){
   document.querySelectorAll('.stp').forEach(b=>b.addEventListener('click',()=>stepLine(p,b.dataset.ctx,Number(b.dataset.step))));
   document.querySelectorAll('[data-reset]').forEach(b=>b.addEventListener('click',()=>{ selLine[b.dataset.reset]=null; rerenderCard(p,b.dataset.reset); }));
 
-  document.querySelectorAll('.sgb').forEach(b=>b.addEventListener('click',()=>setBoardMode(p,b.dataset.ctx,b.dataset.mode)));
+  document.querySelectorAll('.sgb[data-mode]').forEach(b=>b.addEventListener('click',()=>setBoardMode(p,b.dataset.ctx,b.dataset.mode)));
+  document.querySelectorAll('.sgb[data-srt]').forEach(b=>b.addEventListener('click',()=>setBoardSort(p,b.dataset.ctx,b.dataset.srt)));
   document.querySelectorAll('[data-trackbk]').forEach(b=>b.addEventListener('click',ev=>{
     ev.stopPropagation(); const [key,mk2,side,ln,bk]=b.dataset.trackbk.split('|');
     trackProp(p,mk2,side,ln===''?null:Number(ln),cardSrc(p,mk2,`${p.key}|${mk2}`),bk); b.textContent='Tracked'; b.classList.add('on');
@@ -823,6 +846,10 @@ async function setBoardMode(p, ctx, mode){
   boardMode[ctx]=mode; rerenderCard(p,ctx);
   if(mode==='open' && !histCache[histKey(p,mkey)]){ await ensureHist(p,mkey); if(boardMode[ctx]==='open') rerenderCard(p,ctx); }
 }
+function setBoardSort(p, ctx, mode){
+  if((boardSort[ctx]||'best')===mode) return;
+  boardSort[ctx]=mode; rerenderCard(p,ctx);
+}
 function rerenderCard(p, ctx){
   const [,mkey]=ctx.split('|'); const old=document.querySelector(`.mk[data-ctx="${ctx}"]`); if(!old) return;
   const tmp=document.createElement('div'); tmp.innerHTML=marketCardHtml(p,mkey); const fresh=tmp.firstElementChild;
@@ -832,6 +859,7 @@ function rerenderCard(p, ctx){
 const histCache = {};   // fixtureId|markets -> rows (olv/clv per book, main lines)
 const histPending = {};
 const boardMode = {};   // card ctx -> 'now' | 'open'
+const boardSort = {};   // card ctx -> 'best' | 'worst' | 'liq' (default 'best')
 const activePill = {};  // card ctx -> "side|bookKey" whose detail is expanded
 const selLine = {};     // card ctx -> the line you stepped to (null = the board's own lines)
 const altLines = {};    // card ctx -> every line the books post, low to high
