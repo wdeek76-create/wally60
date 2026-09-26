@@ -68,9 +68,8 @@ main{flex:1;padding:10px calc(var(--sar) + 12px) 40px calc(var(--sal) + 12px)}
 .mybk.pos .bev{background:rgba(34,197,94,.18);color:var(--green)}
 .mybk.neg .bev{background:rgba(255,255,255,.06);color:#fff;opacity:.55}
 .mybk .blim{font-family:var(--mono);font-size:8.5px;font-weight:700;color:#fff;opacity:.5;white-space:nowrap}
-.corr{margin-top:7px;padding:6px 9px;border-radius:9px;font-size:10px;font-weight:700;line-height:1.35}
-.corr.yes{background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.3);color:var(--green)}
-.corr.no{background:rgba(251,191,36,.1);border:1px solid rgba(251,191,36,.3);color:var(--amber)}
+.catchlog{margin-top:7px;display:flex;flex-direction:column;gap:4px}
+.catchlog .crow{padding:6px 9px;border-radius:9px;font-size:10px;font-weight:700;line-height:1.35;background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.3);color:var(--green)}
 .crecent{margin-top:7px;font-family:var(--mono);font-size:9px;color:#fff;opacity:.5}
 .ctap{margin-top:7px;font-size:8.5px;font-weight:700;color:var(--purple);opacity:.7;text-align:center}
 
@@ -211,6 +210,10 @@ function oppositeSideKey(mkey, sideKey, fixtureId){
   return null;
 }
 
+const MY_KEYS = MY_BOOKS.map(b=>b.toLowerCase());
+// Minimum move (in cents) on one of "my books" before it counts as the book actually catching up
+// to the steam, as opposed to line-shopping noise.
+const CATCHUP_MIN_CENTS = 3;
 function processRow(o, fixtureMap){
   const mkey = marketKeyFor(o.market); if(!mkey) return;
   const sel = cleanSel(o.selection||o.name); if(!sel) return;
@@ -238,22 +241,23 @@ function processRow(o, fixtureMap){
     if(cents >= MOVE_THRESHOLD_CENTS){
       slot.movedAt = Date.now(); slot.movedBook = bk; slot.moveFrom = prev; slot.moveTo = Number(o.price); slot.moveCents = Math.round(cents); slot.moveLimit = limit;
       slot._justUpdated = true;
+      slot.catchups = [];
       moveLog.unshift({ key, bk, from:prev, to:Number(o.price), cents:Math.round(cents), at:Date.now(), label:slot.meta.label, game:slot.meta.game });
       moveLog = moveLog.slice(0,60);
     }
+  } else if(slot.movedAt && MY_KEYS.includes(bk) && prev!=null){
+    // A "my book" (not the sharp book that steamed) moving its price in the same direction as the
+    // steam, after the steam happened — auto-logged as confirmation other books are catching up.
+    const dir = Math.sign(impliedProb(slot.moveTo) - impliedProb(slot.moveFrom));
+    const bookDir = Math.sign(impliedProb(o.price) - impliedProb(prev));
+    const cents = centsDiff(prev, o.price);
+    if(dir!==0 && bookDir===dir && cents>=CATCHUP_MIN_CENTS){
+      slot.catchups = slot.catchups || [];
+      slot.catchups.unshift({ book:bk, from:prev, to:Number(o.price), cents:Math.round(cents), at:Date.now() });
+      slot.catchups = slot.catchups.slice(0,6);
+      slot._justUpdated = true;
+    }
   }
-}
-// Real steam pushes BOTH sides of the market — a book shortening Fighter A should be laying off
-// by drifting Fighter B (or Under, or No) the other way, on the same book, around the same time.
-// This looks up the opposite side's own move (if any) so the card can show that confirmation
-// (or flag its absence) instead of leaving each side's move looking like an isolated event.
-const CORRELATION_WINDOW_MS = 10*60000;
-function oppositeMoveFor(slot){
-  const oppKey = oppositeSideKey(slot.meta.mkey, slot.meta.sideKey, slot.meta.fx); if(!oppKey) return undefined;
-  const oppSlot = slots[slotKeyFor(slot.meta.mkey, slot.meta.fx, slot.meta.line, oppKey)]; if(!oppSlot) return undefined;
-  if(!oppSlot.movedAt || oppSlot.movedBook!==slot.movedBook) return null;
-  if(Math.abs(oppSlot.movedAt-slot.movedAt) > CORRELATION_WINDOW_MS) return null;
-  return { label:oppSlot.meta.label, from:oppSlot.moveFrom, to:oppSlot.moveTo, cents:oppSlot.moveCents };
 }
 
 // De-vigged fair probability for this slot's side, blended across whichever sharp book(s) are
@@ -319,10 +323,11 @@ function cardHtml(key, slot){
     return `<div class="mybk${posClass}">${lg?`<img src="${esc(lg)}" alt="">`:''}<span class="bn">${esc(r.name)}</span><span class="bp">${fmtAm(r.price)}</span>${r.limit!=null?`<span class="blim">$${r.limit>=1000?(r.limit/1000).toFixed(1).replace(/\.0$/,'')+'k':r.limit} max</span>`:''}${r.ev!=null?`<span class="bev">${r.ev>=0?'+':''}${(r.ev*100).toFixed(1)}%</span>`:''}</div>`;
   }).join('');
   const moveAgo = slot.movedAt ? Math.round((Date.now()-slot.movedAt)/60000) : null;
-  const oppMove = oppositeMoveFor(slot);
-  const corrHtml = oppMove===undefined ? '' : oppMove
-    ? `<div class="corr yes">✓ ${esc(bookShort(slot.movedBook))} also moved ${esc(oppMove.label)} ${fmtAm(oppMove.from)} → ${fmtAm(oppMove.to)} (${oppMove.cents}¢) — real two-sided steam</div>`
-    : `<div class="corr no">⚠ ${esc(bookShort(slot.movedBook))} hasn't moved the other side yet — could be a one-off reprice, not confirmed steam</div>`;
+  const catchups = slot.catchups||[];
+  const corrHtml = catchups.length ? `<div class="catchlog">${catchups.map(c=>{
+    const ago = Math.round((Date.now()-c.at)/60000);
+    return `<div class="crow">✓ ${esc(bookShort(c.book))} followed ${fmtAm(c.from)} → ${fmtAm(c.to)} (${c.cents}¢)${ago>0?' · '+ago+'m ago':''}</div>`;
+  }).join('')}</div>` : '';
   return `<div class="card${slot._justUpdated?' pop':''}${isPinned?' pinned':''}" data-key="${esc(key)}">
     <div class="crow1">
       <span class="cname">${isPinned?'📌 ':''}${esc(slot.meta.label)}</span>
