@@ -204,6 +204,12 @@ async function loadBookLogos(){
 }
 const bookLogo = n => { const k=canonBook(n); return bookLogos[String(n||'').toLowerCase()] || bookLogos[k] || ''; };
 
+// A single resting order-book level implying more than this many dollars is far more likely a
+// parsing artifact (e.g. the price/size columns swapped for an edge-case row) than real liquidity
+// on a niche player prop — seen in practice as a $250k+ "fill" with an absurd -68025 avg price.
+// Bounding it here, at the source, keeps any such row from ever poisoning a running total.
+const MAX_LEVEL_SIZE = 25000;
+
 // order-book depth levels behind the top price (same parsing as props-screen.html)
 function levelsOf(o){
   const top=Number(o.price);
@@ -212,7 +218,7 @@ function levelsOf(o){
   const out=[];
   if(ob.length){
     const a0=normP(ob[0][0]), b0=normP(ob[0][1]); const pf=Math.abs(a0-top)<=Math.abs(b0-top);
-    ob.forEach(l=>{ const price=pf?normP(l[0]):normP(l[1]); const size=pf?Number(l[1]):Number(l[0]); if(!isNaN(price)&&!isNaN(size)&&size>0) out.push({price,size}); });
+    ob.forEach(l=>{ const price=pf?normP(l[0]):normP(l[1]); const size=pf?Number(l[1]):Number(l[0]); if(!isNaN(price)&&!isNaN(size)&&size>0&&size<=MAX_LEVEL_SIZE) out.push({price,size}); });
   } else if(o.limits?.max) out.push({price:top,size:Number(o.limits.max)});
   return out;
 }
@@ -315,11 +321,25 @@ let sessionStart = Date.now();
 // its own section above the per-prop report ("add it on top").
 let liqRollups = {};
 
+// One-time cleanup for state saved before MAX_LEVEL_SIZE existed: a poisoned slot (an implausible
+// running total or average price from the price/size-swap bug) gets its accumulation wiped so it
+// rebuilds cleanly under the new bound, instead of carrying a permanently wrong number forever.
+function sanitizeSlots(){
+  Object.entries(slots).forEach(([key,s])=>{
+    const avg = s.totalSize ? toAm(s.totalNotionalDec/s.totalSize) : null;
+    if(s.totalSize>MAX_LEVEL_SIZE*4 || (avg!=null && Math.abs(avg)>10000)){
+      console.warn('[flow] dropping poisoned slot', key, {totalSize:s.totalSize, avg});
+      s.totalSize=0; s.totalNotionalDec=0; s.byBook={}; s.recent=[]; s.tracked=false; s.gradeStatus=undefined; s.result=undefined; s.actual=undefined;
+      Object.keys(bookSnap).forEach(bk=>{ if(bk.startsWith(key+'|')) delete bookSnap[bk]; });
+    }
+  });
+}
 function loadState(){
   try{
     const raw = JSON.parse(LS.get('flow_state','null'));
     if(raw && raw.slots){ slots=raw.slots; bookSnap=raw.bookSnap||{}; sessionStart=raw.sessionStart||Date.now(); liqRollups=raw.liqRollups||{}; }
   }catch(e){}
+  sanitizeSlots();
 }
 let saveT;
 function saveState(){
@@ -592,7 +612,7 @@ function cardHtml(key, slot){
     ${bookBadges?`<div class="cbooks">${bookBadges}</div>`:''}
     <div class="cnear"><div class="cnearl">Still within 10¢ of avg</div>${nearHtml}</div>
     ${recentHtml?`<div class="crecent"><b>${isPinned?'All recent activity':'Last'}</b>${recentHtml}</div>`:''}
-    <div class="ctap">${isPinned?'Tap to unpin':'Tap to pin & see full activity'}</div>
+    ${isPinned?'<div class="ctap">Tap to unpin</div>':''}
   </div>`;
 }
 
@@ -604,7 +624,7 @@ function rollupCardHtml(key, roll){
     <div class="rrow1"><span class="rname">${isPinned?'📌 ':''}${esc(roll.playerName)}</span><span class="rv">${usd(roll.totalAdded)}</span></div>
     <div class="rsub">${esc(roll.game||'')}${roll.start?' · '+esc(etTime(roll.start)):''} · liquidity added, ${Object.keys(roll.byMarket).length} market${Object.keys(roll.byMarket).length===1?'':'s'}</div>
     ${mkts?`<div class="rmkts">${mkts}</div>`:''}
-    <div class="ctap">${isPinned?'Tap to unpin':'Tap to pin'}</div>
+    ${isPinned?'<div class="ctap">Tap to unpin</div>':''}
   </div>`;
 }
 
@@ -637,7 +657,7 @@ function bigCardHtml(key, slot){
     </div>
     ${oppLabel||grade ? `<div class="bigopp"><span>${oppLabel&&oppPrice?`${esc(oppLabel)} now ${fmtAm(oppPrice.price)} (${esc(bookShort(oppPrice.bk))})`:(oppLabel?`${esc(oppLabel)}: no current price`:'')}</span>${grade}</div>` : ''}
     ${isPinned?recentHtml:''}
-    <div class="ctap">${isPinned?'Tap to unpin':'Tap to pin & see full activity'}</div>
+    ${isPinned?'<div class="ctap">Tap to unpin</div>':''}
   </div>`;
 }
 
