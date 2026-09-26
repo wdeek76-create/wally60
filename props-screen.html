@@ -94,12 +94,15 @@ main{flex:1;padding:12px calc(var(--sar) + 12px) 160px calc(var(--sal) + 12px)}
 .seg.srt button{flex:1;padding:5px 4px;font-size:9.5px}
 .bhead{display:flex;align-items:center;justify-content:space-between;padding:0 2px 5px;font-size:10px;font-weight:800;letter-spacing:.6px;text-transform:uppercase;color:#fff}
 .bhead.single{justify-content:center}
-.mlcompare{display:flex;align-items:center;justify-content:center;gap:8px;padding:4px 2px 2px;font-size:10.5px;font-weight:700;color:#fff;opacity:.75}
-.mlcompare .mlname{font-family:var(--mono)}
-.mlcompare .mlname b{font-weight:800}
-.mlcompare .mlname.lead{color:var(--purple);opacity:1}
-.mlcompare .mlvs{font-size:9px;opacity:.5;text-transform:uppercase}
-.mlwho{text-align:center;font-size:9px;font-weight:700;color:var(--purple);opacity:.85;padding:0 2px 4px;text-transform:uppercase;letter-spacing:.3px}
+.mlcompare{display:flex;align-items:center;justify-content:center;gap:10px;margin:2px 2px 8px;padding:10px 8px;border-radius:12px;background:rgba(168,85,247,.08);border:1px solid rgba(168,85,247,.25)}
+.mlside{flex:1;text-align:center;min-width:0;border-radius:9px;padding:5px 4px;transition:background .15s}
+.mlside.lead{background:rgba(168,85,247,.18);box-shadow:0 0 0 1px rgba(168,85,247,.5) inset}
+.mlnm{font-size:11px;font-weight:800;color:#fff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mlsz{font-family:var(--oddsfont);font-size:19px;font-weight:800;color:#fff;line-height:1.2;margin-top:2px}
+.mlside.lead .mlsz{color:var(--purple)}
+.mlodds{font-family:var(--mono);font-size:9.5px;color:#fff;opacity:.6;margin-top:1px}
+.mlcompare .mlvs{font-size:9px;font-weight:800;color:#fff;opacity:.4;text-transform:uppercase;flex:0 0 auto}
+.mlwho{text-align:center;font-size:10.5px;font-weight:800;color:var(--purple);padding:0 2px 6px;text-transform:uppercase;letter-spacing:.3px}
 .brow{display:grid;grid-template-columns:1fr 30px 1fr;align-items:center;gap:6px;padding:3px 2px;border-bottom:1px solid rgba(255,255,255,.06)}
 .brow.single{grid-template-columns:30px 1fr}
 .brow:last-child{border-bottom:none}
@@ -732,24 +735,39 @@ function boardHtml(rows, p, mkey, ctxKey, mainLine, pt, ro){
     return sortMode==='worst' ? av-bv : bv-av;
   });
   const srt=`<span class="seg srt"><button class="sgb${sortMode==='best'?' on':''}" data-srt="best" data-ctx="${ctxKey}">Best</button><button class="sgb${sortMode==='worst'?' on':''}" data-srt="worst" data-ctx="${ctxKey}">Worst</button><button class="sgb${sortMode==='liq'?' on':''}" data-srt="liq" data-ctx="${ctxKey}">Liquidity</button></span>`;
-  // UFC (or any single-sided ml sport): total liquidity across books for THIS fighter vs. the
-  // opponent's own moneyline board, so you can see which side of the fight has more size behind it.
+  // UFC (or any single-sided ml sport): pool every exchange's own order-book depth for this
+  // fighter into one size-weighted average price + $ total (same weighting depthSummary uses for
+  // one book, just combined across Novig/Prophet X/Kalshi together), then do the same for the
+  // opponent, so it's obvious which side of the fight actually has more real money behind it.
+  const exchangeStakeFor = rows => {
+    const list = bookBoard(rows).filter(b=>b.ex && b.single);
+    let totalSize=0, totalNotionalDec=0;
+    list.forEach(b=>{ levelsOf(b.single).forEach(l=>{ totalSize+=l.size; totalNotionalDec+=l.size*toDec(l.price); }); });
+    return { totalSize, avg: totalSize ? toAm(totalNotionalDec/totalSize) : null };
+  };
   let mlCompare='';
   if(single && SPORTS[sportKey].ml){
     const f=fixtures.find(x=>x.id===p.fixtureId);
     if(f){
       const oppName = normName(f.home.name)===p.key ? f.away.name : f.home.name;
       const oppRows = rowsFor({fixtureId:p.fixtureId, key:normName(oppName)}, mkey, mainRows);
-      const oppList = bookBoard(oppRows);
-      const myLiq = list.reduce((a,b)=>a+bookLiqValue(b),0);
-      const oppLiq = oppList.reduce((a,b)=>a+bookLiqValue(b),0);
-      if(myLiq || oppLiq){
-        const tied = myLiq===oppLiq;
+      const my = exchangeStakeFor(rows), opp = exchangeStakeFor(oppRows);
+      if(my.totalSize || opp.totalSize){
+        const tied = my.totalSize===opp.totalSize;
+        const leader = tied ? null : (my.totalSize>opp.totalSize ? p.name : oppName);
         mlCompare = `<div class="mlcompare">
-          <span class="mlname${!tied&&myLiq>oppLiq?' lead':''}">${esc(titleCase(p.name))} <b>${usd(myLiq)}</b></span>
+          <div class="mlside${!tied&&my.totalSize>opp.totalSize?' lead':''}">
+            <div class="mlnm">${esc(titleCase(p.name))}</div>
+            <div class="mlsz">${usd(my.totalSize)}</div>
+            <div class="mlodds">${my.avg!=null?fmtAm(my.avg):'—'} wtd</div>
+          </div>
           <span class="mlvs">vs</span>
-          <span class="mlname${!tied&&oppLiq>myLiq?' lead':''}">${esc(titleCase(oppName))} <b>${usd(oppLiq)}</b></span>
-        </div>${tied?'':`<div class="mlwho">${esc(titleCase(myLiq>oppLiq?p.name:oppName))} has more liquidity overall</div>`}`;
+          <div class="mlside${!tied&&opp.totalSize>my.totalSize?' lead':''}">
+            <div class="mlnm">${esc(titleCase(oppName))}</div>
+            <div class="mlsz">${usd(opp.totalSize)}</div>
+            <div class="mlodds">${opp.avg!=null?fmtAm(opp.avg):'—'} wtd</div>
+          </div>
+        </div>${leader?`<div class="mlwho">🔥 ${esc(titleCase(leader))} has the most exchange liquidity bet on them</div>`:''}`;
       }
     }
   }
