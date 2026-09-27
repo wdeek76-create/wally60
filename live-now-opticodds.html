@@ -59,6 +59,7 @@ header{padding:14px 16px 10px;padding-top:calc(14px + env(safe-area-inset-top))}
 .logo-name{font-size:21px;font-weight:900;letter-spacing:-1px;color:var(--text);line-height:1}
 .brand{display:flex;align-items:center;gap:8px}
 .brand-text{font-family:var(--font);font-weight:900;font-size:11.5px;line-height:1.08;letter-spacing:.3px;text-transform:uppercase;color:var(--text)}
+.brand-text .accent{color:var(--accent);text-shadow:0 0 8px rgba(94,194,255,.55)}
 .logo-live-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--red);margin-left:4px;vertical-align:middle;box-shadow:0 0 6px var(--red),0 0 12px rgba(255,59,59,.4);animation:blink 1.4s ease-in-out infinite;position:relative;top:-2px}
 .logo-evtag{color:var(--green);font-size:12px;font-weight:900;margin-left:3px}
 .logo-tag{font-size:10px;font-weight:700;color:var(--sub);letter-spacing:.6px;text-transform:uppercase}
@@ -185,6 +186,9 @@ header{padding:14px 16px 10px;padding-top:calc(14px + env(safe-area-inset-top))}
 .bookrow.best .bkname{color:var(--text)}
 .bookrow.best .bkmeta{color:var(--green)}
 .bookrow.ref .bkname{color:var(--sub)}
+.bkprice.pricegood{animation:priceFlashGood 1.8s ease-out}
+.bkprice.pricebad{animation:priceFlashBad 1.8s ease-out}
+.consensus{font-size:10.5px;font-weight:700;color:var(--sub);opacity:.75;padding:0 11px;letter-spacing:.1px}
 /* ── FOOTER STRIP — highlighted stat chips + the bet action, one row, matching a sportsbook
    arb card's bottom "$ / % / action" bar instead of plain text buttons. */
 .footstrip{display:flex;gap:6px;margin-top:10px}
@@ -338,13 +342,13 @@ header{padding:14px 16px 10px;padding-top:calc(14px + env(safe-area-inset-top))}
   <div class="splash-icon">
     <svg class="splash-ring" viewBox="0 0 100 100"><circle cx="50" cy="50" r="42"></circle></svg>
   </div>
-  <div class="splash-text">Pick My Ass</div>
+  <div class="splash-text">Live Arbs</div>
 </div>
 <div id="app">
 
 <header>
   <div class="header-row">
-    <div class="brand"><div class="brand-text"><div>Pick</div><div>The</div><div>Ass</div></div></div>
+    <div class="brand"><div class="brand-text"><div>Live</div><div class="accent">Arbs</div></div></div>
     <div class="header-meta">
       <div class="sync-dot" id="syncDot"></div>
       <span id="lastUpdated">--:--</span>
@@ -997,7 +1001,13 @@ function computeRows(fxs, byFx) {
         const pickPoints = (P.mk.key === 'spread' || P.mk.key === 'total' || P.mk.key === 'tt') ? Number(s.points) : null;
         const overUnder = (P.mk.key === 'total' || P.mk.key === 'tt') ? (/under/i.test(String(s.selection_line || s.selection || '')) ? 'under' : 'over') : null;
         const pinDepth = EXCH.has(refBook.toLowerCase()) ? liqDepth(pin[idx]) : null;
-        out.push({ key, f, mk:P.mk, sideLabel, ttSide, pickSide, pickPoints, overUnder, fair:fp, aligned, refLabel, refBook, refBookShort: refBook==='Kalshi'?'Kalshi':'PIN', fdPrice: aligned ? fd[idx].price : null, pin:{ mine:pin[idx].price, other:pin[1-idx].price, lim, depth:pinDepth }, books, best:books[0] });
+        // Market consensus: exchanges/sharps quoting the OTHER side agree with the reference
+        // book against this pick; exchanges/sharps already counted in `books` (this side) are
+        // effectively backing you instead — surfaced together so you can see both counts.
+        const oppSid = sideIds[1 - idx];
+        const sharpAgainst = Object.keys(P.sides[oppSid] || {}).filter(b => !skip(b) && EXCH.has(b.toLowerCase())).length;
+        const sharpFor = books.filter(x => x.exch).length;
+        out.push({ key, f, mk:P.mk, sideLabel, ttSide, pickSide, pickPoints, overUnder, fair:fp, aligned, refLabel, refBook, refBookShort: refBook==='Kalshi'?'Kalshi':'PIN', fdPrice: aligned ? fd[idx].price : null, pin:{ mine:pin[idx].price, other:pin[1-idx].price, lim, depth:pinDepth }, books, best:books[0], sharpFor, sharpAgainst });
       });
     });
   });
@@ -1015,6 +1025,9 @@ function computeRows(fxs, byFx) {
       ? (Number(r.best.price) > Number(prev.price) ? 'good' : 'bad') : null;
     r.priceWas = prev ? prev.price : null;
     const pinChanged = prev && prev.pin != null && Number(prev.pin) !== Number(r.pin.mine);
+    // Same flash treatment as the book price above, just for Pinnacle's own quote — so a
+    // Pinnacle move reads exactly like a target-book move instead of only feeding the "why" text.
+    r.pinMove = pinChanged ? (Number(r.pin.mine) > Number(prev.pin) ? 'good' : 'bad') : null;
     const bookChanged = prev && prev.price != null && Number(prev.price) !== Number(r.best.price);
     r.moveSource = !prev ? null : (pinChanged && bookChanged) ? 'both' : pinChanged ? 'pin' : bookChanged ? 'book' : null;
     seen[r.key] = { since: r.since, ev: r.best.ev, price: r.best.price, pin: r.pin.mine, arb: r.best.arb };
@@ -1045,6 +1058,10 @@ function markBet(key) {
   toast(`Logged: ${r.sideLabel} ${fmtAm(r.best.price)} ${r.best.book}`);
   saveLog(); render();
 }
+// "Bet This" logs the bet too, but never un-logs it — unlike the dedicated Track button
+// (which toggles), tapping the bet link again to re-open the sportsbook shouldn't silently
+// wipe the tracked entry. Both stay available: this one auto-tracks, the other still toggles.
+function ensureTracked(key) { if (!log[key]) markBet(key); }
 function hideKey(key) { hidden[key] = Date.now(); saveLog(); render(); }
 let pinned = (() => { try { return new Set(JSON.parse(LS.get('live_pinned', '[]'))); } catch(e) { return new Set(); } })();
 const savePinned = () => LS.set('live_pinned', JSON.stringify([...pinned]));
@@ -1308,7 +1325,7 @@ function render() {
   if (!rowsV.length) {
     const searchHtml = `<div class="searching">
       <div class="splash-icon mini"><svg class="splash-ring mini" viewBox="0 0 100 100"><circle cx="50" cy="50" r="42"></circle></svg></div>
-      <div class="searching-title">Pick The Ass is searching…</div>
+      <div class="searching-title">Scanning live boards…</div>
     </div>`;
     setViewHtml(view, searchHtml);
     updateStatusStrip();
@@ -1341,7 +1358,9 @@ function render() {
     const pills = ufcPills(r, f, st);
     const isPinned = pinned.has(r.key);
     const bestRow = `<div class="bookrow best">${lg ? `<img src="${esc(lg)}" alt="${esc(r.best.book)}" title="${esc(r.best.book)}">` : `<span class="bk">${esc(r.best.book)}</span>`}<span class="bkname">${esc(r.best.book)}</span><span class="pwrap">${priceInner}${pop}</span><span class="bkmeta">${isArb ? `${arbPct.toFixed(2)}% Arb` : `+${evPct.toFixed(1)}% EV`}</span></div>`;
-    const refRow = `<div class="bookrow ref">${pinLg ? `<img src="${esc(pinLg)}" alt="${esc(refBook)}" title="${esc(refBook)}">` : `<span class="bk">${esc(refShort)}</span>`}<span class="bkname">${esc(refBook)}</span><span class="bkprice">${fmtAm(probToAm(r.fair))}</span><span class="bkmeta">Fair</span></div>`;
+    const pinMoveCls = r.pinMove === 'good' ? ' pricegood' : r.pinMove === 'bad' ? ' pricebad' : '';
+    const refRow = `<div class="bookrow ref">${pinLg ? `<img src="${esc(pinLg)}" alt="${esc(refBook)}" title="${esc(refBook)}">` : `<span class="bk">${esc(refShort)}</span>`}<span class="bkname">${esc(refBook)}</span><span class="bkprice${pinMoveCls}">${fmtAm(r.pin.mine)}</span><span class="bkmeta">Fair ${fmtAm(probToAm(r.fair))}</span></div>`;
+    const consensus = `<div class="consensus">${r.sharpAgainst} sharp book${r.sharpAgainst===1?'':'s'} siding with ${esc(refShort)} · ${r.books.length} book${r.books.length===1?'':'s'} on your side${r.sharpFor?` (${r.sharpFor} sharp)`:''}</div>`;
     return `<div class="row glass live${r.isNew ? ' new' : ''}${r.aligned ? ' aligned' : ''}${isArb ? ' isarb' : ''}${st.brk ? ' brk' : ''}${isPinned ? ' pinned' : ''}" data-key="${esc(r.key)}">
       <div class="cardhead">
         <div class="chleft"><span class="lg">${esc(f.league.label)}</span><span class="st live">LIVE</span></div>
@@ -1352,11 +1371,11 @@ function render() {
         <div class="side"><div class="m">${esc(r.mk.label)}</div><div class="s">${esc(r.sideLabel)}</div>${totalNote}${situ ? `<div class="situ-note${situ.warn?' warn':''}">${esc(situ.text)}</div>` : ''}${pills.length ? `<div class="pillrow">${pills.map(p=>`<span class="conf-pill">${esc(p)}</span>`).join('')}</div>` : ''}</div>
       </div>
       ${r.aligned ? `<div style="margin-top:8px"><span class="agree">✓ FD &amp; PIN AGREE <b>FD ${fmtAm(r.fdPrice)}</b> · <b>PIN ${fmtAm(r.pin.mine)}</b> → fading ${esc(r.best.book === 'DraftKings' ? 'DK' : r.best.book)}</span></div>` : ''}
-      <div class="booklist">${bestRow}${refRow}${moreRows}</div>
+      <div class="booklist">${bestRow}${refRow}${consensus}${moreRows}</div>
       <div class="footstrip">
         <div class="fs-stat">${r.pin.depth ? `${usd(r.pin.depth.total)} avg` : r.pin.lim != null ? usd(r.pin.lim) : 'n/a'}<span>${r.pin.depth ? 'Avg $' : 'Lim'}</span></div>
         <div class="fs-stat">${isArb ? `${arbPct.toFixed(2)}%` : `${evPct.toFixed(1)}%`}<span>${isArb ? 'Arb' : 'EV'}</span></div>
-        ${dl ? `<a class="fs-bet" href="${esc(dl)}" target="_blank" rel="noopener">I BET THIS</a>` : `<span class="fs-bet fs-bet-off">No Link</span>`}
+        ${dl ? `<a class="fs-bet" href="${esc(dl)}" target="_blank" rel="noopener" data-bet-auto="${esc(r.key)}">Bet This</a>` : `<span class="fs-bet fs-bet-off">No Link</span>`}
       </div>
       <div class="trackrow"><button class="track-btn${log[r.key]?.bet ? ' on' : ''}" data-bet="${esc(r.key)}">${log[r.key]?.bet ? '✓ Tracked' : '+ Track this bet'}</button></div>
       <div class="sig"><span>${esc(why)}</span><span>on board <span class="ageval" data-since="${r.since}"></span> <span class="trend ${r.trend > 0 ? 'up' : r.trend < 0 ? 'dn' : ''}">${r.trend > 0 ? '▲' : r.trend < 0 ? '▼' : '—'}</span></span></div>
@@ -1374,6 +1393,7 @@ function render() {
     + sectionLabel('live', 'Live +EV', restRows.length) + restRows.map(rowCard).join('');
   if (!setViewHtml(view, html)) { updateStatusStrip(); return; }
   view.querySelectorAll('[data-bet]').forEach(b => b.addEventListener('click', () => markBet(b.dataset.bet)));
+  view.querySelectorAll('[data-bet-auto]').forEach(b => b.addEventListener('click', () => ensureTracked(b.dataset.betAuto)));
   view.querySelectorAll('[data-hide]').forEach(b => b.addEventListener('click', () => hideKey(b.dataset.hide)));
   view.querySelectorAll('.row[data-key]').forEach(el => el.addEventListener('dblclick', ev => {
     if (ev.target.closest('button,a')) return;
@@ -1505,7 +1525,7 @@ async function load(force) {
       setLastUpdated(new Date().toLocaleTimeString([], { hour:'numeric', minute:'2-digit' }));
       const searchHtml = `<div class="searching">
         <div class="splash-icon mini"><svg class="splash-ring mini" viewBox="0 0 100 100"><circle cx="50" cy="50" r="42"></circle></svg></div>
-        <div class="searching-title">Pick The Ass is searching…</div>
+        <div class="searching-title">Scanning live boards…</div>
       </div>`;
       setViewHtml($('#view'), searchHtml);
       updateStatusStrip();
