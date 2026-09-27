@@ -1437,6 +1437,17 @@ function periodClockLabel(R, leagueLabel) {
 function gradeOutcome(e, R) {
   const status = String(R?.fixture?.status || '').toLowerCase();
   if (!/completed|closed|final|ended/.test(status)) return null; // not final yet
+  // Player props grade off the final box-score stat, not the team score, so this branches
+  // before the home/away score lookup below (which a prop bet has no use for) — same push/
+  // over/under logic as fd-sharp-tracker.html's gradeOutcome, just reading e.playerActual
+  // instead of a separately-fetched actual.
+  if (e.mkKey === 'prop') {
+    if (e.playerActual == null || e.pickPoints == null || !e.overUnder) return null;
+    const actual = e.playerActual, L = e.pickPoints;
+    if (actual === L) return 'push';
+    const over = actual > L;
+    return (e.overUnder === 'over') === over ? 'won' : 'lost';
+  }
   const home = Number(R?.scores?.home?.total), away = Number(R?.scores?.away?.total);
   if (isNaN(home) || isNaN(away)) return null;
   if (e.mkKey === 'ml') {
@@ -1477,6 +1488,26 @@ async function autoGradeTracked() {
         const r = await oo('/fixtures/results', { fixture_id: idBatch });
         (r?.data || []).forEach(x => { if (x?.fixture?.id) resultsById[x.fixture.id] = x; });
       } catch(e) { console.warn('[live] auto-grade fetch failed', e.message); }
+    }
+    // Pull the box score fresh right before grading a prop, rather than trusting whatever
+    // refreshTrackedPropProgress last saw — that runs on its own cadence and can lag behind
+    // the moment a game actually goes final.
+    const pendingProps = pending.filter(e => e.mkKey === 'prop' && e.player);
+    if (pendingProps.length) {
+      const prById = {};
+      for (const idBatch of chunk([...new Set(pendingProps.map(e => e.fid))], 5)) {
+        try {
+          const r = await oo('/fixtures/player-results', { fixture_id: idBatch });
+          (r?.data || []).forEach(x => { if (x?.fixture?.id) prById[x.fixture.id] = x; });
+        } catch(e) { console.warn('[live] auto-grade player-results fetch failed', e.message); }
+      }
+      pendingProps.forEach(e => {
+        const P = prById[e.fid]; if (!P) return;
+        const found = (P.results || []).find(x => normPlayerName(x.player?.name) === normPlayerName(e.player));
+        if (!found) return;
+        const v = statForMarket(found, e.market);
+        if (v != null && !isNaN(v)) e.playerActual = v;
+      });
     }
     let changed = false;
     pending.forEach(e => {
