@@ -133,6 +133,15 @@ header{padding:14px 16px 10px;padding-top:calc(14px + env(safe-area-inset-top))}
 .preset-chip .x{font-size:11px;font-weight:900;color:var(--sub);padding:0 2px}
 .preset-chip .x:hover{opacity:1}
 .clear-books-btn{background:none;border:none;color:var(--accent);font-size:9px;font-weight:800;letter-spacing:.5px;text-transform:uppercase;cursor:pointer;padding:2px}
+.pb-search{width:100%;background:#000;border:1.5px solid var(--border);color:#fff;border-radius:12px;padding:9px 12px;font-family:var(--font);font-size:13px;font-weight:600}
+.pb-suggest{margin-top:6px;max-height:200px;overflow-y:auto;background:var(--card);border:1.5px solid var(--border);border-radius:12px}
+.pb-suggest .pb-opt{display:flex;justify-content:space-between;gap:8px;padding:9px 12px;font-size:12px;font-weight:700;border-bottom:1px solid var(--border);cursor:pointer}
+.pb-suggest .pb-opt:last-child{border-bottom:none}
+.pb-suggest .pb-opt .g{color:var(--sub);font-weight:600;font-size:10px}
+.pb-suggest .pb-empty{padding:9px 12px;font-size:11px;color:var(--sub)}
+.pb-picked{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.pb-chip{display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border-radius:14px;border:1.5px solid rgba(39,192,113,.5);background:var(--green-dim);color:var(--text);font-size:11px;font-weight:800}
+.pb-chip .x{color:var(--sub);font-weight:900;cursor:pointer;padding:0 2px}
 .ctrl{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:0 16px 12px;font-size:11px;font-weight:800}
 .ctrl label{display:flex;align-items:center;gap:6px;background:var(--card);border:1.5px solid var(--border);border-radius:13px;padding:6px 10px;letter-spacing:.3px;text-transform:uppercase;color:var(--sub)}
 .ctrl input[type=number]{width:58px;background:#000;border:1px solid var(--border);color:#fff;border-radius:6px;padding:4px 6px;font-family:var(--font);font-variant-numeric:tabular-nums;font-size:12px;font-weight:700;text-align:center}
@@ -389,6 +398,12 @@ header{padding:14px 16px 10px;padding-top:calc(14px + env(safe-area-inset-top))}
     <div class="ctrl-sub-label" style="display:flex;justify-content:space-between;align-items:center">Also scan vs Pinnacle <button class="clear-books-btn" id="clearBooks">Clear all</button></div>
     <div class="book-toggles" id="bookToggles"></div>
   </div>
+  <div class="ctrl-sub" id="pbWrap" style="display:none">
+    <div class="ctrl-sub-label">Props Builder — pick who to scan <span class="sub-note">only players from live games with props posted show up</span></div>
+    <input type="text" id="pbSearch" class="pb-search" placeholder="Search a live player…" autocomplete="off">
+    <div class="pb-suggest" id="pbSuggest" style="display:none"></div>
+    <div class="pb-picked" id="pbPicked"></div>
+  </div>
   <input type="checkbox" id="liveOnly" checked style="display:none">
   <div class="ctrl-sub">
     <label class="chk-row"><input type="checkbox" id="timeoutsOnly">Stoppage only <span class="note">off shows everything live · on narrows to halftime / timeout / between innings</span></label>
@@ -438,6 +453,10 @@ const EXTRA_BOOKS = [
   { key:'novig',     name:'Novig',     exch:true },
   { key:'kalshi',    name:'Kalshi',    exch:true },
   { key:'prophetx',  name:'Prophet X', exch:true },
+  // Player-prop-only book: unlike every other entry here, its odds never come back from the
+  // regular game-market fetch in loadOdds() (moneyline/spread/total/team-total), so toggling it
+  // on drives a separate loadPlayerProps() fetch (see below) instead of just widening bookList.
+  { key:'propbuilder', name:'Props Builder', props:true },
 ];
 const EXCH = new Set(EXTRA_BOOKS.filter(b => b.exch).map(b => b.name.toLowerCase()));
 const DEFAULT_BOOKS = ['fanduel','draftkings'];
@@ -585,7 +604,7 @@ async function loadOdds(fxs) {
   for (const [lk, list] of Object.entries(groups)) {
     const L = LEAGUES[lk];
     const marketNames = L.mlOnly ? ['moneyline'] : ['moneyline','point spread','total points','run line','puck line','total goals','total runs','team total'];
-    const extra = [...extraBooks].map(k => EXTRA_BOOKS.find(b => b.key === k)?.name).filter(Boolean);
+    const extra = [...extraBooks].map(k => EXTRA_BOOKS.find(b => b.key === k && !b.props)?.name).filter(Boolean);
     if (lk === 'ufc' && !extra.includes('Kalshi')) extra.push('Kalshi'); // UFC's Kalshi-as-reference needs it regardless of the checklist
     const bookList = [...new Set([REF_BOOK, ...extra])];
     for (const batch of chunk(list, 5)) {
@@ -596,6 +615,117 @@ async function loadOdds(fxs) {
     }
   }
   return byFx;
+}
+
+// ───────────────────────────── Props Builder (player props, pick-your-own) ─────────────────────────────
+// Every other book here trades game markets (moneyline/spread/total), fetched with an explicit
+// market-name filter in loadOdds(). Props Builder only carries player props, which aren't in that
+// list at all, so it gets its own fetch — scoped to whichever players you've actually picked
+// (arbing every player on every live roster against Pinnacle would be a huge, mostly-useless
+// payload), pulled fresh each cycle only while the Props Builder toggle is on.
+let pbCandidates = {};                 // "<player>|<fixtureId>" -> { player, f, rows:[raw odds] }
+let pbPicked = (() => { try { return new Set(JSON.parse(LS.get('live_pb_picked', '[]'))); } catch(e) { return new Set(); } })();
+const savePbPicked = () => LS.set('live_pb_picked', JSON.stringify([...pbPicked]));
+function isGameMarket(name) { return MARKET.some(m => m.test(name)) || PERIODIC.test(name); }
+async function loadPlayerProps() {
+  if (!extraBooks.has('propbuilder') || !fixtures.length) { pbCandidates = {}; return; }
+  const out = {};
+  for (const batch of chunk(fixtures, 5)) {
+    try {
+      const r = await oo('/fixtures/odds', { fixture_id: batch.map(f => f.id), sportsbook: ['Pinnacle', 'Props Builder'] });
+      (r?.data || []).forEach(d => {
+        const f = fixtures.find(x => x.id === d.id); if (!f) return;
+        (d.odds || []).forEach(o => {
+          if (o.price == null || !o.selection || isGameMarket(String(o.market || ''))) return;
+          const player = String(o.selection).trim();
+          const key = player + '|' + f.id;
+          (out[key] = out[key] || { player, f, rows: [] }).rows.push(o);
+        });
+      });
+    } catch(e) { console.warn('[live] player props fetch failed', e.message); }
+  }
+  pbCandidates = out;
+  // Drop picks whose game ended / stopped posting entirely, same spirit as the pinned-row cleanup.
+  [...pbPicked].forEach(k => { if (!out[k]) pbPicked.delete(k); });
+  renderPbPicker();
+}
+// Same devig-and-compare math as computeRows, just keyed by market+line instead of team side,
+// and against whichever picks you've made instead of every row the odds feed returns.
+function pbRows() {
+  const rows = [];
+  pbPicked.forEach(key => {
+    const c = pbCandidates[key]; if (!c) return;
+    const groups = {};
+    c.rows.forEach(o => {
+      const side = String(o.selection_line || '').toLowerCase(); if (side !== 'over' && side !== 'under') return;
+      const pts = o.points == null ? null : Number(o.points);
+      const gk = o.market + '|' + pts;
+      const g = (groups[gk] = groups[gk] || { market: o.market, points: pts, pin: {}, pb: {} });
+      const bk = String(o.sportsbook || '').toLowerCase();
+      if (bk === 'pinnacle') { if (!g.pin[side] || Number(o.price) > Number(g.pin[side].price)) g.pin[side] = o; }
+      else if (bk === 'props builder') { if (!g.pb[side] || Number(o.price) > Number(g.pb[side].price)) g.pb[side] = o; }
+    });
+    Object.values(groups).forEach(g => {
+      if (!g.pin.over || !g.pin.under) return; // need both Pinnacle sides to devig a fair price
+      const hold = imp(g.pin.over.price) + imp(g.pin.under.price);
+      if (hold < 0.97 || hold > 1.15) return;
+      const devig = (a, b) => { const x = imp(a), y = imp(b); return { over: x/(x+y), under: y/(x+y) }; };
+      const fair = devig(g.pin.over.price, g.pin.under.price);
+      ['over','under'].forEach(side => {
+        const pb = g.pb[side]; if (!pb) return;
+        const oppSide = side === 'over' ? 'under' : 'over';
+        const fp = fair[side];
+        const ev = fp * toDec(pb.price) - 1;
+        const arb = 1 - (imp(pb.price) + imp(g.pin[oppSide].price));
+        if (arb <= 0) return; // this app is locked-arb-only everywhere else too
+        const pr = Number(pb.price); if (pr < Number($('#pMin').value) || pr > Number($('#pMax').value)) return;
+        rows.push({
+          key: `pb|${key}|${g.market}|${g.points}|${side}`, f: c.f,
+          mk: { key:'prop', label: g.market },
+          sideLabel: `${c.player} ${side === 'over' ? 'Over' : 'Under'} ${g.points}`,
+          ttSide:null, pickSide:null, pickPoints:g.points, overUnder:side,
+          fair:fp, aligned:false, refLabel:'PIN', refBook:'Pinnacle', refBookShort:'PIN', fdPrice:null,
+          pin:{ mine:g.pin[side].price, other:g.pin[oppSide].price, lim:liqOf(g.pin[side]), depth:null },
+          books:[{ book:'Props Builder', price:pr, ev, arb, exch:false, liq:liqOf(pb), depth:null, o:pb }],
+          best:null, sharpFor:0, sharpAgainst:0,
+        });
+        rows[rows.length - 1].best = rows[rows.length - 1].books[0];
+      });
+    });
+  });
+  applyTrend(rows);
+  return rows;
+}
+function pbAllPlayers() {
+  return Object.entries(pbCandidates).map(([key, c]) => ({ key, player:c.player, game:`${c.f.away.ab} @ ${c.f.home.ab}` }));
+}
+function renderPbPicker() {
+  const wrap = $('#pbWrap'); if (!wrap) return;
+  wrap.style.display = extraBooks.has('propbuilder') ? 'block' : 'none';
+  const picked = $('#pbPicked');
+  if (picked) picked.innerHTML = [...pbPicked].map(key => {
+    const c = pbCandidates[key]; const label = c ? `${c.player} (${c.f.away.ab}@${c.f.home.ab})` : key.split('|')[0];
+    return `<span class="pb-chip">${esc(label)}<span class="x" data-pbrm="${esc(key)}">✕</span></span>`;
+  }).join('') || '';
+  if (picked) picked.querySelectorAll('[data-pbrm]').forEach(x => x.addEventListener('click', () => {
+    pbPicked.delete(x.dataset.pbrm); savePbPicked(); renderPbPicker(); render();
+  }));
+  renderPbSuggest($('#pbSearch')?.value || '');
+}
+function renderPbSuggest(query) {
+  const el = $('#pbSuggest'); if (!el) return;
+  const q = query.trim().toLowerCase();
+  if (!q) { el.style.display = 'none'; el.innerHTML = ''; return; }
+  const matches = pbAllPlayers().filter(p => !pbPicked.has(p.key) && p.player.toLowerCase().includes(q)).slice(0, 8);
+  el.style.display = 'block';
+  el.innerHTML = matches.length
+    ? matches.map(p => `<div class="pb-opt" data-pbadd="${esc(p.key)}">${esc(p.player)}<span class="g">${esc(p.game)}</span></div>`).join('')
+    : `<div class="pb-empty">No live player with props posted matches "${esc(query)}"</div>`;
+  el.querySelectorAll('[data-pbadd]').forEach(o => o.addEventListener('click', () => {
+    pbPicked.add(o.dataset.pbadd); savePbPicked();
+    const input = $('#pbSearch'); if (input) input.value = '';
+    renderPbPicker(); load(false);
+  }));
 }
 
 // ───────────────────────────── insight bar: "when to bet" ─────────────────────────────
@@ -1048,10 +1178,20 @@ function computeRows(fxs, byFx) {
   // seen-since + EV trend, so you can tell fresh from stale and rising from fading. We also
   // track which side actually moved — Pinnacle's same-side price, the book you'd bet, or both —
   // since that's what the gap between them (the edge) is measured off, so "why" can say whose
-  // move is driving it instead of just "better/worse".
-  const now = Date.now(); const keep = new Set();
+  // move is driving it instead of just "better/worse". Shared with pbRows() (Props Builder rows
+  // never went through computeRows) so both kinds of row get the same fresh/trend/flash treatment
+  // off the one `seen` map — pruning stale keys happens once per cycle in load(), after both
+  // row sets have run, so neither one wipes the other's entries out from under it.
+  applyTrend(out);
+  // highest edge always on top; ties → the one that's been on the board longest first
+  // true arbs first (by arb %), then everything else by EV
+  return out.sort((a, b) => ((b.best.arb > 0) - (a.best.arb > 0)) || ((b.best.arb > 0) ? b.best.arb - a.best.arb : b.best.ev - a.best.ev) || (a.since - b.since));
+}
+const seen = {};
+function applyTrend(out) {
+  const now = Date.now();
   out.forEach(r => {
-    keep.add(r.key); const prev = seen[r.key];
+    const prev = seen[r.key];
     r.isNew = !prev; r.since = prev ? prev.since : now; r.trend = prev ? Math.sign(r.best.ev - prev.ev) : 0;
     // Priced moved since the last refresh? Higher American odds is always better for the
     // bettor (holds straight across the -100/+100 boundary), so a plain numeric compare works.
@@ -1066,12 +1206,8 @@ function computeRows(fxs, byFx) {
     r.moveSource = !prev ? null : (pinChanged && bookChanged) ? 'both' : pinChanged ? 'pin' : bookChanged ? 'book' : null;
     seen[r.key] = { since: r.since, ev: r.best.ev, price: r.best.price, pin: r.pin.mine, arb: r.best.arb };
   });
-  Object.keys(seen).forEach(k => { if (!keep.has(k)) delete seen[k]; });
-  // highest edge always on top; ties → the one that's been on the board longest first
-  // true arbs first (by arb %), then everything else by EV
-  return out.sort((a, b) => ((b.best.arb > 0) - (a.best.arb > 0)) || ((b.best.arb > 0) ? b.best.arb - a.best.arb : b.best.ev - a.best.ev) || (a.since - b.since));
 }
-const seen = {};
+function pruneSeen(keepKeys) { Object.keys(seen).forEach(k => { if (!keepKeys.has(k)) delete seen[k]; }); }
 // My Bets only — nothing is logged until you tap "Bet This". Persisted.
 let log = (() => { try { return JSON.parse(LS.get('live_log', '{}')) || {}; } catch(e) { return {}; } })();
 let hidden = (() => { try { return JSON.parse(LS.get('live_hidden', '{}')) || {}; } catch(e) { return {}; } })();
@@ -1335,7 +1471,9 @@ function renderBookToggles() {
   }).join('');
   el.querySelectorAll('[data-bk]').forEach(cb => cb.addEventListener('change', () => {
     const k = cb.dataset.bk; if (cb.checked) extraBooks.add(k); else extraBooks.delete(k);
-    saveExtraBooks(); renderBookToggles(); updateFiltersSummary(); saveLastFilters(); load(true);
+    saveExtraBooks(); renderBookToggles(); updateFiltersSummary(); saveLastFilters();
+    const wrap = $('#pbWrap'); if (wrap) wrap.style.display = extraBooks.has('propbuilder') ? 'block' : 'none';
+    load(true);
   }));
 }
 function clearAllBooks() {
@@ -1575,18 +1713,19 @@ async function load(force) {
       updateStatusStrip();
       busy = false; setSync('idle'); $('#reload').classList.remove('spinning'); return;
     }
-    const [byFx, st] = await Promise.all([loadOdds(fixtures), loadState(fixtures)]);
+    const [byFx, st] = await Promise.all([loadOdds(fixtures), loadState(fixtures), loadPlayerProps()]);
     gameState = st;
     if (!window._lg) { window._lg = true; const all = Object.values(byFx).flat(); console.log('[live] markets seen:', [...new Set(all.map(o => o.market))]); console.log('[live] books seen:', [...new Set(all.map(o => o.sportsbook))]); console.log('[live] sample row:', JSON.stringify(all[0] || {}).slice(0, 400)); }
     window._byFx = byFx;
-    rows = computeRows(fixtures, byFx);
+    rows = computeRows(fixtures, byFx).concat(pbRows());
+    pruneSeen(new Set(rows.map(r => r.key)));
     lastAt = Date.now();
     setLastUpdated(new Date().toLocaleTimeString([], { hour:'numeric', minute:'2-digit', second:'2-digit' }));
     render();
   } catch(e) { console.error(e); setLastUpdated('error'); setSync('error'); toast(e.message); }
   busy = false; if ($('#syncDot').classList.contains('live')) setSync('idle'); $('#reload').classList.remove('spinning');
 }
-function recompute() { updateFiltersSummary(); if (window._byFx) { rows = computeRows(fixtures, window._byFx); render(); } }
+function recompute() { updateFiltersSummary(); if (window._byFx) { rows = computeRows(fixtures, window._byFx).concat(pbRows()); pruneSeen(new Set(rows.map(r => r.key))); render(); } }
 ['minArb','minLim','pMin','pMax','liveOnly','timeoutsOnly','sharpUfcOnly'].forEach(id => $('#' + id).addEventListener('change', () => { saveLastFilters(); recompute(); }));
 $('#presetSave').addEventListener('click', () => {
   const name = prompt('Name this preset (e.g. "Sharp UFC", "Loose EV"):'); if (!name || !name.trim()) return;
@@ -1611,6 +1750,8 @@ setFiltersOpen(LS.get('live_filters_open', '0') === '1');
 renderBookToggles();
 renderPresetChips();
 updateFiltersSummary();
+renderPbPicker();
+$('#pbSearch')?.addEventListener('input', e => renderPbSuggest(e.target.value));
 
 renderChips();
 $('#vLive').addEventListener('click', () => setView('live'));
