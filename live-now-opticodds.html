@@ -394,6 +394,10 @@ header{padding:14px 16px 10px;padding-top:calc(14px + env(safe-area-inset-top))}
     <div class="ctrl-sub-label" style="display:flex;justify-content:space-between;align-items:center">Also scan vs Pinnacle <button class="clear-books-btn" id="clearBooks">Clear all</button></div>
     <div class="book-toggles" id="bookToggles"></div>
   </div>
+  <div class="ctrl-sub" id="pbDevigWrap" style="display:none">
+    <div class="ctrl-sub-label">Props Builder devig <span class="sub-note">— which book(s) set the fair price (can pick more than one)</span></div>
+    <div class="book-toggles" id="pbDevigToggles"></div>
+  </div>
   <input type="checkbox" id="liveOnly" checked style="display:none">
   <div class="ctrl-sub">
     <label class="chk-row"><input type="checkbox" id="timeoutsOnly">Stoppage only <span class="note">off shows everything live · on narrows to halftime / timeout / between innings</span></label>
@@ -617,20 +621,22 @@ async function loadOdds(fxs) {
 
 // ───────────────────────────── Props Builder (automatic — target book, not a pick list) ─────────────────────────────
 // Props Builder is the book being bet here, same role FanDuel/DraftKings/etc play for game
-// markets — it's never the reference. Pinnacle is always the reference; any OTHER regular book
-// you've also toggled on (FanDuel, DraftKings, whatever) gets folded in as confirmation exactly
-// like the game markets' "FD·Pin aligned" averaging, just generalized to whichever books you
-// actually have on. Every other book here trades game markets, fetched with an explicit
-// market-name filter in loadOdds() — Props Builder only carries player props, not in that list at
-// all, so it gets its own fetch, scanning every live game automatically (no picking a player).
-// is_main:true keeps it to main/standard player markets, same technique the NFL sharp-props
-// tracker uses.
-let pbByFx = {}; // fixtureId -> raw player-prop odds rows (Pinnacle + Props Builder + toggled books)
+// markets — it's never the reference. Unlike everywhere else in this app, Pinnacle is NOT
+// automatically the reference for it: it gets its own explicit devig book selection (pbDevigBooks
+// below, defaulting to FanDuel), and can be more than one — every selected book that posts both
+// sides gets devigged independently and averaged together. Every other book here trades game
+// markets, fetched with an explicit market-name filter in loadOdds() — Props Builder only carries
+// player props, not in that list at all, so it gets its own fetch, scanning every live game
+// automatically (no picking a player). is_main:true keeps it to main/standard player markets,
+// same technique the NFL sharp-props tracker uses.
+let pbByFx = {}; // fixtureId -> raw player-prop odds rows (Props Builder + whichever devig books are selected)
+let pbDevigBooks = (() => { try { return new Set(JSON.parse(LS.get('live_pb_devig_books', '["fanduel"]'))); } catch(e) { return new Set(['fanduel']); } })();
+const savePbDevigBooks = () => LS.set('live_pb_devig_books', JSON.stringify([...pbDevigBooks]));
 function isGameMarket(name) { return MARKET.some(m => m.test(name)) || PERIODIC.test(name); }
 async function loadPlayerProps() {
-  if (!extraBooks.has('propbuilder') || !fixtures.length) { pbByFx = {}; return; }
-  const confirmBooks = [...extraBooks].map(k => EXTRA_BOOKS.find(b => b.key === k && !b.props)?.name).filter(Boolean);
-  const bookList = [...new Set([REF_BOOK, 'Props Builder', ...confirmBooks])];
+  if (!extraBooks.has('propbuilder') || !fixtures.length || !pbDevigBooks.size) { pbByFx = {}; return; }
+  const devigBookNames = [...pbDevigBooks].map(k => k === 'pinnacle' ? REF_BOOK : EXTRA_BOOKS.find(b => b.key === k && !b.props)?.name).filter(Boolean);
+  const bookList = [...new Set(['Props Builder', ...devigBookNames])];
   const out = {};
   for (const fxBatch of chunk(fixtures, 5)) {
     for (const bkBatch of chunk(bookList, 5)) {
@@ -649,7 +655,8 @@ async function loadPlayerProps() {
   pbByFx = out;
 }
 // Same devig-and-compare math as computeRows, just keyed by player+market+line instead of team
-// side, and scanning every live game's whole roster instead of one team's two sides.
+// side, scanning every live game's whole roster instead of one team's two sides, and devigging
+// whichever book(s) you picked instead of always Pinnacle.
 function pbRows() {
   const rows = [];
   Object.values(pbByFx).forEach(c => {
@@ -659,46 +666,43 @@ function pbRows() {
       const player = String(o.selection || '').trim(); if (!player) return;
       const pts = o.points == null ? null : Number(o.points);
       const gk = player + '|' + o.market + '|' + pts;
-      const g = (groups[gk] = groups[gk] || { player, market: o.market, points: pts, pin: {}, pb: {}, confirm: {} });
+      const g = (groups[gk] = groups[gk] || { player, market: o.market, points: pts, pb: {}, devig: {} });
       const bk = String(o.sportsbook || '').toLowerCase();
-      if (bk === 'pinnacle') { if (!g.pin[side] || Number(o.price) > Number(g.pin[side].price)) g.pin[side] = o; }
-      else if (bk === 'props builder') { if (!g.pb[side] || Number(o.price) > Number(g.pb[side].price)) g.pb[side] = o; }
-      else { const cs = (g.confirm[bk] = g.confirm[bk] || {}); if (!cs[side] || Number(o.price) > Number(cs[side].price)) cs[side] = o; }
+      if (bk === 'props builder') { if (!g.pb[side] || Number(o.price) > Number(g.pb[side].price)) g.pb[side] = o; }
+      else if (pbDevigBooks.has(bk === 'pinnacle' ? 'pinnacle' : (EXTRA_BOOKS.find(b => b.name.toLowerCase() === bk)?.key || bk))) {
+        const ds = (g.devig[bk] = g.devig[bk] || {}); if (!ds[side] || Number(o.price) > Number(ds[side].price)) ds[side] = o;
+      }
     });
     Object.values(groups).forEach(g => {
-      if (!g.pin.over || !g.pin.under) return; // need both Pinnacle sides to devig a fair price
-      const hold = imp(g.pin.over.price) + imp(g.pin.under.price);
-      if (hold < 0.97 || hold > 1.15) return;
+      const devigEntries = Object.entries(g.devig).filter(([, s]) => s.over && s.under)
+        .filter(([, s]) => { const h = imp(s.over.price) + imp(s.under.price); return h >= 0.97 && h <= 1.15; });
+      if (!devigEntries.length) return; // need at least one selected devig book posting both sides
       const devig = (a, b) => { const x = imp(a), y = imp(b); return { over: x/(x+y), under: y/(x+y) }; };
-      let fair = devig(g.pin.over.price, g.pin.under.price);
-      // Same "aligned" refinement the game markets get, generalized across however many other
-      // toggled books actually agree with Pinnacle (not just one hardcoded book) — average every
-      // agreeing book's own devigged fair in together.
-      const agreeing = Object.entries(g.confirm).filter(([, s]) => s.over && s.under
-        && centsDiff(s.over.price, g.pin.over.price) <= ALIGN_CENTS && centsDiff(s.under.price, g.pin.under.price) <= ALIGN_CENTS);
-      const aligned = agreeing.length > 0;
-      if (aligned) {
-        const fairs = agreeing.map(([, s]) => devig(s.over.price, s.under.price));
-        fair = fairs.reduce((a, f) => ({ over:a.over+f.over, under:a.under+f.under }), fair);
-        fair = { over: fair.over/(agreeing.length+1), under: fair.under/(agreeing.length+1) };
-      }
+      const fairs = devigEntries.map(([, s]) => devig(s.over.price, s.under.price));
+      const fair = { over: fairs.reduce((a, x) => a + x.over, 0) / fairs.length, under: fairs.reduce((a, x) => a + x.under, 0) / fairs.length };
+      const devigNames = devigEntries.map(([bk]) => EXTRA_BOOKS.find(b => b.name.toLowerCase() === bk)?.name || bk);
+      const primary = devigEntries[0][1];
       ['over','under'].forEach(side => {
         const pb = g.pb[side]; if (!pb) return;
         const oppSide = side === 'over' ? 'under' : 'over';
         const fp = fair[side];
         const ev = fp * toDec(pb.price) - 1;
-        const arb = 1 - (imp(pb.price) + imp(g.pin[oppSide].price));
+        // Best (most conservative) opposite-side price across whichever devig books actually have
+        // it, for the locked-arb check — same idea as picking the best price anywhere else here.
+        const oppCandidates = devigEntries.map(([, s]) => s[oppSide]).filter(Boolean);
+        if (!oppCandidates.length) return;
+        const oppBest = oppCandidates.reduce((a, b) => toDec(b.price) > toDec(a.price) ? b : a);
+        const arb = 1 - (imp(pb.price) + imp(oppBest.price));
         if (arb <= 0) return; // this app is locked-arb-only everywhere else too
         const pr = Number(pb.price); if (pr < Number($('#pMin').value) || pr > Number($('#pMax').value)) return;
-        const agreeBook = aligned ? EXTRA_BOOKS.find(b => b.name.toLowerCase() === agreeing[0][0])?.name || agreeing[0][0] : null;
-        const agreeNote = aligned ? `✓ ${esc((agreeBook||'').toUpperCase())} &amp; PIN AGREE <b>${esc(agreeBook)} ${fmtAm(agreeing[0][1][side].price)}</b> · <b>PIN ${fmtAm(g.pin[side].price)}</b> → fading Props Builder${agreeing.length>1?` (+${agreeing.length-1} more agree)`:''}` : '';
+        const agreeNote = devigNames.length > 1 ? `✓ ${devigNames.map(esc).join(', ')} devig <b>${fmtAm(probToAm(fp))}</b> → fading Props Builder` : '';
         rows.push({
           key: `pb|${g.player}|${c.f.id}|${g.market}|${g.points}|${side}`, f: c.f,
-          mk: { key:'prop', label: g.market },
+          mk: { key:'prop', label: g.market }, player: g.player,
           sideLabel: `${g.player} ${side === 'over' ? 'Over' : 'Under'} ${g.points}`,
           ttSide:null, pickSide:null, pickPoints:g.points, overUnder:side,
-          fair:fp, aligned, agreeNote, refLabel: aligned?`${agreeBook}·Pin`:'PIN', refBook:'Pinnacle', refBookShort:'PIN', fdPrice: aligned ? agreeing[0][1][side].price : null,
-          pin:{ mine:g.pin[side].price, other:g.pin[oppSide].price, lim:liqOf(g.pin[side]), depth:null },
+          fair:fp, aligned: devigNames.length > 1, agreeNote, refLabel: devigNames.join('+'), refBook: devigNames[0], refBookShort: devigNames[0], fdPrice: null,
+          pin:{ mine:primary[side].price, other:oppBest.price, lim:liqOf(primary[side]), depth:null },
           books:[{ book:'Props Builder', price:pr, ev, arb, exch:false, liq:liqOf(pb), depth:null, o:pb }],
           best:null, sharpForBooks:[], sharpAgainstBooks:[],
         });
@@ -1587,7 +1591,22 @@ function renderBookToggles() {
   el.querySelectorAll('[data-bk]').forEach(cb => cb.addEventListener('change', () => {
     const k = cb.dataset.bk; if (cb.checked) extraBooks.add(k); else extraBooks.delete(k);
     saveExtraBooks(); renderBookToggles(); updateFiltersSummary(); saveLastFilters();
+    const wrap = $('#pbDevigWrap'); if (wrap) wrap.style.display = extraBooks.has('propbuilder') ? 'block' : 'none';
     load(true);
+  }));
+}
+const PB_DEVIG_BOOKS = [{ key:'pinnacle', name:'Pinnacle' }, ...EXTRA_BOOKS.filter(b => !b.props)];
+function renderPbDevigToggles() {
+  const wrap = $('#pbDevigWrap'); if (wrap) wrap.style.display = extraBooks.has('propbuilder') ? 'block' : 'none';
+  const el = $('#pbDevigToggles'); if (!el) return;
+  el.innerHTML = PB_DEVIG_BOOKS.map(b => {
+    const lg = logoOf(b.name);
+    const inner = lg ? `<img src="${esc(lg)}" alt="${esc(b.name)}" title="${esc(b.name)}">` : `<span>${esc(b.name)}</span>`;
+    return `<label class="book-chk${pbDevigBooks.has(b.key)?' on':''}" title="${esc(b.name)}"><input type="checkbox" data-pbdv="${b.key}"${pbDevigBooks.has(b.key)?' checked':''}>${inner}</label>`;
+  }).join('');
+  el.querySelectorAll('[data-pbdv]').forEach(cb => cb.addEventListener('change', () => {
+    const k = cb.dataset.pbdv; if (cb.checked) pbDevigBooks.add(k); else pbDevigBooks.delete(k);
+    savePbDevigBooks(); renderPbDevigToggles(); load(true);
   }));
 }
 function clearAllBooks() {
@@ -1878,6 +1897,7 @@ $('#filtersToggle').addEventListener('click', () => setFiltersOpen(!$('#filtersP
 loadLastFilters();
 setFiltersOpen(LS.get('live_filters_open', '0') === '1');
 renderBookToggles();
+renderPbDevigToggles();
 renderPresetChips();
 updateFiltersSummary();
 
