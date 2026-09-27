@@ -96,6 +96,7 @@ main{flex:1;padding:12px calc(var(--sar) + 12px) 160px calc(var(--sal) + 12px)}
 .sb{padding:5px 10px;border-radius:7px;border:1px solid var(--line2);background:var(--bg2);color:#fff;font-size:11px;font-weight:700}
 .sb.on{border-color:var(--purple);color:#fff}
 .mkh .was{font-family:var(--mono);font-size:10px;font-weight:700;color:#fff;opacity:1;margin-left:6px}
+.movenote{font-size:10px;font-weight:700;color:var(--amber);letter-spacing:.1px}
 /* Two-sided board: Over and Under are two independently-sorted columns (each book's own logo
    right on its own price cell), so both sides always read best-to-worst top to bottom without
    needing any other highlight to call out which cell is the best price. */
@@ -132,6 +133,10 @@ main{flex:1;padding:12px calc(var(--sar) + 12px) 160px calc(var(--sal) + 12px)}
 .rcell .rmeta{display:flex;gap:6px;font-size:9.5px;font-weight:700;color:#fff;margin-top:1px}
 .rcell .rmeta .pctv{color:#fff}
 .rcell .rliqsum{display:inline-block;font-family:var(--mono);font-size:9px;font-weight:700;color:#fff;margin-top:1px;padding:1px 7px;border-radius:999px;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.12)}
+.rcell .mmnote{font-size:7.5px;font-weight:700;color:#fff;opacity:.6;margin-top:2px;line-height:1.3;max-width:100px}
+.rcell .limitup{display:block;font-size:7px;font-weight:800;color:var(--amber);letter-spacing:.2px;margin-top:1px}
+.rcell.important{animation:limitPulse 3s ease-out;border-radius:10px}
+@keyframes limitPulse{0%{box-shadow:0 0 0 2px var(--amber),0 0 16px 2px rgba(251,191,36,.6)}70%{box-shadow:0 0 0 2px var(--amber),0 0 16px 2px rgba(251,191,36,.6)}100%{box-shadow:0 0 0 0 rgba(251,191,36,0)}}
 @keyframes flashUp{0%{background:rgba(74,222,128,.3);color:#4ade80;border-radius:6px}100%{background:transparent;color:inherit}}
 @keyframes flashDown{0%{background:rgba(248,113,113,.3);color:#f87171;border-radius:6px}100%{background:transparent;color:inherit}}
 .flash-up{animation:flashUp 1.1s ease-out}
@@ -731,6 +736,22 @@ function bestFirst(rows){
   const by={}; rows.forEach(o=>{ const k=canonBook(o.sportsbook); if(!by[k]||Number(o.price)>Number(by[k].price)) by[k]=o; });
   return Object.values(by).sort((a,b)=>Number(b.price)-Number(a.price));
 }
+// Short natural-language summary of what's happened since open — which side the consensus line
+// itself moved toward (a line drifting up means Over is the side drawing money) plus how much
+// that side's own best price has moved, e.g. "Over 8.5 getting the action — line moved from 7.5,
+// moved 8¢ worse".
+function moveNote(nowRows, opRows, mainLine, opLine){
+  if(opLine==null || mainLine==null || opLine===mainLine || !opRows.length) return '';
+  const dir = mainLine>opLine ? 'over' : 'under';
+  const bestNow = bestFirst(nowRows.filter(o=>sideOf(o)===dir))[0];
+  const bestOp = bestFirst(opRows.filter(o=>sideOf(o)===dir))[0];
+  let centsTxt='';
+  if(bestNow && bestOp){
+    const dc = cents(Number(bestNow.price)) - cents(Number(bestOp.price));
+    if(dc) centsTxt = `, moved ${Math.abs(dc)}¢ ${dc<0?'worse':'better'}`;
+  }
+  return `${dir==='over'?'Over':'Under'} ${mainLine} getting the action — line moved from ${opLine}${centsTxt}`;
+}
 // One row per book: the line THAT book is posting, plus its best price a side.
 function bookBoard(rows){
   const by={};
@@ -787,8 +808,18 @@ function sideCellHtml(b, sd, o, pt, ctxKey, ro){
   const d = b.ex ? depthSummary(o) : null;
   const atTop = d ? d.top : (o.limits?.max!=null?Number(o.limits.max):null);
   const showMax = b.ex || SHOW_MAX.has(b.key);
-  const liq = showMax && atTop!=null ? `<span class="${flashCls(base+'|liq',atTop).trim()}">${usd(atTop)}</span>` : '';
+  const liqFlashCls = showMax && atTop!=null ? flashCls(base+'|liq',atTop).trim() : '';
+  // Pinnacle moving its own LIMIT up (not just price) is a real signal — sharp books raise limits
+  // when they're confident, so it's worth calling out harder than the usual brief flash.
+  const pinLimitUp = b.key==='pinnacle' && liqFlashCls==='flash-up';
+  const liq = showMax && atTop!=null ? `<span class="${liqFlashCls}">${usd(atTop)}</span>${pinLimitUp?'<span class="limitup">⚡ Limit up</span>':''}` : '';
   const liqSummary = (b.ex && d && d.size) ? `<div class="rliqsum${flashCls(base+'|liqsum', d.size)}">${usd(d.size)} at ${fmtAm(d.avg)}</div>` : '';
+  // Exchange resting liquidity, per what's already established: a maker posting size on one side
+  // is functionally taking the other — someone offering Over liquidity wants Under matched
+  // against them, at that side's own current quote from the same book.
+  const oppSd = sd==='over'?'under':sd==='under'?'over':null;
+  const oppO = oppSd ? b[oppSd] : null;
+  const mmNote = (b.ex && d && d.size && oppO) ? `<div class="mmnote">Market makers want ${oppSd==='over'?'Over':'Under'} at ${fmtAm(oppO.price)}</div>` : '';
   const priceCls = flashCls(base+'|price', Number(o.price), true);
   const key=`${sd}|${b.key}`;
   const dl=deepLinkFor(o); if(dl) sawDeepLinks=true;
@@ -810,10 +841,11 @@ function sideCellHtml(b, sd, o, pt, ctxKey, ro){
       ${(pct||liq)?`<div class="rmeta">${pct}${liq}</div>`:''}
       ${bet}
       ${liqSummary}
+      ${mmNote}
       <button class="liqbtn" data-pill="${ctxKey}|${key}">LIQ</button>
     </div>`;
   }
-  return `<div class="rcell${playable(o.price,pt)?'':' bad'}" role="button" data-pill="${ctxKey}|${key}">
+  return `<div class="rcell${playable(o.price,pt)?'':' bad'}${pinLimitUp?' important':''}" role="button" data-pill="${ctxKey}|${key}">
     <span class="rv${priceCls}">${fmtAm(o.price)}</span>${bet}
     ${(pct||liq)?`<div class="rmeta">${pct}${liq}</div>`:''}
   </div>`;
@@ -1060,27 +1092,40 @@ function marketCardHtml(p, mkey){
   const bookCount = new Set(nowRows.map(o=>canonBook(o.sportsbook))).size;
   const tag = (isSingle || sel==null) ? '' : `<div class="lntag alt"><span class="dot"></span>Alt line${mainLine!=null?` · consensus ${mainLine}`:''}<span class="lnct">${bookCount}</span><button data-reset="${ctx}">Back</button></div>`;
   const was = opLine!=null && nowLine!=null && opLine!==nowLine ? `<span class="was">from ${opLine}</span>` : '';
+  const note = isSingle ? '' : moveNote(nowRows, opRows, nowLine, opLine);
   const body = nowRows.length ? boardHtml(nowRows,p,mkey,ctx,nowLine,pt,false) : `<div class="bempty">No book is posting ${nowLine}.</div>`;
   return `<div class="mk${isSingle?' single':''}" data-ctx="${ctx}" data-line="${nowLine??''}">
     <div class="mkh">
       <div class="lnrow">${stp}<span><span class="t">${esc(marketLabel(sportKey,mkey))}</span>${line!=null?`<span class="ln">${line}</span>`:''}${was}</span>${stpR}</div>
       ${tag}
+      ${note?`<div class="movenote">${esc(note)}</div>`:''}
     </div>
     ${body}
   </div>`;
 }
+// Delegated once on document instead of re-querying and re-attaching on every single render —
+// bindView() used to run document.querySelectorAll(...).forEach(el=>el.addEventListener(...))
+// after EVERY re-render (each alt-line step, each historical fetch landing, etc.), which only
+// replaces the one card being updated; every OTHER already-rendered market card's buttons kept
+// their old listener AND got a new duplicate one piled on top each time. Over a session that adds
+// up to several duplicate handlers firing per tap — a real bug behind "clicking odds doesn't
+// work," not just wasted work. Binding once here, keyed off the live `current` player, fixes it.
+let _delegatedBound = false;
 function bindView(p){
-  document.querySelectorAll('.mk [data-betlink]').forEach(a=>a.addEventListener('click',ev=>ev.stopPropagation()));
-  document.querySelectorAll('.mk [data-betchoice]').forEach(btn=>btn.addEventListener('click',ev=>{
-    ev.stopPropagation();
-    showBetChoice(btn, betChoices[btn.dataset.betchoice]||[]);
-  }));
-  document.querySelectorAll('.mk [data-pill]').forEach(btn=>btn.addEventListener('click',ev=>{
-    ev.stopPropagation();
-    showDetailPop(btn, detailPops[btn.dataset.pill], p);
-  }));
-  document.querySelectorAll('.stp').forEach(b=>b.addEventListener('click',()=>stepLine(p,b.dataset.ctx,Number(b.dataset.step))));
-  document.querySelectorAll('[data-reset]').forEach(b=>b.addEventListener('click',()=>{ selLine[b.dataset.reset]=null; rerenderCard(p,b.dataset.reset); }));
+  if(_delegatedBound) return;
+  _delegatedBound = true;
+  document.addEventListener('click', ev=>{
+    const betlink = ev.target.closest('.mk [data-betlink]');
+    if(betlink){ ev.stopPropagation(); return; }
+    const betchoice = ev.target.closest('.mk [data-betchoice]');
+    if(betchoice){ ev.stopPropagation(); showBetChoice(betchoice, betChoices[betchoice.dataset.betchoice]||[]); return; }
+    const pill = ev.target.closest('.mk [data-pill]');
+    if(pill){ ev.stopPropagation(); showDetailPop(pill, detailPops[pill.dataset.pill], current); return; }
+    const stp = ev.target.closest('.stp');
+    if(stp){ if(!stp.disabled) stepLine(current, stp.dataset.ctx, Number(stp.dataset.step)); return; }
+    const reset = ev.target.closest('[data-reset]');
+    if(reset){ selLine[reset.dataset.reset]=null; rerenderCard(current, reset.dataset.reset); return; }
+  });
 }
 // DraftKings' Bet button covers 3 real apps sharing the same lines (DK, Courtside, Onyx Odds) —
 // this is the small popover that lets the user pick which one actually opens.
