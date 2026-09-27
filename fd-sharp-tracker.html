@@ -269,6 +269,7 @@ const CONSENSUS_BOOKS = ['Caesars', 'DraftKings', 'Fliff'];
 const KALSHI_BOOK = 'Kalshi';
 const KALSHI_TARGET_BOOKS = [TARGET_BOOK, 'DraftKings', 'Fliff', 'Props Builder'];
 const MIN_KALSHI_LIQ = 300;
+const MIN_KALSHI_LIQ_ATD = 10000; // Anytime TD needs a much deeper book than a yardage line — same bar live-now-opticodds.html uses
 const ALL_BOOKS = [TARGET_BOOK, ...CONSENSUS_BOOKS, KALSHI_BOOK, 'Props Builder'];
 // Alt lines ("5+ Receptions" etc.) are single-sided — there's no opposite side to arb against,
 // and we're betting ON FD here, not hedging against another book, so FD's own price is never
@@ -640,7 +641,11 @@ function computeKalshiRows(fxs, byFx) {
       const player = cleanSel(o.selection || o.name || ''); if (!player) return;
       const line = o.points != null ? Number(o.points) : null;
       if (mkey !== 'atd' && line != null && line < 0) return;
-      const side = /over|under/i.test(String(o.selection_line || '')) ? String(o.selection_line).toLowerCase() : 'yes';
+      const rawLine = String(o.selection_line || '').toLowerCase();
+      // Anytime TD is single-sided on a real sportsbook (only ever a "Yes" line), but Kalshi is a
+      // genuine two-sided exchange and can post a "No" contract too -- that's the real opposite
+      // side to mirror, same idea as over/under, just a different pair of labels.
+      const side = rawLine === 'over' || rawLine === 'under' ? rawLine : rawLine === 'no' ? 'no' : 'yes';
       const bucketKey = `${f.id}|${mkey}|${normName(player)}|${line ?? ''}`;
       const P = (pairs[bucketKey] = pairs[bucketKey] || { mkey, player, line, marketName: o.market, sides: {} });
       const S = (P.sides[side] = P.sides[side] || {});
@@ -648,13 +653,16 @@ function computeKalshiRows(fxs, byFx) {
       if (!S[bk] || Number(o.price) > Number(S[bk].price)) S[bk] = o;
     });
     Object.entries(pairs).forEach(([bucketKey, P]) => {
-      ['over', 'under'].forEach(side => {
-        const oppSide = side === 'over' ? 'under' : 'over';
+      [['over', 'under'], ['yes', 'no']].forEach(([side, oppSide]) => {
         const books = P.sides[side] || {}, oppBooks = P.sides[oppSide] || {};
         const kalshiOpp = oppBooks[KALSHI_BOOK]; if (!kalshiOpp) return;
         const depth = liqDepth(kalshiOpp);
         const liq = depth ? depth.total : liqOf(kalshiOpp);
-        if (liq == null || liq < MIN_KALSHI_LIQ) return;
+        // Anytime TD markets run thinner and swing harder on Kalshi than a yardage line, so it
+        // needs the same higher liquidity bar live-now-opticodds.html's KALSHI_PROP_MARKETS uses
+        // for 'td' (10000) rather than the general $300 floor.
+        const minLiq = P.mkey === 'atd' ? MIN_KALSHI_LIQ_ATD : MIN_KALSHI_LIQ;
+        if (liq == null || liq < minLiq) return;
         const mirrorPrice = -Number(kalshiOpp.price);
         const fairProb = imp(mirrorPrice);
         KALSHI_TARGET_BOOKS.forEach(bk => {
@@ -808,7 +816,7 @@ const comboBooksHtml = e => {
   const books = ((e.arbBooks && e.arbBooks.length >= MIN_ARB_BOOKS ? e.arbBooks : e.valueBooks) || []).map(b => b.book).sort();
   return books.length ? books.map(bookName).join(' + ') : '—';
 };
-const sideLabelFor = e => e.side === 'over' ? 'Over' : e.side === 'under' ? 'Under' : 'Yes';
+const sideLabelFor = e => e.side === 'over' ? 'Over' : e.side === 'under' ? 'Under' : e.side === 'no' ? 'No' : 'Yes';
 const propSideFor = e => `${e.market} ${sideLabelFor(e)}`;
 // Picks tracked before the value rule existed have no qualKind field — they were all arb-only,
 // so infer it from arbCount rather than let old entries render as NaN/undefined value picks.
@@ -987,6 +995,9 @@ function gradeOutcome(e, actual) {
   if (actual == null) return null;
   if (e.side === 'over') return actual > e.line ? 'won' : actual === e.line ? 'push' : 'lost';
   if (e.side === 'under') return actual < e.line ? 'won' : actual === e.line ? 'push' : 'lost';
+  // single-sided Anytime TD 'no' (Kalshi's own opposite contract, betting against a TD): any TD
+  // at all loses it, none wins it -- inverse of 'yes' just below.
+  if (e.side === 'no') return actual > 0 ? 'lost' : 'won';
   // single-sided (Anytime TD 'yes'): any TD at all is a win, none is a loss
   return actual > 0 ? 'won' : 'lost';
 }
@@ -1270,7 +1281,7 @@ function renderTracker() {
     const resultLine = !settled
       ? `<div class="m" style="color:var(--sub)">Pending · grades itself when the game is final</div>`
       : `<div class="m"><b style="color:${clr};font-size:12px">${e.status.toUpperCase()}</b> <b style="color:${clr}">${units}</b>${e.actual != null ? ` · actual ${e.actual}` : ''}</div>`;
-    const sideLabel = e.side === 'over' ? `Over ${e.line}` : e.side === 'under' ? `Under ${e.line}` : 'Yes';
+    const sideLabel = e.side === 'over' ? `Over ${e.line}` : e.side === 'under' ? `Under ${e.line}` : e.side === 'no' ? 'No' : 'Yes';
     const sideLabelNow = !settled && e.actual != null ? `${sideLabel} (${e.actual})` : sideLabel;
     const arbPart = `${(e.arbPct*100).toFixed(2)}% arb vs Kalshi`;
     const valuePart = e.evPct != null ? `+${(e.evPct*100).toFixed(2)}% EV vs Kalshi mirror fair (${fmtAm(probToAm(e.fairProb))})` : null;
