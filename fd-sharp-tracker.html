@@ -194,7 +194,7 @@ header{padding:16px 16px 10px}
       <button id="reload" class="refresh-btn" title="Refresh">↻</button>
     </div>
   </div>
-  <div class="tagline">NFL live player props · FanDuel arb vs 2+ of <b>Caesars · DK · Fliff</b></div>
+  <div class="tagline">NFL live player props · FanDuel arb vs 2+ of <b>Caesars · DK · Fliff</b> · Kalshi sharp vs FD/DK/Fliff/PB</div>
 </header>
 
 <div class="ticker-wrap" id="tickerWrap" style="display:none">
@@ -228,6 +228,27 @@ const imp = a => 1/toDec(a);
 const fmtAm = a => { a = Number(a); return a > 0 ? '+' + a : String(a); };
 const probToAm = p => { if (!(p > 0 && p < 1)) return 0; return p >= 0.5 ? -Math.round(100 * p / (1 - p)) : Math.round(100 * (1 - p) / p); };
 const centsDiff = (a, b) => { a = Number(a); b = Number(b); if ((a < 0) === (b < 0)) return Math.abs(a - b); return Math.abs(Math.abs(a) - 100) + Math.abs(Math.abs(b) - 100); };
+const toAm = dec => dec >= 2 ? Math.round((dec - 1) * 100) : Math.round(-100 / (dec - 1));
+const usd = n => n >= 1000 ? '$' + (n/1000).toFixed(1).replace(/\.0$/,'') + 'k' : '$' + Math.round(n);
+// Kalshi reports liquidity as an order_book of [price,size] levels rather than a flat
+// limits.max — same depth-reading approach as live-now-opticodds.html's Kalshi integration.
+function liqDepth(o) {
+  const ob = Array.isArray(o.order_book) ? o.order_book.filter(l => Array.isArray(l) && l.length >= 2) : [];
+  if (!ob.length) return null;
+  const top = Number(o.price);
+  const priceFirst = Math.abs(Number(ob[0][0]) - top) <= Math.abs(Number(ob[0][1]) - top);
+  const levels = ob.map(l => ({ price: Number(priceFirst ? l[0] : l[1]), size: Number(priceFirst ? l[1] : l[0]) }))
+    .filter(l => !isNaN(l.price) && !isNaN(l.size) && l.size > 0);
+  if (!levels.length) return null;
+  const total = levels.reduce((sum, l) => sum + l.size, 0);
+  const wdec = levels.reduce((sum, l) => sum + toDec(l.price) * l.size, 0) / total;
+  return { total, avg: toAm(wdec) };
+}
+function liqOf(o) {
+  if (o.limits?.max != null) return Number(o.limits.max);
+  const d = liqDepth(o);
+  return d ? d.total : null;
+}
 const chunk = (arr, n) => { const out = []; for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n)); return out; };
 const normName = n => String(n||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/['’.`]/g,'').replace(/[^a-z ]/g,' ').replace(/\s+/g,' ').trim();
 const cleanSel = n => String(n||'').replace(/\s*\([^)]*\)\s*$/,'').trim();
@@ -243,7 +264,12 @@ function toast(msg) { const t = $('#toast'); t.textContent = msg; t.classList.ad
 // ───────────────────────────── config ─────────────────────────────
 const TARGET_BOOK = 'FanDuel';
 const CONSENSUS_BOOKS = ['Caesars', 'DraftKings', 'Fliff'];
-const ALL_BOOKS = [TARGET_BOOK, ...CONSENSUS_BOOKS];
+// Kalshi is tracked as its own independent sharp source, separate from the 3-book consensus rule
+// above — it checks FD, DK, Fliff and Props Builder each on their own, not blended together.
+const KALSHI_BOOK = 'Kalshi';
+const KALSHI_TARGET_BOOKS = [TARGET_BOOK, 'DraftKings', 'Fliff', 'Props Builder'];
+const MIN_KALSHI_LIQ = 300;
+const ALL_BOOKS = [TARGET_BOOK, ...CONSENSUS_BOOKS, KALSHI_BOOK, 'Props Builder'];
 // Alt lines ("5+ Receptions" etc.) are single-sided — there's no opposite side to arb against,
 // and we're betting ON FD here, not hedging against another book, so FD's own price is never
 // required to match consensus. This margin instead gates whether the 3 CONSENSUS books agree
@@ -597,6 +623,61 @@ function computeAltRows(fxs, byFx) {
   });
   return out.sort((a, b) => b.evPct - a.evPct);
 }
+// Kalshi acts as its own independent sharp source, checked against FD/DK/Fliff/Props Builder
+// one at a time — never blended into the 3-book consensus above. Fair price for a side comes
+// from MIRRORING Kalshi's own OPPOSITE-side quote (sign-flip the price), not from trusting
+// Kalshi's same-side quote directly: imp(-x) + imp(x) = 1 identically, so the opposite side's
+// price already encodes the true no-vig complement — same convention proven out in
+// live-now-opticodds.html's kalshiRows(). The liquidity gate reads off that same opposite-side
+// quote, since that's the number the fair price and the arb check both depend on.
+function computeKalshiRows(fxs, byFx) {
+  const out = [];
+  fxs.forEach(f => {
+    const odds = (byFx[f.id] || []).filter(o => o.price != null);
+    const pairs = {};
+    odds.forEach(o => {
+      const mkey = marketKeyFor(o.market || ''); if (!mkey) return;
+      const player = cleanSel(o.selection || o.name || ''); if (!player) return;
+      const line = o.points != null ? Number(o.points) : null;
+      if (mkey !== 'atd' && line != null && line < 0) return;
+      const side = /over|under/i.test(String(o.selection_line || '')) ? String(o.selection_line).toLowerCase() : 'yes';
+      const bucketKey = `${f.id}|${mkey}|${normName(player)}|${line ?? ''}`;
+      const P = (pairs[bucketKey] = pairs[bucketKey] || { mkey, player, line, marketName: o.market, sides: {} });
+      const S = (P.sides[side] = P.sides[side] || {});
+      const bk = String(o.sportsbook || '');
+      if (!S[bk] || Number(o.price) > Number(S[bk].price)) S[bk] = o;
+    });
+    Object.entries(pairs).forEach(([bucketKey, P]) => {
+      ['over', 'under'].forEach(side => {
+        const oppSide = side === 'over' ? 'under' : 'over';
+        const books = P.sides[side] || {}, oppBooks = P.sides[oppSide] || {};
+        const kalshiOpp = oppBooks[KALSHI_BOOK]; if (!kalshiOpp) return;
+        const depth = liqDepth(kalshiOpp);
+        const liq = depth ? depth.total : liqOf(kalshiOpp);
+        if (liq == null || liq < MIN_KALSHI_LIQ) return;
+        const mirrorPrice = -Number(kalshiOpp.price);
+        const fairProb = imp(mirrorPrice);
+        KALSHI_TARGET_BOOKS.forEach(bk => {
+          const bo = books[bk]; if (!bo) return;
+          const pr = Number(bo.price);
+          const evPct = fairProb * toDec(pr) - 1;
+          const arbPct = 1 - (imp(pr) + imp(kalshiOpp.price));
+          const hasArb = arbPct > 0 && arbPct <= MAX_PLAUSIBLE_EDGE;
+          const hasValue = evPct > 0 && evPct <= MAX_PLAUSIBLE_EDGE;
+          if (!hasArb && !hasValue) return;
+          const qualKind = hasArb && hasValue ? 'both' : hasArb ? 'arb' : 'value';
+          out.push({
+            key: `${bucketKey}|${side}|kalshi|${bk}`, fid: f.id, f, mkey: P.mkey, marketNames: [P.marketName],
+            player: P.player, line: P.line, side, book: bk, price: pr,
+            kalshiPrice: Number(kalshiOpp.price), kalshiLiq: liq, mirrorPrice, fairProb,
+            evPct: hasValue ? evPct : null, arbPct: hasArb ? arbPct : null, qualKind,
+          });
+        });
+      });
+    });
+  });
+  return out.sort((a, b) => ((b.arbPct||0) - (a.arbPct||0)) || ((b.evPct||0) - (a.evPct||0)));
+}
 
 // ───────────────────────────── auto-track + grading ─────────────────────────────
 let log = (() => { try { return JSON.parse(LS.get('fdst_log', '{}')) || {}; } catch(e) { return {}; } })();
@@ -643,6 +724,29 @@ function autoTrackAlt(altRows) {
     changed = true;
   });
   if (changed) { saveAltLog(); if (viewMode === 'tracker') renderTracker(); }
+}
+// Kalshi-sourced picks track completely separately from both the main and alt logs — different
+// reference book entirely (Kalshi's mirrored opposite-side quote, not the 3-book consensus), and
+// the TARGET book being bet varies per pick (FD/DK/Fliff/Props Builder), not always FD. The field
+// is still named fdPrice (holding whichever book's price) so it drops straight into the existing
+// unitsFor/gradeOutcome/groupRecords helpers without special-casing them.
+let kalshiLog = (() => { try { return JSON.parse(LS.get('fdst_kalshi_log', '{}')) || {}; } catch(e) { return {}; } })();
+const saveKalshiLog = () => { LS.set('fdst_kalshi_log', JSON.stringify(kalshiLog)); };
+function autoTrackKalshi(kalshiRows) {
+  let changed = false;
+  kalshiRows.forEach(r => {
+    if (kalshiLog[r.key]) return;
+    kalshiLog[r.key] = {
+      key: r.key, fid: r.fid, game: `${r.f.away.ab} @ ${r.f.home.ab}`, awayAb: r.f.away.ab, homeAb: r.f.home.ab,
+      awayLogo: r.f.away.logo || '', homeLogo: r.f.home.logo || '',
+      market: marketLabel(r.mkey), mkey: r.mkey, marketNames: r.marketNames, player: r.player, playerKey: normName(r.player),
+      side: r.side, line: r.line, book: r.book, fdPrice: r.price, kalshiPrice: r.kalshiPrice, kalshiLiq: r.kalshiLiq,
+      mirrorPrice: r.mirrorPrice, fairProb: r.fairProb, evPct: r.evPct, arbPct: r.arbPct, qualKind: r.qualKind,
+      betPeriod: periodOf(r.fid), stakeUnits: 1, betAt: Date.now(), status: 'pending',
+    };
+    changed = true;
+  });
+  if (changed) { saveKalshiLog(); if (viewMode === 'tracker') renderTracker(); }
 }
 function unitsFor(price, stake) { price = Number(price); return price > 0 ? stake * price / 100 : stake * 100 / Math.abs(price); }
 // Higher American odds is always better regardless of sign, so a plain numeric compare works
@@ -731,6 +835,14 @@ function arbBucket(pct) {
   if (pct < 5) return '3-5%';
   if (pct < 10) return '5-10%';
   return '10-20% ++EV'; // top of the plausible range (capped at MAX_PLAUSIBLE_EDGE) — the strongest signal
+}
+function kalshiLiqBucket(liq) {
+  liq = Number(liq);
+  if (liq < 500) return '$300-499';
+  if (liq < 1000) return '$500-999';
+  if (liq < 2500) return '$1k-2.4k';
+  if (liq < 5000) return '$2.5k-4.9k';
+  return '$5k+';
 }
 function groupRecords(bets, keyFn) {
   const groups = {};
@@ -893,10 +1005,11 @@ async function autoGrade() {
   if (_gradeBusy) return;
   const pendingMain = Object.values(log).filter(e => e.status === 'pending');
   const pendingAlt = Object.values(altLog).filter(e => e.status === 'pending');
-  if (!pendingMain.length && !pendingAlt.length) return;
+  const pendingKalshi = Object.values(kalshiLog).filter(e => e.status === 'pending');
+  if (!pendingMain.length && !pendingAlt.length && !pendingKalshi.length) return;
   _gradeBusy = true;
   try {
-    const fids = [...new Set([...pendingMain, ...pendingAlt].map(e => e.fid))];
+    const fids = [...new Set([...pendingMain, ...pendingAlt, ...pendingKalshi].map(e => e.fid))];
     const resultsById = {};
     for (const ids of chunk(fids, 5)) { try { const r = await oo('/fixtures/results', { fixture_id: ids }); (r?.data || []).forEach(x => { if (x?.fixture?.id) resultsById[x.fixture.id] = x; }); } catch(e) {} }
     const prById = {};
@@ -918,9 +1031,11 @@ async function autoGrade() {
     };
     const changedMain = gradeList(pendingMain);
     const changedAlt = gradeList(pendingAlt);
+    const changedKalshi = gradeList(pendingKalshi);
     if (changedMain) saveLog();
     if (changedAlt) saveAltLog();
-    if ((changedMain || changedAlt) && viewMode === 'tracker') renderTracker();
+    if (changedKalshi) saveKalshiLog();
+    if ((changedMain || changedAlt || changedKalshi) && viewMode === 'tracker') renderTracker();
   } finally { _gradeBusy = false; }
 }
 let _progressBusy = false;
@@ -1146,6 +1261,47 @@ function renderTracker() {
   const altCardsHtml = altBets.length ? '<div class="cards-grid">' + altBets.map(altCard).join('') + '</div>' : '<div class="empty">No alt-line picks yet — auto-tracks when FD is +EV against the devigged fair price from all 3 books.</div>';
   const altSection = sectionLabel('info', 'Alt Line Picks', altBets.length) + altBreakdowns + altCardsHtml;
 
+  // Kalshi-as-sharp picks — its own log, own rule (mirrored opposite-side quote, $300+ liq gate),
+  // any of FD/DK/Fliff/Props Builder checked individually rather than blended together.
+  const kalshiBets = ladderFiltered(Object.values(kalshiLog), showLadders).sort((a, b) => b.betAt - a.betAt);
+  const kalshiCard = e => {
+    const settled = e.status === 'won' || e.status === 'lost' || e.status === 'push';
+    const clr = e.status === 'won' ? 'var(--green)' : e.status === 'lost' ? 'var(--red)' : 'var(--text)';
+    const units = e.status === 'won' ? `+${unitsFor(e.fdPrice, e.stakeUnits).toFixed(2)}u` : e.status === 'lost' ? `-${e.stakeUnits.toFixed(2)}u` : e.status === 'push' ? '0u' : '';
+    const resultLine = !settled
+      ? `<div class="m" style="color:var(--sub)">Pending · grades itself when the game is final</div>`
+      : `<div class="m"><b style="color:${clr};font-size:12px">${e.status.toUpperCase()}</b> <b style="color:${clr}">${units}</b>${e.actual != null ? ` · actual ${e.actual}` : ''}</div>`;
+    const sideLabel = e.side === 'over' ? `Over ${e.line}` : e.side === 'under' ? `Under ${e.line}` : 'Yes';
+    const sideLabelNow = !settled && e.actual != null ? `${sideLabel} (${e.actual})` : sideLabel;
+    const arbPart = e.arbPct != null ? `${(e.arbPct*100).toFixed(2)}% arb vs Kalshi` : null;
+    const valuePart = e.evPct != null ? `+${(e.evPct*100).toFixed(2)}% EV vs Kalshi mirror fair (${fmtAm(probToAm(e.fairProb))})` : null;
+    const edgeLine = [arbPart, valuePart].filter(Boolean).join(' · ');
+    const kind = e.qualKind || 'value';
+    const kindLabel = kind === 'both' ? 'ARB + VALUE' : kind === 'arb' ? 'DIRECT ARB' : 'VALUE ONLY';
+    const resultBtns = settled
+      ? `<button data-kres="${esc(e.key)}|pending">↺ Re-open</button>`
+      : `<button data-kres="${esc(e.key)}|won">WON</button><button data-kres="${esc(e.key)}|lost">LOST</button><button data-kres="${esc(e.key)}|push">PUSH</button>`;
+    return `<div class="tk glass"><div class="h"><span>${gameHeaderHtml(e)} <span style="color:var(--sub);font-size:10px">NFL KALSHI</span></span><span>${t(e.betAt)}</span></div>
+    <div style="font-weight:800;font-size:14px;margin-top:3px">${esc(e.market)} · ${esc(e.player)} ${esc(sideLabelNow)} <span class="kindtag ${kind}">${esc(kindLabel)}</span></div>
+    <div class="rawmkt">source: "${esc((e.marketNames||[])[0] || '')}"</div>
+    <div class="m">${bookName(e.book)} <b>${fmtAm(e.fdPrice)}</b> · ${edgeLine} · Kalshi opp side ${fmtAm(e.kalshiPrice)} (${usd(e.kalshiLiq)} liq) · 1u</div>
+    ${resultLine}
+    <div class="acts" style="margin-top:8px">${resultBtns}<button data-kdel="${esc(e.key)}">✕</button></div></div>`;
+  };
+  const kalshiBreakdowns = kalshiBets.length ? `<div class="bdwrap">
+    ${breakdownHtml('Kalshi: By Prop Type', groupRecords(kalshiBets, e => e.market))}
+    ${breakdownHtml('Kalshi: Over vs Under', groupRecords(kalshiBets, sideLabelFor))}
+    ${breakdownHtml('Kalshi: By Target Book', groupRecords(kalshiBets, e => e.book))}
+    ${breakdownHtml('Kalshi: By Target Book + O/U', groupRecords(kalshiBets, e => `${e.book} · ${sideLabelFor(e)}`))}
+    ${breakdownHtml('Kalshi: By Liquidity', groupRecords(kalshiBets, e => kalshiLiqBucket(e.kalshiLiq)))}
+    ${breakdownHtml('Kalshi: By Liquidity + O/U', groupRecords(kalshiBets, e => `${kalshiLiqBucket(e.kalshiLiq)} · ${sideLabelFor(e)}`))}
+    ${breakdownHtml('Kalshi: Direct Arb vs Value', groupRecords(kalshiBets, e => { const k = e.qualKind || 'value'; return k === 'both' ? 'Direct Arb + Value' : k === 'arb' ? 'Direct Arb' : 'Value Only'; }))}
+    ${breakdownHtml('Kalshi: By Quarter (bet timing)', groupRecords(kalshiBets, e => periodLabel(e.betPeriod)))}
+    ${breakdownHtml('Kalshi: By Half (bet timing)', groupRecords(kalshiBets, e => halfLabel(e.betPeriod)))}
+  </div>` : '';
+  const kalshiCardsHtml = kalshiBets.length ? '<div class="cards-grid">' + kalshiBets.map(kalshiCard).join('') + '</div>' : '<div class="empty">No Kalshi picks yet — auto-tracks when FD/DK/Fliff/Props Builder is +EV or arbs against Kalshi\'s mirrored opposite-side quote (min $300 liq).</div>';
+  const kalshiSection = sectionLabel('info', 'Kalshi Sharp Picks', kalshiBets.length) + kalshiBreakdowns + kalshiCardsHtml;
+
   const recapBtn = `<div style="margin:0 16px 12px">
     <div class="date-toggle" style="margin:0 0 8px">
       <button id="toggleLaddersBtn" class="date-btn${showLadders ? ' active' : ''}">Ladders ${showLadders ? 'ON' : 'OFF'}</button>
@@ -1155,7 +1311,7 @@ function renderTracker() {
   </div>`;
   const movementPanel = movementPanelHtml();
   const movementHtml = movementPanel ? `<div class="bdwrap">${movementPanel}</div>` : '';
-  const html = movementHtml + recapBtn + sectionLabel('info', 'Tracked Picks', bets.length) + breakdowns + cardsHtml + altSection;
+  const html = movementHtml + recapBtn + sectionLabel('info', 'Tracked Picks', bets.length) + breakdowns + cardsHtml + altSection + kalshiSection;
   if (!setViewHtml(view, html)) { updateRecordBar(); return; }
   const recapBtnEl = $('#copyRecapBtn'); if (recapBtnEl) recapBtnEl.addEventListener('click', copyRecap);
   const laddersBtnEl = $('#toggleLaddersBtn'); if (laddersBtnEl) laddersBtnEl.addEventListener('click', () => {
@@ -1173,6 +1329,12 @@ function renderTracker() {
     saveAltLog(); renderTracker();
   }));
   view.querySelectorAll('[data-adel]').forEach(b => b.addEventListener('click', () => { delete altLog[b.dataset.adel]; saveAltLog(); renderTracker(); }));
+  view.querySelectorAll('[data-kres]').forEach(b => b.addEventListener('click', () => {
+    const [k, r] = b.dataset.kres.split('|'); if (!kalshiLog[k]) return;
+    kalshiLog[k].status = r; if (r === 'pending') { delete kalshiLog[k].gradedAt; }
+    saveKalshiLog(); renderTracker();
+  }));
+  view.querySelectorAll('[data-kdel]').forEach(b => b.addEventListener('click', () => { delete kalshiLog[b.dataset.kdel]; saveKalshiLog(); renderTracker(); }));
   updateRecordBar();
 }
 function setView(m) { viewMode = m; $('#vLive').classList.toggle('active', m === 'live'); $('#vTrack').classList.toggle('active', m === 'tracker'); render(); }
@@ -1198,6 +1360,7 @@ async function load(force) {
     if (!fixtures.length) { rows = []; altRows = []; render(); busy = false; setSync('idle'); $('#reload').classList.remove('spinning'); return; }
     rows = computeRows(fixtures, byFx);
     altRows = computeAltRows(fixtures, altByFx);
+    autoTrackKalshi(computeKalshiRows(fixtures, byFx));
     autoTrack(rows);
     autoTrackAlt(altRows);
     setLastUpdated();
