@@ -699,12 +699,13 @@ function pbRows() {
         const arb = 1 - (imp(pb.price) + imp(g.pin[oppSide].price));
         if (arb <= 0) return; // this app is locked-arb-only everywhere else too
         const pr = Number(pb.price); if (pr < Number($('#pMin').value) || pr > Number($('#pMax').value)) return;
+        const agreeNote = aligned ? `✓ FD &amp; PIN AGREE <b>FD ${fmtAm(g.fd[side].price)}</b> · <b>PIN ${fmtAm(g.pin[side].price)}</b> → fading Props Builder` : '';
         rows.push({
           key: `pb|${key}|${g.market}|${g.points}|${side}`, f: c.f,
           mk: { key:'prop', label: g.market },
           sideLabel: `${c.player} ${side === 'over' ? 'Over' : 'Under'} ${g.points}`,
           ttSide:null, pickSide:null, pickPoints:g.points, overUnder:side,
-          fair:fp, aligned, refLabel: aligned?'FD·Pin':'PIN', refBook:'Pinnacle', refBookShort:'PIN', fdPrice: aligned ? g.fd[side].price : null,
+          fair:fp, aligned, agreeNote, refLabel: aligned?'FD·Pin':'PIN', refBook:'Pinnacle', refBookShort:'PIN', fdPrice: aligned ? g.fd[side].price : null,
           pin:{ mine:g.pin[side].price, other:g.pin[oppSide].price, lim:liqOf(g.pin[side]), depth:null },
           books:[{ book:'Props Builder', price:pr, ev, arb, exch:false, liq:liqOf(pb), depth:null, o:pb }],
           best:null, sharpFor:0, sharpAgainst:0,
@@ -746,6 +747,103 @@ function renderPbSuggest(query) {
     const input = $('#pbSearch'); if (input) input.value = '';
     renderPbPicker(); load(false);
   }));
+}
+
+// ───────────────────────────── Kalshi football props (automatic, no picking) ─────────────────────────────
+// Backtested signal: Kalshi's own liquidity on a football player prop is a real confidence read —
+// rushing/receiving yards hold up at $2.5k+ resting size, passing yards needs $5k+, anytime-TD
+// needs $10k+ before it's worth anything (thin Kalshi liquidity, like the $14 / $847 rows circled
+// in the reference screenshot, isn't the same signal as the $50k row next to it). Unlike Props
+// Builder this runs automatically for every live NFL/CFB game — no picking a player, no toggle to
+// flip — and arbs Kalshi's devigged fair against whichever regular books are already toggled on,
+// same as Pinnacle does for game markets. Pinnacle comes along too, purely to flag when Kalshi's
+// own number also agrees with Pinnacle's (a second, independent sharp source lining up).
+const KALSHI_PROP_MARKETS = [
+  { key:'rush_yds', label:'Rushing Yards',   test:m => /rushing yards/i.test(m)   && !/\+/.test(m), minLiq:2500 },
+  { key:'pass_yds', label:'Passing Yards',   test:m => /passing yards/i.test(m)   && !/\+/.test(m), minLiq:5000 },
+  { key:'rec_yds',  label:'Receiving Yards', test:m => /receiving yards/i.test(m) && !/\+/.test(m), minLiq:2500 },
+  { key:'td',       label:'Anytime TD',      test:m => /anytime/i.test(m) && /touchdown/i.test(m),  minLiq:10000 },
+];
+let kalshiCandidates = {}; // "<player>|<fixtureId>" -> { player, f, rows:[raw odds] }
+async function loadKalshiProps() {
+  const fbFx = fixtures.filter(f => f.lk === 'nfl' || f.lk === 'cfb');
+  if (!fbFx.length) { kalshiCandidates = {}; return; }
+  const extra = [...extraBooks].map(k => EXTRA_BOOKS.find(b => b.key === k && !b.props)?.name).filter(Boolean);
+  const bookList = [...new Set(['Kalshi', REF_BOOK, ...extra])];
+  const out = {};
+  for (const fxBatch of chunk(fbFx, 5)) {
+    for (const bkBatch of chunk(bookList, 5)) {
+      try {
+        const r = await oo('/fixtures/odds', { fixture_id: fxBatch.map(f => f.id), sportsbook: bkBatch, is_main: true });
+        (r?.data || []).forEach(d => {
+          const f = fbFx.find(x => x.id === d.id); if (!f) return;
+          (d.odds || []).forEach(o => {
+            if (o.price == null || !o.selection) return;
+            const mkt = String(o.market || '');
+            if (!KALSHI_PROP_MARKETS.some(m => m.test(mkt))) return;
+            const player = String(o.selection).trim();
+            const key = player + '|' + f.id;
+            (out[key] = out[key] || { player, f, rows: [] }).rows.push(o);
+          });
+        });
+      } catch(e) { console.warn('[live] kalshi props fetch failed', e.message); }
+    }
+  }
+  kalshiCandidates = out;
+}
+function kalshiRows() {
+  const out = [];
+  Object.values(kalshiCandidates).forEach(c => {
+    const groups = {};
+    c.rows.forEach(o => {
+      const side = String(o.selection_line || '').toLowerCase(); if (side !== 'over' && side !== 'under') return;
+      const M = KALSHI_PROP_MARKETS.find(m => m.test(o.market)); if (!M) return;
+      const pts = o.points == null ? null : Number(o.points);
+      const gk = M.key + '|' + pts;
+      const g = (groups[gk] = groups[gk] || { M, points:pts, kalshi:{}, pin:{}, books:{} });
+      const bk = String(o.sportsbook || '').toLowerCase();
+      if (bk === 'kalshi') { if (!g.kalshi[side] || Number(o.price) > Number(g.kalshi[side].price)) g.kalshi[side] = o; }
+      else if (bk === 'pinnacle') { if (!g.pin[side] || Number(o.price) > Number(g.pin[side].price)) g.pin[side] = o; }
+      else { const bs = (g.books[bk] = g.books[bk] || {}); if (!bs[side] || Number(o.price) > Number(bs[side].price)) bs[side] = o; }
+    });
+    Object.values(groups).forEach(g => {
+      if (!g.kalshi.over || !g.kalshi.under) return; // need both Kalshi sides to devig a fair price
+      const depthOver = liqDepth(g.kalshi.over), depthUnder = liqDepth(g.kalshi.under);
+      const liqOver = depthOver ? depthOver.total : liqOf(g.kalshi.over);
+      const liqUnder = depthUnder ? depthUnder.total : liqOf(g.kalshi.under);
+      const devig = (a, b) => { const x = imp(a), y = imp(b); return { over: x/(x+y), under: y/(x+y) }; };
+      const fair = devig(g.kalshi.over.price, g.kalshi.under.price);
+      ['over','under'].forEach(side => {
+        const liq = side === 'over' ? liqOver : liqUnder; if (liq == null || liq < g.M.minLiq) return;
+        const oppSide = side === 'over' ? 'under' : 'over';
+        const fp = fair[side];
+        const pinSide = g.pin[side];
+        const kalshiBacksPin = !!(pinSide && centsDiff(g.kalshi[side].price, pinSide.price) <= ALIGN_CENTS && liq >= 10000);
+        Object.entries(g.books).forEach(([bookName, sides]) => {
+          const bo = sides[side]; if (!bo) return;
+          const pr = Number(bo.price); if (pr < Number($('#pMin').value) || pr > Number($('#pMax').value)) return;
+          const ev = fp * toDec(pr) - 1;
+          const arb = 1 - (imp(pr) + imp(g.kalshi[oppSide].price));
+          if (arb <= 0) return; // locked-arb-only, same as everywhere else in this app
+          const properName = EXTRA_BOOKS.find(b => b.name.toLowerCase() === bookName)?.name || bo.sportsbook;
+          const agreeNote = kalshiBacksPin ? `✓ KALSHI &amp; PIN AGREE <b>Kalshi ${fmtAm(g.kalshi[side].price)}</b> · <b>PIN ${fmtAm(pinSide.price)}</b> · ${usd(liq)} Kalshi liquidity` : '';
+          out.push({
+            key: `kx|${c.player}|${c.f.id}|${g.M.key}|${g.points}|${side}`, f: c.f,
+            mk: { key:'prop', label: g.M.label },
+            sideLabel: `${c.player} ${side === 'over' ? 'Over' : 'Under'} ${g.points}`,
+            ttSide:null, pickSide:null, pickPoints:g.points, overUnder:side,
+            fair:fp, aligned:kalshiBacksPin, agreeNote, refLabel:'Kalshi', refBook:'Kalshi', refBookShort:'Kalshi', fdPrice: kalshiBacksPin ? pinSide.price : null,
+            pin:{ mine:g.kalshi[side].price, other:g.kalshi[oppSide].price, lim:null, depth:{ total:liq, avg:g.kalshi[side].price } },
+            books:[{ book:properName, price:pr, ev, arb, exch:false, liq:null, depth:null, o:bo }],
+            best:null, sharpFor:0, sharpAgainst:0,
+          });
+          out[out.length - 1].best = out[out.length - 1].books[0];
+        });
+      });
+    });
+  });
+  applyTrend(out);
+  return out;
 }
 
 // ───────────────────────────── insight bar: "when to bet" ─────────────────────────────
@@ -1192,7 +1290,8 @@ function computeRows(fxs, byFx) {
         const oppSid = sideIds[1 - idx];
         const sharpAgainst = Object.keys(P.sides[oppSid] || {}).filter(b => !skip(b) && SHARP_BOOKS.has(b.toLowerCase())).length;
         const sharpFor = books.filter(x => x.sharp).length;
-        out.push({ key, f, mk:P.mk, sideLabel, ttSide, pickSide, pickPoints, overUnder, fair:fp, aligned, refLabel, refBook, refBookShort: refBook==='Kalshi'?'Kalshi':'PIN', fdPrice: aligned ? fd[idx].price : null, pin:{ mine:pin[idx].price, other:pin[1-idx].price, lim, depth:pinDepth }, books, best:books[0], sharpFor, sharpAgainst });
+        const agreeNote = aligned ? `✓ FD &amp; PIN AGREE <b>FD ${fmtAm(fd[idx].price)}</b> · <b>PIN ${fmtAm(pin[idx].price)}</b> → fading ${esc(books[0].book === 'DraftKings' ? 'DK' : books[0].book)}` : '';
+        out.push({ key, f, mk:P.mk, sideLabel, ttSide, pickSide, pickPoints, overUnder, fair:fp, aligned, agreeNote, refLabel, refBook, refBookShort: refBook==='Kalshi'?'Kalshi':'PIN', fdPrice: aligned ? fd[idx].price : null, pin:{ mine:pin[idx].price, other:pin[1-idx].price, lim, depth:pinDepth }, books, best:books[0], sharpFor, sharpAgainst });
       });
     });
   });
@@ -1583,7 +1682,7 @@ function render() {
       <div class="pick">
         <div class="side"><div class="m">${esc(r.mk.label)}</div><div class="s">${esc(r.sideLabel)}</div>${totalNote}${situ ? `<div class="situ-note${situ.warn?' warn':''}">${esc(situ.text)}</div>` : ''}${pills.length ? `<div class="pillrow">${pills.map(p=>`<span class="conf-pill">${esc(p)}</span>`).join('')}</div>` : ''}</div>
       </div>
-      ${r.aligned ? `<div style="margin-top:8px"><span class="agree">✓ FD &amp; PIN AGREE <b>FD ${fmtAm(r.fdPrice)}</b> · <b>PIN ${fmtAm(r.pin.mine)}</b> → fading ${esc(r.best.book === 'DraftKings' ? 'DK' : r.best.book)}</span></div>` : ''}
+      ${r.agreeNote ? `<div style="margin-top:8px"><span class="agree">${r.agreeNote}</span></div>` : ''}
       <div class="booklist">${bestRow}${refRow}${consensus}${moreRows}</div>
       <div class="footstrip">
         <div class="fs-stat">${r.pin.depth ? `${usd(r.pin.depth.total)} avg` : r.pin.lim != null ? usd(r.pin.lim) : 'n/a'}<span>${r.pin.depth ? 'Avg $' : 'Lim'}</span></div>
@@ -1749,11 +1848,11 @@ async function load(force) {
       updateStatusStrip();
       busy = false; setSync('idle'); $('#reload').classList.remove('spinning'); return;
     }
-    const [byFx, st] = await Promise.all([loadOdds(fixtures), loadState(fixtures), loadPlayerProps()]);
+    const [byFx, st] = await Promise.all([loadOdds(fixtures), loadState(fixtures), loadPlayerProps(), loadKalshiProps()]);
     gameState = st;
     if (!window._lg) { window._lg = true; const all = Object.values(byFx).flat(); console.log('[live] markets seen:', [...new Set(all.map(o => o.market))]); console.log('[live] books seen:', [...new Set(all.map(o => o.sportsbook))]); console.log('[live] sample row:', JSON.stringify(all[0] || {}).slice(0, 400)); }
     window._byFx = byFx;
-    rows = computeRows(fixtures, byFx).concat(pbRows());
+    rows = computeRows(fixtures, byFx).concat(pbRows()).concat(kalshiRows());
     pruneSeen(new Set(rows.map(r => r.key)));
     lastAt = Date.now();
     setLastUpdated(new Date().toLocaleTimeString([], { hour:'numeric', minute:'2-digit', second:'2-digit' }));
@@ -1761,7 +1860,7 @@ async function load(force) {
   } catch(e) { console.error(e); setLastUpdated('error'); setSync('error'); toast(e.message); }
   busy = false; if ($('#syncDot').classList.contains('live')) setSync('idle'); $('#reload').classList.remove('spinning');
 }
-function recompute() { updateFiltersSummary(); if (window._byFx) { rows = computeRows(fixtures, window._byFx).concat(pbRows()); pruneSeen(new Set(rows.map(r => r.key))); render(); } }
+function recompute() { updateFiltersSummary(); if (window._byFx) { rows = computeRows(fixtures, window._byFx).concat(pbRows()).concat(kalshiRows()); pruneSeen(new Set(rows.map(r => r.key))); render(); } }
 ['minArb','minLim','pMin','pMax','liveOnly','timeoutsOnly','sharpUfcOnly'].forEach(id => $('#' + id).addEventListener('change', () => { saveLastFilters(); recompute(); }));
 $('#presetSave').addEventListener('click', () => {
   const name = prompt('Name this preset (e.g. "Sharp UFC", "Loose EV"):'); if (!name || !name.trim()) return;
