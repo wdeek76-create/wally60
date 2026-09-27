@@ -1229,8 +1229,30 @@ function computeRows(fxs, byFx) {
       let refLabel = BOOK_SHORT[refBook.toLowerCase()] || refBook;
       if (aligned) { const ff = devig(fd[0].price, fd[1].price); fair = [(fair[0] + ff[0]) / 2, (fair[1] + ff[1]) / 2]; refLabel = 'FD·Pin'; }
       sideIds.forEach((sid, idx) => {
-        const fp = fair[idx];
         const skip = b => b.toLowerCase() === refBook.toLowerCase() || (aligned && b.toLowerCase() === 'fanduel');
+        // Exchanges are different from a flat sportsbook: Kalshi/Novig/Prophet X posting the OTHER
+        // side at some price technically means they have THIS side at the mirror of that price
+        // (Novig has the other team +203 means Novig has this team -203 — same convention as
+        // "back fighter A at -179, you want fighter B at +179"). That mirror IS their no-vig fair
+        // for this side by construction (imp(-x)+imp(x)=1 exactly). When at least 2 of the 3
+        // independently mirror-agree with Pinnacle AND each has real size behind it, that's a
+        // second sharp source as strong as Pinnacle itself — same treatment FD gets when aligned,
+        // averaged into the actual fair price used for every book's EV/arb below, not just a
+        // footnote banner. Runs by default, no toggle, same as the Kalshi football-props scanner.
+        const oppSid = sideIds[1 - idx];
+        const oppSideLower = {}; Object.entries(P.sides[oppSid] || {}).forEach(([b, o]) => { oppSideLower[b.toLowerCase()] = o; });
+        const exchangeBacksPin = [...EXCH].map(bk => {
+          const o = oppSideLower[bk]; if (!o) return null;
+          const depth = liqDepth(o); const liq = depth ? depth.total : liqOf(o);
+          const mirrorPrice = -Number(o.price);
+          if (centsDiff(mirrorPrice, pin[idx].price) > ALIGN_CENTS) return null;
+          return { book: EXTRA_BOOKS.find(b => b.key === bk)?.name || bk, liq, mirrorPrice };
+        }).filter(Boolean);
+        const EXCHANGE_HIGH_LIQ = 5000; // "high liquidity" bar for the 2-of-3 exchange consensus
+        const highLiqBacking = exchangeBacksPin.filter(x => x.liq != null && x.liq >= EXCHANGE_HIGH_LIQ);
+        const exchangeConsensus = highLiqBacking.length >= 2;
+        let fp = fair[idx];
+        if (exchangeConsensus) fp = highLiqBacking.reduce((a, x) => a + imp(x.mirrorPrice), fp) / (highLiqBacking.length + 1);
         const books = Object.entries(P.sides[sid]).filter(([b]) => !skip(b)).map(([b, o]) => {
           const pr = Number(o.price); if (refBook === REF_BOOK && (pr < pMin || pr > pMax)) return null;
           const ev = fp * toDec(pr) - 1;
@@ -1256,30 +1278,15 @@ function computeRows(fxs, byFx) {
         // with this pick — a real, direct read, no mirroring needed. Sharp books already counted
         // in `books` (this side) are backing you instead. An exchange named here is just reporting
         // its own resting size on whichever side it's actually on — not the mirror-verified
-        // "backs Pinnacle" claim (see exchangeBacksPin below), so its $ liquidity is shown to tell
-        // that apart from a flat sportsbook's name-only entry.
-        const oppSid = sideIds[1 - idx];
+        // "backs Pinnacle" claim above, so its $ liquidity is shown to tell that apart from a flat
+        // sportsbook's name-only entry.
         const withLiq = (b, o) => { if (!EXCH.has(b.toLowerCase())) return b; const d = liqDepth(o); const liq = d ? d.total : liqOf(o); return liq != null ? `${b} (${usd(liq)})` : b; };
         const sharpAgainstBooks = Object.entries(P.sides[oppSid] || {}).filter(([b]) => !skip(b) && (REGULAR_SHARP_BOOKS.has(b.toLowerCase()) || EXCH.has(b.toLowerCase()))).map(([b, o]) => withLiq(b, o));
         const sharpForBooks = books.filter(x => x.sharp || x.exch).map(x => withLiq(x.book, x.o));
-        // Exchanges are different: Kalshi/Novig/Prophet X posting the OTHER side at some price
-        // technically means they have THIS side at the mirror of that price (Novig has the other
-        // team +203 means Novig has this team -203 — same convention as "back fighter A at -179,
-        // you want fighter B at +179"). That mirror IS their no-vig fair for this side by
-        // construction (imp(-x)+imp(x)=1 exactly), so checking whether an exchange "backs
-        // Pinnacle" on the main line means comparing THAT mirror to Pinnacle's own number here —
-        // not trusting whatever the exchange happens to show directly on this same side.
-        const oppSideLower = {}; Object.entries(P.sides[oppSid] || {}).forEach(([b, o]) => { oppSideLower[b.toLowerCase()] = o; });
-        const exchangeBacksPin = [...EXCH].map(bk => {
-          const o = oppSideLower[bk]; if (!o) return null;
-          const depth = liqDepth(o); const liq = depth ? depth.total : liqOf(o);
-          const mirrorPrice = -Number(o.price);
-          if (centsDiff(mirrorPrice, pin[idx].price) > ALIGN_CENTS) return null;
-          return { book: EXTRA_BOOKS.find(b => b.key === bk)?.name || bk, liq, mirrorPrice };
-        }).filter(Boolean);
         const agreeNote = aligned ? `✓ FD &amp; PIN AGREE <b>FD ${fmtAm(fd[idx].price)}</b> · <b>PIN ${fmtAm(pin[idx].price)}</b> → fading ${esc(books[0].book === 'DraftKings' ? 'DK' : books[0].book)}`
+          : exchangeConsensus ? `✓ ${highLiqBacking.map(x => `${esc(x.book)} (${usd(x.liq)})`).join(', ')} back PIN <b>${fmtAm(pin[idx].price)}</b> (mirror, ${highLiqBacking.length}-of-3 acting as Pinnacle)`
           : exchangeBacksPin.length ? `✓ ${exchangeBacksPin.map(x => `${esc(x.book)}${x.liq!=null?` (${usd(x.liq)})`:''}`).join(', ')} back${exchangeBacksPin.length===1?'s':''} PIN <b>${fmtAm(pin[idx].price)}</b> (mirror)` : '';
-        out.push({ key, f, mk:P.mk, sideLabel, ttSide, pickSide, pickPoints, overUnder, fair:fp, aligned: aligned || exchangeBacksPin.length>0, agreeNote, refLabel, refBook, refBookShort: refBook==='Kalshi'?'Kalshi':'PIN', fdPrice: aligned ? fd[idx].price : null, pin:{ mine:pin[idx].price, other:pin[1-idx].price, lim, depth:pinDepth }, books, best:books[0], sharpForBooks, sharpAgainstBooks, exchangeBacksPin });
+        out.push({ key, f, mk:P.mk, sideLabel, ttSide, pickSide, pickPoints, overUnder, fair:fp, aligned: aligned || exchangeBacksPin.length>0, exchangeConsensus, agreeNote, refLabel: exchangeConsensus?'Exch·Pin':refLabel, refBook, refBookShort: refBook==='Kalshi'?'Kalshi':'PIN', fdPrice: aligned ? fd[idx].price : null, pin:{ mine:pin[idx].price, other:pin[1-idx].price, lim, depth:pinDepth }, books, best:books[0], sharpForBooks, sharpAgainstBooks, exchangeBacksPin });
       });
     });
   });
