@@ -563,8 +563,14 @@ function renderChips() {
 const isLiveStatus = st => /live|progress|half|in_play|playing|ongoing/i.test(String(st || ''));
 let diag = {};
 let upcomingAll = []; // every non-live future fixture, no time cap — feeds the "when to bet" insight bar
+// Once a fixture has been seen live, it stays counted as live through a stoppage's momentary
+// is_live/status flicker (a break can genuinely report as "delayed" or drop is_live for a poll or
+// two) — only an EXPLICIT completed/cancelled status actually drops it. Otherwise a game going
+// into a timeout or rain delay silently vanishes from both the board and the "N live games" count,
+// which reads as "it's hiding stoppage games" even though nothing here ever filtered by stoppage.
+let stickyLiveIds = new Set();
 async function loadFixtures() {
-  const now = Date.now(); const out = []; diag = {}; const upcomingNext = [];
+  const now = Date.now(); const out = []; diag = {}; const upcomingNext = []; const seenIds = new Set();
   for (const k of active) {
     const L = LEAGUES[k];
     try {
@@ -573,9 +579,13 @@ async function loadFixtures() {
       const st = {}; raw.forEach(f => { const key = (f.is_live ? 'is_live' : String(f.status || '?')); st[key] = (st[key] || 0) + 1; });
       diag[L.label] = { n: raw.length, st, next: raw.filter(f => new Date(f.start_date).getTime() > now).sort((a, b) => new Date(a.start_date) - new Date(b.start_date))[0]?.start_date || null };
       raw.forEach(f => {
+        seenIds.add(f.id);
         const t = new Date(f.start_date).getTime();
-        const live = !!f.is_live || isLiveStatus(f.status) || (t <= now && t > now - 4*3600e3 && !/completed|cancelled|unplayed|scheduled/i.test(String(f.status||'')));
-        if (/completed|cancelled/i.test(String(f.status || ''))) return;
+        const finished = /completed|cancelled/i.test(String(f.status || ''));
+        const rawLive = !!f.is_live || isLiveStatus(f.status) || (t <= now && t > now - 4*3600e3 && !/completed|cancelled|unplayed|scheduled/i.test(String(f.status||'')));
+        const live = finished ? false : (rawLive || stickyLiveIds.has(f.id));
+        if (finished) { stickyLiveIds.delete(f.id); return; }
+        if (live) stickyLiveIds.add(f.id);
         // insight bar: every future, non-live fixture — no window cap here (renderInsight bounds the window it displays)
         if (!live && t > now) {
           const hc0 = f.home_competitors?.[0] || {}, ac0 = f.away_competitors?.[0] || {};
@@ -593,6 +603,9 @@ async function loadFixtures() {
       });
     } catch(e) { console.warn('[live] fixtures', k, e.message); diag[L.label] = { error: e.message }; }
   }
+  // Drop stickiness for anything that fell out of the feed entirely (not just this poll's active
+  // leagues) rather than letting it ride forever as a phantom live game.
+  stickyLiveIds = new Set([...stickyLiveIds].filter(id => seenIds.has(id)));
   console.log('[live] fixtures diag:', JSON.stringify(diag));
   upcomingAll = upcomingNext.sort((a, b) => a.start - b.start);
   renderInsight(out, upcomingAll);
