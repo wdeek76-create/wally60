@@ -524,9 +524,48 @@ const bookLogo = n => { const k=canonBook(n); if(k==='fanduel') return FD_LOGO_O
 const deepLinkFor = o => { const d=o?.deep_link; if(!d||typeof d!=='object') return null; return (IS_IOS&&d.ios)||(IS_ANDROID&&d.android)||d.desktop||d.ios||d.android||null; };
 
 // ───────────────────────── load ─────────────────────────
+// Same-day local cache: fixtures/odds/players for a sport are saved to localStorage after every
+// successful load, tagged with today's date (ET). On a fresh page load, a same-day cache renders
+// instantly instead of staring at "loading fixtures…" every single time — a real network refresh
+// still kicks off right behind it since the cache is likely a few minutes to a few hours stale.
+// Once the date rolls over the cache is just ignored (and swept up at boot), since a new slate
+// means everything in it is gone anyway.
+const sportCacheKey = sk => `props_cache_${sk}`;
+const todayKey = () => etDateKey(new Date().toISOString());
+function saveSportCache(sk){
+  try{
+    const playersOut=players.map(p=>({...p, pids:[...p.pids], marketKeys:[...p.marketKeys]}));
+    LS.set(sportCacheKey(sk), JSON.stringify({ day:todayKey(), fixtures, mainRows, players:playersOut, at:loadedAt }));
+  }catch(e){ console.warn('[props] cache save failed', e.message); }
+}
+function loadSportCache(sk){
+  try{
+    const raw=JSON.parse(LS.get(sportCacheKey(sk),'null')); if(!raw || raw.day!==todayKey()) return null;
+    return { fixtures:raw.fixtures, mainRows:raw.mainRows, at:raw.at,
+      players: raw.players.map(p=>({...p, pids:new Set(p.pids), marketKeys:new Set(p.marketKeys)})) };
+  }catch(e){ return null; }
+}
+function purgeStaleSportCaches(){
+  try{
+    const today=todayKey();
+    Object.keys(localStorage).filter(k=>k.startsWith('props_cache_')).forEach(k=>{
+      try{ const raw=JSON.parse(localStorage.getItem(k)); if(!raw || raw.day!==today) localStorage.removeItem(k); }
+      catch(e){ localStorage.removeItem(k); }
+    });
+  }catch(e){}
+}
 async function loadSport(force){
   const S=SPORTS[sportKey]; const stat=$('#stat');
   if(!force && loadedAt && Date.now()-loadedAt<180000 && mainRows.length){ stat.textContent=`${S.label} · ${players.length} players · cached`; return; }
+  if(!force && !mainRows.length){
+    const cached=loadSportCache(sportKey);
+    if(cached){
+      fixtures=cached.fixtures; mainRows=cached.mainRows; players=cached.players; loadedAt=cached.at;
+      stat.textContent=`${S.label} · ${players.length} players · cached, refreshing…`;
+      if(current){ const again=players.find(x=>x.key===current.key); if(again) openPlayer(again, curMktIdx); }
+      else if(viewMode==='sport') renderSlate();
+    }
+  }
   stat.textContent=`${S.label} · loading fixtures…`;
   try{
     const raw=[]; let page=1;
@@ -546,7 +585,7 @@ async function loadSport(force){
       console.log('[props] UFC cards kept:', [...keep]);
     }
     console.log(`[props] ${S.label} fixtures: ${raw.length} fetched, ${fixtures.length} in window`, fixtures.map(f=>`${f.away.ab||f.away.name}@${f.home.ab||f.home.name} ${f.status}`));
-    if(!fixtures.length){ stat.textContent=`${S.label} · no games in the next 30h`; mainRows=[]; players=[]; loadedAt=Date.now(); return; }
+    if(!fixtures.length){ stat.textContent=`${S.label} · no games in the next 30h`; mainRows=[]; players=[]; loadedAt=Date.now(); saveSportCache(sportKey); return; }
     // injuries (best-effort; schema read defensively)
     stat.textContent=`${S.label} · loading injuries…`;
     injuries={ byPid:{}, byName:{}, at:Date.now() };
@@ -585,6 +624,7 @@ async function loadSport(force){
     stat.textContent= S.ml ? `UFC · ${[...new Set(fixtures.map(f=>f.card))].join(' + ')} · ${players.length} fighters`
                            : `${S.label} · ${fixtures.length} games · ${[...new Set(fixtures.map(f=>etDateKey(f.start)))].length}d · ${players.length} players`;
     if(current){ const again=players.find(p=>p.key===current.key); if(again) openPlayer(again, curMktIdx); }
+    saveSportCache(sportKey);
   }catch(e){
     console.error(e); stat.textContent=`${S.label} · load failed`;
     $('#view').innerHTML=`<div class="err">${esc(e.message)}<br><span class="dim">Check the backend URL via ⚙.</span></div>`;
@@ -1472,6 +1512,7 @@ $('#reload').addEventListener('click',()=>loadSport(true));
 $('#cfg').addEventListener('click',()=>{ const u=prompt('OpticOdds backend URL (your Vercel /api/odds):',getBackend()); if(u!=null){ LS.set('oo_backend_url',u.trim()||BACKEND_DEFAULT); toast('Backend saved'); } });
 renderTabs();
 loadBookLogos();
+purgeStaleSportCaches();
 loadSportGameCounts();
 loadSport(false).then(()=>{ if(!current) renderSlate(); if(!sawDeepLinks) console.log('[props] no deep_link fields returned — key may not have deep-link permission'); });
 </script>
