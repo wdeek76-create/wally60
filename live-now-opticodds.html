@@ -207,8 +207,13 @@ header{padding:14px 16px 10px;padding-top:calc(14px + env(safe-area-inset-top))}
 .footstrip{display:flex;gap:6px;margin-top:10px}
 .footstrip .fs-stat{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;background:rgba(255,255,255,.05);border:1px solid rgba(39,192,113,.35);border-radius:13px;padding:7px 4px;font-size:13px;font-weight:900;color:var(--green);font-variant-numeric:tabular-nums}
 .footstrip .fs-stat span{font-size:8px;font-weight:800;letter-spacing:.4px;text-transform:uppercase;color:var(--sub);margin-top:1px}
-.footstrip .fs-bet{flex:1.6;display:flex;align-items:center;justify-content:center;background:var(--green);color:#04140b;border:none;border-radius:13px;font-weight:900;font-size:12px;letter-spacing:.2px;font-family:var(--font);cursor:pointer;text-decoration:none;text-align:center}
-.footstrip .fs-bet.fs-bet-off{background:rgba(255,255,255,.06);color:var(--sub);cursor:default}
+.footstrip .fs-bet{flex:1.6;display:flex;align-items:center;justify-content:center;
+  background:linear-gradient(160deg, rgba(210,245,255,.32) 0%, rgba(94,194,255,.22) 55%, rgba(39,192,113,.22) 100%);
+  backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
+  border:1px solid rgba(210,245,255,.6);color:#eafcff;border-radius:13px;font-weight:900;font-size:12px;letter-spacing:.2px;font-family:var(--font);cursor:pointer;text-decoration:none;text-align:center;
+  text-shadow:0 0 8px rgba(255,255,255,.55);
+  box-shadow:0 0 18px rgba(120,220,255,.4),inset 0 1px 0 rgba(255,255,255,.45),inset 0 -6px 12px rgba(94,194,255,.12)}
+.footstrip .fs-bet.fs-bet-off{background:rgba(255,255,255,.06);backdrop-filter:none;-webkit-backdrop-filter:none;border-color:var(--border);color:var(--sub);text-shadow:none;box-shadow:none;cursor:default}
 .trackrow{display:flex;justify-content:center;margin-top:8px}
 .track-btn{background:none;border:1.5px solid rgba(39,192,113,.5);color:var(--green);border-radius:20px;padding:6px 16px;font-weight:800;font-size:11px;letter-spacing:.2px;font-family:var(--font);cursor:pointer;-webkit-tap-highlight-color:transparent}
 .track-btn.on{background:var(--green-dim);border-color:var(--green)}
@@ -450,6 +455,7 @@ const EXTRA_BOOKS = [
   { key:'rebet',     name:'ReBet' },
   { key:'betonline', name:'BetOnline' },
   { key:'fliff',     name:'Fliff' },
+  { key:'circa',     name:'Circa' },
   { key:'novig',     name:'Novig',     exch:true },
   { key:'kalshi',    name:'Kalshi',    exch:true },
   { key:'prophetx',  name:'Prophet X', exch:true },
@@ -459,6 +465,10 @@ const EXTRA_BOOKS = [
   { key:'propbuilder', name:'Props Builder', props:true },
 ];
 const EXCH = new Set(EXTRA_BOOKS.filter(b => b.exch).map(b => b.name.toLowerCase()));
+// "Sharp" for the consensus line isn't just the no-vig exchanges — a regular book like Circa,
+// FanDuel, or BetOnline posting the other side is just as real a signal that the market disagrees
+// with this pick.
+const SHARP_BOOKS = new Set([...EXCH, 'circa', 'fanduel', 'betonline']);
 const DEFAULT_BOOKS = ['fanduel','draftkings'];
 let extraBooks = (() => { try { const v = LS.get('live_extra_books', null); return new Set(v == null ? DEFAULT_BOOKS : JSON.parse(v)); } catch(e) { return new Set(DEFAULT_BOOKS); } })();
 const saveExtraBooks = () => LS.set('live_extra_books', JSON.stringify([...extraBooks]));
@@ -622,7 +632,9 @@ async function loadOdds(fxs) {
 // market-name filter in loadOdds(). Props Builder only carries player props, which aren't in that
 // list at all, so it gets its own fetch — scoped to whichever players you've actually picked
 // (arbing every player on every live roster against Pinnacle would be a huge, mostly-useless
-// payload), pulled fresh each cycle only while the Props Builder toggle is on.
+// payload), pulled fresh each cycle only while the Props Builder toggle is on. is_main:true keeps
+// it to main/standard player markets only (same technique the NFL sharp-props tracker uses), and
+// FanDuel comes along for the same "FD·Pin aligned" fair-price averaging the game markets get.
 let pbCandidates = {};                 // "<player>|<fixtureId>" -> { player, f, rows:[raw odds] }
 let pbPicked = (() => { try { return new Set(JSON.parse(LS.get('live_pb_picked', '[]'))); } catch(e) { return new Set(); } })();
 const savePbPicked = () => LS.set('live_pb_picked', JSON.stringify([...pbPicked]));
@@ -632,7 +644,9 @@ async function loadPlayerProps() {
   const out = {};
   for (const batch of chunk(fixtures, 5)) {
     try {
-      const r = await oo('/fixtures/odds', { fixture_id: batch.map(f => f.id), sportsbook: ['Pinnacle', 'Props Builder'] });
+      // is_main:true — standard lines only, same technique the NFL sharp-props tracker uses to
+      // keep this to the main/popular player markets instead of every alternate line variant.
+      const r = await oo('/fixtures/odds', { fixture_id: batch.map(f => f.id), sportsbook: ['Pinnacle', 'Props Builder', 'FanDuel'], is_main: true });
       (r?.data || []).forEach(d => {
         const f = fixtures.find(x => x.id === d.id); if (!f) return;
         (d.odds || []).forEach(o => {
@@ -660,17 +674,23 @@ function pbRows() {
       const side = String(o.selection_line || '').toLowerCase(); if (side !== 'over' && side !== 'under') return;
       const pts = o.points == null ? null : Number(o.points);
       const gk = o.market + '|' + pts;
-      const g = (groups[gk] = groups[gk] || { market: o.market, points: pts, pin: {}, pb: {} });
+      const g = (groups[gk] = groups[gk] || { market: o.market, points: pts, pin: {}, pb: {}, fd: {} });
       const bk = String(o.sportsbook || '').toLowerCase();
       if (bk === 'pinnacle') { if (!g.pin[side] || Number(o.price) > Number(g.pin[side].price)) g.pin[side] = o; }
       else if (bk === 'props builder') { if (!g.pb[side] || Number(o.price) > Number(g.pb[side].price)) g.pb[side] = o; }
+      else if (bk === 'fanduel') { if (!g.fd[side] || Number(o.price) > Number(g.fd[side].price)) g.fd[side] = o; }
     });
     Object.values(groups).forEach(g => {
       if (!g.pin.over || !g.pin.under) return; // need both Pinnacle sides to devig a fair price
       const hold = imp(g.pin.over.price) + imp(g.pin.under.price);
       if (hold < 0.97 || hold > 1.15) return;
       const devig = (a, b) => { const x = imp(a), y = imp(b); return { over: x/(x+y), under: y/(x+y) }; };
-      const fair = devig(g.pin.over.price, g.pin.under.price);
+      let fair = devig(g.pin.over.price, g.pin.under.price);
+      // Same "FD·Pin aligned" refinement the game markets get: when FanDuel's own devigged fair
+      // agrees with Pinnacle's (within ALIGN_CENTS on both sides), average the two instead of
+      // trusting Pinnacle alone.
+      const aligned = !!(g.fd.over && g.fd.under && centsDiff(g.fd.over.price, g.pin.over.price) <= ALIGN_CENTS && centsDiff(g.fd.under.price, g.pin.under.price) <= ALIGN_CENTS);
+      if (aligned) { const ff = devig(g.fd.over.price, g.fd.under.price); fair = { over:(fair.over+ff.over)/2, under:(fair.under+ff.under)/2 }; }
       ['over','under'].forEach(side => {
         const pb = g.pb[side]; if (!pb) return;
         const oppSide = side === 'over' ? 'under' : 'over';
@@ -684,7 +704,7 @@ function pbRows() {
           mk: { key:'prop', label: g.market },
           sideLabel: `${c.player} ${side === 'over' ? 'Over' : 'Under'} ${g.points}`,
           ttSide:null, pickSide:null, pickPoints:g.points, overUnder:side,
-          fair:fp, aligned:false, refLabel:'PIN', refBook:'Pinnacle', refBookShort:'PIN', fdPrice:null,
+          fair:fp, aligned, refLabel: aligned?'FD·Pin':'PIN', refBook:'Pinnacle', refBookShort:'PIN', fdPrice: aligned ? g.fd[side].price : null,
           pin:{ mine:g.pin[side].price, other:g.pin[oppSide].price, lim:liqOf(g.pin[side]), depth:null },
           books:[{ book:'Props Builder', price:pr, ev, arb, exch:false, liq:liqOf(pb), depth:null, o:pb }],
           best:null, sharpFor:0, sharpAgainst:0,
@@ -1150,7 +1170,8 @@ function computeRows(fxs, byFx) {
           const ev = fp * toDec(pr) - 1;
           const arb = 1 - (imp(pr) + imp(pin[1-idx].price));   // this side here + other side at the reference book
           const exch = EXCH.has(b.toLowerCase());
-          return { book:b, price:pr, ev, arb, o, exch, liq: liqOf(o), depth: exch ? liqDepth(o) : null };
+          const sharp = SHARP_BOOKS.has(b.toLowerCase());
+          return { book:b, price:pr, ev, arb, o, exch, sharp, liq: liqOf(o), depth: exch ? liqDepth(o) : null };
         }).filter(x => x && x.ev * 100 <= 25 && x.arb * 100 >= minArb && (!arbsOnly || x.arb > 0)).sort((a, b) => b.price - a.price);
         if (!books.length) return;
         const s = P.samples[sid];
@@ -1169,8 +1190,8 @@ function computeRows(fxs, byFx) {
         // book against this pick; exchanges/sharps already counted in `books` (this side) are
         // effectively backing you instead — surfaced together so you can see both counts.
         const oppSid = sideIds[1 - idx];
-        const sharpAgainst = Object.keys(P.sides[oppSid] || {}).filter(b => !skip(b) && EXCH.has(b.toLowerCase())).length;
-        const sharpFor = books.filter(x => x.exch).length;
+        const sharpAgainst = Object.keys(P.sides[oppSid] || {}).filter(b => !skip(b) && SHARP_BOOKS.has(b.toLowerCase())).length;
+        const sharpFor = books.filter(x => x.sharp).length;
         out.push({ key, f, mk:P.mk, sideLabel, ttSide, pickSide, pickPoints, overUnder, fair:fp, aligned, refLabel, refBook, refBookShort: refBook==='Kalshi'?'Kalshi':'PIN', fdPrice: aligned ? fd[idx].price : null, pin:{ mine:pin[idx].price, other:pin[1-idx].price, lim, depth:pinDepth }, books, best:books[0], sharpFor, sharpAgainst });
       });
     });
@@ -1494,11 +1515,26 @@ function setViewHtml(view, html) {
   requestAnimationFrame(() => window.scrollTo(0, y));
   return true;
 }
+// Once you've bet a side, the directly-opposing side of that SAME market/line is a correlated,
+// not-a-new-opportunity row (you already have skin in this exact game): FanDuel ML you took means
+// the Celtics ML on the other side isn't a fresh idea, it's just the bet you already made mirrored
+// back at you. A different market on the same teams (the spread, the total, a player prop) is a
+// genuinely different bet and stays — this only ever hides the exact mirror of an exact market.
+function isCorrelatedOpposite(r) {
+  return Object.values(log).some(e => {
+    if (e.fid !== r.f.id || e.mkKey !== r.mk.key) return false;
+    if (r.mk.key === 'ml') return !!(e.pickSide && r.pickSide && e.pickSide !== r.pickSide);
+    if (r.mk.key === 'total') return e.pickPoints === r.pickPoints && !!(e.overUnder && r.overUnder && e.overUnder !== r.overUnder);
+    if (r.mk.key === 'tt') return e.pickSide === r.pickSide && e.pickPoints === r.pickPoints && e.overUnder !== r.overUnder;
+    if (r.mk.key === 'spread') return e.pickSide !== r.pickSide && Number(e.pickPoints) === -Number(r.pickPoints);
+    return false; // player props: no game-market correlation to check against
+  });
+}
 // ───────────────────────────── render ─────────────────────────────
 function render() {
   const view = $('#view');
   if (viewMode === 'tracker') { renderTracker(); return; }
-  const rowsV = rows.filter(r => !hidden[r.key]);
+  const rowsV = rows.filter(r => !hidden[r.key] && !isCorrelatedOpposite(r));
   if (!rowsV.length) {
     const searchHtml = `<div class="searching">
       <div class="splash-icon mini"><svg class="splash-ring mini" viewBox="0 0 100 100"><circle cx="50" cy="50" r="42"></circle></svg></div>
