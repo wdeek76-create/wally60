@@ -497,7 +497,15 @@ async function fetchInjuriesList(S){
 async function ensureInjuriesFor(sk){
   if(injuriesBySport[sk]) return injuriesBySport[sk].list;
   const S=SPORTS[sk]; if(S.ml) return [];
-  try{ const list=await fetchInjuriesList(S); injuriesBySport[sk]={list, at:Date.now()}; return list; }
+  try{
+    const list=await fetchInjuriesList(S); injuriesBySport[sk]={list, at:Date.now()};
+    // Diagnostic: whether "only one GTD" is a real count from the API or something getting
+    // dropped client-side is easy to tell apart from this — check the console after loading
+    // Injuries with a sport filtered.
+    const byStatus={}; list.forEach(r=>{ const s=injShort(r.status); byStatus[s]=(byStatus[s]||0)+1; });
+    console.log(`[props] injuries for ${sk}: ${list.length} total`, byStatus);
+    return list;
+  }
   catch(e){ console.warn('[props] injuries failed for',sk,e.message); return []; }
 }
 let bookLogos = {};                             // lowercase book name -> logo url (from /sportsbooks)
@@ -990,25 +998,6 @@ function bindView(p){
   }));
   document.querySelectorAll('.stp').forEach(b=>b.addEventListener('click',()=>stepLine(p,b.dataset.ctx,Number(b.dataset.step))));
   document.querySelectorAll('[data-reset]').forEach(b=>b.addEventListener('click',()=>{ selLine[b.dataset.reset]=null; rerenderCard(p,b.dataset.reset); }));
-  document.querySelectorAll('.mk:not(.single)').forEach(mk=>{
-    const ctx=mk.dataset.ctx; let sx=0, sy=0, t0=0, tracking=false, locked=false;
-    mk.addEventListener('touchstart',ev=>{ if(ev.touches.length!==1) return; const t=ev.touches[0]; sx=t.clientX; sy=t.clientY; t0=Date.now(); tracking=true; locked=false; },{passive:true});
-    // touch-action:pan-y on .mscroll is meant to stop the market carousel from stealing a
-    // horizontal drag meant for alt-line stepping, but some browsers still let the native
-    // scroll engage anyway — so once a drag reads as clearly horizontal, preventDefault it
-    // here too, killing the carousel scroll outright rather than trusting CSS alone.
-    mk.addEventListener('touchmove',ev=>{
-      if(!tracking || ev.touches.length!==1) return;
-      const t=ev.touches[0]; const dx=t.clientX-sx, dy=t.clientY-sy;
-      if(!locked && Math.abs(dx)>10 && Math.abs(dx)>Math.abs(dy)*1.5) locked=true;
-      if(locked) ev.preventDefault();
-    },{passive:false});
-    mk.addEventListener('touchend',ev=>{
-      if(!tracking) return; tracking=false;
-      const t=ev.changedTouches[0]; const dx=t.clientX-sx, dy=t.clientY-sy, dt=Date.now()-t0;
-      if(dt<600 && Math.abs(dx)>40 && Math.abs(dx)>Math.abs(dy)*1.5) stepLine(p, ctx, dx<0?1:-1);
-    },{passive:true});
-  });
 }
 // DraftKings' Bet button covers 3 real apps sharing the same lines (DK, Courtside, Onyx Odds) —
 // this is the small popover that lets the user pick which one actually opens.
@@ -1097,8 +1086,11 @@ async function stepLine(p, ctx, dir){
   if(lines.length<2){ toast('No alt lines posted'); return; }
   const cur=selLine[ctx]??main;
   let i=lines.indexOf(Number(cur));
-  if(i<0){ i=lines.findIndex(l=>l>Number(cur)); if(i<0) i=lines.length-1; if(dir<0&&i>0) i--; }
-  else i=Math.max(0,Math.min(lines.length-1,i+dir));
+  // cur isn't an exact match in the freshly-fetched alt lines (typical on the very first step,
+  // before this ctx's alt lines were known) — start from whichever line is numerically closest
+  // instead of an unmatched line falling through to the far end of the list.
+  if(i<0){ let bestDiff=Infinity; lines.forEach((l,idx)=>{ const d=Math.abs(l-Number(cur)); if(d<bestDiff){ bestDiff=d; i=idx; } }); }
+  i=Math.max(0,Math.min(lines.length-1,i+dir));
   selLine[ctx] = (main!=null && lines[i]===main) ? null : lines[i];
   rerenderCard(p,ctx);
 }
