@@ -607,11 +607,15 @@ function parseSearchQuery(q){
 }
 const startIdxFor = (p, mkey) => { if(!mkey) return 0; const mkeys=SPORTS[sportKey].markets.map(m=>m[0]).filter(k=>p.marketKeys.has(k)); const i=mkeys.indexOf(mkey); return i<0?0:i; };
 const teamLogoFor = p => { const info=p.pid?playerInfo[p.pid]:null; const f=fixtures.find(x=>x.id===p.fixtureId); if(!info?.teamId||!f) return ''; return f.home.id===info.teamId?f.home.logo:(f.away.id===info.teamId?f.away.logo:''); };
+// Once a game goes live, its props drop off every browsing surface (slate, search, game roster)
+// — betting live is a different thing and not what this board is for. Already-tracked picks are
+// unaffected: the Tracker looks prices up straight from mainRows/fixtures, not through here.
+const fixtureIsLive = fid => !!fixtures.find(f=>f.id===fid)?.live;
 function suggest(q){
   const box=$('#sug'); q=String(q||'').trim();
   if(!q||!players.length){ box.classList.remove('show'); box.innerHTML=''; return; }
   const {name,mkey}=parseSearchQuery(q);
-  const hits=players.filter(p=>nameMatches(p.name,name||q)).slice(0,12);
+  const hits=players.filter(p=>nameMatches(p.name,name||q) && !fixtureIsLive(p.fixtureId)).slice(0,12);
   if(!hits.length){ box.innerHTML=`<div class="si"><span class="nm dim">No ${SPORTS[sportKey].ml?'fighter':'player'} matches "${esc(q)}"</span></div>`; box.classList.add('show'); return; }
   const mhit = mkey ? `<span class="mhit">→ ${esc(marketLabel(sportKey,mkey))}</span> ` : '';
   box.innerHTML=hits.map((p,i)=>{ const f=fixtures.find(x=>x.id===p.fixtureId); const lg=teamLogoFor(p); return `<div class="si" data-i="${i}"><span class="nm">${lg?`<img class="stl" src="${esc(lg)}" alt="">`:''}${esc(titleCase(p.name))} ${injPill(p)}</span><span class="g">${mhit}${f?(SPORTS[sportKey].ml?`${esc(f.card)} · ${etDay(f.start)}`:`${esc(f.away.ab)}@${esc(f.home.ab)} ${etDay(f.start)} ${etTime(f.start)}`):''}</span></div>`; }).join('');
@@ -1380,7 +1384,7 @@ function renderSlate(){
   if(!fixtures.length){ view.innerHTML=`<div class="empty">No ${S.label} games in the window.</div>`; return; }
   if(S.ml){
     let h=''; let lastCard=null;
-    fixtures.forEach(f=>{
+    fixtures.filter(f=>!f.live).forEach(f=>{
       if(f.card!==lastCard){ lastCard=f.card; h+=`<div class="sh"><span class="t">${esc(f.card)} · ${etDay(f.start)}</span></div>`; }
       const a=players.find(p=>p.key===normName(f.away.name)), b=players.find(p=>p.key===normName(f.home.name));
       const mlA=a?bestML(rowsFor(a,'ml',mainRows)):'—', mlB=b?bestML(rowsFor(b,'ml',mainRows)):'—';
@@ -1397,11 +1401,16 @@ function renderSlate(){
     return;
   }
   let lastDay=null;
-  const h=fixtures.map(f=>{
+  // Once a game goes live, it drops off this pregame board entirely — betting live is a
+  // different thing, and any prop you already tracked keeps updating fine in the Tracker tab
+  // without needing to still be browsable here.
+  const upcoming=fixtures.filter(f=>!f.live);
+  if(!upcoming.length){ view.innerHTML=`<div class="empty">No upcoming ${S.label} games right now — anything live has dropped off this board.</div>`; return; }
+  const h=upcoming.map(f=>{
     const dk=etDateKey(f.start); let hd='';
     if(dk!==lastDay){ lastDay=dk; hd=`<div class="sh" style="margin-top:6px"><span class="t">${etDay(f.start)} · ${esc(dk)}</span></div>`; }
     const n=players.filter(p=>p.fixtureId===f.id).length;
-    const st = f.live ? `<span class="live">LIVE</span>` : f.status==='completed' ? 'FINAL' : `${etDay(f.start)} ${etTime(f.start)}${startsInTxt(f.start)?` <span class="starts">${startsInTxt(f.start)}</span>`:''}`;
+    const st = f.status==='completed' ? 'FINAL' : `${etDay(f.start)} ${etTime(f.start)}${startsInTxt(f.start)?` <span class="starts">${startsInTxt(f.start)}</span>`:''}`;
     return hd+`<div class="gm" data-fid="${esc(f.id)}"><div class="tmwrap"><div class="tm">${f.away.logo?`<img src="${esc(f.away.logo)}" alt="">`:''}${esc(f.away.ab||f.away.name)}<span class="at">@</span>${f.home.logo?`<img src="${esc(f.home.logo)}" alt="">`:''}${esc(f.home.ab||f.home.name)}</div><div class="gmt">${st}</div></div><div class="tt">${n} players</div></div>`;
   }).join('');
   view.innerHTML=`<div class="slate">${h}</div>`;
@@ -1409,6 +1418,7 @@ function renderSlate(){
 }
 function renderGame(fid){
   const f=fixtures.find(x=>x.id===fid); if(!f) return renderSlate();
+  if(f.live){ $('#view').innerHTML=`<div class="sh shback"><span class="t">${esc(f.away.ab)} @ ${esc(f.home.ab)} · <span class="neg">LIVE</span></span><button class="back" id="back">‹ Slate</button></div><div class="empty">This game is live — its props are no longer shown here. Anything you already tracked keeps updating in the Tracker tab.</div>`; $('#back').addEventListener('click',renderSlate); return; }
   const list=players.filter(p=>p.fixtureId===fid).sort((a,b)=>a.name.localeCompare(b.name));
   const mkTxt = p => `${[...p.marketKeys].map(k=>marketLabel(sportKey,k)).slice(0,4).join(' · ')}${p.marketKeys.size>4?' +'+(p.marketKeys.size-4):''}`;
   const h=list.map(p=>`<div class="pl" data-k="${esc(p.key)}"><span>${esc(titleCase(p.name))} ${injPill(p)}</span><span class="m">${mkTxt(p)}</span></div>`).join('');
@@ -1457,7 +1467,7 @@ $('#q').addEventListener('input',e=>suggest(e.target.value));
 $('#q').addEventListener('focus',e=>suggest(e.target.value));
 document.addEventListener('click',e=>{ if(!e.target.closest('.sw')) $('#sug').classList.remove('show'); });
 $('#clr').addEventListener('click',()=>{ $('#q').value=''; suggest(''); renderSlate(); });
-$('#q').addEventListener('keydown',e=>{ if(e.key==='Enter'){ e.preventDefault(); const {name,mkey}=parseSearchQuery($('#q').value); const hit=players.filter(p=>nameMatches(p.name,name||$('#q').value))[0]; if(hit){ openPlayer(hit, startIdxFor(hit,mkey)); $('#sug').classList.remove('show'); $('#q').blur(); } } });
+$('#q').addEventListener('keydown',e=>{ if(e.key==='Enter'){ e.preventDefault(); const {name,mkey}=parseSearchQuery($('#q').value); const hit=players.filter(p=>nameMatches(p.name,name||$('#q').value) && !fixtureIsLive(p.fixtureId))[0]; if(hit){ openPlayer(hit, startIdxFor(hit,mkey)); $('#sug').classList.remove('show'); $('#q').blur(); } } });
 $('#reload').addEventListener('click',()=>loadSport(true));
 $('#cfg').addEventListener('click',()=>{ const u=prompt('OpticOdds backend URL (your Vercel /api/odds):',getBackend()); if(u!=null){ LS.set('oo_backend_url',u.trim()||BACKEND_DEFAULT); toast('Backend saved'); } });
 renderTabs();
