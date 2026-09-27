@@ -133,15 +133,6 @@ header{padding:14px 16px 10px;padding-top:calc(14px + env(safe-area-inset-top))}
 .preset-chip .x{font-size:11px;font-weight:900;color:var(--sub);padding:0 2px}
 .preset-chip .x:hover{opacity:1}
 .clear-books-btn{background:none;border:none;color:var(--accent);font-size:9px;font-weight:800;letter-spacing:.5px;text-transform:uppercase;cursor:pointer;padding:2px}
-.pb-search{width:100%;background:#000;border:1.5px solid var(--border);color:#fff;border-radius:12px;padding:9px 12px;font-family:var(--font);font-size:13px;font-weight:600}
-.pb-suggest{margin-top:6px;max-height:200px;overflow-y:auto;background:var(--card);border:1.5px solid var(--border);border-radius:12px}
-.pb-suggest .pb-opt{display:flex;justify-content:space-between;gap:8px;padding:9px 12px;font-size:12px;font-weight:700;border-bottom:1px solid var(--border);cursor:pointer}
-.pb-suggest .pb-opt:last-child{border-bottom:none}
-.pb-suggest .pb-opt .g{color:var(--sub);font-weight:600;font-size:10px}
-.pb-suggest .pb-empty{padding:9px 12px;font-size:11px;color:var(--sub)}
-.pb-picked{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
-.pb-chip{display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border-radius:14px;border:1.5px solid rgba(39,192,113,.5);background:var(--green-dim);color:var(--text);font-size:11px;font-weight:800}
-.pb-chip .x{color:var(--sub);font-weight:900;cursor:pointer;padding:0 2px}
 .ctrl{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:0 16px 12px;font-size:11px;font-weight:800}
 .ctrl label{display:flex;align-items:center;gap:6px;background:var(--card);border:1.5px solid var(--border);border-radius:13px;padding:6px 10px;letter-spacing:.3px;text-transform:uppercase;color:var(--sub)}
 .ctrl input[type=number]{width:58px;background:#000;border:1px solid var(--border);color:#fff;border-radius:6px;padding:4px 6px;font-family:var(--font);font-variant-numeric:tabular-nums;font-size:12px;font-weight:700;text-align:center}
@@ -403,12 +394,6 @@ header{padding:14px 16px 10px;padding-top:calc(14px + env(safe-area-inset-top))}
     <div class="ctrl-sub-label" style="display:flex;justify-content:space-between;align-items:center">Also scan vs Pinnacle <button class="clear-books-btn" id="clearBooks">Clear all</button></div>
     <div class="book-toggles" id="bookToggles"></div>
   </div>
-  <div class="ctrl-sub" id="pbWrap" style="display:none">
-    <div class="ctrl-sub-label">Props Builder — pick who to scan <span class="sub-note">only players from live games with props posted show up</span></div>
-    <input type="text" id="pbSearch" class="pb-search" placeholder="Search a live player…" autocomplete="off">
-    <div class="pb-suggest" id="pbSuggest" style="display:none"></div>
-    <div class="pb-picked" id="pbPicked"></div>
-  </div>
   <input type="checkbox" id="liveOnly" checked style="display:none">
   <div class="ctrl-sub">
     <label class="chk-row"><input type="checkbox" id="timeoutsOnly">Stoppage only <span class="note">off shows everything live · on narrows to halftime / timeout / between innings</span></label>
@@ -627,58 +612,55 @@ async function loadOdds(fxs) {
   return byFx;
 }
 
-// ───────────────────────────── Props Builder (player props, pick-your-own) ─────────────────────────────
-// Every other book here trades game markets (moneyline/spread/total), fetched with an explicit
-// market-name filter in loadOdds(). Props Builder only carries player props, which aren't in that
-// list at all, so it gets its own fetch — scoped to whichever players you've actually picked
-// (arbing every player on every live roster against Pinnacle would be a huge, mostly-useless
-// payload), pulled fresh each cycle only while the Props Builder toggle is on. is_main:true keeps
-// it to main/standard player markets only (same technique the NFL sharp-props tracker uses), and
-// FanDuel comes along for the same "FD·Pin aligned" fair-price averaging the game markets get.
-let pbCandidates = {};                 // "<player>|<fixtureId>" -> { player, f, rows:[raw odds] }
-let pbPicked = (() => { try { return new Set(JSON.parse(LS.get('live_pb_picked', '[]'))); } catch(e) { return new Set(); } })();
-const savePbPicked = () => LS.set('live_pb_picked', JSON.stringify([...pbPicked]));
+// ───────────────────────────── Props Builder (automatic — target book, not a pick list) ─────────────────────────────
+// Props Builder is the book being bet here, same role FanDuel/DraftKings/etc play for game
+// markets — it's never the reference. Pinnacle is always the reference; any OTHER regular book
+// you've also toggled on (FanDuel, DraftKings, whatever) gets folded in as confirmation exactly
+// like the game markets' "FD·Pin aligned" averaging, just generalized to whichever books you
+// actually have on. Every other book here trades game markets, fetched with an explicit
+// market-name filter in loadOdds() — Props Builder only carries player props, not in that list at
+// all, so it gets its own fetch, scanning every live game automatically (no picking a player).
+// is_main:true keeps it to main/standard player markets, same technique the NFL sharp-props
+// tracker uses.
+let pbByFx = {}; // fixtureId -> raw player-prop odds rows (Pinnacle + Props Builder + toggled books)
 function isGameMarket(name) { return MARKET.some(m => m.test(name)) || PERIODIC.test(name); }
 async function loadPlayerProps() {
-  if (!extraBooks.has('propbuilder') || !fixtures.length) { pbCandidates = {}; return; }
+  if (!extraBooks.has('propbuilder') || !fixtures.length) { pbByFx = {}; return; }
+  const confirmBooks = [...extraBooks].map(k => EXTRA_BOOKS.find(b => b.key === k && !b.props)?.name).filter(Boolean);
+  const bookList = [...new Set([REF_BOOK, 'Props Builder', ...confirmBooks])];
   const out = {};
-  for (const batch of chunk(fixtures, 5)) {
-    try {
-      // is_main:true — standard lines only, same technique the NFL sharp-props tracker uses to
-      // keep this to the main/popular player markets instead of every alternate line variant.
-      const r = await oo('/fixtures/odds', { fixture_id: batch.map(f => f.id), sportsbook: ['Pinnacle', 'Props Builder', 'FanDuel'], is_main: true });
-      (r?.data || []).forEach(d => {
-        const f = fixtures.find(x => x.id === d.id); if (!f) return;
-        (d.odds || []).forEach(o => {
-          if (o.price == null || !o.selection || isGameMarket(String(o.market || ''))) return;
-          const player = String(o.selection).trim();
-          const key = player + '|' + f.id;
-          (out[key] = out[key] || { player, f, rows: [] }).rows.push(o);
+  for (const fxBatch of chunk(fixtures, 5)) {
+    for (const bkBatch of chunk(bookList, 5)) {
+      try {
+        const r = await oo('/fixtures/odds', { fixture_id: fxBatch.map(f => f.id), sportsbook: bkBatch, is_main: true });
+        (r?.data || []).forEach(d => {
+          const f = fixtures.find(x => x.id === d.id); if (!f) return;
+          (d.odds || []).forEach(o => {
+            if (o.price == null || !o.selection || isGameMarket(String(o.market || ''))) return;
+            (out[f.id] = out[f.id] || { f, rows: [] }).rows.push(o);
+          });
         });
-      });
-    } catch(e) { console.warn('[live] player props fetch failed', e.message); }
+      } catch(e) { console.warn('[live] player props fetch failed', e.message); }
+    }
   }
-  pbCandidates = out;
-  // Drop picks whose game ended / stopped posting entirely, same spirit as the pinned-row cleanup.
-  [...pbPicked].forEach(k => { if (!out[k]) pbPicked.delete(k); });
-  renderPbPicker();
+  pbByFx = out;
 }
-// Same devig-and-compare math as computeRows, just keyed by market+line instead of team side,
-// and against whichever picks you've made instead of every row the odds feed returns.
+// Same devig-and-compare math as computeRows, just keyed by player+market+line instead of team
+// side, and scanning every live game's whole roster instead of one team's two sides.
 function pbRows() {
   const rows = [];
-  pbPicked.forEach(key => {
-    const c = pbCandidates[key]; if (!c) return;
+  Object.values(pbByFx).forEach(c => {
     const groups = {};
     c.rows.forEach(o => {
       const side = String(o.selection_line || '').toLowerCase(); if (side !== 'over' && side !== 'under') return;
+      const player = String(o.selection || '').trim(); if (!player) return;
       const pts = o.points == null ? null : Number(o.points);
-      const gk = o.market + '|' + pts;
-      const g = (groups[gk] = groups[gk] || { market: o.market, points: pts, pin: {}, pb: {}, fd: {} });
+      const gk = player + '|' + o.market + '|' + pts;
+      const g = (groups[gk] = groups[gk] || { player, market: o.market, points: pts, pin: {}, pb: {}, confirm: {} });
       const bk = String(o.sportsbook || '').toLowerCase();
       if (bk === 'pinnacle') { if (!g.pin[side] || Number(o.price) > Number(g.pin[side].price)) g.pin[side] = o; }
       else if (bk === 'props builder') { if (!g.pb[side] || Number(o.price) > Number(g.pb[side].price)) g.pb[side] = o; }
-      else if (bk === 'fanduel') { if (!g.fd[side] || Number(o.price) > Number(g.fd[side].price)) g.fd[side] = o; }
+      else { const cs = (g.confirm[bk] = g.confirm[bk] || {}); if (!cs[side] || Number(o.price) > Number(cs[side].price)) cs[side] = o; }
     });
     Object.values(groups).forEach(g => {
       if (!g.pin.over || !g.pin.under) return; // need both Pinnacle sides to devig a fair price
@@ -686,11 +668,17 @@ function pbRows() {
       if (hold < 0.97 || hold > 1.15) return;
       const devig = (a, b) => { const x = imp(a), y = imp(b); return { over: x/(x+y), under: y/(x+y) }; };
       let fair = devig(g.pin.over.price, g.pin.under.price);
-      // Same "FD·Pin aligned" refinement the game markets get: when FanDuel's own devigged fair
-      // agrees with Pinnacle's (within ALIGN_CENTS on both sides), average the two instead of
-      // trusting Pinnacle alone.
-      const aligned = !!(g.fd.over && g.fd.under && centsDiff(g.fd.over.price, g.pin.over.price) <= ALIGN_CENTS && centsDiff(g.fd.under.price, g.pin.under.price) <= ALIGN_CENTS);
-      if (aligned) { const ff = devig(g.fd.over.price, g.fd.under.price); fair = { over:(fair.over+ff.over)/2, under:(fair.under+ff.under)/2 }; }
+      // Same "aligned" refinement the game markets get, generalized across however many other
+      // toggled books actually agree with Pinnacle (not just one hardcoded book) — average every
+      // agreeing book's own devigged fair in together.
+      const agreeing = Object.entries(g.confirm).filter(([, s]) => s.over && s.under
+        && centsDiff(s.over.price, g.pin.over.price) <= ALIGN_CENTS && centsDiff(s.under.price, g.pin.under.price) <= ALIGN_CENTS);
+      const aligned = agreeing.length > 0;
+      if (aligned) {
+        const fairs = agreeing.map(([, s]) => devig(s.over.price, s.under.price));
+        fair = fairs.reduce((a, f) => ({ over:a.over+f.over, under:a.under+f.under }), fair);
+        fair = { over: fair.over/(agreeing.length+1), under: fair.under/(agreeing.length+1) };
+      }
       ['over','under'].forEach(side => {
         const pb = g.pb[side]; if (!pb) return;
         const oppSide = side === 'over' ? 'under' : 'over';
@@ -699,13 +687,14 @@ function pbRows() {
         const arb = 1 - (imp(pb.price) + imp(g.pin[oppSide].price));
         if (arb <= 0) return; // this app is locked-arb-only everywhere else too
         const pr = Number(pb.price); if (pr < Number($('#pMin').value) || pr > Number($('#pMax').value)) return;
-        const agreeNote = aligned ? `✓ FD &amp; PIN AGREE <b>FD ${fmtAm(g.fd[side].price)}</b> · <b>PIN ${fmtAm(g.pin[side].price)}</b> → fading Props Builder` : '';
+        const agreeBook = aligned ? EXTRA_BOOKS.find(b => b.name.toLowerCase() === agreeing[0][0])?.name || agreeing[0][0] : null;
+        const agreeNote = aligned ? `✓ ${esc((agreeBook||'').toUpperCase())} &amp; PIN AGREE <b>${esc(agreeBook)} ${fmtAm(agreeing[0][1][side].price)}</b> · <b>PIN ${fmtAm(g.pin[side].price)}</b> → fading Props Builder${agreeing.length>1?` (+${agreeing.length-1} more agree)`:''}` : '';
         rows.push({
-          key: `pb|${key}|${g.market}|${g.points}|${side}`, f: c.f,
+          key: `pb|${g.player}|${c.f.id}|${g.market}|${g.points}|${side}`, f: c.f,
           mk: { key:'prop', label: g.market },
-          sideLabel: `${c.player} ${side === 'over' ? 'Over' : 'Under'} ${g.points}`,
+          sideLabel: `${g.player} ${side === 'over' ? 'Over' : 'Under'} ${g.points}`,
           ttSide:null, pickSide:null, pickPoints:g.points, overUnder:side,
-          fair:fp, aligned, agreeNote, refLabel: aligned?'FD·Pin':'PIN', refBook:'Pinnacle', refBookShort:'PIN', fdPrice: aligned ? g.fd[side].price : null,
+          fair:fp, aligned, agreeNote, refLabel: aligned?`${agreeBook}·Pin`:'PIN', refBook:'Pinnacle', refBookShort:'PIN', fdPrice: aligned ? agreeing[0][1][side].price : null,
           pin:{ mine:g.pin[side].price, other:g.pin[oppSide].price, lim:liqOf(g.pin[side]), depth:null },
           books:[{ book:'Props Builder', price:pr, ev, arb, exch:false, liq:liqOf(pb), depth:null, o:pb }],
           best:null, sharpFor:0, sharpAgainst:0,
@@ -716,37 +705,6 @@ function pbRows() {
   });
   applyTrend(rows);
   return rows;
-}
-function pbAllPlayers() {
-  return Object.entries(pbCandidates).map(([key, c]) => ({ key, player:c.player, game:`${c.f.away.ab} @ ${c.f.home.ab}` }));
-}
-function renderPbPicker() {
-  const wrap = $('#pbWrap'); if (!wrap) return;
-  wrap.style.display = extraBooks.has('propbuilder') ? 'block' : 'none';
-  const picked = $('#pbPicked');
-  if (picked) picked.innerHTML = [...pbPicked].map(key => {
-    const c = pbCandidates[key]; const label = c ? `${c.player} (${c.f.away.ab}@${c.f.home.ab})` : key.split('|')[0];
-    return `<span class="pb-chip">${esc(label)}<span class="x" data-pbrm="${esc(key)}">✕</span></span>`;
-  }).join('') || '';
-  if (picked) picked.querySelectorAll('[data-pbrm]').forEach(x => x.addEventListener('click', () => {
-    pbPicked.delete(x.dataset.pbrm); savePbPicked(); renderPbPicker(); render();
-  }));
-  renderPbSuggest($('#pbSearch')?.value || '');
-}
-function renderPbSuggest(query) {
-  const el = $('#pbSuggest'); if (!el) return;
-  const q = query.trim().toLowerCase();
-  if (!q) { el.style.display = 'none'; el.innerHTML = ''; return; }
-  const matches = pbAllPlayers().filter(p => !pbPicked.has(p.key) && p.player.toLowerCase().includes(q)).slice(0, 8);
-  el.style.display = 'block';
-  el.innerHTML = matches.length
-    ? matches.map(p => `<div class="pb-opt" data-pbadd="${esc(p.key)}">${esc(p.player)}<span class="g">${esc(p.game)}</span></div>`).join('')
-    : `<div class="pb-empty">No live player with props posted matches "${esc(query)}"</div>`;
-  el.querySelectorAll('[data-pbadd]').forEach(o => o.addEventListener('click', () => {
-    pbPicked.add(o.dataset.pbadd); savePbPicked();
-    const input = $('#pbSearch'); if (input) input.value = '';
-    renderPbPicker(); load(false);
-  }));
 }
 
 // ───────────────────────────── Kalshi football props (automatic, no picking) ─────────────────────────────
@@ -1592,7 +1550,6 @@ function renderBookToggles() {
   el.querySelectorAll('[data-bk]').forEach(cb => cb.addEventListener('change', () => {
     const k = cb.dataset.bk; if (cb.checked) extraBooks.add(k); else extraBooks.delete(k);
     saveExtraBooks(); renderBookToggles(); updateFiltersSummary(); saveLastFilters();
-    const wrap = $('#pbWrap'); if (wrap) wrap.style.display = extraBooks.has('propbuilder') ? 'block' : 'none';
     load(true);
   }));
 }
@@ -1885,8 +1842,6 @@ setFiltersOpen(LS.get('live_filters_open', '0') === '1');
 renderBookToggles();
 renderPresetChips();
 updateFiltersSummary();
-renderPbPicker();
-$('#pbSearch')?.addEventListener('input', e => renderPbSuggest(e.target.value));
 
 renderChips();
 $('#vLive').addEventListener('click', () => setView('live'));
