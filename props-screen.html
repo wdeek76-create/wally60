@@ -1178,21 +1178,27 @@ async function stepLine(p, ctx, dir){
   rerenderCard(p,ctx);
 }
 const marketNamesFor = (p,mkey) => [...new Set(rowsFor(p,mkey,mainRows).map(o=>o.market))];
-// One historical fetch per fixture, not per market — filtering server-side by an exact market
-// NAME string (scraped from the live feed) turned out fragile: the historical endpoint doesn't
-// necessarily use the same naming per sport, so it could silently return nothing (this is why
-// football opening prices weren't showing while basketball's happened to line up). Fetching
-// every market for the fixture and classifying client-side with the same marketKeyFor() used
-// for live rows sidesteps that mismatch entirely, and also means switching markets/players on
-// the same fixture reuses one cached fetch instead of firing a fresh one each time.
+// One historical fetch per fixture, not per market. Try narrow first — scoped to just this
+// market's name(s), like the live feed does — since fetching a whole busy fixture's entire
+// history in one shot turned out too large/slow for real games and broke this for every sport.
+// Only if that narrow, name-filtered fetch comes back completely empty (which is what was
+// happening for football — its historical endpoint doesn't share basketball's market naming) do
+// we retry once broader and classify client-side with the same marketKeyFor() used for live
+// rows, so a naming mismatch doesn't just silently show nothing.
 const histKey = (p,mkey) => p.fixtureId;
 async function ensureHist(p, mkey){
   const ck=p.fixtureId;
   if(histCache[ck]) return histCache[ck];
   if(histPending[ck]) return histPending[ck];
   histPending[ck]=(async()=>{
-    const rows=[];
-    for(const bk of chunk(BOOK_REQ,5)){ try{ const r=await oo('/fixtures/odds/historical',{fixture_id:p.fixtureId,sportsbook:bk,is_main:true}); (r?.data?.[0]?.odds||[]).forEach(o=>{ o._fx=p.fixtureId; rows.push(o); }); }catch(e){ console.warn('[props] history chunk failed',e.message); } }
+    const marketNames=marketNamesFor(p,mkey);
+    let rows=[];
+    for(const bk of chunk(BOOK_REQ,5)){ try{ const r=await oo('/fixtures/odds/historical',{fixture_id:p.fixtureId,sportsbook:bk,market:marketNames,is_main:true}); (r?.data?.[0]?.odds||[]).forEach(o=>{ o._fx=p.fixtureId; rows.push(o); }); }catch(e){ console.warn('[props] history chunk failed',e.message); } }
+    console.log(`[props] historical (narrow, ${marketNames.join('|')}): ${rows.length} rows`);
+    if(!rows.length){
+      for(const bk of chunk(BOOK_REQ,5)){ try{ const r=await oo('/fixtures/odds/historical',{fixture_id:p.fixtureId,sportsbook:bk,is_main:true}); (r?.data?.[0]?.odds||[]).forEach(o=>{ o._fx=p.fixtureId; rows.push(o); }); }catch(e){ console.warn('[props] history fallback chunk failed',e.message); } }
+      console.log(`[props] historical (broad fallback): ${rows.length} rows`);
+    }
     if(rows.length && !window._histLogged){ window._histLogged=true; console.log('[props] historical sample:', JSON.stringify(rows[0]).slice(0,400)); }
     histCache[ck]=rows; delete histPending[ck]; return rows;
   })();
