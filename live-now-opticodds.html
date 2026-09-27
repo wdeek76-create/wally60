@@ -653,6 +653,7 @@ async function loadPlayerProps() {
     }
   }
   pbByFx = out;
+  await loadPlayerStatsFor(Object.values(out).map(c => c.f.id));
 }
 // Same devig-and-compare math as computeRows, just keyed by player+market+line instead of team
 // side, scanning every live game's whole roster instead of one team's two sides, and devigging
@@ -698,7 +699,7 @@ function pbRows() {
         const agreeNote = devigNames.length > 1 ? `✓ ${devigNames.map(esc).join(', ')} devig <b>${fmtAm(probToAm(fp))}</b> → fading Props Builder` : '';
         rows.push({
           key: `pb|${g.player}|${c.f.id}|${g.market}|${g.points}|${side}`, f: c.f,
-          mk: { key:'prop', label: g.market }, player: g.player,
+          mk: { key:'prop', label: g.market }, player: g.player, playerActual: currentStatFor(c.f.id, g.player, g.market),
           sideLabel: `${g.player} ${side === 'over' ? 'Over' : 'Under'} ${g.points}`,
           ttSide:null, pickSide:null, pickPoints:g.points, overUnder:side,
           fair:fp, aligned: devigNames.length > 1, agreeNote, refLabel: devigNames.join('+'), refBook: devigNames[0], refBookShort: devigNames[0], fdPrice: null,
@@ -730,6 +731,22 @@ const KALSHI_PROP_MARKETS = [
   { key:'td',       label:'Anytime TD',      test:m => /anytime/i.test(m) && /touchdown/i.test(m),  minLiq:10000 },
 ];
 let kalshiCandidates = {}; // "<player>|<fixtureId>" -> { player, f, rows:[raw odds] }
+// Live player box scores for whatever prop rows are on screen right now — same endpoint and stat
+// resolution the tracker uses for its own progress bar (see statForMarket/normPlayerName below),
+// just fetched for every candidate row instead of only the ones you've tracked, so the live board
+// itself can show "current: 62 Rushing Yards" before you ever tap Track.
+let playerStatsByFx = {}; // fixtureId -> /fixtures/player-results response entry ({results:[...]})
+async function loadPlayerStatsFor(fixtureIds) {
+  for (const batch of chunk([...new Set(fixtureIds)], 5)) {
+    try { const r = await oo('/fixtures/player-results', { fixture_id: batch }); (r?.data || []).forEach(x => { if (x?.fixture?.id) playerStatsByFx[x.fixture.id] = x; }); }
+    catch(e) { console.warn('[live] player stats fetch failed', e.message); }
+  }
+}
+function currentStatFor(fixtureId, playerName, marketLabel) {
+  const P = playerStatsByFx[fixtureId]; if (!P) return null;
+  const r = (P.results || []).find(x => normPlayerName(x.player?.name) === normPlayerName(playerName));
+  return r ? statForMarket(r, marketLabel) : null;
+}
 async function loadKalshiProps() {
   const fbFx = fixtures.filter(f => f.lk === 'nfl' || f.lk === 'cfb');
   if (!fbFx.length) { kalshiCandidates = {}; return; }
@@ -755,6 +772,7 @@ async function loadKalshiProps() {
     }
   }
   kalshiCandidates = out;
+  await loadPlayerStatsFor(fbFx.map(f => f.id));
 }
 function kalshiRows() {
   const out = [];
@@ -801,7 +819,7 @@ function kalshiRows() {
           const agreeNote = kalshiBacksPin ? `✓ KALSHI &amp; PIN AGREE <b>Kalshi ${fmtAm(mirrorPrice)}</b> · <b>PIN ${fmtAm(pinSide.price)}</b> · ${usd(liq)} on the other side` : '';
           out.push({
             key: `kx|${c.player}|${c.f.id}|${g.M.key}|${g.points}|${side}`, f: c.f,
-            mk: { key:'prop', label: g.M.label },
+            mk: { key:'prop', label: g.M.label }, player: c.player, playerActual: currentStatFor(c.f.id, c.player, g.M.label),
             sideLabel: `${c.player} ${side === 'over' ? 'Over' : 'Under'} ${g.points}`,
             ttSide:null, pickSide:null, pickPoints:g.points, overUnder:side,
             fair:fp, aligned:kalshiBacksPin, agreeNote, refLabel:'Kalshi', refBook:'Kalshi', refBookShort:'Kalshi', fdPrice: kalshiBacksPin ? pinSide.price : null,
@@ -1360,7 +1378,10 @@ function markBet(key) {
     fid:r.f.id, mkKey:r.mk.key, pickSide:r.pickSide, pickPoints:r.pickPoints, overUnder:r.overUnder,
     // Live-progress metadata — lets the tracker re-pull this exact side later and show whether
     // the bet is still holding up (same idea as the props-screen tracker's price movement).
-    pinAtBet:r.pin.mine, refBook:r.refBook || REF_BOOK, refBookShort:r.refBookShort || 'PIN', homeId:r.f.home.id, awayId:r.f.away.id };
+    pinAtBet:r.pin.mine, refBook:r.refBook || REF_BOOK, refBookShort:r.refBookShort || 'PIN', homeId:r.f.home.id, awayId:r.f.away.id,
+    // Player-prop bets carry the player's name too, so the tracker can pull their live box score
+    // and show a progress bar the same way a game-market bet gets one.
+    player: r.mk.key === 'prop' ? r.player : null };
   toast(`Logged: ${r.sideLabel} ${fmtAm(r.best.price)} ${r.best.book}`);
   saveLog(); render();
 }
@@ -1510,6 +1531,46 @@ async function refreshTrackedProgress() {
     });
     if (changed) { saveLog(); if (viewMode === 'tracker') renderTracker(); }
   } finally { _trackProgressBusy = false; }
+}
+// Same idea as refreshTrackedProgress, but for player-prop bets specifically: pulls the player's
+// live box score from /fixtures/player-results and resolves it to a number the tracker's progress
+// bar can compare against the line, same as props-screen's own tracker does for its markets.
+const normPlayerName = s => String(s || '').toLowerCase().trim().replace(/\s+/g, ' ');
+function statForMarket(r, marketLabel) {
+  const periods = Array.isArray(r.stats) ? r.stats : [];
+  const all = (periods.find(x => x.period === 'all') || periods[0] || {}).stats || {};
+  const ms = r.market_stats || {};
+  const mk = String(marketLabel || '');
+  if (ms[mk] != null) return Number(ms[mk]);
+  const msKey = Object.keys(ms).find(k => k.toLowerCase() === mk.toLowerCase());
+  if (msKey) return Number(ms[msKey]);
+  const words = mk.toLowerCase().replace(/[^a-z0-9 ]/g, '').split(/\s+/).filter(Boolean);
+  const hit = Object.keys(all).find(k => { const kl = k.toLowerCase().replace(/_/g, ' '); return words.every(w => kl.includes(w)); });
+  return hit != null ? Number(all[hit]) : null;
+}
+let _trackPropProgressBusy = false;
+async function refreshTrackedPropProgress() {
+  if (_trackPropProgressBusy) return;
+  const pending = Object.values(log).filter(e => e.status === 'pending' && e.mkKey === 'prop' && e.fid && e.player);
+  if (!pending.length) return;
+  _trackPropProgressBusy = true;
+  try {
+    const ids = [...new Set(pending.map(e => e.fid))];
+    const pr = {};
+    for (const batch of chunk(ids, 5)) {
+      try { const r = await oo('/fixtures/player-results', { fixture_id: batch }); (r?.data || []).forEach(x => { if (x?.fixture?.id) pr[x.fixture.id] = x; }); }
+      catch(e) { console.warn('[live] player-results fetch failed', e.message); }
+    }
+    let changed = false;
+    pending.forEach(e => {
+      const P = pr[e.fid]; if (!P) return;
+      const r = (P.results || []).find(x => normPlayerName(x.player?.name) === normPlayerName(e.player));
+      if (!r) return;
+      const v = statForMarket(r, e.market);
+      if (v != null && !isNaN(v) && v !== e.playerActual) { e.playerActual = v; changed = true; }
+    });
+    if (changed) { saveLog(); if (viewMode === 'tracker') renderTracker(); }
+  } finally { _trackPropProgressBusy = false; }
 }
 
 // ───────────────────────────── header / status strip ─────────────────────────────
@@ -1694,6 +1755,7 @@ function render() {
     const curTotal = (!isNaN(st.home) && !isNaN(st.away)) ? (Number(st.home) + Number(st.away)) : null;
     const totalNote = r.mk.key === 'total' && curTotal != null ? `<div class="curtot">Live total <b>${curTotal}</b></div>`
                      : r.mk.key === 'tt' && curTotal != null ? (() => { const own = r.ttSide === 'home' ? st.home : st.away; return isNaN(own) ? '' : `<div class="curtot">Live score <b>${own}</b></div>`; })()
+                     : r.mk.key === 'prop' && r.playerActual != null ? `<div class="curtot">Current <b>${r.playerActual}</b> ${esc(r.mk.label)}</div>`
                      : '';
     const situ = situationNote(r, f, st);
     const pills = ufcPills(r, f, st);
@@ -1804,6 +1866,12 @@ function renderTracker() {
         pct = total > 0 ? Math.round((own / total) * 100) : 50;
         mark = 50;
         winningNow = own > opp;
+      } else if (e.mkKey === 'prop' && e.pickPoints != null && e.playerActual != null) {
+        const L = Number(e.pickPoints), actual = e.playerActual;
+        big = actual; small = `/ ${L} ${e.market}`;
+        pct = Math.min(100, Math.round(actual / (L * 1.25) * 100));
+        mark = Math.round(100 / 1.25);
+        winningNow = e.overUnder === 'over' ? actual > L : actual < L;
       }
       if (big != null) {
         const cls = settled ? (e.status === 'won' ? 'g' : e.status === 'lost' ? 'r' : '') : (winningNow ? 'g' : 'r');
@@ -1863,7 +1931,7 @@ let busy = false, lastFixAt = 0, lastGradeAt = 0;
 async function load(force) {
   if (busy) return; busy = true; setSync('busy'); $('#reload').classList.add('spinning');
   // Fire-and-forget, throttled — doesn't block the odds refresh above.
-  if (Date.now() - lastGradeAt > 30000) { lastGradeAt = Date.now(); autoGradeTracked(); refreshTrackedProgress(); }
+  if (Date.now() - lastGradeAt > 30000) { lastGradeAt = Date.now(); autoGradeTracked(); refreshTrackedProgress(); refreshTrackedPropProgress(); }
   try {
     if (force || !fixtures.length || Date.now() - lastFixAt > 60e3) { fixtures = await loadFixtures(); lastFixAt = Date.now(); }
     renderChips();
