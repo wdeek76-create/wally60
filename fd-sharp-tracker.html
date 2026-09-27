@@ -660,17 +660,16 @@ function computeKalshiRows(fxs, byFx) {
         KALSHI_TARGET_BOOKS.forEach(bk => {
           const bo = books[bk]; if (!bo) return;
           const pr = Number(bo.price);
-          const evPct = fairProb * toDec(pr) - 1;
+          // Genuine arb against Kalshi's own raw opposite-side quote is the sole gate here —
+          // same as live-now-opticodds.html's kalshiRows(), which never qualifies a pick on the
+          // mirrored fair (evPct) alone. evPct still rides along as informational context.
           const arbPct = 1 - (imp(pr) + imp(kalshiOpp.price));
-          const hasArb = arbPct > 0 && arbPct <= MAX_PLAUSIBLE_EDGE;
-          const hasValue = evPct > 0 && evPct <= MAX_PLAUSIBLE_EDGE;
-          if (!hasArb && !hasValue) return;
-          const qualKind = hasArb && hasValue ? 'both' : hasArb ? 'arb' : 'value';
+          if (arbPct <= 0 || arbPct > MAX_PLAUSIBLE_EDGE) return;
+          const evPct = fairProb * toDec(pr) - 1;
           out.push({
             key: `${bucketKey}|${side}|kalshi|${bk}`, fid: f.id, f, mkey: P.mkey, marketNames: [P.marketName],
             player: P.player, line: P.line, side, book: bk, price: pr,
-            kalshiPrice: Number(kalshiOpp.price), kalshiLiq: liq, mirrorPrice, fairProb,
-            evPct: hasValue ? evPct : null, arbPct: hasArb ? arbPct : null, qualKind,
+            kalshiPrice: Number(kalshiOpp.price), kalshiLiq: liq, mirrorPrice, fairProb, evPct, arbPct,
           });
         });
       });
@@ -741,7 +740,7 @@ function autoTrackKalshi(kalshiRows) {
       awayLogo: r.f.away.logo || '', homeLogo: r.f.home.logo || '',
       market: marketLabel(r.mkey), mkey: r.mkey, marketNames: r.marketNames, player: r.player, playerKey: normName(r.player),
       side: r.side, line: r.line, book: r.book, fdPrice: r.price, kalshiPrice: r.kalshiPrice, kalshiLiq: r.kalshiLiq,
-      mirrorPrice: r.mirrorPrice, fairProb: r.fairProb, evPct: r.evPct, arbPct: r.arbPct, qualKind: r.qualKind,
+      mirrorPrice: r.mirrorPrice, fairProb: r.fairProb, evPct: r.evPct, arbPct: r.arbPct,
       betPeriod: periodOf(r.fid), stakeUnits: 1, betAt: Date.now(), status: 'pending',
     };
     changed = true;
@@ -1273,16 +1272,14 @@ function renderTracker() {
       : `<div class="m"><b style="color:${clr};font-size:12px">${e.status.toUpperCase()}</b> <b style="color:${clr}">${units}</b>${e.actual != null ? ` · actual ${e.actual}` : ''}</div>`;
     const sideLabel = e.side === 'over' ? `Over ${e.line}` : e.side === 'under' ? `Under ${e.line}` : 'Yes';
     const sideLabelNow = !settled && e.actual != null ? `${sideLabel} (${e.actual})` : sideLabel;
-    const arbPart = e.arbPct != null ? `${(e.arbPct*100).toFixed(2)}% arb vs Kalshi` : null;
+    const arbPart = `${(e.arbPct*100).toFixed(2)}% arb vs Kalshi`;
     const valuePart = e.evPct != null ? `+${(e.evPct*100).toFixed(2)}% EV vs Kalshi mirror fair (${fmtAm(probToAm(e.fairProb))})` : null;
     const edgeLine = [arbPart, valuePart].filter(Boolean).join(' · ');
-    const kind = e.qualKind || 'value';
-    const kindLabel = kind === 'both' ? 'ARB + VALUE' : kind === 'arb' ? 'DIRECT ARB' : 'VALUE ONLY';
     const resultBtns = settled
       ? `<button data-kres="${esc(e.key)}|pending">↺ Re-open</button>`
       : `<button data-kres="${esc(e.key)}|won">WON</button><button data-kres="${esc(e.key)}|lost">LOST</button><button data-kres="${esc(e.key)}|push">PUSH</button>`;
     return `<div class="tk glass"><div class="h"><span>${gameHeaderHtml(e)} <span style="color:var(--sub);font-size:10px">NFL KALSHI</span></span><span>${t(e.betAt)}</span></div>
-    <div style="font-weight:800;font-size:14px;margin-top:3px">${esc(e.market)} · ${esc(e.player)} ${esc(sideLabelNow)} <span class="kindtag ${kind}">${esc(kindLabel)}</span></div>
+    <div style="font-weight:800;font-size:14px;margin-top:3px">${esc(e.market)} · ${esc(e.player)} ${esc(sideLabelNow)} <span class="kindtag arb">DIRECT ARB</span></div>
     <div class="rawmkt">source: "${esc((e.marketNames||[])[0] || '')}"</div>
     <div class="m">${bookName(e.book)} <b>${fmtAm(e.fdPrice)}</b> · ${edgeLine} · Kalshi opp side ${fmtAm(e.kalshiPrice)} (${usd(e.kalshiLiq)} liq) · 1u</div>
     ${resultLine}
@@ -1295,11 +1292,11 @@ function renderTracker() {
     ${breakdownHtml('Kalshi: By Target Book + O/U', groupRecords(kalshiBets, e => `${e.book} · ${sideLabelFor(e)}`))}
     ${breakdownHtml('Kalshi: By Liquidity', groupRecords(kalshiBets, e => kalshiLiqBucket(e.kalshiLiq)))}
     ${breakdownHtml('Kalshi: By Liquidity + O/U', groupRecords(kalshiBets, e => `${kalshiLiqBucket(e.kalshiLiq)} · ${sideLabelFor(e)}`))}
-    ${breakdownHtml('Kalshi: Direct Arb vs Value', groupRecords(kalshiBets, e => { const k = e.qualKind || 'value'; return k === 'both' ? 'Direct Arb + Value' : k === 'arb' ? 'Direct Arb' : 'Value Only'; }))}
+    ${breakdownHtml('Kalshi: By Arb %', groupRecords(kalshiBets, e => arbBucket(e.arbPct)))}
     ${breakdownHtml('Kalshi: By Quarter (bet timing)', groupRecords(kalshiBets, e => periodLabel(e.betPeriod)))}
     ${breakdownHtml('Kalshi: By Half (bet timing)', groupRecords(kalshiBets, e => halfLabel(e.betPeriod)))}
   </div>` : '';
-  const kalshiCardsHtml = kalshiBets.length ? '<div class="cards-grid">' + kalshiBets.map(kalshiCard).join('') + '</div>' : '<div class="empty">No Kalshi picks yet — auto-tracks when FD/DK/Fliff/Props Builder is +EV or arbs against Kalshi\'s mirrored opposite-side quote (min $300 liq).</div>';
+  const kalshiCardsHtml = kalshiBets.length ? '<div class="cards-grid">' + kalshiBets.map(kalshiCard).join('') + '</div>' : '<div class="empty">No Kalshi picks yet — auto-tracks when FD/DK/Fliff/Props Builder arbs against Kalshi\'s own opposite-side quote (min $300 liq).</div>';
   const kalshiSection = sectionLabel('info', 'Kalshi Sharp Picks', kalshiBets.length) + kalshiBreakdowns + kalshiCardsHtml;
 
   const recapBtn = `<div style="margin:0 16px 12px">
