@@ -5350,7 +5350,6 @@ async function exportModelCardImage() {
   const CARD_BORDER   = '#00d68f';   // Coinbase-style green frame
   const ROW_DIVIDER   = 'rgba(0,0,0,0)';  // removed — no dividers between rows
   const TEXT          = '#0f172a';   // slate-900, near-black for readability on white
-  const LABEL         = '#0f172a';
   const RANK          = '#0f172a';
   const MUTED         = '#64748b';   // slate-500 — subtitle, dimmed text (visible on white)
   const GREEN         = '#00d68f';   // unified green (#00d68f) — matches frame, pill, chip, fair odds
@@ -5371,7 +5370,6 @@ async function exportModelCardImage() {
   const FONT_KEY      = `500 11px ${FONT_STACK}`;
   const FONT_VAL      = `700 11px ${FONT_STACK}`;
   const FONT_CHIP_N   = `700 15px ${FONT_STACK}`;
-  const FONT_CHIP_L   = `700 10px ${FONT_STACK}`;
 
   // Layout
   const cardRadius     = 12;
@@ -5413,22 +5411,8 @@ async function exportModelCardImage() {
     if (line) lines.push(line);
     return lines.length ? lines : [text];
   }
-  // Same idea as wrapText, but wraps whole "Book Price" pairs instead of
-  // individual words -- a plain word-wrap would happily split "DK" from
-  // "-150" onto separate lines, which reads as broken, not clean.
-  function wrapPairs(pairs, maxW, font, sep = '  ·  ') {
-    mctx.font = font;
-    const lines = []; let line = '';
-    for (const p of pairs) {
-      const test = line ? line + sep + p : p;
-      if (!line || mctx.measureText(test).width <= maxW) line = test;
-      else { lines.push(line); line = p; }
-    }
-    if (line) lines.push(line);
-    return lines;
-  }
 
-  // Layout per row: pill + fighters (wrap) + 3 data lines
+  // Layout per row: pill + fighters (wrap) + book board
   const rowLayouts = rendered.map((f, i) => {
     const pickName = f.predictedWinner;
     const oppName = f.predictedWinner === f.fighter1 ? f.fighter2 : f.fighter1;
@@ -5452,28 +5436,22 @@ async function exportModelCardImage() {
         fLines = wrapText(fighterLine, bodyContentW, FONT_FIGHT);
       }
     }
-    const modelPct  = fmtPct(f.predictedWinner === f.fighter1 ? f.f1Prob : f.f2Prob, 1);
-    const fairAm    = fmtAm(f.predictedWinner === f.fighter1 ? f.f1Fair : f.f2Fair);
     const pickMl    = f.predictedWinner === f.fighter1 ? f.f1Ml : f.f2Ml;
-    const marketAm  = fmtAm(pickMl);
-    const marketImp = americanToImplied(pickMl);
-    const marketPct = marketImp != null ? fmtPct(marketImp, 1) : '—';
     const pickBook  = f.predictedWinner === f.fighter1 ? f.f1Book : f.f2Book;
-    // Full book board for the pick side, pulled from the same lastAutoFetch
-    // snapshot the live Model table's board line reads (ooBoardForBet /
-    // allBooks). Pick's own best book is already named on the Market line
-    // above, so it's left out here to avoid showing the same price twice.
+    // Full live book board for the pick side (pick's own best book included),
+    // pulled from the same lastAutoFetch snapshot the live Model table's
+    // board line reads (ooBoardForBet / allBooks) -- this is now the whole
+    // row's price content, logos only, no Model%/Market% text.
     const pickMlKey = findMatchKey(card.ml || {}, pickName);
     const pickMlEntry = pickMlKey ? card.ml[pickMlKey] : null;
-    const boardBooks = (pickMlEntry?.lastAutoFetch?.allBooks || [])
-      .filter(b => _ooBookKey(b.book) !== _ooBookKey(pickBook))
-      .sort((a, b) => b.odds - a.odds);
-    const bookPairs = boardBooks.map(b => `${ooShort(b.book)} ${fmtAm(b.odds)}`);
-    const bookLines = bookPairs.length ? wrapPairs(bookPairs, bodyContentW, FONT_KEY) : [];
+    const books = (pickMlEntry?.lastAutoFetch?.allBooks || []).slice().sort((a, b) => b.odds - a.odds);
+    // A book with no live board yet (e.g. odds never fetched) still needs
+    // its one known price shown, or the row would have no prices at all.
+    if (!books.length && pickMl != null) books.push({ book: pickBook, odds: pickMl });
     return {
       fight: f, rank: i + 1,
       fighterLines: fLines,
-      modelPct, fairAm, marketAm, marketPct, pickBook, pickName, oppName, bookLines,
+      pickBook, pickName, oppName, books,
     };
   });
 
@@ -5541,11 +5519,12 @@ async function exportModelCardImage() {
     }));
   }
 
-  // Preload the pick's sportsbook logo too — same OO_BOOK_LOGO data-URI map the
-  // Consensus grid uses (ooBookLogo/ooBookLogoUri), keyed the same normalized way
-  // (lowercase, alnum only) so "FanDuel", "Prophet X", "BetOnline.ag" all resolve.
-  // These are already embedded base64, so loading is instant — no network round trip,
-  // no timeout needed like the headshot/flag fetches above.
+  // Preload every book's logo shown anywhere in the board (not just the pick's
+  // best book) — same OO_BOOK_LOGO data-URI map the Consensus grid uses
+  // (ooBookLogo/ooBookLogoUri), keyed the same normalized way (lowercase,
+  // alnum only) so "FanDuel", "Prophet X", "BetOnline.ag" all resolve.
+  // These are already embedded base64, so loading is instant — no network
+  // round trip, no timeout needed like the headshot/flag fetches above.
   const bookLogoMap = {}; // normalized book key → HTMLImageElement or null
   {
     // Data URIs never hit the network, so no timeout needed — but keep the same
@@ -5557,12 +5536,39 @@ async function exportModelCardImage() {
       img.onerror = () => resolve(null);
       img.src = url;
     });
-    const uniqueBooks = [...new Set(rowLayouts.map(rl => rl.pickBook).filter(Boolean))];
+    const uniqueBooks = [...new Set(rowLayouts.flatMap(rl => rl.books.map(b => b.book)).filter(Boolean))];
     await Promise.all(uniqueBooks.map(async book => {
       const key = _ooBookKey(book);
       bookLogoMap[key] = await loadDataUri(ooBookLogoUri(book));
     }));
   }
+
+  // Lay out each row's book board into wrapped lines of {logo-or-name, price}
+  // items, now that logos are loaded. BOOK_GAP separates consecutive items on
+  // a line; ICON_GAP separates a logo from its own price.
+  const BOOK_GAP = 14, ICON_GAP = 5, ICON_SIZE = 14, BOOK_ROW_H = 17;
+  rowLayouts.forEach(rl => {
+    const items = rl.books.map(b => {
+      const logo = bookLogoMap[_ooBookKey(b.book)] || null;
+      const priceText = fmtAm(b.odds);
+      mctx.font = FONT_VAL;
+      const priceW = mctx.measureText(priceText).width;
+      const nameText = logo ? '' : ooShort(b.book) + ' ';
+      mctx.font = FONT_KEY;
+      const nameW = nameText ? mctx.measureText(nameText).width : 0;
+      const w = (logo ? ICON_SIZE + ICON_GAP : nameW) + priceW;
+      return { logo, nameText, priceText, w };
+    });
+    const lines = []; let line = []; let lineW = 0;
+    items.forEach(it => {
+      const addW = it.w + (line.length ? BOOK_GAP : 0);
+      if (line.length && lineW + addW > bodyContentW) { lines.push(line); line = []; lineW = 0; }
+      line.push(it);
+      lineW += it.w + (line.length > 1 ? BOOK_GAP : 0);
+    });
+    if (line.length) lines.push(line);
+    rl.bookRows = lines;
+  });
 
   // Backfill hasMeta on each row — true if EITHER pick or opp has record/country
   // data. Row height reserves 14px for the trailing line when hasMeta, so chip
@@ -5573,9 +5579,9 @@ async function exportModelCardImage() {
     rl.hasMeta = !!(pMeta.record || pMeta.country || oMeta.record || oMeta.country);
   });
 
-  // Row height budget: fighter lines + Model/Fair + Market (+ optional book
-  // board lines + optional record/country line, only when present).
-  const rowH = (r) => 8 + r.fighterLines.length * 18 + 6 + 16 * 2 + (r.bookLines.length * 13) + (r.hasMeta ? 14 : 0) + 10;
+  // Row height budget: fighter lines + book board lines (+ optional
+  // record/country line, only when present).
+  const rowH = (r) => 8 + r.fighterLines.length * 18 + 6 + (r.bookRows.length * BOOK_ROW_H) + (r.hasMeta ? 14 : 0) + 10;
 
   // Compact list layout — each row uses dynamic height based on its content
   // (fighter matchup wraps + optional trailing meta line). 8px gap between rows.
@@ -5711,16 +5717,16 @@ async function exportModelCardImage() {
   // matchupH so canvas layout math is predictable.
   let ry = cardY + cardPadY + headerH + 10;
   // Compact list layout — one row per fight. Photo + rank + fighter matchup
-  // with green pick pill + Model/Market inline + trailing muted meta line
+  // with green pick pill + a logo'd book board + trailing muted meta line
   // (record vs record + weight class). Chip on right, vertically centered.
   rowLayouts.forEach((rl, idx) => {
-    const { fight: f, rank, fighterLines, modelPct, fairAm, marketAm, marketPct, pickBook, pickName, oppName, bookLines } = rl;
+    const { fight: f, rank, fighterLines, pickBook, pickName, oppName, bookRows } = rl;
     const rowX = cardX + cardPadX;
     const height = rowH(rl);
 
     // Body geometry — chip centers on visible content
     const bodyTop = ry + 8;
-    const bodyH = fighterLines.length * 18 + 6 + 16 * 2 + (bookLines.length * 13) + (rl.hasMeta ? 14 : 0);
+    const bodyH = fighterLines.length * 18 + 6 + (bookRows.length * BOOK_ROW_H) + (rl.hasMeta ? 14 : 0);
     const bodyMidY = bodyTop + bodyH / 2;
 
     // Avatar (pick's headshot) on left, cover-fit into a circle with flag corner
@@ -5839,50 +5845,27 @@ async function exportModelCardImage() {
     });
     fy += 4;
 
-    // Data lines: Model, Market
-    const drawKV = (key, val, valColor, y) => {
-      ctx.font = FONT_KEY;
-      ctx.fillStyle = LABEL;
-      ctx.textAlign = 'left';
-      ctx.textBaseline = 'top';
-      ctx.fillText(key, midX, y);
-      const kw = measureText(key, FONT_KEY);
-      ctx.font = FONT_VAL;
-      ctx.fillStyle = valColor;
-      ctx.fillText(val, midX + kw + 4, y);
-    };
-    drawKV('Model', `${modelPct} (${fairAm})`, TEXT, fy);
-    fy += 16;
-    // Market line: draw the sportsbook's logo (same embedded OO_BOOK_LOGO set the
-    // Consensus grid uses) instead of typing the book name out, same as the
-    // NFL/WNBA picture cards. Falls back to "@ BookName" text if that book has no
-    // logo in the map.
-    const marketVal = `${marketPct} (${marketAm})`;
-    drawKV('Market', marketVal, TEXT, fy);
-    if (pickBook) {
-      const usedW = measureText('Market', FONT_KEY) + 4 + measureText(marketVal, FONT_VAL);
-      const logoImg = bookLogoMap[_ooBookKey(pickBook)];
-      const logoX = midX + usedW + 8;
-      if (logoImg) {
-        const logoSize = 14;
-        ctx.drawImage(logoImg, logoX, fy + 1, logoSize, logoSize);
-      } else {
+    // Book board: each book drawn as its logo (or a short-name fallback when
+    // no logo is known) next to its price, wrapped into bookRows ahead of
+    // time once logos were loaded. No Model%/Market% text — the logos +
+    // prices are the whole story here.
+    bookRows.forEach(line => {
+      let cx = midX;
+      line.forEach(it => {
+        if (it.logo) {
+          ctx.drawImage(it.logo, cx, fy + 1, ICON_SIZE, ICON_SIZE);
+          cx += ICON_SIZE + ICON_GAP;
+        } else if (it.nameText) {
+          ctx.font = FONT_KEY; ctx.fillStyle = MUTED; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+          ctx.fillText(it.nameText, cx, fy + 2);
+          cx += measureText(it.nameText, FONT_KEY);
+        }
         ctx.font = FONT_VAL; ctx.fillStyle = TEXT; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
-        ctx.fillText('@ ' + pickBook, logoX, fy);
-      }
-    }
-    fy += 16;
-
-    // Rest of the live book board for this pick, cleanly as "Book Price"
-    // pairs so the export shows the same price spread the live app does,
-    // not just the single best price already named on the Market line.
-    if (bookLines.length) {
-      ctx.font = FONT_KEY;
-      ctx.fillStyle = MUTED;
-      ctx.textAlign = 'left';
-      ctx.textBaseline = 'top';
-      bookLines.forEach(line => { ctx.fillText(line, midX, fy); fy += 13; });
-    }
+        ctx.fillText(it.priceText, cx, fy + 1);
+        cx += measureText(it.priceText, FONT_VAL) + BOOK_GAP;
+      });
+      fy += BOOK_ROW_H;
+    });
 
     // Trailing meta line: <pick record country> vs <opp record country> (weight class)
     const pMeta = metaMap[pickName] || {};
@@ -5944,9 +5927,7 @@ async function exportModelCardImage() {
     ctx.font = FONT_CHIP_N;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText((f.edge >= 0 ? '+' : '') + f.edge.toFixed(1), chipX + chipW / 2, chipY + 15);
-    ctx.font = FONT_CHIP_L;
-    ctx.fillText('PP', chipX + chipW / 2, chipY + 32);
+    ctx.fillText((f.edge >= 0 ? '+' : '') + f.edge.toFixed(1), chipX + chipW / 2, chipY + chipH / 2);
 
     ry += height + 8;  // 8px gap to next row (no visible divider)
   });
