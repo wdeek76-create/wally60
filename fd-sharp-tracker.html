@@ -122,6 +122,19 @@ header{padding:16px 16px 10px}
 .bookrow .bkmeta{font-size:10px;font-weight:800;color:var(--sub);margin-left:8px;flex-shrink:0;white-space:nowrap}
 .bookrow.best{border-color:rgba(94,194,255,.5);box-shadow:0 0 14px rgba(94,194,255,.22)}
 .bookrow.best .bkname{color:var(--text)}
+a.bookrow{text-decoration:none;cursor:pointer}
+a.bookrow:active{opacity:.75}
+/* ── LIVE SITUATIONAL ALERTS ── */
+/* Border-glow pulse, not an opacity flash — keeps the card's text fully readable while it's
+   flagged, unlike the dot/tag blink used elsewhere in this app for small chrome elements. */
+@keyframes pulseGlowAmber{0%,100%{box-shadow:inset 0 1px 0 rgba(255,255,255,.10),0 0 0 rgba(245,166,35,0)}50%{box-shadow:inset 0 1px 0 rgba(255,255,255,.10),0 0 22px rgba(245,166,35,.6)}}
+@keyframes pulseGlowGreen{0%,100%{box-shadow:inset 0 1px 0 rgba(255,255,255,.10),0 0 0 rgba(39,192,113,0)}50%{box-shadow:inset 0 1px 0 rgba(255,255,255,.10),0 0 22px rgba(39,192,113,.6)}}
+.row.hotsitu{border-color:rgba(245,166,35,.6);animation:pulseGlowAmber 1.1s ease-in-out infinite}
+.row.profithot{animation:pulseGlowGreen 1.3s ease-in-out infinite}
+.alertrow{display:flex;gap:6px;margin:-2px 0 8px;flex-wrap:wrap}
+.alertbadge{font-size:9px;font-weight:900;letter-spacing:.4px;padding:3px 8px;border-radius:20px;animation:blink 1s infinite}
+.alertbadge.hot{background:rgba(245,166,35,.18);border:1px solid rgba(245,166,35,.6);color:var(--amber)}
+.alertbadge.profit{background:rgba(39,192,113,.16);border:1px solid rgba(39,192,113,.55);color:var(--green)}
 .footstrip{display:flex;gap:6px;margin-top:10px}
 .fs-stat{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;background:rgba(255,255,255,.05);border:1px solid rgba(94,194,255,.35);border-radius:13px;padding:7px 4px;font-size:13px;font-weight:900;color:var(--accent);font-variant-numeric:tabular-nums}
 .fs-stat span{font-size:8px;font-weight:800;letter-spacing:.4px;text-transform:uppercase;color:var(--sub);margin-top:1px}
@@ -250,6 +263,10 @@ function liqOf(o) {
   return d ? d.total : null;
 }
 const chunk = (arr, n) => { const out = []; for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n)); return out; };
+const IS_ANDROID = /Android/.test(navigator.userAgent);
+// Same convention as live-now-opticodds.html: OpticOdds odds rows carry a deep_link object
+// keyed by platform — pick whichever this device can actually open, falling back to desktop.
+const deepLink = o => { const d = o?.deep_link; if (!d || typeof d !== 'object') return null; return (IS_ANDROID && d.android) || d.ios || d.desktop || d.android || null; };
 const normName = n => String(n||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/['’.`]/g,'').replace(/[^a-z ]/g,' ').replace(/\s+/g,' ').trim();
 const cleanSel = n => String(n||'').replace(/\s*\([^)]*\)\s*$/,'').trim();
 const has = (m, s) => m.includes(s);
@@ -286,6 +303,12 @@ async function loadBookLogos() {
 }
 const logoOf = n => { const k = String(n || '').toLowerCase(); return LOGO_OVERRIDES[k] || bookLogos[k] || ''; };
 const bookName = n => `${logoOf(n) ? `<img class="bklogo" src="${esc(logoOf(n))}" alt="">` : ''}${esc(n)}`;
+// A bet link turns a book row into the actual next step (tap it, land on that book's slip) instead
+// of just information — falls back to a plain (non-clickable) div when no deep link came through.
+const linkTag = (link, cls, inner) => link ? `<a class="${cls}" href="${esc(link)}" target="_blank" rel="noopener">${inner}</a>` : `<div class="${cls}">${inner}</div>`;
+// Tracker cards only need the link while the bet is still live to place — a settled pick has
+// nothing left to click through to.
+const betLinkHtml = e => (e.status === 'pending' && e.fdLink) ? ` · <a href="${esc(e.fdLink)}" target="_blank" rel="noopener" style="color:var(--accent);font-weight:800;text-decoration:none">↗ Bet</a>` : '';
 const teamLogo = url => url ? `<img class="tmlogo" src="${esc(url)}" alt="">` : '';
 // Falls back to the plain game string for picks tracked before logos were captured.
 const gameHeaderHtml = e => (e.awayAb && e.homeAb)
@@ -383,7 +406,7 @@ function stateOf(f) {
   const period = Number(ip.period || ip.quarter || 0) || 0;
   const clock = String(ip.clock || ip.time || '').trim();
   const pLabel = period ? 'Q' + period : '';
-  return { away, home, label: [pLabel, clock].filter(Boolean).join(' ') };
+  return { away, home, period, clock, label: [pLabel, clock].filter(Boolean).join(' ') };
 }
 // The quarter a fixture is in RIGHT NOW — captured at auto-track time and frozen onto the pick,
 // so "was FD softer in the 4th quarter" can be measured later regardless of how the game state
@@ -399,6 +422,16 @@ function periodLabel(period) {
   if (period === 3) return '3rd Quarter';
   if (period === 4) return '4th Quarter';
   return 'OT';
+}
+// "One away with real time left" — the live stat sits exactly half a point short of the line
+// (e.g. 5 receptions on a 5.5 line) while at least a full quarter remains to get there. Over-only:
+// there's no equivalent "about to clear" signal for Under or Anytime TD ('yes').
+function isHotSitu(fid, mkey, player, line, side) {
+  if (side !== 'over' || line == null) return false;
+  const period = periodOf(fid);
+  if (period == null || period < 2 || period > 3) return false;
+  const actual = liveActuals[`${fid}|${mkey}|${normName(player)}`];
+  return actual != null && (Number(line) - Number(actual)) === 0.5;
 }
 function halfLabel(period) {
   if (period == null) return 'Unknown';
@@ -535,7 +568,7 @@ function computeRows(fxs, byFx) {
         CONSENSUS_BOOKS.forEach(bk => {
           const opp = oppBooks[bk]; if (!opp) return;
           const arbPct = 1 - (imp(fd.price) + imp(opp.price));
-          if (arbPct > 0 && arbPct <= MAX_PLAUSIBLE_EDGE) arbBooks.push({ book: bk, oppPrice: Number(opp.price), arbPct });
+          if (arbPct > 0 && arbPct <= MAX_PLAUSIBLE_EDGE) arbBooks.push({ book: bk, oppPrice: Number(opp.price), arbPct, link: deepLink(opp) });
         });
         arbBooks.sort((a, b) => b.arbPct - a.arbPct);
 
@@ -548,7 +581,7 @@ function computeRows(fxs, byFx) {
           const thisSide = books[bk], otherSide = oppBooks[bk];
           if (!thisSide || !otherSide) return;
           const impThis = imp(thisSide.price), impOther = imp(otherSide.price);
-          valueBooks.push({ book: bk, price: Number(thisSide.price), fairProb: impThis / (impThis + impOther) });
+          valueBooks.push({ book: bk, price: Number(thisSide.price), fairProb: impThis / (impThis + impOther), link: deepLink(thisSide) });
         });
         let fairProb = null, evPct = null;
         if (valueBooks.length >= MIN_ARB_BOOKS) {
@@ -578,7 +611,7 @@ function computeRows(fxs, byFx) {
       const key = `${bucketKey}|${chosen.side}`;
       out.push({
         key, fid: f.id, f, mkey: P.mkey, marketNames: [P.marketName], player: P.player, line: P.line, side: chosen.side,
-        fdPrice: Number(chosen.fd.price), arbBooks: chosen.arbBooks, arbCount: chosen.arbBooks.length, bestArb: chosen.bestArb,
+        fdPrice: Number(chosen.fd.price), fdLink: deepLink(chosen.fd), arbBooks: chosen.arbBooks, arbCount: chosen.arbBooks.length, bestArb: chosen.bestArb,
         valueBooks: chosen.valueBooks, fairProb: chosen.fairProb, evPct: chosen.evPct, qualKind: chosen.qualKind,
       });
     });
@@ -622,10 +655,10 @@ function computeAltRows(fxs, byFx) {
       const fairProb = Math.min(...CONSENSUS_BOOKS.map(bk => imp(G.books[bk].price)));
       const evPct = fairProb * toDec(fd.price) - 1; // FD's payout vs the devigged-fair win probability
       if (evPct <= 0 || evPct > MAX_PLAUSIBLE_EDGE) return; // real value, not a stale/misfired FD quote
-      const vsConsensus = CONSENSUS_BOOKS.map(bk => ({ book: bk, price: Number(G.books[bk].price), centsDiff: centsDiff(fd.price, G.books[bk].price) }));
+      const vsConsensus = CONSENSUS_BOOKS.map(bk => ({ book: bk, price: Number(G.books[bk].price), centsDiff: centsDiff(fd.price, G.books[bk].price), link: deepLink(G.books[bk]) }));
       out.push({
         key: `${key}|alt`, fid: f.id, f, mkey: G.mkey, marketNames: [G.marketName], player: G.player, line: G.line,
-        fdPrice: Number(fd.price), aligned: vsConsensus, fairProb, evPct,
+        fdPrice: Number(fd.price), fdLink: deepLink(fd), aligned: vsConsensus, fairProb, evPct,
       });
     });
   });
@@ -683,7 +716,7 @@ function computeKalshiRows(fxs, byFx) {
           const evPct = fairProb * toDec(pr) - 1;
           out.push({
             key: `${bucketKey}|${side}|kalshi|${bk}`, fid: f.id, f, mkey: P.mkey, marketNames: [P.marketName],
-            player: P.player, line: P.line, side, book: bk, price: pr,
+            player: P.player, line: P.line, side, book: bk, price: pr, link: deepLink(bo),
             kalshiPrice: Number(kalshiOpp.price), kalshiLiq: liq, mirrorPrice, fairProb, evPct, arbPct,
           });
         });
@@ -739,8 +772,9 @@ function autoTrack(rows) {
       key: r.key, fid: r.fid, game: `${r.f.away.ab} @ ${r.f.home.ab}`, awayAb: r.f.away.ab, homeAb: r.f.home.ab,
       awayLogo: r.f.away.logo || '', homeLogo: r.f.home.logo || '',
       market: marketLabel(r.mkey), mkey: r.mkey, marketNames: r.marketNames, player: r.player, playerKey: normName(r.player),
-      side: r.side, line: r.line, fdPrice: r.fdPrice, arbBooks: r.arbBooks, arbCount: r.arbCount, bestArb: r.bestArb,
+      side: r.side, line: r.line, fdPrice: r.fdPrice, fdLink: r.fdLink, arbBooks: r.arbBooks, arbCount: r.arbCount, bestArb: r.bestArb,
       valueBooks: r.valueBooks, fairProb: r.fairProb, evPct: r.evPct, qualKind: r.qualKind, betPeriod: periodOf(r.fid),
+      wasHot: isHotSitu(r.fid, r.mkey, r.player, r.line, r.side),
       favDog: isFav ? 'favorite' : 'underdog', stakeUnits: 1, betAt: Date.now(), status: 'pending',
     };
     changed = true;
@@ -759,7 +793,8 @@ function autoTrackAlt(altRows) {
       key: r.key, fid: r.fid, game: `${r.f.away.ab} @ ${r.f.home.ab}`, awayAb: r.f.away.ab, homeAb: r.f.home.ab,
       awayLogo: r.f.away.logo || '', homeLogo: r.f.home.logo || '',
       market: marketLabel(r.mkey), mkey: r.mkey, marketNames: r.marketNames, player: r.player, playerKey: normName(r.player),
-      side: 'over', line: r.line, fdPrice: r.fdPrice, aligned: r.aligned, fairProb: r.fairProb, evPct: r.evPct, betPeriod: periodOf(r.fid),
+      side: 'over', line: r.line, fdPrice: r.fdPrice, fdLink: r.fdLink, aligned: r.aligned, fairProb: r.fairProb, evPct: r.evPct, betPeriod: periodOf(r.fid),
+      wasHot: isHotSitu(r.fid, r.mkey, r.player, r.line, 'over'),
       stakeUnits: 1, betAt: Date.now(), status: 'pending',
     };
     changed = true;
@@ -784,9 +819,10 @@ function autoTrackKalshi(kalshiRows) {
       key: r.key, fid: r.fid, game: `${r.f.away.ab} @ ${r.f.home.ab}`, awayAb: r.f.away.ab, homeAb: r.f.home.ab,
       awayLogo: r.f.away.logo || '', homeLogo: r.f.home.logo || '',
       market: marketLabel(r.mkey), mkey: r.mkey, marketNames: r.marketNames, player: r.player, playerKey: normName(r.player),
-      side: r.side, line: r.line, book: r.book, fdPrice: r.price, kalshiPrice: r.kalshiPrice, kalshiLiq: r.kalshiLiq,
+      side: r.side, line: r.line, book: r.book, fdPrice: r.price, fdLink: r.link, kalshiPrice: r.kalshiPrice, kalshiLiq: r.kalshiLiq,
       mirrorPrice: r.mirrorPrice, fairProb: r.fairProb, evPct: r.evPct, arbPct: r.arbPct,
-      betPeriod: periodOf(r.fid), stakeUnits: 1, betAt: Date.now(), status: 'pending',
+      betPeriod: periodOf(r.fid), wasHot: isHotSitu(r.fid, r.mkey, r.player, r.line, r.side),
+      stakeUnits: 1, betAt: Date.now(), status: 'pending',
     };
     changed = true;
   });
@@ -888,6 +924,10 @@ function kalshiLiqBucket(liq) {
   if (liq < 5000) return '$2.5k-4.9k';
   return '$5k+';
 }
+// Record specifically for the "1 away, 1-2Q left" live alert (wasHot, frozen at bet time) — the
+// only new trigger introduced alongside bet links; the "profitable" blink reuses arb/EV concepts
+// that already have their own breakdowns (By Arb %, By EV %, Direct Arb vs Value, etc.) above.
+const hotLabel = e => e.wasHot ? 'Hot (1 away, 1-2Q left)' : 'Normal';
 function groupRecords(bets, keyFn) {
   const groups = {};
   bets.forEach(e => {
@@ -1016,6 +1056,7 @@ function buildRecapText(includeLadders) {
   pushBreakdown('FD vs Each Book + O/U (backtest)', groupByBookSide(mainGraded, CONSENSUS_BOOKS));
   pushBreakdown('By Quarter (bet timing)', groupRecords(all, e => periodLabel(e.betPeriod)));
   pushBreakdown('By Half (bet timing)', groupRecords(all, e => halfLabel(e.betPeriod)));
+  pushBreakdown('Hot Situation (1 away, 1-2Q left)', groupRecords(all, hotLabel));
 
   if (includeLadders) {
     lines.push('LADDERS (same player, same stat, multiple lines)');
@@ -1192,12 +1233,16 @@ function render() {
     // actually qualified anything — don't badge/detail it as "arb" just because the number exists.
     const hasArbInfo = r.arbCount >= MIN_ARB_BOOKS, hasValueInfo = r.evPct != null;
     const strong = hasArbInfo && r.arbCount >= 3;
-    const fdRow = `<div class="bookrow best"><span class="bkname">${bookName('FanDuel')}</span><span class="bkprice">${fmtAm(r.fdPrice)}</span><span class="bkmeta">TARGET · ${esc(sideLabel)}</span></div>`;
+    // "Profitable spot based on our tracker" — the strongest tiers our own rules already
+    // recognize: a clean 3/3 arb, or a pick that clears BOTH the arb and value bars at once.
+    const profitHot = strong || (hasArbInfo && hasValueInfo);
+    const hot = isHotSitu(r.fid, r.mkey, r.player, r.line, r.side);
+    const fdRow = linkTag(r.fdLink, 'bookrow best', `<span class="bkname">${bookName('FanDuel')}</span><span class="bkprice">${fmtAm(r.fdPrice)}</span><span class="bkmeta">TARGET · ${esc(sideLabel)}</span>`);
     // Arb evidence (the opposite side's price) is the more concrete detail to list per book —
     // fall back to the devigged-fair listing only when there's no arb backing it at all.
     const detailRows = hasArbInfo
-      ? r.arbBooks.map(b => `<div class="bookrow"><span class="bkname">${bookName(b.book)}</span><span class="bkprice">${fmtAm(b.oppPrice)}</span><span class="bkmeta">${esc(oppSideLabel)} · ${(b.arbPct*100).toFixed(2)}% arb</span></div>`).join('')
-      : r.valueBooks.map(b => `<div class="bookrow"><span class="bkname">${bookName(b.book)}</span><span class="bkprice">${fmtAm(b.price)}</span><span class="bkmeta">${esc(sideLabel)} · devigged fair ${fmtAm(probToAm(b.fairProb))}</span></div>`).join('');
+      ? r.arbBooks.map(b => linkTag(b.link, 'bookrow', `<span class="bkname">${bookName(b.book)}</span><span class="bkprice">${fmtAm(b.oppPrice)}</span><span class="bkmeta">${esc(oppSideLabel)} · ${(b.arbPct*100).toFixed(2)}% arb</span>`)).join('')
+      : r.valueBooks.map(b => linkTag(b.link, 'bookrow', `<span class="bkname">${bookName(b.book)}</span><span class="bkprice">${fmtAm(b.price)}</span><span class="bkmeta">${esc(sideLabel)} · devigged fair ${fmtAm(probToAm(b.fairProb))}</span>`)).join('');
     // Show both stats whenever both are known — a pick that's a real arb AND separately +EV is
     // strictly a stronger signal than either alone, so say so instead of picking just one label.
     let badge;
@@ -1209,11 +1254,17 @@ function render() {
     const sigText = `✓ auto-tracked · ${[arbPart, valuePart].filter(Boolean).join(' · ')}`;
     const liveActual = liveActuals[`${r.fid}|${r.mkey}|${normName(r.player)}`];
     const sideLabelNow = liveActual != null ? `${sideLabel} (${liveActual})` : sideLabel;
-    return `<div class="row glass${strong ? ' strong' : ''}" data-key="${esc(r.key)}">
+    const alertBadges = [
+      hot ? `<span class="alertbadge hot">🔥 1 AWAY · ${st.period ? `Q${st.period}` : 'LIVE'}</span>` : '',
+      profitHot ? `<span class="alertbadge profit">⚡ PROFITABLE</span>` : '',
+    ].join('');
+    const alertRow = alertBadges ? `<div class="alertrow">${alertBadges}</div>` : '';
+    return `<div class="row glass${strong ? ' strong' : ''}${hot ? ' hotsitu' : ''}${profitHot ? ' profithot' : ''}" data-key="${esc(r.key)}">
       <div class="cardhead">
         <div class="chleft"><span class="lg">NFL</span><span class="st live">LIVE</span></div>
         <div class="chleft"><span class="autobadge${strong ? ' strong' : ''}">${esc(badge)}</span></div>
       </div>
+      ${alertRow}
       <div class="gm">${teamLogo(r.f.away.logo)}${esc(r.f.away.ab)} <span>${isNaN(st.away)?'':st.away}</span> @ ${teamLogo(r.f.home.logo)}${esc(r.f.home.ab)} <span>${isNaN(st.home)?'':st.home}</span>${st.label ? `<span class="qtr">${esc(st.label)}</span>` : ''}</div>
       <div class="pick"><div class="m">${esc(marketLabel(r.mkey))}</div><div class="s">${esc(r.player)} — ${esc(sideLabelNow)}</div><div class="rawmkt">source: "${esc(r.marketNames[0])}"</div></div>
       <div class="booklist">${fdRow}${detailRows}</div>
@@ -1267,7 +1318,7 @@ function renderTracker() {
     return `<div class="tk glass"><div class="h"><span>${gameHeaderHtml(e)} <span style="color:var(--sub);font-size:10px">NFL</span></span><span>${t(e.betAt)}</span></div>
     <div style="font-weight:800;font-size:14px;margin-top:3px">${esc(e.market)} · ${esc(e.player)} ${esc(sideLabelNow)} <span class="kindtag ${kind}">${esc(kindLabel)}</span></div>
     <div class="rawmkt">source: "${esc((e.marketNames||[])[0] || '')}"</div>
-    <div class="m">FD <b>${fmtAm(e.fdPrice)}</b> · ${edgeLine} · ${esc(e.favDog)} · 1u</div>
+    <div class="m">FD <b>${fmtAm(e.fdPrice)}</b> · ${edgeLine} · ${esc(e.favDog)} · 1u${betLinkHtml(e)}</div>
     ${prog}
     ${moveRow}
     ${resultLine}
@@ -1288,6 +1339,7 @@ function renderTracker() {
     ${breakdownHtml('FD vs Each Book + O/U (backtest)', groupByBookSide(bets, CONSENSUS_BOOKS))}
     ${breakdownHtml('By Quarter (bet timing)', groupRecords(bets, e => periodLabel(e.betPeriod)))}
     ${breakdownHtml('By Half (bet timing)', groupRecords(bets, e => halfLabel(e.betPeriod)))}
+    ${breakdownHtml('Hot Situation (1 away, 1-2Q left)', groupRecords(bets, hotLabel))}
   </div>` : '';
   const cardsHtml = bets.length ? '<div class="cards-grid">' + bets.map(card).join('') + '</div>' : '<div class="empty">Nothing tracked yet — auto-tracks the moment an FD prop aligns with consensus.</div>';
 
@@ -1310,7 +1362,7 @@ function renderTracker() {
     return `<div class="tk glass"><div class="h"><span>${gameHeaderHtml(e)} <span style="color:var(--sub);font-size:10px">NFL ALT</span></span><span>${t(e.betAt)}</span></div>
     <div style="font-weight:800;font-size:14px;margin-top:3px">${esc(e.player)} — ${esc(thresholdLabel)} <span class="kindtag value">VALUE ONLY</span></div>
     <div class="rawmkt">source: "${esc((e.marketNames||[])[0] || '')}"</div>
-    <div class="m">FD <b>${fmtAm(e.fdPrice)}</b> · <b style="color:var(--green)">+${evStr} EV</b> vs devigged fair (${fairStr}) · 3/3 tight: ${(e.aligned||[]).map(a=>a.book).sort().map(bookName).join(' + ') || '—'} · 1u</div>
+    <div class="m">FD <b>${fmtAm(e.fdPrice)}</b> · <b style="color:var(--green)">+${evStr} EV</b> vs devigged fair (${fairStr}) · 3/3 tight: ${(e.aligned||[]).map(a=>a.book).sort().map(bookName).join(' + ') || '—'} · 1u${betLinkHtml(e)}</div>
     ${moveRow}
     ${resultLine}
     <div class="acts" style="margin-top:8px">${resultBtns}<button data-adel="${esc(e.key)}">✕</button></div></div>`;
@@ -1321,6 +1373,7 @@ function renderTracker() {
     ${breakdownHtml('Alt: By EV %', groupRecords(altBets, e => arbBucket(e.evPct)))}
     ${breakdownHtml('Alt: By Quarter (bet timing)', groupRecords(altBets, e => periodLabel(e.betPeriod)))}
     ${breakdownHtml('Alt: By Half (bet timing)', groupRecords(altBets, e => halfLabel(e.betPeriod)))}
+    ${breakdownHtml('Alt: Hot Situation (1 away, 1-2Q left)', groupRecords(altBets, hotLabel))}
   </div>` : '';
   const altCardsHtml = altBets.length ? '<div class="cards-grid">' + altBets.map(altCard).join('') + '</div>' : '<div class="empty">No alt-line picks yet — auto-tracks when FD is +EV against the devigged fair price from all 3 books.</div>';
   const altSection = sectionLabel('info', 'Alt Line Picks', altBets.length) + altBreakdowns + altCardsHtml;
@@ -1346,7 +1399,7 @@ function renderTracker() {
     return `<div class="tk glass"><div class="h"><span>${gameHeaderHtml(e)} <span style="color:var(--sub);font-size:10px">NFL KALSHI</span></span><span>${t(e.betAt)}</span></div>
     <div style="font-weight:800;font-size:14px;margin-top:3px">${esc(e.market)} · ${esc(e.player)} ${esc(sideLabelNow)} <span class="kindtag arb">DIRECT ARB</span></div>
     <div class="rawmkt">source: "${esc((e.marketNames||[])[0] || '')}"</div>
-    <div class="m">${bookName(e.book)} <b>${fmtAm(e.fdPrice)}</b> · ${edgeLine} · Kalshi opp side ${fmtAm(e.kalshiPrice)} (${usd(e.kalshiLiq)} liq) · 1u</div>
+    <div class="m">${bookName(e.book)} <b>${fmtAm(e.fdPrice)}</b> · ${edgeLine} · Kalshi opp side ${fmtAm(e.kalshiPrice)} (${usd(e.kalshiLiq)} liq) · 1u${betLinkHtml(e)}</div>
     ${resultLine}
     <div class="acts" style="margin-top:8px">${resultBtns}<button data-kdel="${esc(e.key)}">✕</button></div></div>`;
   };
@@ -1360,6 +1413,7 @@ function renderTracker() {
     ${breakdownHtml('Kalshi: By Arb %', groupRecords(kalshiBets, e => arbBucket(e.arbPct)))}
     ${breakdownHtml('Kalshi: By Quarter (bet timing)', groupRecords(kalshiBets, e => periodLabel(e.betPeriod)))}
     ${breakdownHtml('Kalshi: By Half (bet timing)', groupRecords(kalshiBets, e => halfLabel(e.betPeriod)))}
+    ${breakdownHtml('Kalshi: Hot Situation (1 away, 1-2Q left)', groupRecords(kalshiBets, hotLabel))}
   </div>` : '';
   const kalshiCardsHtml = kalshiBets.length ? '<div class="cards-grid">' + kalshiBets.map(kalshiCard).join('') + '</div>' : '<div class="empty">No Kalshi picks yet — auto-tracks when FD/DK/Fliff/Props Builder arbs against Kalshi\'s own opposite-side quote (min $300 liq).</div>';
   const kalshiSection = sectionLabel('info', 'Kalshi Sharp Picks', kalshiBets.length) + kalshiBreakdowns + kalshiCardsHtml;
