@@ -213,7 +213,9 @@ header{padding:14px 16px 10px;padding-top:calc(14px + env(safe-area-inset-top))}
 .consensus{font-size:10.5px;font-weight:700;color:var(--sub);opacity:.75;padding:0 11px;letter-spacing:.1px}
 /* ── BOOK COMPARISON GRID — book logos as columns, this-side/other-side as rows, closer to a
    sportsbook arb card's mini odds matrix than a stacked list. */
-.gridwrap{margin-top:10px;border-radius:13px;border:1px solid var(--border);background:rgba(255,255,255,.03);overflow-x:auto;-webkit-overflow-scrolling:touch}
+/* No border/background of its own — it's part of the same card surface, not a floating box
+   inside one. Just the table's own row shading (myside/oppside) carries the visual structure. */
+.gridwrap{margin-top:10px;overflow-x:auto;-webkit-overflow-scrolling:touch}
 /* Column count varies with how many books are scanned, so the table sizes to its content and
    the wrapper above scrolls sideways when it doesn't fit, rather than squeezing every column
    down to illegible widths. */
@@ -237,10 +239,11 @@ header{padding:14px 16px 10px;padding-top:calc(14px + env(safe-area-inset-top))}
 .bookgrid tr.oppside th{color:var(--red)}
 .bookgrid tr.oppside td{color:var(--red)}
 .bookgrid tbody tr+tr th,.bookgrid tbody tr+tr td{border-top:1px solid var(--border)}
-/* ── FOOTER STRIP — highlighted stat chips + the bet action, one row, matching a sportsbook
-   arb card's bottom "$ / % / action" bar instead of plain text buttons. */
-.footstrip{display:flex;gap:6px;margin-top:10px}
-.footstrip .fs-stat{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;background:rgba(255,255,255,.05);border:1px solid rgba(39,192,113,.35);border-radius:13px;padding:7px 4px;font-size:13px;font-weight:900;color:var(--green);font-variant-numeric:tabular-nums}
+/* ── FOOTER STRIP — plain stat text + the bet action, one row. The stats are just numbers in the
+   card now, not their own little boxes -- only the actual tappable action (Bet This) looks like
+   a button, same as everything else in this card lives on one surface, not stacked sub-cards. */
+.footstrip{display:flex;align-items:center;gap:6px;margin-top:10px}
+.footstrip .fs-stat{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:4px;font-size:13px;font-weight:900;color:var(--green);font-variant-numeric:tabular-nums}
 .footstrip .fs-stat span{font-size:8px;font-weight:800;letter-spacing:.4px;text-transform:uppercase;color:var(--sub);margin-top:1px}
 .footstrip .fs-bet{flex:1.6;display:flex;align-items:center;justify-content:center;
   background:linear-gradient(160deg, rgba(210,245,255,.32) 0%, rgba(94,194,255,.22) 55%, rgba(39,192,113,.22) 100%);
@@ -1178,7 +1181,36 @@ function stateOf(f) {
     const kd = pair('knockdowns','kd');
     if ([...strikes, ...control, ...td, ...kd].some(v => v != null)) ufc = { strikes, control, td, kd };
   }
-  return { away, home, period, clock, brk, hot, sit, ufc, label: [pLabel, clock].filter(Boolean).join(' ') };
+  // NFL/CFB down & distance + field position, e.g. "1st & Goal · TB 3" — same best-effort spirit
+  // as the MLB/UFC blocks above. Prefers parsing an already-correct phrase straight out of the
+  // feed's own play-by-play text (desc/last_play/description), since that sidesteps ever having
+  // to guess which team's side of the field a raw yard-line number is measured from. The
+  // structured fallback (when no such phrase is present) only ever rebuilds down/distance/
+  // goal-to-go — all unambiguous scalars — and deliberately leaves the field-position half off
+  // rather than guess it wrong.
+  let fbSitu = null;
+  if (L === 'NFL' || L === 'CFB') {
+    const raw = ip.situation || ip;
+    const readyText = raw.down_distance_text || raw.situation_text || raw.play_situation || null;
+    const textSource = readyText || [ip.last_play, ip.description, ip.status].find(t => t && /\b(1st|2nd|3rd|4th)\s*(&|and)\s*(goal|\d+)/i.test(String(t)));
+    const m = textSource && String(textSource).match(/\b(1st|2nd|3rd|4th)\s*(?:&|and)\s*(goal|\d+)(?:\s+at\s+([A-Z]{2,4}\s*\d{1,2}))?/i);
+    if (m) {
+      const downWord = m[1][0].toUpperCase() + m[1].slice(1).toLowerCase();
+      const distWord = /goal/i.test(m[2]) ? 'Goal' : m[2];
+      const spot = m[3] ? m[3].toUpperCase().replace(/\s+/, ' ') : null;
+      fbSitu = `${downWord} & ${distWord}` + (spot ? ` · ${spot}` : '');
+    } else {
+      const down = raw.down ?? raw.down_number;
+      const distance = raw.distance ?? raw.yards_to_go ?? raw.yardsToGo;
+      const goalToGo = raw.goal_to_go ?? raw.goalToGo ?? raw.is_goal_to_go;
+      if (down != null) {
+        const downWord = ['', '1st', '2nd', '3rd', '4th'][Number(down)] || `${down}th`;
+        const distWord = goalToGo ? 'Goal' : (distance != null ? distance : null);
+        fbSitu = distWord != null ? `${downWord} & ${distWord}` : downWord;
+      }
+    }
+  }
+  return { away, home, period, clock, brk, hot, sit, ufc, fbSitu, label: [pLabel, clock].filter(Boolean).join(' ') };
 }
 // One-line "N live — N playing · N on break · N timeout" readout across whichever leagues are
 // currently toggled on (fixtures is already scoped to `active`) — same brk classification stateOf
@@ -1990,6 +2022,7 @@ function render() {
     // the action icons, not up top).
     const stateBits = [`${esc(f.away.ab)} ${isNaN(st.away) ? '—' : st.away}`, `${esc(f.home.ab)} ${isNaN(st.home) ? '—' : st.home}`];
     if (st.label) stateBits.push(esc(st.label));
+    if (st.fbSitu) stateBits.push(esc(st.fbSitu));
     if (situ) stateBits.push(esc(situ.text));
     const matchupName = `${esc(f.away.name || f.away.ab)} @ ${esc(f.home.name || f.home.ab)}`;
     return `<div class="row glass live${r.isNew ? ' new' : ''}${r.aligned ? ' aligned' : ''}${isArb ? ' isarb' : ''}${st.brk ? ' brk' : ''}${isPinned ? ' pinned' : ''}" data-key="${esc(r.key)}">
