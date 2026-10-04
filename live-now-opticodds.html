@@ -147,6 +147,8 @@ header{padding:14px 16px 10px;padding-top:calc(14px + env(safe-area-inset-top))}
 .section-dot.info{background:var(--sub)}
 .section-name{font-size:13px;font-weight:900;text-transform:uppercase;letter-spacing:2px;color:var(--text)}
 .section-n{font-size:12px;font-weight:900;color:var(--text);background:rgba(255,255,255,.12);padding:1px 7px;border-radius:20px;font-variant-numeric:tabular-nums}
+.unhide-bar{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:0 16px 8px;padding:7px 12px;border-radius:12px;background:rgba(255,255,255,.04);border:1px solid var(--border);font-size:11px;font-weight:700;color:var(--sub)}
+.unhide-bar button{background:none;border:1.5px solid var(--border);color:var(--text);border-radius:20px;padding:4px 11px;font-weight:800;font-size:10.5px;font-family:var(--font);cursor:pointer;-webkit-tap-highlight-color:transparent}
 
 /* ── ROW CARD ── */
 .row{border-radius:20px;padding:12px 12px 12px 16px;margin:0 16px 8px;-webkit-user-select:none;user-select:none;animation:fadein .18s ease}
@@ -621,6 +623,11 @@ async function loadOdds(fxs) {
     const marketNames = L.mlOnly ? ['moneyline'] : ['moneyline','point spread','total points','run line','puck line','total goals','total runs','team total'];
     const extra = [...extraBooks].map(k => EXTRA_BOOKS.find(b => b.key === k && !b.props)?.name).filter(Boolean);
     if (lk === 'ufc' && !extra.includes('Kalshi')) extra.push('Kalshi'); // UFC's Kalshi-as-reference needs it regardless of the checklist
+    // Kalshi⇄Novig direct cross-exchange arbs (exchDirectArbRows, below) run on every live game
+    // automatically — both need to be in the odds fetch regardless of whether the user has them
+    // checked in the book toggles, same as Kalshi already is for UFC above.
+    if (!extra.includes('Kalshi')) extra.push('Kalshi');
+    if (!extra.includes('Novig')) extra.push('Novig');
     const bookList = [...new Set([REF_BOOK, ...extra])];
     for (const batch of chunk(list, 5)) {
       const calls = chunk(bookList, 5).map(bk => oo('/fixtures/odds', { fixture_id: batch.map(f => f.id), sportsbook: bk, market: marketNames }).catch(e => { console.warn('[live] odds', e.message); return null; }));
@@ -1204,7 +1211,11 @@ function liqDepth(o) {
   const wdec = levels.reduce((sum, l) => sum + toDec(l.price) * l.size, 0) / total;
   return { total, avg: toAm(wdec) };
 }
-const ALIGN_CENTS = 10;
+// FD and PIN don't need to match to the cent to count as "aligned" — 20c of American-odds
+// daylight between them still means they're reading the same market the same way, just priced
+// a shade differently. Loosened from 10c so genuinely-aligned pairs stop getting dropped for
+// being a hair apart.
+const ALIGN_CENTS = 20;
 // ───────────────────────────── math ─────────────────────────────
 // Pair sides at the same line. key: market|line ; sideId: team id / over|under
 // Spread pairs are keyed by the HOME team's signed number: home -2 pairs only with away +2.
@@ -1259,15 +1270,22 @@ function computeRows(fxs, byFx) {
       // filter below (pMin/pMax) — only applies when the reference book is Pinnacle.
       if (refBook === REF_BOOK && lim != null && lim < minLim) return;
       const hold = imp(pin[0].price) + imp(pin[1].price);
-      if (hold < 0.97 || hold > 1.15) { console.warn(`[live] skipped implausible ${refBook} pair`, f.away.ab, f.home.ab, P.mk.key, pin[0].price, pin[1].price, 'hold', hold.toFixed(3)); return; }
+      // 8% max hold on the sharp side of the pair -- above that the reference book's own market
+      // isn't tight enough to trust as "fair" to begin with. 0.97 floor stays as a sanity check
+      // for a corrupted/mismatched pair (a real two-sided book is never UNDER 100% hold).
+      if (hold < 0.97 || hold > 1.08) { console.warn(`[live] skipped implausible ${refBook} pair`, f.away.ab, f.home.ab, P.mk.key, pin[0].price, pin[1].price, 'hold', hold.toFixed(3)); return; }
       const devig = (a, b) => { const x = imp(a), y = imp(b); return [x/(x+y), y/(x+y)]; };
       let fair = devig(pin[0].price, pin[1].price);
-      // FD·PIN aligned (both sides within 10c): average the two devigged fairs and hunt DK only.
-      // Kalshi-as-reference (UFC) skips this — FD and DK are both scanned directly against Kalshi.
+      // FD·PIN aligned (both sides within ALIGN_CENTS): blend the two devigged fairs, but
+      // Pinnacle still carries more weight than FD in that blend — it's the sharper of the two
+      // books, so a straight 50/50 average would let FD's number pull the fair price around by
+      // as much as Pinnacle's. Kalshi-as-reference (UFC) skips this — FD and DK are both scanned
+      // directly against Kalshi.
       const fd = sideIds.map(sid => bookOn(sid, 'FanDuel'));
       const aligned = refBook === REF_BOOK && !!(fd[0] && fd[1] && centsDiff(fd[0].price, pin[0].price) <= ALIGN_CENTS && centsDiff(fd[1].price, pin[1].price) <= ALIGN_CENTS);
       let refLabel = BOOK_SHORT[refBook.toLowerCase()] || refBook;
-      if (aligned) { const ff = devig(fd[0].price, fd[1].price); fair = [(fair[0] + ff[0]) / 2, (fair[1] + ff[1]) / 2]; refLabel = 'FD·Pin'; }
+      const PIN_WEIGHT = 0.65, FD_WEIGHT = 0.35; // Pinnacle always the higher weight
+      if (aligned) { const ff = devig(fd[0].price, fd[1].price); fair = [fair[0]*PIN_WEIGHT + ff[0]*FD_WEIGHT, fair[1]*PIN_WEIGHT + ff[1]*FD_WEIGHT]; refLabel = 'FD·Pin'; }
       sideIds.forEach((sid, idx) => {
         const skip = b => b.toLowerCase() === refBook.toLowerCase() || (aligned && b.toLowerCase() === 'fanduel');
         // Exchanges are different from a flat sportsbook: Kalshi/Novig/Prophet X posting the OTHER
@@ -1351,6 +1369,78 @@ function computeRows(fxs, byFx) {
   // true arbs first (by arb %), then everything else by EV
   return out.sort((a, b) => ((b.best.arb > 0) - (a.best.arb > 0)) || ((b.best.arb > 0) ? b.best.arb - a.best.arb : b.best.ev - a.best.ev) || (a.since - b.since));
 }
+// ───────────────────────────── Kalshi ⇄ Novig direct arbs ─────────────────────────────
+// Kalshi and Novig are both genuine two-sided exchanges — each one's own posted price on a side
+// is a real, tradeable number, not something that needs mirroring or devigging against Pinnacle
+// first. So whenever Kalshi has one side of a market and Novig has the other side, their RAW
+// prices arb directly against each other: 1 - (imp(kalshiSide) + imp(novigOtherSide)) > 0 means
+// a locked, no-reference-book-involved arb (e.g. Novig +230 on one side means the direct play is
+// Kalshi at -230 or better on the other side). No devig, no mirror math needed on either leg —
+// that's the whole point of using two real exchanges instead of a mirrored sportsbook quote.
+// Liquidity: prefer both legs to individually clear EXCH_ARB_MIN_LIQ (a real two-way fill), but
+// accept just one leg clearing it when the other exchange doesn't report a depth number at all
+// (no liquidity data isn't the same as zero liquidity).
+// Runs on every live game automatically (loadOdds always fetches Kalshi + Novig now, regardless
+// of the book toggles) — same "no toggle, always on" treatment as the Kalshi football-props scanner.
+const EXCH_ARB_MIN_LIQ = 1000; // starting bar, matched to a $1k reference floor — tune with live data
+function exchDirectArbRows(fxs, byFx) {
+  const out = [];
+  const pMin = Number($('#pMin').value), pMax = Number($('#pMax').value);
+  fxs.forEach(f => {
+    const odds = (byFx[f.id] || []).filter(o => o.price != null && !PERIODIC.test(o.market || ''));
+    const pairs = {};
+    odds.forEach(o => {
+      const M = MARKET.find(m => m.test(o.market || '')); if (!M) return;
+      if (f.league.mlOnly && M.key !== 'ml') return;
+      const k = sideKey(o, M.key, f);
+      const P = (pairs[k.pair] = pairs[k.pair] || { mk:M, sides:{}, samples:{} });
+      const S = (P.sides[k.side] = P.sides[k.side] || {});
+      const bk = String(o.sportsbook || '');
+      if (!S[bk] || Number(o.price) > Number(S[bk].price)) S[bk] = o;
+      P.samples[k.side] = o;
+    });
+    Object.values(pairs).forEach(P => {
+      const sideIds = Object.keys(P.sides); if (sideIds.length !== 2) return;
+      const bookOn = (sid, name) => Object.entries(P.sides[sid]).find(([b]) => b.toLowerCase() === name.toLowerCase())?.[1];
+      [[0,1],[1,0]].forEach(([aIdx, bIdx]) => {
+        const sidA = sideIds[aIdx], sidB = sideIds[bIdx];
+        const kal = bookOn(sidA, 'Kalshi'), nov = bookOn(sidB, 'Novig');
+        if (!kal || !nov) return;
+        if (Number(kal.price) < pMin || Number(kal.price) > pMax) return;
+        const arb = 1 - (imp(kal.price) + imp(nov.price));
+        if (arb <= 0) return; // locked arb only, same as everywhere else in this app
+        const kalDepth = liqDepth(kal), novDepth = liqDepth(nov);
+        const kalLiq = kalDepth ? kalDepth.total : liqOf(kal);
+        const novLiq = novDepth ? novDepth.total : liqOf(nov);
+        const bothReport = kalLiq != null && novLiq != null;
+        const clears = bothReport ? (kalLiq >= EXCH_ARB_MIN_LIQ && novLiq >= EXCH_ARB_MIN_LIQ)
+          : ((kalLiq ?? novLiq) != null && (kalLiq ?? novLiq) >= EXCH_ARB_MIN_LIQ);
+        if (!clears) return;
+        const s = P.samples[sidA];
+        const sideLabel = P.mk.key === 'total' ? `${String(s.selection_line || s.selection).replace(/^./, c => c.toUpperCase())} ${s.points}`
+                        : P.mk.key === 'tt' ? `${isHomeSide(s, f) ? f.home.ab : f.away.ab} ${String(s.selection_line || '').replace(/^./, c => c.toUpperCase())} ${s.points}`
+                        : P.mk.key === 'spread' ? `${shortTeamName(s.selection, f.league)} ${Number(s.points) > 0 ? '+' : ''}${s.points}` : `${shortTeamName(s.selection, f.league)} ML`;
+        const ttSide = P.mk.key === 'tt' ? (isHomeSide(s, f) ? 'home' : 'away') : null;
+        const pickSide = P.mk.key === 'total' ? null : P.mk.key === 'tt' ? ttSide : (isHomeSide(s, f) ? 'home' : 'away');
+        const pickPoints = (P.mk.key === 'spread' || P.mk.key === 'total' || P.mk.key === 'tt') ? Number(s.points) : null;
+        const overUnder = (P.mk.key === 'total' || P.mk.key === 'tt') ? (/under/i.test(String(s.selection_line || s.selection || '')) ? 'under' : 'over') : null;
+        const key = `ex|${f.id}|${P.mk.key}|${ttSide ? ttSide + '|' : ''}${sidA}|${P.mk.key === 'ml' ? '' : Math.abs(Number(s.points))}`;
+        const fp = imp(-Number(nov.price)); // Novig's own mirror of this side — its no-vig fair
+        out.push({
+          key, f, mk:P.mk, sideLabel, ttSide, pickSide, pickPoints, overUnder, fair:fp, aligned:true,
+          agreeNote: `✓ DIRECT ARB <b>Kalshi ${fmtAm(kal.price)}</b> vs <b>Novig ${fmtAm(nov.price)}</b> other side — both legs needed, locked ${(arb*100).toFixed(2)}%`,
+          refLabel:'Novig', refBook:'Novig', refBookShort:'NOVIG', fdPrice:null,
+          pin:{ mine:nov.price, other:kal.price, lim:null, depth:{ total: novLiq ?? 0, avg: nov.price } },
+          books:[{ book:'Kalshi', price:Number(kal.price), ev: fp * toDec(kal.price) - 1, arb, exch:true, sharp:false, liq:kalLiq, depth:kalDepth, o:kal }],
+          best:null, sharpForBooks:[], sharpAgainstBooks:[],
+        });
+        out[out.length - 1].best = out[out.length - 1].books[0];
+      });
+    });
+  });
+  applyTrend(out);
+  return out;
+}
 const seen = {};
 function applyTrend(out) {
   const now = Date.now();
@@ -1375,7 +1465,9 @@ function pruneSeen(keepKeys) { Object.keys(seen).forEach(k => { if (!keepKeys.ha
 // My Bets only — nothing is logged until you tap "Bet This". Persisted.
 let log = (() => { try { return JSON.parse(LS.get('live_log', '{}')) || {}; } catch(e) { return {}; } })();
 let hidden = (() => { try { return JSON.parse(LS.get('live_hidden', '{}')) || {}; } catch(e) { return {}; } })();
-const saveLog = () => { LS.set('live_log', JSON.stringify(log)); LS.set('live_hidden', JSON.stringify(hidden)); const n = Object.keys(log).length; const el = $('#trackN'); if (el) el.textContent = n; const now = Date.now(); Object.keys(hidden).forEach(k => { if (now - hidden[k] > 12*3600e3) delete hidden[k]; }); };
+// Hides are permanent once you tap the ✕ — a hidden key never ages back out and pops the row
+// back up on its own. The only way it comes back is an explicit unhide.
+const saveLog = () => { LS.set('live_log', JSON.stringify(log)); LS.set('live_hidden', JSON.stringify(hidden)); const n = Object.keys(log).length; const el = $('#trackN'); if (el) el.textContent = n; };
 function markBet(key) {
   const existing = log[key];
   if (existing) { delete log[key]; toast('Un-marked'); saveLog(); render(); return; }
@@ -1403,6 +1495,9 @@ function markBet(key) {
 // wipe the tracked entry. Both stay available: this one auto-tracks, the other still toggles.
 function ensureTracked(key) { if (!log[key]) markBet(key); }
 function hideKey(key) { hidden[key] = Date.now(); saveLog(); render(); }
+// Hides never expire on their own now, so this is the only way back — clears every hidden key
+// at once rather than one at a time.
+function unhideAll() { hidden = {}; saveLog(); render(); toast('Unhid all'); }
 let pinned = (() => { try { return new Set(JSON.parse(LS.get('live_pinned', '[]'))); } catch(e) { return new Set(); } })();
 const savePinned = () => LS.set('live_pinned', JSON.stringify([...pinned]));
 function togglePin(key) {
@@ -1846,12 +1941,15 @@ function render() {
   if (pinsChanged) savePinned();
   const pinnedRows = rowsV.filter(r => pinned.has(r.key));
   const restRows = rowsV.filter(r => !pinned.has(r.key));
-  const html = (pinnedRows.length ? sectionLabel('pin', 'Pinned', pinnedRows.length) + pinnedRows.map(rowCard).join('') : '')
+  const hiddenN = Object.keys(hidden).length;
+  const unhideBar = hiddenN ? `<div class="unhide-bar"><span>${hiddenN} hidden</span><button id="unhideAllBtn">Unhide all</button></div>` : '';
+  const html = unhideBar + (pinnedRows.length ? sectionLabel('pin', 'Pinned', pinnedRows.length) + pinnedRows.map(rowCard).join('') : '')
     + sectionLabel('live', 'Live +EV', restRows.length) + restRows.map(rowCard).join('');
   if (!setViewHtml(view, html)) { updateStatusStrip(); return; }
   view.querySelectorAll('[data-bet]').forEach(b => b.addEventListener('click', () => markBet(b.dataset.bet)));
   view.querySelectorAll('[data-bet-auto]').forEach(b => b.addEventListener('click', () => ensureTracked(b.dataset.betAuto)));
   view.querySelectorAll('[data-hide]').forEach(b => b.addEventListener('click', () => hideKey(b.dataset.hide)));
+  const unhideBtn = view.querySelector('#unhideAllBtn'); if (unhideBtn) unhideBtn.addEventListener('click', unhideAll);
   view.querySelectorAll('.row[data-key]').forEach(el => el.addEventListener('dblclick', ev => {
     if (ev.target.closest('button,a')) return;
     window.getSelection()?.removeAllRanges();
@@ -2003,7 +2101,7 @@ async function load(force) {
     gameState = st;
     if (!window._lg) { window._lg = true; const all = Object.values(byFx).flat(); console.log('[live] markets seen:', [...new Set(all.map(o => o.market))]); console.log('[live] books seen:', [...new Set(all.map(o => o.sportsbook))]); console.log('[live] sample row:', JSON.stringify(all[0] || {}).slice(0, 400)); }
     window._byFx = byFx;
-    rows = computeRows(fixtures, byFx).concat(pbRows()).concat(kalshiRows());
+    rows = computeRows(fixtures, byFx).concat(pbRows()).concat(kalshiRows()).concat(exchDirectArbRows(fixtures, byFx));
     pruneSeen(new Set(rows.map(r => r.key)));
     lastAt = Date.now();
     setLastUpdated(new Date().toLocaleTimeString([], { hour:'numeric', minute:'2-digit', second:'2-digit' }));
@@ -2011,7 +2109,7 @@ async function load(force) {
   } catch(e) { console.error(e); setLastUpdated('error'); setSync('error'); toast(e.message); }
   busy = false; if ($('#syncDot').classList.contains('live')) setSync('idle'); $('#reload').classList.remove('spinning');
 }
-function recompute() { updateFiltersSummary(); if (window._byFx) { rows = computeRows(fixtures, window._byFx).concat(pbRows()).concat(kalshiRows()); pruneSeen(new Set(rows.map(r => r.key))); render(); } }
+function recompute() { updateFiltersSummary(); if (window._byFx) { rows = computeRows(fixtures, window._byFx).concat(pbRows()).concat(kalshiRows()).concat(exchDirectArbRows(fixtures, window._byFx)); pruneSeen(new Set(rows.map(r => r.key))); render(); } }
 ['minArb','minLim','pMin','pMax','liveOnly','timeoutsOnly','sharpUfcOnly'].forEach(id => $('#' + id).addEventListener('change', () => { saveLastFilters(); recompute(); }));
 $('#presetSave').addEventListener('click', () => {
   const name = prompt('Name this preset (e.g. "Sharp UFC", "Loose EV"):'); if (!name || !name.trim()) return;
