@@ -978,15 +978,37 @@ function buildRecapText(includeLadders) {
   lines.push('OVERALL: ' + record(all) + ' (' + all.length + ' graded)');
   lines.push('');
 
-  lines.push('BY MARKET TYPE');
-  const byMarket = groupBy(all, e => e.market);
-  Object.keys(byMarket).sort().forEach(m => lines.push(m + ': ' + record(byMarket[m])));
-  lines.push('');
-
-  lines.push('OVER VS UNDER');
-  const bySide = groupBy(all, e => e.side === 'over' ? 'Over' : e.side === 'under' ? 'Under' : 'Yes');
-  Object.keys(bySide).sort().forEach(s => lines.push(s + ': ' + record(bySide[s])));
-  lines.push('');
+  // Every breakdown the live tracker shows, each ranked best-to-worst by units — this replaces
+  // a flat dump of every individual play, which stopped being readable past a few dozen bets.
+  // Categories that depend on arb-specific fields (arbBooks/valueBooks/arbCount/bestArb) only
+  // exist on main-log entries, so those run on mainGraded; everything else blends main+alt
+  // together, same as this recap always has for market type and over/under.
+  const pushBreakdown = (title, groups) => {
+    if (!groups.length) return;
+    const decided = g => g.won + g.lost;
+    const winPct = g => decided(g) ? g.won / decided(g) : -1;
+    const sorted = groups.slice().sort((a, b) => (b.units - a.units) || (winPct(b) - winPct(a)));
+    lines.push(title.toUpperCase() + ' (best to worst)');
+    sorted.forEach(g => {
+      const wp = decided(g) ? Math.round(g.won / decided(g) * 100) : null;
+      lines.push(`${g.key}: ${g.won}-${g.lost}-${g.push} - ${g.units >= 0 ? '+' : ''}${g.units.toFixed(2)}u${wp == null ? '' : ` (${wp}%)`}`);
+    });
+    lines.push('');
+  };
+  pushBreakdown('By Market Type', groupRecords(all, e => e.market));
+  pushBreakdown('Over vs Under', groupRecords(all, sideLabelFor));
+  pushBreakdown('Prop Type + Side', groupRecords(all, propSideFor));
+  pushBreakdown('By FD Odds', groupRecords(all, e => oddsBucket(e.fdPrice)));
+  pushBreakdown('By FD Odds + O/U', groupRecords(all, e => `${oddsBucket(e.fdPrice)} · ${sideLabelFor(e)}`));
+  pushBreakdown('Direct Arb vs Value', groupRecords(mainGraded, qualKindOf));
+  pushBreakdown('By Arb %', groupRecords(mainGraded.filter(e => e.arbCount >= MIN_ARB_BOOKS), e => arbBucket(e.bestArb)));
+  pushBreakdown('By EV %', groupRecords(all.filter(e => e.evPct != null), e => arbBucket(e.evPct)));
+  pushBreakdown('By EV % + O/U', groupRecords(all.filter(e => e.evPct != null), e => `${arbBucket(e.evPct)} · ${sideLabelFor(e)}`));
+  pushBreakdown('By Consensus Combo', groupRecords(mainGraded, comboFor));
+  pushBreakdown('FD vs Each Book (backtest)', groupByBook(mainGraded, CONSENSUS_BOOKS));
+  pushBreakdown('FD vs Each Book + O/U (backtest)', groupByBookSide(mainGraded, CONSENSUS_BOOKS));
+  pushBreakdown('By Quarter (bet timing)', groupRecords(all, e => periodLabel(e.betPeriod)));
+  pushBreakdown('By Half (bet timing)', groupRecords(all, e => halfLabel(e.betPeriod)));
 
   if (includeLadders) {
     lines.push('LADDERS (same player, same stat, multiple lines)');
@@ -1001,13 +1023,8 @@ function buildRecapText(includeLadders) {
     lines.push('');
   }
 
-  lines.push('ALL GRADED BETS');
-  all.forEach(e => {
-    const u = e.status === 'won' ? unitsFor(e.fdPrice, e.stakeUnits) : e.status === 'lost' ? -e.stakeUnits : 0;
-    const tag = e.isAlt ? ' (ALT)' : '';
-    lines.push(`${e.game} - ${e.market}${tag} - ${e.player} ${lineLabel(e)} - FD ${fmtAm(e.fdPrice)} - ${e.status.toUpperCase()} ${u >= 0 ? '+' : ''}${u.toFixed(2)}u`);
-  });
-
+  // No per-play listing — the breakdowns above are the recap now, not a dump of every bet.
+  while (lines.length && lines[lines.length - 1] === '') lines.pop();
   return lines.join('\n');
 }
 async function copyRecap() {
