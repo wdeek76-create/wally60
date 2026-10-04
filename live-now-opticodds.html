@@ -449,6 +449,7 @@ header{padding:14px 16px 10px;padding-top:calc(14px + env(safe-area-inset-top))}
 <div class="filters-panel" id="filtersPanel">
   <div class="ctrl">
     <label>Min Arb <input type="number" id="minArb" value="0" step="0.1" min="0">%</label>
+    <label>Min EV <input type="number" id="minEv" value="0" step="0.1" min="0">%</label>
     <label>Pin limit ≥ $<input type="number" id="minLim" value="1000" step="100" min="0"></label>
     <label>Price <input type="number" id="pMin" value="-400" step="5"> to <input type="number" id="pMax" value="250" step="5"></label>
   </div>
@@ -779,6 +780,7 @@ function pbRows() {
         const oppBest = oppCandidates.reduce((a, b) => toDec(b.price) > toDec(a.price) ? b : a);
         const arb = 1 - (imp(pb.price) + imp(oppBest.price));
         if (arb <= 0) return; // this app is locked-arb-only everywhere else too
+        if (ev * 100 < (Number($('#minEv').value) || 0)) return;
         const pr = Number(pb.price); if (pr < Number($('#pMin').value) || pr > Number($('#pMax').value)) return;
         const agreeNote = devigNames.length > 1 ? `✓ ${devigNames.map(esc).join(', ')} devig <b>${fmtAm(probToAm(fp))}</b> → fading Props Builder` : '';
         rows.push({
@@ -902,6 +904,7 @@ function kalshiRows() {
           const ev = fp * toDec(pr) - 1;
           const arb = 1 - (imp(pr) + imp(oppQuote.price));
           if (arb <= 0) return; // locked-arb-only, same as everywhere else in this app
+          if (ev * 100 < (Number($('#minEv').value) || 0)) return;
           const properName = EXTRA_BOOKS.find(b => b.name.toLowerCase() === bookName)?.name || bo.sportsbook;
           const agreeNote = kalshiBacksPin ? `✓ KALSHI &amp; PIN AGREE <b>Kalshi ${fmtAm(mirrorPrice)}</b> · <b>PIN ${fmtAm(pinSide.price)}</b> · ${usd(liq)} on the other side` : '';
           out.push({
@@ -1299,7 +1302,7 @@ function sideKey(o, mk, f) {
   return { pair:'ml|0', side: String(o.team_id || o.selection || '').toLowerCase() };
 }
 function computeRows(fxs, byFx) {
-  const minArb = Number($('#minArb').value) || 0, minLim = Number($('#minLim').value) || 0;
+  const minArb = Number($('#minArb').value) || 0, minEv = Number($('#minEv').value) || 0, minLim = Number($('#minLim').value) || 0;
   const pMin = Number($('#pMin').value), pMax = Number($('#pMax').value);
   const liveOnly = $('#liveOnly').checked; const arbsOnly = true; // always locked-arb-vs-Pinnacle only — no toggle
   const timeoutsOnly = $('#timeoutsOnly')?.checked;
@@ -1391,7 +1394,7 @@ function computeRows(fxs, byFx) {
           const exch = EXCH.has(b.toLowerCase());
           const sharp = REGULAR_SHARP_BOOKS.has(b.toLowerCase());
           return { book:b, price:pr, ev, arb, o, exch, sharp, liq: liqOf(o), depth: exch ? liqDepth(o) : null };
-        }).filter(x => x && x.ev * 100 <= 25 && x.arb * 100 >= minArb && (!arbsOnly || x.arb > 0)).sort((a, b) => b.price - a.price);
+        }).filter(x => x && x.ev * 100 <= 25 && x.ev * 100 >= minEv && x.arb * 100 >= minArb && (!arbsOnly || x.arb > 0)).sort((a, b) => b.price - a.price);
         if (!books.length) return;
         const s = P.samples[sid];
         const sideLabelOf = ss => P.mk.key === 'total' ? `${String(ss.selection_line || ss.selection).replace(/^./, c => c.toUpperCase())} ${ss.points}`
@@ -1757,7 +1760,7 @@ function updateStatusStrip() {
   if (gsb) gsb.innerHTML = (viewMode === 'live') ? (gameStateSummary() || 'No live games right now') : '';
 }
 // ── filter state: last-used numeric/toggle settings always persist automatically ──
-const FILTER_INPUT_IDS = ['minArb','minLim','pMin','pMax'];
+const FILTER_INPUT_IDS = ['minArb','minEv','minLim','pMin','pMax'];
 function getFilterState() {
   const st = { timeoutsOnly: !!$('#timeoutsOnly')?.checked, sharpUfcOnly: !!$('#sharpUfcOnly')?.checked };
   FILTER_INPUT_IDS.forEach(id => st[id] = $('#' + id).value);
@@ -1818,7 +1821,7 @@ function updateFiltersSummary() {
   const extra = extraBooks.size ? ` · +${extraBooks.size} book${extraBooks.size>1?'s':''}` : '';
   const to = $('#timeoutsOnly')?.checked ? ' · stoppage only' : '';
   const su = $('#sharpUfcOnly')?.checked ? ' · SHARP UFC' : '';
-  el.textContent = `Arb≥${$('#minArb').value}% · Lim≥${usd(Number($('#minLim').value)||0)} · ${fmtAm($('#pMin').value)}/${fmtAm($('#pMax').value)}${extra}${to}${su}`;
+  el.textContent = `Arb≥${$('#minArb').value}% · EV≥${$('#minEv').value}% · Lim≥${usd(Number($('#minLim').value)||0)} · ${fmtAm($('#pMin').value)}/${fmtAm($('#pMax').value)}${extra}${to}${su}`;
 }
 function renderBookToggles() {
   const kl = logoOf('Kalshi'), klEl = $('#sharpUfcLogo');
@@ -1944,13 +1947,18 @@ function render() {
       // prices" means all of them, not a capped preview. gridwrap scrolls horizontally if the
       // full set doesn't fit the card width.
       r.books.slice(1).forEach(b => { if (!cols.some(c => c.name.toLowerCase() === b.book.toLowerCase())) cols.push({ name: b.book, isRef:false }); });
-      Object.keys(r.oppBooks).forEach(bk => { if (!cols.some(c => c.name.toLowerCase() === bk)) cols.push({ name: bk, isRef:false }); });
+      Object.keys(r.oppBooks).forEach(bk => { if (!cols.some(c => c.name.toLowerCase() === bk)) cols.push({ name: EXTRA_BOOKS.find(b => b.name.toLowerCase() === bk)?.name || bk, isRef:false }); });
       const myPriceFor = c => c.isRef ? r.pin.mine : r.books.find(b => b.book.toLowerCase() === c.name.toLowerCase())?.price;
       const oppPriceFor = c => c.isRef ? r.pin.other : r.oppBooks[c.name.toLowerCase()];
-      // Only keep a book if it's actually quoting the OTHER side too — that's what lets you read
-      // "how they do" against our book, side by side. A book that only ever shows up on our own
-      // side isn't a comparison, so it's dropped rather than shown as a blank/dash column.
-      const colsLive = cols.filter(c => oppPriceFor(c) != null);
+      // Our own bettable book always shows (it IS the play). Every other column only earns a spot
+      // if betting our actual price against THAT book's own opposite-side number is a genuine,
+      // positive play -- "only show ref books that the play's good to", not just any book that
+      // happens to have a number.
+      const colsLive = cols.filter(c => {
+        if (c.name.toLowerCase() === r.best.book.toLowerCase()) return true;
+        const opp = oppPriceFor(c); if (opp == null) return false;
+        return 1 - (imp(r.best.price) + imp(opp)) > 0;
+      });
       const headCells = colsLive.map(c => { const clg = logoOf(c.name); return `<th>${clg ? `<img src="${esc(clg)}" alt="${esc(c.name)}" title="${esc(c.name)}">` : `<span class="bk">${esc(c.name.slice(0,3))}</span>`}</th>`; }).join('');
       // Liquidity is only known for the ref-book column (r.pin.lim/depth) -- shown as a small
       // "$Xk" line under its price, same spot the reference card annotates its sharp column with.
@@ -2189,7 +2197,7 @@ async function load(force) {
   busy = false; if ($('#syncDot').classList.contains('live')) setSync('idle'); $('#reload').classList.remove('spinning');
 }
 function recompute() { updateFiltersSummary(); if (window._byFx) { rows = computeRows(fixtures, window._byFx).concat(pbRows()).concat(kalshiRows()); pruneSeen(new Set(rows.map(r => r.key))); render(); } }
-['minArb','minLim','pMin','pMax','liveOnly','timeoutsOnly','sharpUfcOnly'].forEach(id => $('#' + id).addEventListener('change', () => { saveLastFilters(); recompute(); }));
+['minArb','minEv','minLim','pMin','pMax','liveOnly','timeoutsOnly','sharpUfcOnly'].forEach(id => $('#' + id).addEventListener('change', () => { saveLastFilters(); recompute(); }));
 $('#presetSave').addEventListener('click', () => {
   const name = prompt('Name this preset (e.g. "Sharp UFC", "Loose EV"):'); if (!name || !name.trim()) return;
   presets[name.trim()] = { books: [...extraBooks], ...getFilterState() };
