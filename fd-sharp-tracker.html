@@ -687,19 +687,46 @@ function computeKalshiRows(fxs, byFx) {
 }
 
 // ───────────────────────────── auto-track + grading ─────────────────────────────
+// Over/under (and Kalshi's yes/no) are opposite directions on the same player+stat — tracking
+// both at once for the same game is a hedge, not two independent signals, so once one direction
+// is locked in for a fid+mkey+player ladder, the other direction is never added alongside it.
+const OPP_SIDE = { over: 'under', under: 'over', yes: 'no', no: 'yes' };
+// One-time sweep for logs that already picked up both directions before this guard existed —
+// keeps the earliest-tracked side per fid+mkey+player group and drops every entry on the
+// opposite side of it (ladders of the SAME side, e.g. Over 39.5 + Over 49.5, are untouched).
+function pruneLadderConflicts(logObj) {
+  const groups = {};
+  Object.values(logObj).forEach(e => {
+    const gKey = `${e.fid}|${e.mkey}|${e.playerKey}`;
+    (groups[gKey] = groups[gKey] || []).push(e);
+  });
+  let removed = false;
+  Object.values(groups).forEach(entries => {
+    if (entries.length < 2) return;
+    entries.sort((a, b) => a.betAt - b.betAt);
+    const keepSide = entries[0].side;
+    const oppSide = OPP_SIDE[keepSide]; if (!oppSide) return;
+    entries.forEach(e => { if (e.side === oppSide) { delete logObj[e.key]; removed = true; } });
+  });
+  return removed;
+}
 let log = (() => { try { return JSON.parse(LS.get('fdst_log', '{}')) || {}; } catch(e) { return {}; } })();
 const saveLog = () => { LS.set('fdst_log', JSON.stringify(log)); const el = $('#trackN'); if (el) el.textContent = Object.keys(log).length; };
+if (pruneLadderConflicts(log)) saveLog();
 // Every currently-aligned row auto-tracks itself the moment it's first seen — no button, no
 // manual step. Once a key has been tracked it's never re-logged, even if it drops out of
 // alignment and comes back later (that would double-count the same signal). A player+stat can
 // ladder across multiple lines/games just fine (e.g. Over 39.5 AND Over 49.5 both tracked) —
 // the key is already unique per game+player+stat+line+side, so that's all the dedup needs;
-// the only thing still blocked is taking both sides of the exact same line (handled upstream,
-// in computeRows'/computeAltRows' "first side only" selection).
+// taking both sides of the exact same line is blocked upstream (computeRows'/computeAltRows'
+// "first side only" selection), and taking opposite sides across DIFFERENT lines of the same
+// ladder (a counter bet) is blocked below via OPP_SIDE.
 function autoTrack(rows) {
   let changed = false;
   rows.forEach(r => {
     if (log[r.key]) return;
+    const oppSide = OPP_SIDE[r.side];
+    if (oppSide && Object.values(log).some(e => e.fid === r.fid && e.mkey === r.mkey && e.playerKey === normName(r.player) && e.side === oppSide)) return;
     const isFav = r.fdPrice < 0;
     log[r.key] = {
       key: r.key, fid: r.fid, game: `${r.f.away.ab} @ ${r.f.home.ab}`, awayAb: r.f.away.ab, homeAb: r.f.home.ab,
@@ -739,10 +766,13 @@ function autoTrackAlt(altRows) {
 // unitsFor/gradeOutcome/groupRecords helpers without special-casing them.
 let kalshiLog = (() => { try { return JSON.parse(LS.get('fdst_kalshi_log', '{}')) || {}; } catch(e) { return {}; } })();
 const saveKalshiLog = () => { LS.set('fdst_kalshi_log', JSON.stringify(kalshiLog)); };
+if (pruneLadderConflicts(kalshiLog)) saveKalshiLog();
 function autoTrackKalshi(kalshiRows) {
   let changed = false;
   kalshiRows.forEach(r => {
     if (kalshiLog[r.key]) return;
+    const oppSide = OPP_SIDE[r.side];
+    if (oppSide && Object.values(kalshiLog).some(e => e.fid === r.fid && e.mkey === r.mkey && e.playerKey === normName(r.player) && e.side === oppSide)) return;
     kalshiLog[r.key] = {
       key: r.key, fid: r.fid, game: `${r.f.away.ab} @ ${r.f.home.ab}`, awayAb: r.f.away.ab, homeAb: r.f.home.ab,
       awayLogo: r.f.away.logo || '', homeLogo: r.f.home.logo || '',
