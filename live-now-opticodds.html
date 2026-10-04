@@ -761,7 +761,9 @@ function pbRows() {
       if (!devigEntries.length) return; // need at least one selected devig book posting both sides
       const devig = (a, b) => { const x = imp(a), y = imp(b); return { over: x/(x+y), under: y/(x+y) }; };
       const fairs = devigEntries.map(([, s]) => devig(s.over.price, s.under.price));
-      const fair = { over: fairs.reduce((a, x) => a + x.over, 0) / fairs.length, under: fairs.reduce((a, x) => a + x.under, 0) / fairs.length };
+      // Worst-case devig, same as everywhere else in this app now: per side, take whichever
+      // selected sharp book implies the LOWEST fair probability, never an average across them.
+      const fair = { over: Math.min(...fairs.map(x => x.over)), under: Math.min(...fairs.map(x => x.under)) };
       const devigNames = devigEntries.map(([bk]) => EXTRA_BOOKS.find(b => b.name.toLowerCase() === bk)?.name || bk);
       const primary = devigEntries[0][1];
       ['over','under'].forEach(side => {
@@ -1337,16 +1339,15 @@ function computeRows(fxs, byFx) {
       if (hold < 0.97 || hold > 1.08) { console.warn(`[live] skipped implausible ${refBook} pair`, f.away.ab, f.home.ab, P.mk.key, pin[0].price, pin[1].price, 'hold', hold.toFixed(3)); return; }
       const devig = (a, b) => { const x = imp(a), y = imp(b); return [x/(x+y), y/(x+y)]; };
       let fair = devig(pin[0].price, pin[1].price);
-      // FD·PIN aligned (both sides within ALIGN_CENTS): blend the two devigged fairs, but
-      // Pinnacle still carries more weight than FD in that blend — it's the sharper of the two
-      // books, so a straight 50/50 average would let FD's number pull the fair price around by
-      // as much as Pinnacle's. Kalshi-as-reference (UFC) skips this — FD and DK are both scanned
-      // directly against Kalshi.
+      // FD·PIN aligned (both sides within ALIGN_CENTS): worst-case devig, always — per side, take
+      // whichever of Pinnacle's or FD's own devigged probability is LOWER (the more conservative
+      // read), never a blended/weighted average. Pinnacle is the required sharp book (always in
+      // `fair` above); FD only ever pulls the number down further, never up. Kalshi-as-reference
+      // (UFC) skips this — FD and DK are both scanned directly against Kalshi.
       const fd = sideIds.map(sid => bookOn(sid, 'FanDuel'));
       const aligned = refBook === REF_BOOK && !!(fd[0] && fd[1] && centsDiff(fd[0].price, pin[0].price) <= ALIGN_CENTS && centsDiff(fd[1].price, pin[1].price) <= ALIGN_CENTS);
       let refLabel = BOOK_SHORT[refBook.toLowerCase()] || refBook;
-      const PIN_WEIGHT = 0.65, FD_WEIGHT = 0.35; // Pinnacle always the higher weight
-      if (aligned) { const ff = devig(fd[0].price, fd[1].price); fair = [fair[0]*PIN_WEIGHT + ff[0]*FD_WEIGHT, fair[1]*PIN_WEIGHT + ff[1]*FD_WEIGHT]; refLabel = 'FD·Pin'; }
+      if (aligned) { const ff = devig(fd[0].price, fd[1].price); fair = [Math.min(fair[0], ff[0]), Math.min(fair[1], ff[1])]; refLabel = 'FD·Pin'; }
       sideIds.forEach((sid, idx) => {
         const skip = b => b.toLowerCase() === refBook.toLowerCase() || (aligned && b.toLowerCase() === 'fanduel');
         // Exchanges are different from a flat sportsbook: Kalshi/Novig/Prophet X posting the OTHER
@@ -1370,8 +1371,12 @@ function computeRows(fxs, byFx) {
         const EXCHANGE_HIGH_LIQ = 5000; // "high liquidity" bar for the 2-of-3 exchange consensus
         const highLiqBacking = exchangeBacksPin.filter(x => x.liq != null && x.liq >= EXCHANGE_HIGH_LIQ);
         const exchangeConsensus = highLiqBacking.length >= 2;
+        // Worst-case devig again here — fp starts at the FD·PIN fair (already worst-case above),
+        // and 2-of-3 high-liquidity exchanges backing it can only pull it lower, never average it
+        // up. Same principle as the FD·PIN blend: never assume a better fair number than the most
+        // conservative source actually implies.
         let fp = fair[idx];
-        if (exchangeConsensus) fp = highLiqBacking.reduce((a, x) => a + imp(x.mirrorPrice), fp) / (highLiqBacking.length + 1);
+        if (exchangeConsensus) fp = Math.min(fp, ...highLiqBacking.map(x => imp(x.mirrorPrice)));
         const books = Object.entries(P.sides[sid]).filter(([b]) => !skip(b)).map(([b, o]) => {
           const pr = Number(o.price); if (refBook === REF_BOOK && (pr < pMin || pr > pMax)) return null;
           const ev = fp * toDec(pr) - 1;
