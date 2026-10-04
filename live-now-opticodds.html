@@ -684,9 +684,10 @@ async function loadOdds(fxs) {
     const marketNames = L.mlOnly ? ['moneyline'] : ['moneyline','point spread','total points','run line','puck line','total goals','total runs','team total'];
     const extra = [...extraBooks].map(k => EXTRA_BOOKS.find(b => b.key === k && !b.props)?.name).filter(Boolean);
     if (lk === 'ufc' && !extra.includes('Kalshi')) extra.push('Kalshi'); // UFC's Kalshi-as-reference needs it regardless of the checklist
-    // Kalshi⇄Novig direct cross-exchange arbs (exchDirectArbRows, below) run on every live game
-    // automatically — both need to be in the odds fetch regardless of whether the user has them
-    // checked in the book toggles, same as Kalshi already is for UFC above.
+    // Kalshi and Novig feed the sharp-confirmation logic in computeRows (exchangeBacksPin /
+    // exchangeConsensus below) on every live game automatically, same as Kalshi already is for
+    // UFC above — both need to be in the odds fetch regardless of the book toggles. They're never
+    // eligible to be the bettable pick itself (computeRows' skip() excludes every exchange).
     if (!extra.includes('Kalshi')) extra.push('Kalshi');
     if (!extra.includes('Novig')) extra.push('Novig');
     const bookList = [...new Set([REF_BOOK, ...extra])];
@@ -870,6 +871,9 @@ function kalshiRows() {
       const bk = String(o.sportsbook || '').toLowerCase();
       if (bk === 'kalshi') { if (!g.kalshi[side] || Number(o.price) > Number(g.kalshi[side].price)) g.kalshi[side] = o; }
       else if (bk === 'pinnacle') { if (!g.pin[side] || Number(o.price) > Number(g.pin[side].price)) g.pin[side] = o; }
+      // Every exchange is a sharp reference only, never something you bet on directly — Novig,
+      // Prophet X, etc. feed the same role Kalshi/Pinnacle do here, not the bettable `books` map.
+      else if (EXCH.has(bk)) { /* ignored as a bettable candidate */ }
       else { const bs = (g.books[bk] = g.books[bk] || {}); if (!bs[side] || Number(o.price) > Number(bs[side].price)) bs[side] = o; }
     });
     Object.values(groups).forEach(g => {
@@ -1349,7 +1353,10 @@ function computeRows(fxs, byFx) {
       let refLabel = BOOK_SHORT[refBook.toLowerCase()] || refBook;
       if (aligned) { const ff = devig(fd[0].price, fd[1].price); fair = [Math.min(fair[0], ff[0]), Math.min(fair[1], ff[1])]; refLabel = 'FD·Pin'; }
       sideIds.forEach((sid, idx) => {
-        const skip = b => b.toLowerCase() === refBook.toLowerCase() || (aligned && b.toLowerCase() === 'fanduel');
+        // Exchanges are sharp references only, never a bettable pick -- Kalshi/Novig/Prophet X
+        // never belong in the `books` list below, whichever one (if any) is also serving as the
+        // refBook for this row.
+        const skip = b => EXCH.has(b.toLowerCase()) || b.toLowerCase() === refBook.toLowerCase() || (aligned && b.toLowerCase() === 'fanduel');
         // Exchanges are different from a flat sportsbook: Kalshi/Novig/Prophet X posting the OTHER
         // side at some price technically means they have THIS side at the mirror of that price
         // (Novig has the other team +203 means Novig has this team -203 — same convention as
@@ -1443,78 +1450,11 @@ function computeRows(fxs, byFx) {
   // true arbs first (by arb %), then everything else by EV
   return out.sort((a, b) => ((b.best.arb > 0) - (a.best.arb > 0)) || ((b.best.arb > 0) ? b.best.arb - a.best.arb : b.best.ev - a.best.ev) || (a.since - b.since));
 }
-// ───────────────────────────── Kalshi ⇄ Novig direct arbs ─────────────────────────────
-// Kalshi and Novig are both genuine two-sided exchanges — each one's own posted price on a side
-// is a real, tradeable number, not something that needs mirroring or devigging against Pinnacle
-// first. So whenever Kalshi has one side of a market and Novig has the other side, their RAW
-// prices arb directly against each other: 1 - (imp(kalshiSide) + imp(novigOtherSide)) > 0 means
-// a locked, no-reference-book-involved arb (e.g. Novig +230 on one side means the direct play is
-// Kalshi at -230 or better on the other side). No devig, no mirror math needed on either leg —
-// that's the whole point of using two real exchanges instead of a mirrored sportsbook quote.
-// Liquidity: prefer both legs to individually clear EXCH_ARB_MIN_LIQ (a real two-way fill), but
-// accept just one leg clearing it when the other exchange doesn't report a depth number at all
-// (no liquidity data isn't the same as zero liquidity).
-// Runs on every live game automatically (loadOdds always fetches Kalshi + Novig now, regardless
-// of the book toggles) — same "no toggle, always on" treatment as the Kalshi football-props scanner.
-const EXCH_ARB_MIN_LIQ = 1000; // starting bar, matched to a $1k reference floor — tune with live data
-function exchDirectArbRows(fxs, byFx) {
-  const out = [];
-  const pMin = Number($('#pMin').value), pMax = Number($('#pMax').value);
-  fxs.forEach(f => {
-    const odds = (byFx[f.id] || []).filter(o => o.price != null && !PERIODIC.test(o.market || ''));
-    const pairs = {};
-    odds.forEach(o => {
-      const M = MARKET.find(m => m.test(o.market || '')); if (!M) return;
-      if (f.league.mlOnly && M.key !== 'ml') return;
-      const k = sideKey(o, M.key, f);
-      const P = (pairs[k.pair] = pairs[k.pair] || { mk:M, sides:{}, samples:{} });
-      const S = (P.sides[k.side] = P.sides[k.side] || {});
-      const bk = String(o.sportsbook || '');
-      if (!S[bk] || Number(o.price) > Number(S[bk].price)) S[bk] = o;
-      P.samples[k.side] = o;
-    });
-    Object.values(pairs).forEach(P => {
-      const sideIds = Object.keys(P.sides); if (sideIds.length !== 2) return;
-      const bookOn = (sid, name) => Object.entries(P.sides[sid]).find(([b]) => b.toLowerCase() === name.toLowerCase())?.[1];
-      [[0,1],[1,0]].forEach(([aIdx, bIdx]) => {
-        const sidA = sideIds[aIdx], sidB = sideIds[bIdx];
-        const kal = bookOn(sidA, 'Kalshi'), nov = bookOn(sidB, 'Novig');
-        if (!kal || !nov) return;
-        if (Number(kal.price) < pMin || Number(kal.price) > pMax) return;
-        const arb = 1 - (imp(kal.price) + imp(nov.price));
-        if (arb <= 0) return; // locked arb only, same as everywhere else in this app
-        const kalDepth = liqDepth(kal), novDepth = liqDepth(nov);
-        const kalLiq = kalDepth ? kalDepth.total : liqOf(kal);
-        const novLiq = novDepth ? novDepth.total : liqOf(nov);
-        const bothReport = kalLiq != null && novLiq != null;
-        const clears = bothReport ? (kalLiq >= EXCH_ARB_MIN_LIQ && novLiq >= EXCH_ARB_MIN_LIQ)
-          : ((kalLiq ?? novLiq) != null && (kalLiq ?? novLiq) >= EXCH_ARB_MIN_LIQ);
-        if (!clears) return;
-        const s = P.samples[sidA];
-        const sideLabel = P.mk.key === 'total' ? `${String(s.selection_line || s.selection).replace(/^./, c => c.toUpperCase())} ${s.points}`
-                        : P.mk.key === 'tt' ? `${isHomeSide(s, f) ? f.home.ab : f.away.ab} ${String(s.selection_line || '').replace(/^./, c => c.toUpperCase())} ${s.points}`
-                        : P.mk.key === 'spread' ? `${shortTeamName(s.selection, f.league)} ${Number(s.points) > 0 ? '+' : ''}${s.points}` : `${shortTeamName(s.selection, f.league)} ML`;
-        const ttSide = P.mk.key === 'tt' ? (isHomeSide(s, f) ? 'home' : 'away') : null;
-        const pickSide = P.mk.key === 'total' ? null : P.mk.key === 'tt' ? ttSide : (isHomeSide(s, f) ? 'home' : 'away');
-        const pickPoints = (P.mk.key === 'spread' || P.mk.key === 'total' || P.mk.key === 'tt') ? Number(s.points) : null;
-        const overUnder = (P.mk.key === 'total' || P.mk.key === 'tt') ? (/under/i.test(String(s.selection_line || s.selection || '')) ? 'under' : 'over') : null;
-        const key = `ex|${f.id}|${P.mk.key}|${ttSide ? ttSide + '|' : ''}${sidA}|${P.mk.key === 'ml' ? '' : Math.abs(Number(s.points))}`;
-        const fp = imp(-Number(nov.price)); // Novig's own mirror of this side — its no-vig fair
-        out.push({
-          key, f, mk:P.mk, sideLabel, ttSide, pickSide, pickPoints, overUnder, fair:fp, aligned:true,
-          agreeNote: `✓ DIRECT ARB <b>Kalshi ${fmtAm(kal.price)}</b> vs <b>Novig ${fmtAm(nov.price)}</b> other side — both legs needed, locked ${(arb*100).toFixed(2)}%`,
-          refLabel:'Novig', refBook:'Novig', refBookShort:'NOVIG', fdPrice:null,
-          pin:{ mine:nov.price, other:kal.price, lim:null, depth:{ total: novLiq ?? 0, avg: nov.price } },
-          books:[{ book:'Kalshi', price:Number(kal.price), ev: fp * toDec(kal.price) - 1, arb, exch:true, sharp:false, liq:kalLiq, depth:kalDepth, o:kal }],
-          best:null, sharpForBooks:[], sharpAgainstBooks:[],
-        });
-        out[out.length - 1].best = out[out.length - 1].books[0];
-      });
-    });
-  });
-  applyTrend(out);
-  return out;
-}
+// Exchanges (Kalshi, Novig, Prophet X) are sharp reference sources only, never a bettable pick —
+// a prior version of this app had a Kalshi<->Novig "direct arb" scanner that put Kalshi itself in
+// the bettable slot with a "Bet This" link. Removed: exchanges feed the fair-price/devig logic
+// above (exchangeBacksPin/exchangeConsensus) and kalshiRows()'s reference role, same as Pinnacle,
+// and `skip()` above now excludes every exchange from the bettable `books` list on every row.
 const seen = {};
 function applyTrend(out) {
   const now = Date.now();
@@ -2240,7 +2180,7 @@ async function load(force) {
     gameState = st;
     if (!window._lg) { window._lg = true; const all = Object.values(byFx).flat(); console.log('[live] markets seen:', [...new Set(all.map(o => o.market))]); console.log('[live] books seen:', [...new Set(all.map(o => o.sportsbook))]); console.log('[live] sample row:', JSON.stringify(all[0] || {}).slice(0, 400)); }
     window._byFx = byFx;
-    rows = computeRows(fixtures, byFx).concat(pbRows()).concat(kalshiRows()).concat(exchDirectArbRows(fixtures, byFx));
+    rows = computeRows(fixtures, byFx).concat(pbRows()).concat(kalshiRows());
     pruneSeen(new Set(rows.map(r => r.key)));
     lastAt = Date.now();
     setLastUpdated(new Date().toLocaleTimeString([], { hour:'numeric', minute:'2-digit', second:'2-digit' }));
@@ -2248,7 +2188,7 @@ async function load(force) {
   } catch(e) { console.error(e); setLastUpdated('error'); setSync('error'); toast(e.message); }
   busy = false; if ($('#syncDot').classList.contains('live')) setSync('idle'); $('#reload').classList.remove('spinning');
 }
-function recompute() { updateFiltersSummary(); if (window._byFx) { rows = computeRows(fixtures, window._byFx).concat(pbRows()).concat(kalshiRows()).concat(exchDirectArbRows(fixtures, window._byFx)); pruneSeen(new Set(rows.map(r => r.key))); render(); } }
+function recompute() { updateFiltersSummary(); if (window._byFx) { rows = computeRows(fixtures, window._byFx).concat(pbRows()).concat(kalshiRows()); pruneSeen(new Set(rows.map(r => r.key))); render(); } }
 ['minArb','minLim','pMin','pMax','liveOnly','timeoutsOnly','sharpUfcOnly'].forEach(id => $('#' + id).addEventListener('change', () => { saveLastFilters(); recompute(); }));
 $('#presetSave').addEventListener('click', () => {
   const name = prompt('Name this preset (e.g. "Sharp UFC", "Loose EV"):'); if (!name || !name.trim()) return;
