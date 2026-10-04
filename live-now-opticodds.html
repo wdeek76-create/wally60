@@ -167,6 +167,10 @@ header{padding:14px 16px 10px;padding-top:calc(14px + env(safe-area-inset-top))}
 .row.brk::before{background:var(--accent)!important;box-shadow:0 0 8px rgba(77,184,255,.9),0 0 16px rgba(77,184,255,.5)}
 .row.pinned::before{background:var(--amber)!important;box-shadow:0 0 8px rgba(245,166,35,.9)}
 .row.aligned{border-color:rgba(39,192,113,.4)}
+/* Held over from the last cycle it actually qualified in (grace window) — a visible but subtle
+   cue that this row's numbers are a beat old, not a fresh confirm. Clears on its own next poll
+   either way: back to full opacity if it requalifies, or gone if the grace window runs out. */
+.row.stale{opacity:.55}
 .gm{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}
 .gm .t{display:flex;align-items:center;gap:6px;font-weight:900;font-size:13px;text-transform:uppercase;letter-spacing:.2px}
 .gm .t img{width:18px;height:18px;object-fit:contain}
@@ -1496,6 +1500,28 @@ function computeRows(fxs, byFx) {
 // above (exchangeBacksPin/exchangeConsensus) and kalshiRows()'s reference role, same as Pinnacle,
 // and `skip()` above now excludes every exchange from the bettable `books` list on every row.
 const seen = {};
+// Grace window: rows are rebuilt 100% fresh every ~2s poll, with zero tolerance for a single bad
+// cycle. A transient failure in one odds-fetch batch (a timeout, a rate-limited book) silently
+// drops that batch's prices for the whole cycle (see loadOdds' .catch(...return null)), which was
+// making otherwise-still-live rows vanish and instantly reappear through no real price movement —
+// not the same thing as a genuinely tight margin flickering at a threshold edge. Holding a row's
+// last-known data for a short grace window absorbs that one-cycle blip without masking a real,
+// sustained disappearance (it still drops once the grace window elapses).
+const ROW_GRACE_MS = 6000;
+const rowCache = {};
+function applyGrace(freshRows) {
+  const now = Date.now();
+  const freshKeys = new Set(freshRows.map(r => r.key));
+  freshRows.forEach(r => { rowCache[r.key] = { row: r, lastSeen: now }; });
+  const held = [];
+  Object.keys(rowCache).forEach(k => {
+    if (freshKeys.has(k)) return;
+    const c = rowCache[k];
+    if (now - c.lastSeen < ROW_GRACE_MS) { held.push({ ...c.row, stale: true }); }
+    else delete rowCache[k];
+  });
+  return freshRows.concat(held);
+}
 function applyTrend(out) {
   const now = Date.now();
   out.forEach(r => {
@@ -2036,7 +2062,7 @@ function render() {
     if (st.fbSitu) stateBits.push(esc(st.fbSitu));
     if (situ) stateBits.push(esc(situ.text));
     const matchupName = `${esc(f.away.name || f.away.ab)} @ ${esc(f.home.name || f.home.ab)}`;
-    return `<div class="row glass live${r.isNew ? ' new' : ''}${r.aligned ? ' aligned' : ''}${isArb ? ' isarb' : ''}${st.brk ? ' brk' : ''}${isPinned ? ' pinned' : ''}" data-key="${esc(r.key)}">
+    return `<div class="row glass live${r.isNew ? ' new' : ''}${r.aligned ? ' aligned' : ''}${isArb ? ' isarb' : ''}${st.brk ? ' brk' : ''}${isPinned ? ' pinned' : ''}${r.stale ? ' stale' : ''}" data-key="${esc(r.key)}">
       <div class="cardhead">
         <div class="chleft"><span class="chsport">${SPORT_EMOJI[f.league.sport] || '🏟️'}</span><span class="chmatchup">${matchupName}</span><span class="lg">${esc(f.league.label)}</span>${st.brk ? `<span class="stoppage-badge">STOPPAGE</span><span class="brk-badge">${esc(st.brk)}</span>` : ''}${st.hot ? `<span class="hot-badge">${esc(st.hot)}</span>` : ''}</div>
         <div class="chmetrics"><span class="chpct${isArb?' arb':''}">${isArb ? arbPct.toFixed(2)+'%' : '+'+evPct.toFixed(1)+'%'}</span><span class="chfair">Fair ${fmtAm(probToAm(r.fair))}</span></div>
@@ -2224,7 +2250,7 @@ async function load(force) {
     gameState = st;
     if (!window._lg) { window._lg = true; const all = Object.values(byFx).flat(); console.log('[live] markets seen:', [...new Set(all.map(o => o.market))]); console.log('[live] books seen:', [...new Set(all.map(o => o.sportsbook))]); console.log('[live] sample row:', JSON.stringify(all[0] || {}).slice(0, 400)); }
     window._byFx = byFx;
-    rows = computeRows(fixtures, byFx).concat(pbRows()).concat(kalshiRows());
+    rows = applyGrace(computeRows(fixtures, byFx).concat(pbRows()).concat(kalshiRows()));
     pruneSeen(new Set(rows.map(r => r.key)));
     lastAt = Date.now();
     setLastUpdated(new Date().toLocaleTimeString([], { hour:'numeric', minute:'2-digit', second:'2-digit' }));
