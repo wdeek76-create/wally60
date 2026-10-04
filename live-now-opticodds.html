@@ -1468,7 +1468,11 @@ function computeRows(fxs, byFx) {
         // exchange-mirror check, so this is free.
         const oppSample = P.samples[oppSid];
         const oppSideLabel = oppSample ? sideLabelOf(oppSample) : null;
-        const oppBooks = {}; Object.entries(oppSideLower).forEach(([bk, o]) => { oppBooks[bk] = Number(o.price); });
+        // Each side carries its own liquidity too now, not just the price -- every book already
+        // has liqOf(o) available (used in `books` above), this just also stashes it on the
+        // opposite side so the grid can show a "$Xk" line under every column that has one, same
+        // as the reference card does, not only the Pinnacle column.
+        const oppBooks = {}; Object.entries(oppSideLower).forEach(([bk, o]) => { oppBooks[bk] = { price: Number(o.price), liq: liqOf(o) }; });
         out.push({ key, f, mk:P.mk, sideLabel, oppSideLabel, oppBooks, ttSide, pickSide, pickPoints, overUnder, fair:fp, aligned: aligned || exchangeBacksPin.length>0, exchangeConsensus, agreeNote, refLabel: exchangeConsensus?'Exch·Pin':refLabel, refBook, refBookShort: refBook==='Kalshi'?'Kalshi':'PIN', fdPrice: aligned ? fd[idx].price : null, pin:{ mine:pin[idx].price, other:pin[1-idx].price, lim, depth:pinDepth }, books, best:books[0], sharpForBooks, sharpAgainstBooks, exchangeBacksPin });
       });
     });
@@ -1981,22 +1985,23 @@ function render() {
       // full set doesn't fit the card width.
       r.books.slice(1).forEach(b => { if (!cols.some(c => c.name.toLowerCase() === b.book.toLowerCase())) cols.push({ name: b.book, isRef:false }); });
       Object.keys(r.oppBooks).forEach(bk => { if (!cols.some(c => c.name.toLowerCase() === bk)) cols.push({ name: EXTRA_BOOKS.find(b => b.name.toLowerCase() === bk)?.name || bk, isRef:false }); });
-      const myPriceFor = c => c.isRef ? r.pin.mine : r.books.find(b => b.book.toLowerCase() === c.name.toLowerCase())?.price;
-      const oppPriceFor = c => c.isRef ? r.pin.other : r.oppBooks[c.name.toLowerCase()];
+      // Every column now carries its own {price, liq} on both sides -- not just the ref book --
+      // so the grid can show a "$Xk" line under any book that has one, same as the reference card
+      // (it's not only ever under the Pinnacle column there either).
+      const refLiq = r.pin.depth ? r.pin.depth.total : r.pin.lim;
+      const myPriceFor = c => c.isRef ? { price: r.pin.mine, liq: refLiq } : (() => { const b = r.books.find(x => x.book.toLowerCase() === c.name.toLowerCase()); return b ? { price: b.price, liq: b.liq } : null; })();
+      const oppPriceFor = c => c.isRef ? { price: r.pin.other, liq: refLiq } : (r.oppBooks[c.name.toLowerCase()] || null);
       // Our own bettable book always shows (it IS the play). Every other column only earns a spot
       // if betting our actual price against THAT book's own opposite-side number is a genuine,
       // positive play -- "only show ref books that the play's good to", not just any book that
       // happens to have a number.
       const colsLive = cols.filter(c => {
         if (c.name.toLowerCase() === r.best.book.toLowerCase()) return true;
-        const opp = oppPriceFor(c); if (opp == null) return false;
-        return 1 - (imp(r.best.price) + imp(opp)) > 0;
+        const opp = oppPriceFor(c); if (opp?.price == null) return false;
+        return 1 - (imp(r.best.price) + imp(opp.price)) > 0;
       });
       const headCells = colsLive.map(c => { const clg = logoOf(c.name); return `<th>${clg ? `<img src="${esc(clg)}" alt="${esc(c.name)}" title="${esc(c.name)}">` : `<span class="bk">${esc(c.name.slice(0,3))}</span>`}</th>`; }).join('');
-      // Liquidity is only known for the ref-book column (r.pin.lim/depth) -- shown as a small
-      // "$Xk" line under its price, same spot the reference card annotates its sharp column with.
-      const refLiq = r.pin.depth ? r.pin.depth.total : r.pin.lim;
-      const cellsFor = getter => colsLive.map(c => { const p = getter(c); return `<td>${p != null ? fmtAm(p) : '—'}${c.isRef && refLiq != null ? `<div class="gridliq">${usd(refLiq)}</div>` : ''}</td>`; }).join('');
+      const cellsFor = getter => colsLive.map(c => { const cell = getter(c); return `<td>${cell?.price != null ? fmtAm(cell.price) : '—'}${cell?.liq != null ? `<div class="gridliq">${usd(cell.liq)}</div>` : ''}</td>`; }).join('');
       // Total/team-total markets repeat the line in the big pick heading above, so the grid rows
       // just say "Over"/"Under" (matching the reference card) instead of restating it; other
       // market types (spread/ML) keep their full side label since there's no shorter canonical word.
