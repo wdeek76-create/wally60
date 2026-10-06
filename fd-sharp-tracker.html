@@ -940,70 +940,20 @@ function groupRecords(bets, keyFn) {
   });
   return Object.values(groups).sort((a, b) => b.n - a.n);
 }
-// Same book list comboFor/comboBooksHtml use to build the combo string, but kept as an array —
-// membership test, not a display label. A pick can involve more than one book at once (e.g. a
-// 2-of-3 arb), so it belongs in more than one of the per-book backtests below; that's intentional,
-// not double-counting a single combo.
-const booksInvolvedIn = e => ((e.arbBooks && e.arbBooks.length >= MIN_ARB_BOOKS ? e.arbBooks : e.valueBooks) || []).map(b => b.book);
-// "Backtest FD as the sharp against just this one book" — same win/loss/units math as
-// groupRecords, but membership is "this book was one of the ones backing the pick", not a
-// single exclusive key, so a bet can land in more than one book's group. This is still FD's OWN
-// record (FD's price, FD's win/loss) — just sliced down to the bets where book X was the one
-// confirming it. It does NOT tell you what betting book X itself would have returned: for a
-// value-only pick, book X never had a bettable opposite-side price to begin with (it's only ever
-// a same-side reference used to build the fair estimate); for an arb pick it did, which is exactly
-// what groupHedgeLeg below answers instead.
+// "FD as the sharp" means: FD's price is what's trusted as fair; the actual, real-money bet this
+// backtest is grading is the one you'd place AT THE OTHER BOOK, not FD's own bet (FD's own record
+// is just the W-L totals at the top of the page — it doesn't need a separate per-book cut).
+// Book X's involvement here always means a real arb: book X posted a genuine bettable price on the
+// OTHER side of the same line (arbBooks). Betting that side at book X's own price is the exact
+// trade this backtest simulates. Value-only picks are correctly left out — book X's price there
+// was only ever a same-side reference used to help build the fair estimate, never a second bet.
+// Same game, same line, opposite side: FD winning means that side necessarily lost, and vice
+// versa (a push on one is a push on the other), so the outcome is just a flip of FD's own status.
+const HEDGE_STATUS = { won: 'lost', lost: 'won', push: 'push', pending: 'pending' };
 function groupByBook(bets, books) {
   return books.map(bk => {
-    const list = bets.filter(e => booksInvolvedIn(e).includes(bk));
-    const g = { key: `FD w/ ${bk} confirming`, n: 0, won: 0, lost: 0, push: 0, pending: 0, units: 0 };
-    list.forEach(e => {
-      g.n++;
-      if (e.status === 'won') { g.won++; g.units += unitsFor(e.fdPrice, e.stakeUnits); }
-      else if (e.status === 'lost') { g.lost++; g.units -= e.stakeUnits; }
-      else if (e.status === 'push') { g.push++; }
-      else g.pending++;
-    });
-    return g;
-  }).filter(g => g.n > 0).sort((a, b) => b.n - a.n);
-}
-// Same per-book backtest, sliced further by Over/Under — a book can be a great confirming signal
-// on one side and a bad one on the other, and that's invisible once both sides are blended into
-// one record. Anytime-TD ('yes') picks have no over/under, so they're left out here (they're
-// still counted in the combined groupByBook above).
-function groupByBookSide(bets, books) {
-  const out = [];
-  books.forEach(bk => {
-    ['over', 'under'].forEach(side => {
-      const list = bets.filter(e => booksInvolvedIn(e).includes(bk) && e.side === side);
-      if (!list.length) return;
-      const g = { key: `FD w/ ${bk} confirming · ${side === 'over' ? 'Over' : 'Under'}`, n: 0, won: 0, lost: 0, push: 0, pending: 0, units: 0 };
-      list.forEach(e => {
-        g.n++;
-        if (e.status === 'won') { g.won++; g.units += unitsFor(e.fdPrice, e.stakeUnits); }
-        else if (e.status === 'lost') { g.lost++; g.units -= e.stakeUnits; }
-        else if (e.status === 'push') { g.push++; }
-        else g.pending++;
-      });
-      out.push(g);
-    });
-  });
-  return out.sort((a, b) => b.n - a.n);
-}
-// The actual other leg: what betting book X's own opposite-side NUMBER would have returned,
-// using book X's own price for the payout, not FD's. This is the reversed view — only meaningful
-// for arb-qualified bets, where book X posted a real, bettable opposite-side price (arbBooks).
-// Value-only bets never had an opposite-side price from that book to begin with (it's a same-side
-// reference, not a hedge candidate), so they're correctly left out rather than shown as a
-// nonsense "what would I be betting into" on a side that was never actually priced there.
-// Same game, same line, opposite side: FD winning means that side necessarily lost, and vice
-// versa (a push on one is a push on the other) — so the outcome is a flip of FD's own status,
-// not something that needs separate grading.
-const HEDGE_STATUS = { won: 'lost', lost: 'won', push: 'push', pending: 'pending' };
-function groupHedgeLeg(bets, books) {
-  return books.map(bk => {
     const list = bets.filter(e => e.arbCount >= MIN_ARB_BOOKS && (e.arbBooks || []).some(b => b.book === bk));
-    const g = { key: `${bk}'s other side instead`, n: 0, won: 0, lost: 0, push: 0, pending: 0, units: 0 };
+    const g = { key: `FD vs ${bk}`, n: 0, won: 0, lost: 0, push: 0, pending: 0, units: 0 };
     list.forEach(e => {
       const leg = e.arbBooks.find(b => b.book === bk);
       const outcome = HEDGE_STATUS[e.status];
@@ -1016,16 +966,17 @@ function groupHedgeLeg(bets, books) {
     return g;
   }).filter(g => g.n > 0).sort((a, b) => b.n - a.n);
 }
-// Same hedge-leg backtest, sliced by the SIDE actually being bet at book X — the opposite of
-// FD's own side, since that's the leg this group is grading.
-function groupHedgeLegBySide(bets, books) {
+// Same per-book backtest, sliced further by Over/Under — a book can be a good bet to take on one
+// side and a bad one on the other, and that's invisible once both sides are blended into one
+// record. The side shown here is the side actually bet AT book X (the opposite of FD's side).
+function groupByBookSide(bets, books) {
   const out = [];
   books.forEach(bk => {
     ['over', 'under'].forEach(hedgeSide => {
       const fdSide = OPP_SIDE[hedgeSide];
       const list = bets.filter(e => e.side === fdSide && e.arbCount >= MIN_ARB_BOOKS && (e.arbBooks || []).some(b => b.book === bk));
       if (!list.length) return;
-      const g = { key: `${bk}'s other side instead · ${hedgeSide === 'over' ? 'Over' : 'Under'}`, n: 0, won: 0, lost: 0, push: 0, pending: 0, units: 0 };
+      const g = { key: `FD vs ${bk} · ${hedgeSide === 'over' ? 'Over' : 'Under'}`, n: 0, won: 0, lost: 0, push: 0, pending: 0, units: 0 };
       list.forEach(e => {
         const leg = e.arbBooks.find(b => b.book === bk);
         const outcome = HEDGE_STATUS[e.status];
@@ -1107,10 +1058,8 @@ function buildRecapText(includeLadders) {
   pushBreakdown('By EV %', groupRecords(all.filter(e => e.evPct != null), e => arbBucket(e.evPct)));
   pushBreakdown('By EV % + O/U', groupRecords(all.filter(e => e.evPct != null), e => `${arbBucket(e.evPct)} · ${sideLabelFor(e)}`));
   pushBreakdown('By Consensus Combo', groupRecords(mainGraded, comboFor));
-  pushBreakdown('FD Record When Each Book Confirms (backtest)', groupByBook(mainGraded, CONSENSUS_BOOKS));
-  pushBreakdown('FD Record When Each Book Confirms + O/U (backtest)', groupByBookSide(mainGraded, CONSENSUS_BOOKS));
-  pushBreakdown('Hedge Leg: Bet That Book\'s Other Side Instead (backtest)', groupHedgeLeg(mainGraded, CONSENSUS_BOOKS));
-  pushBreakdown('Hedge Leg + O/U (backtest)', groupHedgeLegBySide(mainGraded, CONSENSUS_BOOKS));
+  pushBreakdown('FD vs Each Book (backtest)', groupByBook(mainGraded, CONSENSUS_BOOKS));
+  pushBreakdown('FD vs Each Book + O/U (backtest)', groupByBookSide(mainGraded, CONSENSUS_BOOKS));
   pushBreakdown('By Quarter (bet timing)', groupRecords(all, e => periodLabel(e.betPeriod)));
   pushBreakdown('By Half (bet timing)', groupRecords(all, e => halfLabel(e.betPeriod)));
   pushBreakdown('Hot Situation (1 away, 1-2Q left)', groupRecords(all, hotLabel));
@@ -1392,10 +1341,8 @@ function renderTracker() {
     ${breakdownHtml('By EV %', groupRecords(bets.filter(e => e.evPct != null), e => arbBucket(e.evPct)))}
     ${breakdownHtml('By EV % + O/U', groupRecords(bets.filter(e => e.evPct != null), e => `${arbBucket(e.evPct)} · ${sideLabelFor(e)}`))}
     ${breakdownHtml('By Consensus Combo', groupRecords(bets, comboFor))}
-    ${breakdownHtml('FD Record When Each Book Confirms (backtest)', groupByBook(bets, CONSENSUS_BOOKS))}
-    ${breakdownHtml('FD Record When Each Book Confirms + O/U (backtest)', groupByBookSide(bets, CONSENSUS_BOOKS))}
-    ${breakdownHtml("Hedge Leg: Bet That Book's Other Side Instead (backtest)", groupHedgeLeg(bets, CONSENSUS_BOOKS))}
-    ${breakdownHtml('Hedge Leg + O/U (backtest)', groupHedgeLegBySide(bets, CONSENSUS_BOOKS))}
+    ${breakdownHtml('FD vs Each Book (backtest)', groupByBook(bets, CONSENSUS_BOOKS))}
+    ${breakdownHtml('FD vs Each Book + O/U (backtest)', groupByBookSide(bets, CONSENSUS_BOOKS))}
     ${breakdownHtml('By Quarter (bet timing)', groupRecords(bets, e => periodLabel(e.betPeriod)))}
     ${breakdownHtml('By Half (bet timing)', groupRecords(bets, e => halfLabel(e.betPeriod)))}
     ${breakdownHtml('Hot Situation (1 away, 1-2Q left)', groupRecords(bets, hotLabel))}
