@@ -1518,7 +1518,8 @@ async function refreshTracker(){
   const stat=$('#stat'); stat.textContent='Tracker · refreshing…';
   try{
     const open=tracked.filter(t=>!t.final);
-    const fids=[...new Set(open.map(t=>t.fixtureId))];
+    // Manual backfilled bets left as "Pending" have no real fixture to look up at all.
+    const fids=[...new Set(open.map(t=>t.fixtureId).filter(Boolean))];
     // 1) fixture results (status, clock, scores)
     const res={};
     for(const ids of chunk(fids,5)){ try{ const r=await oo('/fixtures/results',{fixture_id:ids}); (r?.data||[]).forEach(x=>{ if(x?.fixture?.id) res[x.fixture.id]=x; }); }catch(e){ console.warn('[tracker] results',e.message); } }
@@ -1617,49 +1618,47 @@ function teamTotalsSummaryHtml(){
 // since moved), so it takes your own numbers directly instead of re-reading the current board.
 // Still ties to a real fixture (so refreshTracker can grade it off the final score like any other
 // tracked pick) -- just needs the NHL tab opened at least once so `fixtures` is populated.
+// For backfilling bets you already placed and already know the outcome of (old bets, a
+// quick starting record) — not tied to any loaded fixture at all, so it works even with
+// nothing else loaded, and takes the result directly instead of waiting on a score to grade it.
 function ttAddFormHtml(){
-  if(!fixtures.length || !fixtures.some(f=>f.home && f.away)){
-    return `<div class="ttadd"><div class="ttaddh">Add a bet</div><div class="dim" style="font-size:11px">Open the NHL tab first so today's games load, then come back here to add one.</div></div>`;
-  }
-  const opts=fixtures.flatMap(f=>[
-    { v:`${f.id}|away`, label:`${f.away.name} — ${f.away.ab}@${f.home.ab}` },
-    { v:`${f.id}|home`, label:`${f.home.name} — ${f.away.ab}@${f.home.ab}` },
-  ]);
   const books=[...new Set(BOOKS.map(b=>b.toLowerCase()))];
   return `<div class="ttadd">
-    <div class="ttaddh">Add a bet</div>
-    <select id="ttaTeam">${opts.map(o=>`<option value="${esc(o.v)}">${esc(o.label)}</option>`).join('')}</select>
+    <div class="ttaddh">Add a bet (already placed / already settled)</div>
+    <input id="ttaTeam" type="text" placeholder="Team e.g. Carolina Hurricanes">
+    <input id="ttaOpp" type="text" placeholder="Opponent (optional)">
     <div class="ttaddrow">
       <select id="ttaSide"><option value="over">Over</option><option value="under">Under</option></select>
       <input id="ttaLine" type="text" inputmode="decimal" placeholder="Line 3.5">
       <input id="ttaPrice" type="text" inputmode="numeric" placeholder="Price -115">
     </div>
-    <select id="ttaBook"><option value="">Book (optional)</option>${books.map(b=>`<option value="${esc(b)}">${esc(bookLabel(b))}</option>`).join('')}</select>
+    <div class="ttaddrow">
+      <select id="ttaFavDog"><option value="favorite">Favorite</option><option value="underdog">Underdog</option></select>
+      <select id="ttaResult"><option value="win">Won</option><option value="loss">Lost</option><option value="push">Push</option><option value="">Pending</option></select>
+      <select id="ttaBook"><option value="">Book (optional)</option>${books.map(b=>`<option value="${esc(b)}">${esc(bookLabel(b))}</option>`).join('')}</select>
+    </div>
     <button class="big p" id="ttaAdd">Add</button>
   </div>`;
 }
 function addManualTeamTotal(){
-  const sel=$('#ttaTeam')?.value; if(!sel) return;
-  const [fixtureId, teamSide]=sel.split('|');
-  const f=fixtures.find(x=>x.id===fixtureId); if(!f) return;
+  const team=$('#ttaTeam')?.value.trim(); if(!team){ toast('Team name required'); return; }
+  const opp=$('#ttaOpp')?.value.trim()||'';
   const side=$('#ttaSide').value;
   const lineRaw=$('#ttaLine').value.trim(), priceRaw=$('#ttaPrice').value.trim();
   const line=Number(lineRaw); if(!lineRaw || isNaN(line)){ toast('Line must be a number'); return; }
   const price=parseAm(priceRaw); if(!priceRaw || price==null){ toast('Price wants American odds, e.g. -110 or +120'); return; }
+  const favDog=$('#ttaFavDog').value;
+  const result=$('#ttaResult').value || null;
   const bookKey=$('#ttaBook').value || null;
-  const teamName = teamSide==='home' ? f.home.name : f.away.name;
-  const favDog=moneylineFavDog(fixtureId, teamName);
-  const snap={ at:Date.now(), byBook: bookKey?{[bookKey]:{price,points:line,liq:null}}:{}, best:price };
-  tracked.unshift({ id:Date.now()+Math.random().toString(36).slice(2,6), sportKey:'nhl', fixtureId, start:f.start||null,
-    away:f.away.ab||f.away.name||'', home:f.home.ab||f.home.name||'', card:null,
-    playerKey:normName(teamName), playerName:teamName, pid:null, headshot:'',
-    teamAb: teamSide==='home'?f.home.ab:f.away.ab, teamLogo: teamSide==='home'?f.home.logo:f.away.logo,
+  tracked.unshift({ id:Date.now()+Math.random().toString(36).slice(2,6), sportKey:'nhl', fixtureId:null, start:null,
+    away:team, home:opp, card:null,
+    playerKey:normName(team), playerName:team, pid:null, headshot:'', teamAb:'', teamLogo:'',
     mkey:'tt', marketLabel:'Team Total', marketNames:['Team Total'], side, line:Number(line),
     price, book: bookKey?bookLabel(bookKey):null, bookKey, pinned:!!bookKey, trackedAt:Date.now(),
     mainLineAtTrack: Number(line),
-    isTeam:true, teamSide, favDog, stakeUnits:1,
-    snapshots:[snap], live:null, actual:null, result:null, open:null, close:null });
-  saveTracked(); toast(`Added ${teamName} ${side==='over'?'O':'U'}${line}`); renderTracker(); refreshTracker();
+    isTeam:true, teamSide:null, favDog, stakeUnits:1, manual:true,
+    snapshots:[{ at:Date.now(), byBook:{}, best:price }], live:null, actual:null, result, final: result!=null, open:null, close:null });
+  saveTracked(); toast(`Added ${team} ${side==='over'?'O':'U'}${line}${result?' · '+result.toUpperCase():''}`); renderTracker();
 }
 function buildTeamTotalsText(){
   const tts=tracked.filter(t=>t.isTeam);
