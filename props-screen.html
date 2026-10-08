@@ -121,9 +121,9 @@ main{flex:1;padding:12px calc(var(--sar) + 12px) 160px calc(var(--sal) + 12px)}
    needing any other highlight to call out which cell is the best price. */
 .bboard{padding:4px 8px 2px;border-left:1px solid var(--line2);border-right:1px solid var(--line2)}
 .bhead.single{display:flex;justify-content:center;align-items:center;gap:6px;padding:0 2px 4px;font-size:10px;font-weight:800;letter-spacing:.6px;text-transform:uppercase;color:#fff;text-align:center}
-.bboard2{display:grid;grid-template-columns:1fr 1fr;gap:6px}
-.bcolwrap{display:flex;flex-direction:column;gap:6px;min-width:0}
-.bcollbl{font-size:10px;font-weight:800;letter-spacing:.6px;text-transform:uppercase;color:#fff;text-align:center}
+.sidetog{display:flex;gap:6px;padding:2px 2px 10px}
+.stbtn{flex:1;padding:8px;border-radius:10px;border:1px solid var(--line2);background:var(--bg2);color:#fff;font-weight:800;font-size:12px;letter-spacing:.3px}
+.stbtn.on{border-color:var(--purple);background:rgba(34,197,94,.18);color:var(--purple)}
 .mlcompare{display:flex;align-items:center;justify-content:center;gap:10px;margin:2px 2px 8px;padding:10px 8px;border-radius:12px;background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.25)}
 .mlside{flex:1;text-align:center;min-width:0;border-radius:9px;padding:5px 4px;transition:background .15s}
 .mlside.lead{background:rgba(34,197,94,.18);box-shadow:0 0 0 1px rgba(34,197,94,.5) inset}
@@ -235,8 +235,7 @@ main{flex:1;padding:12px calc(var(--sar) + 12px) 160px calc(var(--sal) + 12px)}
 .gdmu{font-size:10px;color:#fff;opacity:.6;margin-top:1px}
 .gd-mk{margin:0;border:none;border-radius:0;border-top:1px solid var(--line2);background:transparent}
 .gd-mk .bboard{padding:8px;border-left:none;border-right:none}
-.gd-mk .bboard2{display:flex;flex-direction:column;gap:10px}
-.gd-mk .bcollbl{text-align:left}
+.gd-mk .sidetog{display:none}
 .gd-mk .bcol{flex-direction:row;overflow-x:auto;gap:6px;scrollbar-width:none;-webkit-overflow-scrolling:touch;padding-bottom:2px}
 .gd-mk .bcol::-webkit-scrollbar{display:none}
 .gd-mk .bbx{flex:0 0 84px;width:84px;padding:7px 4px}
@@ -1142,7 +1141,10 @@ function bookLiqValue(b){
   });
   return total;
 }
-function boardHtml(rows, p, mkey, ctxKey, mainLine, pt, ro){
+// Which side the two-sided board shows -- a global toggle (not per-card) so every board on
+// screen stays in sync, persisted across reloads.
+let oddsSide = LS.get('props_side','over')==='under' ? 'under' : 'over';
+function boardHtml(rows, p, mkey, ctxKey, mainLine, pt, ro, embedToggle){
   const list=bookBoard(rows);
   const opm=ro?null:openMap(p,mkey);
   if(!list.length) return `<div class="bempty">No books posting this one.</div>`;
@@ -1212,14 +1214,17 @@ function boardHtml(rows, p, mkey, ctxKey, mainLine, pt, ro){
     const k=nm.toLowerCase(); const lg=bookLogo(k);
     return `<div class="bnonerow"><div class="rlogo">${lg?`<img src="${esc(lg)}" alt="">`:`<span class="rlogotxt">${esc(bookShort(k))}</span>`}</div><span>${esc(nm)}</span></div>`;
   }).join('')}</div>` : '';
-  // Each column carries its own "Over"/"Under" label instead of one shared header row above
-  // both -- the grid view restacks these columns into full-width horizontal strips, where a
-  // label that isn't physically attached to its own strip no longer lines up with it.
+  // One side shown at a time (Over/Under toggle at top), full-width boxes best-to-worst --
+  // not two squeezed side-by-side columns, so every box has real room for its logo, liq and Bet
+  // button. The toggle itself is global (same side everywhere), so a grid row with many of these
+  // boards on screen at once can skip rendering its own copy (embedToggle=false) and let one
+  // shared control at the top of that screen drive them all.
+  const activeSide = oddsSide==='under' ? 'under' : 'over';
+  const activeSorted = activeSide==='under' ? underSorted : overSorted;
+  const toggle = embedToggle===false ? '' : `<div class="sidetog"><button class="stbtn${activeSide==='over'?' on':''}" data-side="over">Over</button><button class="stbtn${activeSide==='under'?' on':''}" data-side="under">Under</button></div>`;
   return `<div class="bboard">
-    <div class="bboard2">
-      <div class="bcolwrap"><div class="bcollbl">Over</div><div class="bcol">${overSorted.map((b,i)=>bookBoxHtml(b,'over',b.over,pt,ctxKey,i,ro)).join('')||'<div class="bempty">No books</div>'}</div></div>
-      <div class="bcolwrap"><div class="bcollbl">Under</div><div class="bcol">${underSorted.map((b,i)=>bookBoxHtml(b,'under',b.under,pt,ctxKey,i,ro)).join('')||'<div class="bempty">No books</div>'}</div></div>
-    </div>
+    ${toggle}
+    <div class="bcol">${activeSorted.map((b,i)=>bookBoxHtml(b,activeSide,b[activeSide],pt,ctxKey,i,ro)).join('')||'<div class="bempty">No books</div>'}</div>
     ${missingHtml}
   </div>`;
 }
@@ -1459,12 +1464,29 @@ function bindView(p){
     const betchoice = ev.target.closest('.mk [data-betchoice]');
     if(betchoice){ ev.stopPropagation(); showBetChoice(betchoice, betChoices[betchoice.dataset.betchoice]||[]); return; }
     const pill = ev.target.closest('.mk [data-pill]');
-    if(pill){ ev.stopPropagation(); showDetailPop(pill, detailPops[pill.dataset.pill], current); return; }
+    // Resolve the player from the pill's own ctx (its key is the first `|`-segment) rather than
+    // the global `current` -- `current` is null while browsing the grid, where many different
+    // players' boards are on screen at once.
+    if(pill){ ev.stopPropagation(); const pk=pill.dataset.pill.split('|')[0]; const pp=players.find(x=>x.key===pk)||current; showDetailPop(pill, detailPops[pill.dataset.pill], pp); return; }
     const stp = ev.target.closest('.stp');
     if(stp){ if(!stp.disabled) stepLine(current, stp.dataset.ctx, Number(stp.dataset.step)); return; }
     const reset = ev.target.closest('[data-reset]');
     if(reset){ selLine[reset.dataset.reset]=null; rerenderCard(current, reset.dataset.reset); return; }
+    const stbtn = ev.target.closest('.stbtn[data-side]');
+    if(stbtn){ setOddsSide(stbtn.dataset.side); return; }
   });
+}
+// Flips the global Over/Under toggle and refreshes whatever board(s) are currently on screen --
+// the open player's visible market card(s), or the whole grid if that's what's showing.
+function setOddsSide(side){
+  if(side!=='over' && side!=='under') return;
+  oddsSide=side; LS.set('props_side', side);
+  if(current){
+    const S=SPORTS[sportKey]; const mkeys=S.markets.map(m=>m[0]).filter(k=>current.marketKeys.has(k));
+    mkeys.forEach(mk=>{ const ctx=`${current.key}|${mk}`; if(document.querySelector(`.mk[data-ctx="${ctx}"]`)) rerenderCard(current, ctx); });
+  } else if(viewMode==='sport' && gridMode){
+    renderGrid();
+  }
 }
 // DraftKings' Bet button covers 3 real apps sharing the same lines (DK, Courtside, Onyx Odds) —
 // this is the small popover that lets the user pick which one actually opens.
@@ -2002,7 +2024,7 @@ function gridRowHtml(p, mkey){
   const teamAb = info?.teamId ? (f?.home.id===info.teamId?f.home.ab:f?.away.id===info.teamId?f.away.ab:'') : '';
   const dateBadge = f? `${esc(etDateKey(f.start))} · ${esc(etTime(f.start))}` : '';
   const matchup = f? `${esc(f.away.ab||f.away.name)} @ ${esc(f.home.ab||f.home.name)}` : '';
-  const board = rows.length ? boardHtml(rows, p, mkey, ctx, mainLine, ptFor(p,mkey), false) : `<div class="bempty">No books posting this one.</div>`;
+  const board = rows.length ? boardHtml(rows, p, mkey, ctx, mainLine, ptFor(p,mkey), false, false) : `<div class="bempty">No books posting this one.</div>`;
   return `<div class="gdplyr">
     <div class="gdphdr" data-k="${esc(p.key)}">
       <div class="gddate">${dateBadge}</div>
@@ -2039,13 +2061,16 @@ function renderGrid(){
   if(!gridMarket || !mkeys.includes(gridMarket)) gridMarket=mkeys[0];
   if(!fixtures.length){ view.innerHTML=`<div class="empty">No ${S.label} games in the window.</div>`; return; }
   const tabs=`<div class="gdtabs">${S.markets.map(m=>`<button class="gdtab${m[0]===gridMarket?' on':''}" data-mk="${m[0]}">${esc(m[1])}</button>`).join('')}</div>`;
+  // One shared Over/Under toggle for the whole grid (not one per row) -- each row's board reads
+  // the same global oddsSide and skips its own copy (embedToggle=false in gridRowHtml).
+  const sideToggle = S.ml ? '' : `<div class="sidetog"><button class="stbtn${oddsSide==='over'?' on':''}" data-side="over">Over</button><button class="stbtn${oddsSide==='under'?' on':''}" data-side="under">Under</button></div>`;
   const rows=players.filter(p=>p.marketKeys.has(gridMarket) && !fixtures.find(f=>f.id===p.fixtureId)?.live).sort((a,b)=>{
     const fa=fixtures.find(x=>x.id===a.fixtureId), fb=fixtures.find(x=>x.id===b.fixtureId);
     const ta=fa?new Date(fa.start).getTime():0, tb=fb?new Date(fb.start).getTime():0;
     return ta-tb || a.name.localeCompare(b.name);
   });
   const body=rows.map(p=>gridRowHtml(p,gridMarket)).join('') || `<div class="empty">No ${esc(marketLabel(sportKey,gridMarket))} props posted yet.</div>`;
-  view.innerHTML=`${tabs}<div class="gdlist">${body}</div>`;
+  view.innerHTML=`${tabs}${sideToggle}<div class="gdlist">${body}</div>`;
   view.querySelectorAll('.gdtab[data-mk]').forEach(el=>el.addEventListener('click',()=>{ gridMarket=el.dataset.mk; renderGrid(); }));
   view.querySelectorAll('.gdphdr[data-k]').forEach(el=>el.addEventListener('click',()=>{
     const p=players.find(x=>x.key===el.dataset.k); if(!p) return;
