@@ -895,10 +895,10 @@ function bestFirst(rows){
   const by={}; rows.forEach(o=>{ const k=canonBook(o.sportsbook); if(!by[k]||Number(o.price)>Number(by[k].price)) by[k]=o; });
   return Object.values(by).sort((a,b)=>Number(b.price)-Number(a.price));
 }
-// Short natural-language summary of what's happened since open — which side the consensus line
-// itself moved toward (a line drifting up means Over is the side drawing money) plus how much
-// that side's own best price has moved, e.g. "Over 8.5 getting the action — line moved from 7.5,
-// moved 8¢ worse".
+// Plain fact, not a read on betting pressure: the consensus line itself changed since open, plus
+// how much that side's own best price has moved since then, e.g. "Line opened 17.5, now 18.5 —
+// Over 8¢ worse". No "X getting the action" framing — that implies a directional read this app
+// isn't actually making.
 function moveNote(nowRows, opRows, mainLine, opLine){
   if(opLine==null || mainLine==null || opLine===mainLine || !opRows.length) return '';
   const dir = mainLine>opLine ? 'over' : 'under';
@@ -907,9 +907,9 @@ function moveNote(nowRows, opRows, mainLine, opLine){
   let centsTxt='';
   if(bestNow && bestOp){
     const dc = cents(Number(bestNow.price)) - cents(Number(bestOp.price));
-    if(dc) centsTxt = `, moved ${Math.abs(dc)}¢ ${dc<0?'worse':'better'}`;
+    if(dc) centsTxt = ` — ${dir==='over'?'Over':'Under'} ${Math.abs(dc)}¢ ${dc<0?'worse':'better'}`;
   }
-  return `${dir==='over'?'Over':'Under'} ${mainLine} getting the action — line moved from ${opLine}${centsTxt}`;
+  return `Line opened ${opLine}, now ${mainLine}${centsTxt}`;
 }
 // One row per book: the line THAT book is posting, plus its best price a side.
 function bookBoard(rows){
@@ -1476,8 +1476,9 @@ function trackProp(p, mkey, label, line, srcRows, bookKey){
   const snap=snapshotFrom(rowsAll, side, line);
   const bestBook=(bookKey&&snap.byBook[bookKey]) ? [bookKey,snap.byBook[bookKey]] : Object.entries(snap.byBook).sort((a,b)=>b[1].price-a[1].price)[0];
   const teamAb = info?.teamId ? (f?.home.id===info.teamId?f.home.ab:f?.away.id===info.teamId?f.away.ab:'') : (p.isTeam ? (p.teamSide==='home'?f?.home.ab:p.teamSide==='away'?f?.away.ab:'') : '');
-  // Team totals always stake a flat 1 unit on either side (favorite or underdog) — the point of
-  // tagging favDog is to split the record afterward, never to size the bet differently.
+  // Team totals always bet TO WIN 1 unit on either side (favorite or underdog) -- stakeUnits
+  // here is that win target, not a risk amount; ttRecord backs out the actual risk from price.
+  // The point of tagging favDog is to split the record afterward, never to size the bet differently.
   tracked.unshift({ id:Date.now()+Math.random().toString(36).slice(2,6), sportKey, fixtureId:p.fixtureId, start:f?.start||null, away:f?.away.ab||f?.away.name||'', home:f?.home.ab||f?.home.name||'', card:f?.card||null,
     playerKey:p.key, playerName:p.name, pid:p.pid||null, headshot:info?.headshot||'', teamAb, teamLogo: info?.teamId ? (f?.home.id===info.teamId?f.home.logo:f?.away.logo) : '',
     mkey, marketLabel:marketLabel(sportKey,mkey), marketNames:[...new Set(rowsAll.map(o=>o.market))], side, line:line??null,
@@ -1595,15 +1596,23 @@ function snapsHtml(t){
   return `<div class="snaps"><div class="hd">Board history</div>${rows}</div>`;
 }
 // Team totals record, split by favorite/underdog (favDog is tagged off that team's own
-// moneyline at track time) — same win/loss/push + flat-1u-payout math fd-sharp-tracker.html uses,
-// just scoped to the subset of `tracked` that's a team total (t.isTeam).
+// moneyline at track time). Staked "to win" t.stakeUnits (1u on both favs and dogs), not a flat
+// risk amount -- a win is always exactly +stakeUnits regardless of price, and the actual amount
+// risked (what a loss costs, and what ROI's denominator is built from) is backed out from the
+// price instead: risking less than 1u at plus money to win 1u, more than 1u at minus money.
+const riskToWin = (price, winAmt) => { price=Number(price); return price>0 ? winAmt*100/price : winAmt*Math.abs(price)/100; };
 function ttRecord(list){
   const w=list.filter(t=>t.result==='win').length, l=list.filter(t=>t.result==='loss').length, p=list.filter(t=>t.result==='push').length;
-  let u=0; list.forEach(t=>{ if(t.result==='win') u+=unitsFor(t.price,t.stakeUnits||1); else if(t.result==='loss') u-=(t.stakeUnits||1); });
-  // ROI against everything actually settled (wins+losses+pushes) -- a push still had money
-  // resting on it even though the stake comes back, so it belongs in the base, same convention
-  // as every other unit-tracked backtest in this set.
-  const staked=w+l+p; const roi=staked>0 ? (u/staked*100) : null;
+  let u=0, staked=0;
+  list.forEach(t=>{
+    const win=t.stakeUnits||1, risk=riskToWin(t.price, win);
+    if(t.result==='win'){ u+=win; staked+=risk; }
+    else if(t.result==='loss'){ u-=risk; staked+=risk; }
+    // a push still had money resting on it even though the stake comes back, so its risk still
+    // belongs in ROI's base -- just no change to units won/lost.
+    else if(t.result==='push'){ staked+=risk; }
+  });
+  const roi=staked>0 ? (u/staked*100) : null;
   return { w,l,p,u,n:list.length,roi };
 }
 function teamTotalsSummaryHtml(){
