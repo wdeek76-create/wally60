@@ -220,6 +220,9 @@ main{flex:1;padding:12px calc(var(--sar) + 12px) 160px calc(var(--sal) + 12px)}
 .back{padding:6px 10px;border-radius:8px;border:1px solid var(--line2);background:var(--bg2);color:#fff;font-size:12px;font-weight:700}
 .pl{display:flex;align-items:center;justify-content:space-between;padding:12px;border:1px solid var(--line);border-radius:12px;background:var(--bg2);margin-bottom:6px;font-weight:700}
 .pl .m{font-family:var(--mono);font-size:10px;color:#fff;font-weight:500}
+.pl.off{opacity:.55;font-weight:500;cursor:default}
+.nolines{margin-top:4px}
+.nolines #nlToggle{width:100%;text-align:left;padding:10px 12px;border-radius:12px;border:1px dashed var(--line2);background:transparent;color:var(--dim);font-size:11px;font-weight:700;margin-bottom:6px}
 .flc{display:flex;flex-direction:column;gap:8px;padding:10px;border:1px solid var(--line2);border-radius:16px;background:var(--bg2);cursor:pointer}
 .flph{position:relative;aspect-ratio:1;border-radius:12px;overflow:hidden;background:var(--bg3);display:flex;align-items:center;justify-content:center}
 .flph img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
@@ -1844,15 +1847,43 @@ function renderSlate(){
   view.innerHTML=`<div class="slate">${h}</div>`;
   view.querySelectorAll('.gm').forEach(el=>el.addEventListener('click',()=>renderGame(el.dataset.fid)));
 }
-function renderGame(fid){
+// Full team rosters, cached per team id -- players is only ever built from ODDS rows, so a
+// player nobody's posted a line on yet never makes it in there at all, not just hidden behind a
+// toggle. This is the separate roster fetch needed to know they exist in the first place.
+const rosterCache = {};
+async function ensureRoster(teamId){
+  if(!teamId || rosterCache[teamId]) return rosterCache[teamId]||[];
+  try{ const r=await oo('/players',{team_id:[teamId]}); rosterCache[teamId]=(r?.data||[]).filter(d=>d?.name); }
+  catch(e){ console.warn('[props] roster fetch failed',e.message); rosterCache[teamId]=[]; }
+  return rosterCache[teamId];
+}
+let noLinesShown=false;
+let openGameFid=null;
+async function renderGame(fid){
   const f=fixtures.find(x=>x.id===fid); if(!f) return renderSlate();
   if(f.live){ $('#view').innerHTML=`<div class="sh shback"><span class="t">${esc(f.away.ab)} @ ${esc(f.home.ab)} · <span class="neg">LIVE</span></span><button class="back" id="back">‹ Slate</button></div><div class="empty">This game is live — its props are no longer shown here. Anything you already tracked keeps updating in the Tracker tab.</div>`; $('#back').addEventListener('click',renderSlate); return; }
-  const list=players.filter(p=>p.fixtureId===fid).sort((a,b)=>a.name.localeCompare(b.name));
+  noLinesShown=false;
+  const withLines=players.filter(p=>p.fixtureId===fid).sort((a,b)=>a.name.localeCompare(b.name));
+  const withKeys=new Set(withLines.map(p=>p.key));
   const mkTxt = p => `${[...p.marketKeys].map(k=>marketLabel(sportKey,k)).slice(0,4).join(' · ')}${p.marketKeys.size>4?' +'+(p.marketKeys.size-4):''}`;
-  const h=list.map(p=>`<div class="pl" data-k="${esc(p.key)}"><span>${esc(titleCase(p.name))} ${injPill(p)}</span><span class="m">${mkTxt(p)}</span></div>`).join('');
-  $('#view').innerHTML=`<div class="sh shback"><span class="t">${f.away.logo?`<img class="tl" src="${esc(f.away.logo)}" alt=""> `:''}${esc(f.away.ab)} @ ${f.home.logo?`<img class="tl" src="${esc(f.home.logo)}" alt=""> `:''}${esc(f.home.ab)} · ${f.live?'<span class="neg">LIVE</span>':etTime(f.start)}</span><button class="back" id="back">‹ Slate</button></div>${h||'<div class="empty">No props posted yet.</div>'}`;
-  $('#back').addEventListener('click',renderSlate); window.scrollTo({top:0});
-  $('#view').querySelectorAll('.pl').forEach(el=>el.addEventListener('click',()=>{ const p=players.find(x=>x.key===el.dataset.k); if(p) openPlayer(p); }));
+  const rowHtml = p => `<div class="pl" data-k="${esc(p.key)}"><span>${esc(titleCase(p.name))} ${injPill(p)}</span><span class="m">${mkTxt(p)}</span></div>`;
+  const draw=(withoutLines)=>{
+    const h=withLines.map(rowHtml).join('');
+    const noLinesHtml = withoutLines.length
+      ? `<div class="nolines"><button id="nlToggle">${withoutLines.length} player${withoutLines.length===1?'':'s'} without lines ${noLinesShown?'▴ hide':'▾ show'}</button>${noLinesShown?withoutLines.map(n=>`<div class="pl off"><span>${esc(titleCase(n))}</span></div>`).join(''):''}</div>` : '';
+    $('#view').innerHTML=`<div class="sh shback"><span class="t">${f.away.logo?`<img class="tl" src="${esc(f.away.logo)}" alt=""> `:''}${esc(f.away.ab)} @ ${f.home.logo?`<img class="tl" src="${esc(f.home.logo)}" alt=""> `:''}${esc(f.home.ab)} · ${f.live?'<span class="neg">LIVE</span>':etTime(f.start)}</span><button class="back" id="back">‹ Slate</button></div>${h||'<div class="empty">No props posted yet.</div>'}${noLinesHtml}`;
+    $('#back').addEventListener('click',renderSlate);
+    $('#view').querySelectorAll('.pl[data-k]').forEach(el=>el.addEventListener('click',()=>{ const p=players.find(x=>x.key===el.dataset.k); if(p) openPlayer(p); }));
+    $('#nlToggle')?.addEventListener('click',()=>{ noLinesShown=!noLinesShown; draw(withoutLines); });
+  };
+  draw([]); window.scrollTo({top:0});
+  openGameFid=fid;
+  // Roster fetch resolves after the lines-only list is already up, then redraws once with
+  // whichever names from the full roster never got a line at all -- never blocks the initial paint.
+  const [awayRoster, homeRoster] = await Promise.all([ensureRoster(f.away.id), ensureRoster(f.home.id)]);
+  if(openGameFid!==fid) return; // navigated away while the roster fetch was in flight
+  const withoutLines=[...awayRoster,...homeRoster].map(d=>d.name).filter(n=>n && !withKeys.has(normName(cleanSel(n)))).filter((n,i,a)=>a.findIndex(x=>normName(x)===normName(n))===i).sort((a,b)=>a.localeCompare(b));
+  draw(withoutLines);
 }
 // ───────────────────────── wiring ─────────────────────────
 let sportGameCounts = {};      // extended window (S.days ahead) -- still what's actually fetched/browsed
