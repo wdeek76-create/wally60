@@ -148,7 +148,7 @@ main{flex:1;padding:12px calc(var(--sar) + 12px) 160px calc(var(--sal) + 12px)}
 .rcell.empty{color:#fff;font-size:15px;font-weight:700;cursor:default}
 .rcell .rv{font-family:var(--pricefont);color:#fff;font-weight:600;font-size:16px;line-height:1;font-variant-numeric:tabular-nums;letter-spacing:0}
 .rcell .rbl{display:flex;align-items:center;justify-content:center;gap:4px;font-size:11px;font-weight:800;padding:6px 16px;margin-top:4px;border-radius:999px;border:1px solid rgba(34,197,94,.9);background:var(--green);color:#06210f;text-decoration:none;letter-spacing:.3px;box-shadow:inset 0 1px 1px rgba(255,255,255,.5),inset 0 -1px 2px rgba(0,0,0,.2),0 0 10px rgba(34,197,94,.35)}
-.rblarr{font-size:12px;font-weight:900;line-height:1}
+.rblarr{flex:0 0 auto;display:block}
 .betpop{position:fixed;z-index:80;display:flex;flex-direction:column;gap:2px;background:var(--bg3);border:1px solid var(--line2);border-radius:10px;padding:5px;box-shadow:0 8px 24px rgba(0,0,0,.5)}
 .betpop a{padding:6px 14px;border-radius:7px;font-size:12px;font-weight:800;color:#fff;text-decoration:none;white-space:nowrap}
 .betpop a:active{background:rgba(255,255,255,.1)}
@@ -981,9 +981,9 @@ function sideCellHtml(b, sd, o, pt, ctxKey, ro){
   let bet='';
   if(betOpts.length>1){
     betChoices[ctxKey+'|'+key] = betOpts; sawDeepLinks=true;
-    bet = `<button type="button" class="rbl" data-betchoice="${ctxKey}|${key}">Bet<span class="rblarr">↗</span></button>`;
+    bet = `<button type="button" class="rbl" data-betchoice="${ctxKey}|${key}">Bet<svg class="rblarr" viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><line x1="7" y1="17" x2="17" y2="7"/><polyline points="8,7 17,7 17,16"/></svg></button>`;
   } else if(dl){
-    bet = `<a class="rbl" href="${esc(dl)}" target="_blank" rel="noopener" data-betlink>Bet<span class="rblarr">↗</span></a>`;
+    bet = `<a class="rbl" href="${esc(dl)}" target="_blank" rel="noopener" data-betlink>Bet<svg class="rblarr" viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><line x1="7" y1="17" x2="17" y2="7"/><polyline points="8,7 17,7 17,16"/></svg></a>`;
   }
   // Exchange rows: the liq-depth pill stays put under the price like always (plain display, not
   // clickable) — a separate small "LIQ" button pops up the order-book breakdown instead. Non-
@@ -1171,6 +1171,15 @@ async function openPlayer(p, startAt){
   bindView(p);
   initMarketScroll(mkeys, startIdx);
   startBoardTimer();
+  // Eagerly warm each visible market's alt-line cache in the background (not awaited) so a book
+  // whose own main line sits off the market consensus -- its matching price only ever lived in
+  // the alt fetch -- still shows up on the default consensus board once this resolves, without
+  // waiting on the user to manually step into alt mode first.
+  mkeys.forEach(mkey=>{
+    const ctx=`${p.key}|${mkey}`;
+    if(selLine[ctx]!=null) return;
+    ensureAlts(p,mkey).then(()=>{ if(current===p && selLine[ctx]==null) rerenderCard(p,ctx); }).catch(()=>{});
+  });
 }
 // live odds/liq: while a player's board is open, refresh its fixture's main lines
 // and re-render whatever market card(s) are on screen. Self-stops once the board
@@ -1365,7 +1374,17 @@ function cardRows(p, mkey, ctx){
   // getting mixed into the consensus board.
   const main=lineForMarket(p,mkey);
   if(main==null) return rows;
-  return rows.filter(o=>{ if(o.points==null) return true; return Number(o.points)===Number(main); });
+  const atMain = rows.filter(o=>{ if(o.points==null) return true; return Number(o.points)===Number(main); });
+  // A book whose OWN main line is off the market consensus (FanDuel posting 4.5 as ITS main
+  // while every other book's main is 3.5) has no row here at all -- its matching price only
+  // exists in that book's alt-line fetch, never in the is_main:true data this board otherwise
+  // reads from. Merge in any book's alt row that happens to sit exactly at the consensus number,
+  // but only for a book not already represented here (never let a cached alt row crowd out that
+  // book's own live is_main:true read of the same line).
+  const haveBooks=new Set(atMain.map(o=>canonBook(o.sportsbook)));
+  const altRows=rowsFor(p,mkey, altCache[altKey(p,mkey)]||[]);
+  const altAtMain=altRows.filter(o=>o.points!=null && Number(o.points)===Number(main) && !haveBooks.has(canonBook(o.sportsbook)));
+  return atMain.concat(altAtMain);
 }
 async function stepLine(p, ctx, dir){
   const [,mkey]=ctx.split('|'); const main=lineForMarket(p,mkey);
