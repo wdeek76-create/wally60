@@ -162,7 +162,6 @@ main{flex:1;padding:12px calc(var(--sar) + 12px) 160px calc(var(--sal) + 12px)}
 .rcell.empty{color:#fff;font-size:15px;font-weight:700;cursor:default}
 .rcell .rv{font-family:var(--pricefont);color:#fff;font-weight:600;font-size:13px;line-height:1;font-variant-numeric:tabular-nums;letter-spacing:0}
 .betlogo{cursor:pointer;outline:1.5px solid rgba(34,197,94,.9);outline-offset:1.5px;box-shadow:0 0 6px rgba(34,197,94,.35)}
-.rv.betlogo{background:none;border:none;padding:0;margin:0;font:inherit;line-height:inherit;text-decoration:none;display:inline-block;outline-offset:3px;border-radius:4px}
 .betpop{position:fixed;z-index:80;display:flex;flex-direction:column;gap:2px;background:var(--bg3);border:1px solid var(--line2);border-radius:10px;padding:5px;box-shadow:0 8px 24px rgba(0,0,0,.5)}
 .betpop a{padding:6px 14px;border-radius:7px;font-size:12px;font-weight:800;color:#fff;text-decoration:none;white-space:nowrap}
 .betpop a:active{background:rgba(255,255,255,.1)}
@@ -170,7 +169,6 @@ main{flex:1;padding:12px calc(var(--sar) + 12px) 160px calc(var(--sal) + 12px)}
 .rcell .rmeta .pctv{color:#fff}
 .rcell .rliqsum{display:inline-block;font-family:var(--mono);font-size:7.5px;font-weight:700;color:#fff;margin-top:1px;padding:1px 7px;border-radius:999px;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.12)}
 .rcell .limitup{display:block;font-size:7px;font-weight:800;color:var(--amber);letter-spacing:.2px;margin-top:1px}
-.rcell .liqwas{display:inline-block;font-size:7px;font-weight:700;color:#fff;opacity:.5;margin-left:3px}
 .rcell.important{animation:limitPulse 3s ease-out;border-radius:10px}
 @keyframes limitPulse{0%{box-shadow:0 0 0 2px var(--amber),0 0 16px 2px rgba(251,191,36,.6)}70%{box-shadow:0 0 0 2px var(--amber),0 0 16px 2px rgba(251,191,36,.6)}100%{box-shadow:0 0 0 0 rgba(251,191,36,0)}}
 @keyframes flashUp{0%{background:rgba(74,222,128,.3);color:#4ade80;border-radius:6px}100%{background:transparent;color:inherit}}
@@ -1175,55 +1173,52 @@ function flashCls(key, val, isPrice){
 // label the win-probability figure in cents (a contract exchange's own convention) instead of %.
 let exWeighted = LS.get('props_exweighted','')==='1';
 let exPctMode = LS.get('props_exmode','cents')==='cents' ? 'cents' : 'pct';
-// priceBet: true only for the grid's per-book columns, where (unlike the board) there's no
-// per-row logo to tap for betting -- the book's logo there lives once in the sticky column
-// header, shared across every row in that column. So the price text itself becomes the bet
-// target there (ringed the same way a clickable logo is), while the board keeps betting on the
-// logo alone and leaves the price text as the plain tap-for-detail surface it's always been.
-function sideCellHtml(b, sd, o, pt, ctxKey, ro, priceBet){
+function sideCellHtml(b, sd, o, pt, ctxKey, ro){
   if(!o) return `<div class="rcell empty">–</div>`;
   // Keyed by line + Now/Open too, not just ctx/side/book: switching to an alt line or
   // toggling Now<->Open shows a different (line,price) pair, not a live move, so each
   // (line, mode) combo tracks its own last-seen value and only flashes on a real change
   // at that exact slot.
   const base = `${ctxKey}|${ro?'open':'now'}|${sd}|${b.key}|${o.points??''}`;
-  const d = b.ex ? depthSummary(o) : null;
-  const displayPrice = (b.ex && exWeighted && d && d.avg!=null) ? d.avg : o.price;
+  // Exchange price selection: an exchange's raw "top of book" price can be backed by almost
+  // nothing (a few dollars resting at the best number) and isn't a price you can actually get any
+  // real size at. Default to the first (best-priced) level that clears a liquidity floor --
+  // the grid's own min-liq filter if the user set one, else $100 -- instead of blindly always
+  // showing the literal top price regardless of size. The Weighted toggle is a separate, explicit
+  // opt-in: a size-weighted average across nearby levels, with the full depth breakdown line
+  // shown alongside it -- off by default so the plain view stays as clean as a normal book cell.
+  const levels = b.ex ? levelsOf(o) : [];
+  const liqFloor = gridMinLiq>0 ? gridMinLiq : 100;
+  const chosen = b.ex ? (levels.find(l=>l.size>=liqFloor) || levels[0] || null) : null;
+  const d = b.ex && exWeighted ? depthSummary(o) : null;
+  const displayPrice = (d && d.avg!=null) ? d.avg : (chosen ? chosen.price : o.price);
   const pct = b.ex ? `<span class="pctv">${Math.round(Number(winPct(displayPrice)))}${exPctMode==='cents'?'¢':'%'}</span>` : '';
-  const atTop = d ? d.top : (o.limits?.max!=null?Number(o.limits.max):null);
+  const atTop = b.ex ? (chosen ? chosen.size : null) : (o.limits?.max!=null?Number(o.limits.max):null);
   const showMax = b.ex || SHOW_MAX.has(b.key);
-  const liqKey = base+'|liq';
-  const prevLiq = showMax && atTop!=null ? flashSeen[liqKey] : null;
-  const liqFlashCls = showMax && atTop!=null ? flashCls(liqKey,atTop).trim() : '';
+  const liqFlashCls = showMax && atTop!=null ? flashCls(base+'|liq',atTop).trim() : '';
   // Pinnacle moving its own LIMIT up (not just price) is a real signal — sharp books raise limits
   // when they're confident, so it's worth calling out harder than the usual brief flash.
   const pinLimitUp = b.key==='pinnacle' && liqFlashCls==='flash-up';
-  // Show what the limit just moved FROM, not only that it moved -- lasts exactly as long as the
-  // flash color does (next render with an unchanged value clears both together).
-  const liqWas = liqFlashCls && prevLiq!=null ? `<span class="liqwas">was ${usd(prevLiq)}</span>` : '';
-  const liq = showMax && atTop!=null ? `<span class="${liqFlashCls}">${usd(atTop)}</span>${liqWas}${pinLimitUp?'<span class="limitup">⚡ Limit up</span>':''}` : '';
-  const liqSummary = (b.ex && d && d.size) ? `<div class="rliqsum${flashCls(base+'|liqsum', d.size)}">${usd(d.size)} at ${fmtAm(d.avg)}</div>` : '';
+  const liq = showMax && atTop!=null ? `<span class="${liqFlashCls}">${usd(atTop)}</span>${pinLimitUp?'<span class="limitup">⚡ Limit up</span>':''}` : '';
+  const liqSummary = (d && d.size) ? `<div class="rliqsum${flashCls(base+'|liqsum', d.size)}">${usd(d.size)} at ${fmtAm(d.avg)}</div>` : '';
   const priceCls = flashCls(base+'|price', Number(displayPrice), true);
   const key=`${sd}|${b.key}`;
-  const bt = priceBet ? betTarget(b, sd, o, ctxKey, key) : null;
-  const priceHtml = bt
-    ? `<${bt.tag} class="rv betlogo${priceCls}" ${bt.attrs}>${fmtAm(displayPrice)}</${bt.tag}>`
-    : `<span class="rv${priceCls}">${fmtAm(displayPrice)}</span>`;
-  // Exchange rows: the liq-depth pill stays put under the price like always (plain display, not
-  // clickable) — a separate small "LIQ" button pops up the order-book breakdown instead. Non-
-  // exchange rows have no depth to click into, so the whole cell is the tap target for the same
-  // popup (open price, track button, etc). Betting itself happens off the book's own logo (board)
-  // or the price text (grid, see priceBet above) now, not a button crowding this cell.
-  if(b.ex && liqSummary){
+  // Weighted mode: the liq-depth pill stays put under the price like always (plain display, not
+  // clickable) — a separate small "LIQ" button pops up the order-book breakdown instead. Every
+  // other row (including an exchange NOT in weighted mode) has no depth summary to click into, so
+  // the whole cell is the tap target for the same popup (open price, track button, full order-book
+  // ladder, etc). Betting itself happens off the book's own logo now (see betTarget), not a button
+  // crowding this cell.
+  if(liqSummary){
     return `<div class="rcell${playable(o.price,pt)?'':' bad'}">
-      ${priceHtml}
+      <span class="rv${priceCls}">${fmtAm(displayPrice)}</span>
       ${(pct||liq)?`<div class="rmeta">${pct}${liq}</div>`:''}
       ${liqSummary}
       <button class="liqbtn" data-pill="${ctxKey}|${key}">LIQ</button>
     </div>`;
   }
   return `<div class="rcell${playable(o.price,pt)?'':' bad'}${pinLimitUp?' important':''}" role="button" data-pill="${ctxKey}|${key}">
-    ${priceHtml}
+    <span class="rv${priceCls}">${fmtAm(displayPrice)}</span>
     ${(pct||liq)?`<div class="rmeta">${pct}${liq}</div>`:''}
   </div>`;
 }
@@ -1277,7 +1272,10 @@ function pillDetail(b, sd, o, label, ctxKey, p, mkey, opm, ro){
   const showMax2 = b.ex || SHOW_MAX.has(b.key);
   const liqKey2 = `${ctxKey}|${ro?'open':'now'}|${sd}|${b.key}|${o.points??''}|liq`;
   const prevLiq2 = showMax2 && atTop2!=null ? flashSeen[liqKey2] : null;
-  const liqWas2 = (prevLiq2!=null && atTop2!=null && prevLiq2!==atTop2) ? `<span class="liqwas">was ${usd(prevLiq2)}</span>` : '';
+  // Exchanges' "limit" is really order-book depth re-forming every tick -- it moves constantly
+  // and a "was $X" note there is just noise, not a signal, so this only ever shows for flat-limit
+  // sportsbooks (Pinnacle/bet105).
+  const liqWas2 = (!b.ex && prevLiq2!=null && atTop2!=null && prevLiq2!==atTop2) ? `<span class="liqwas">was ${usd(prevLiq2)}</span>` : '';
   const liq = showMax2 && atTop2!=null ? `<span class="liq">${usd(atTop2)}${b.ex?'':' max'}</span>${liqWas2}` : '';
   const pct=b.ex?`<span class="pct">${winPct(o.price)}%</span>`:'';
   const lv=b.ex?levelsOf(o):[];
@@ -2422,7 +2420,7 @@ function gridRowHtml(p, mkey, side){
   const bookCells=orderedBooks().map(nm=>{
     const k=nm.toLowerCase(); const b=list.find(x=>x.key===k); const o=b?b[sk]:null;
     if(!o) return `<div class="gdc gdempty"></div>`;
-    return `<div class="gdc">${sideCellHtml(b, sk, o, pt, ctx, false, true)}${o.points!=null?`<div class="gdcline">${o.points}</div>`:''}</div>`;
+    return `<div class="gdc">${sideCellHtml(b, sk, o, pt, ctx, false)}${o.points!=null?`<div class="gdcline">${o.points}</div>`:''}</div>`;
   }).join('');
   const info=p.pid?playerInfo[p.pid]:null;
   const teamLogo = info?.teamId ? (f?.home.id===info.teamId?f.home.logo:f?.away.id===info.teamId?f.away.logo:'') : (p.isTeam?teamLogoFor(p):'');
