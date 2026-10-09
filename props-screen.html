@@ -263,6 +263,7 @@ main{flex:1;padding:12px calc(var(--sar) + 12px) 160px calc(var(--sal) + 12px)}
 .gdbestinner{display:flex;flex-direction:column;align-items:center;gap:2px;min-width:0}
 .gdv{font-family:var(--mono);font-size:11px;font-weight:800;color:var(--green);display:block}
 .gdlgwrap{display:block;width:14px;height:14px;border-radius:3px;margin:2px auto 0}
+.gdbetlg{cursor:pointer}
 .gdlg{display:block;width:14px;height:14px;border-radius:3px;object-fit:cover}
 .gdbliq{font-family:var(--mono);font-size:8px;color:#fff;opacity:.55}
 .gddash{color:#fff;opacity:.4}
@@ -1173,6 +1174,28 @@ function flashCls(key, val, isPrice){
 // label the win-probability figure in cents (a contract exchange's own convention) instead of %.
 let exWeighted = LS.get('props_exweighted','')==='1';
 let exPctMode = LS.get('props_exmode','cents')==='cents' ? 'cents' : 'pct';
+// Single source of truth for "what does this cell actually show" -- the headline price and the
+// size backing it. sideCellHtml AND pillDetail (its own detail popup) both call this instead of
+// each computing their own version, so the number in the cell and the number behind "tap for
+// detail" never disagree. Non-exchange books just pass their own posted price/limit straight
+// through (nothing to choose between). For exchanges: an order book's raw top price can be
+// backed by almost nothing, so default to the first (best) level that clears a liquidity floor
+// (the grid's min-liq filter if set, else $100) -- or, with the Weighted toggle on, a
+// size-weighted average across nearby levels instead.
+function cellPrice(b, o){
+  if(!b.ex) return { price: o.price, size: (o.limits?.max!=null?Number(o.limits.max):null), weighted:false, qualifies:true };
+  const levels = levelsOf(o);
+  const liqFloor = gridMinLiq>0 ? gridMinLiq : 100;
+  const chosen = levels.find(l=>l.size>=liqFloor) || levels[0] || null;
+  if(exWeighted){
+    const d = depthSummary(o);
+    if(d && d.avg!=null) return { price: d.avg, size: d.size, weighted:true, qualifies:true };
+  }
+  // qualifies: this book actually has real size at the floor -- an all-thin order book falls
+  // back to showing its raw top price in its own cell (always show something), but that
+  // unqualified price shouldn't be able to win "Best Odds" over a book that genuinely clears it.
+  return { price: chosen?chosen.price:o.price, size: chosen?chosen.size:null, weighted:false, qualifies: !!(chosen && chosen.size>=liqFloor) };
+}
 function sideCellHtml(b, sd, o, pt, ctxKey, ro){
   if(!o) return `<div class="rcell empty">–</div>`;
   // Keyed by line + Now/Open too, not just ctx/side/book: switching to an alt line or
@@ -1180,27 +1203,17 @@ function sideCellHtml(b, sd, o, pt, ctxKey, ro){
   // (line, mode) combo tracks its own last-seen value and only flashes on a real change
   // at that exact slot.
   const base = `${ctxKey}|${ro?'open':'now'}|${sd}|${b.key}|${o.points??''}`;
-  // Exchange price selection: an exchange's raw "top of book" price can be backed by almost
-  // nothing (a few dollars resting at the best number) and isn't a price you can actually get any
-  // real size at. Default to the first (best-priced) level that clears a liquidity floor --
-  // the grid's own min-liq filter if the user set one, else $100 -- instead of blindly always
-  // showing the literal top price regardless of size. The Weighted toggle is a separate, explicit
-  // opt-in: a size-weighted average across nearby levels, with the full depth breakdown line
-  // shown alongside it -- off by default so the plain view stays as clean as a normal book cell.
-  const levels = b.ex ? levelsOf(o) : [];
-  const liqFloor = gridMinLiq>0 ? gridMinLiq : 100;
-  const chosen = b.ex ? (levels.find(l=>l.size>=liqFloor) || levels[0] || null) : null;
-  const d = b.ex && exWeighted ? depthSummary(o) : null;
-  const displayPrice = (d && d.avg!=null) ? d.avg : (chosen ? chosen.price : o.price);
+  const cp = cellPrice(b, o);
+  const displayPrice = cp.price;
   const pct = b.ex ? `<span class="pctv">${Math.round(Number(winPct(displayPrice)))}${exPctMode==='cents'?'¢':'%'}</span>` : '';
-  const atTop = b.ex ? (chosen ? chosen.size : null) : (o.limits?.max!=null?Number(o.limits.max):null);
+  const atTop = cp.size;
   const showMax = b.ex || SHOW_MAX.has(b.key);
   const liqFlashCls = showMax && atTop!=null ? flashCls(base+'|liq',atTop).trim() : '';
   // Pinnacle moving its own LIMIT up (not just price) is a real signal — sharp books raise limits
   // when they're confident, so it's worth calling out harder than the usual brief flash.
   const pinLimitUp = b.key==='pinnacle' && liqFlashCls==='flash-up';
   const liq = showMax && atTop!=null ? `<span class="${liqFlashCls}">${usd(atTop)}</span>${pinLimitUp?'<span class="limitup">⚡ Limit up</span>':''}` : '';
-  const liqSummary = (d && d.size) ? `<div class="rliqsum${flashCls(base+'|liqsum', d.size)}">${usd(d.size)} at ${fmtAm(d.avg)}</div>` : '';
+  const liqSummary = (cp.weighted && cp.size) ? `<div class="rliqsum${flashCls(base+'|liqsum', cp.size)}">${usd(cp.size)} at ${fmtAm(cp.price)}</div>` : '';
   const priceCls = flashCls(base+'|price', Number(displayPrice), true);
   const key=`${sd}|${b.key}`;
   // Weighted mode: the liq-depth pill stays put under the price like always (plain display, not
@@ -1259,16 +1272,16 @@ function bookBoxHtml(b, sd, o, pt, ctxKey, i, ro){
 function pillDetail(b, sd, o, label, ctxKey, p, mkey, opm, ro){
   if(!o) return '';
   const cls = sd==='under'?'u':'o';
+  // Same cellPrice() the cell itself rendered from -- the number this popup leads with always
+  // matches the number you tapped, instead of silently falling back to the raw top-of-book price
+  // the cell may not even be showing.
+  const cp = cellPrice(b, o);
   const op = opm ? opm[b.key+'|'+sd] : null;
   const opTxt = op ? `<span class="op">open ${fmtAm(op.price)}${op.points!=null&&Number(op.points)!==Number(o.points??op.points)?' @'+op.points:''}</span>` : '';
-  const dc = op!=null ? cents(Number(o.price))-cents(op.price) : null;
+  const dc = op!=null ? cents(Number(cp.price))-cents(op.price) : null;
   const clv = dc ? `<span class="clv">${dc>0?'+':''}${dc}¢ since</span>` : '';
   const trk = ro ? '' : `<button class="trk${isTracked(p,mkey,sd,b.line,b.key)?' on':''}" data-trackbk="${ctxKey}|${sd}|${b.line??''}|${b.key}">${isTracked(p,mkey,sd,b.line,b.key)?'Tracked':'Track '+esc(bookShort(b.key))}</button>`;
-  // Same top-of-book figure sideCellHtml shows (order-book depth for exchanges, flat limit
-  // otherwise) and the same session-memory key, so "was $X" here matches the inline flash exactly
-  // instead of recomputing a different number.
-  const d2 = b.ex ? depthSummary(o) : null;
-  const atTop2 = d2 ? d2.top : (o.limits?.max!=null?Number(o.limits.max):null);
+  const atTop2 = cp.size;
   const showMax2 = b.ex || SHOW_MAX.has(b.key);
   const liqKey2 = `${ctxKey}|${ro?'open':'now'}|${sd}|${b.key}|${o.points??''}|liq`;
   const prevLiq2 = showMax2 && atTop2!=null ? flashSeen[liqKey2] : null;
@@ -1277,21 +1290,22 @@ function pillDetail(b, sd, o, label, ctxKey, p, mkey, opm, ro){
   // sportsbooks (Pinnacle/bet105).
   const liqWas2 = (!b.ex && prevLiq2!=null && atTop2!=null && prevLiq2!==atTop2) ? `<span class="liqwas">was ${usd(prevLiq2)}</span>` : '';
   const liq = showMax2 && atTop2!=null ? `<span class="liq">${usd(atTop2)}${b.ex?'':' max'}</span>${liqWas2}` : '';
-  const pct=b.ex?`<span class="pct">${winPct(o.price)}%</span>`:'';
+  const pct=b.ex?`<span class="pct">${winPct(cp.price)}%</span>`:'';
   const lv=b.ex?levelsOf(o):[];
   let lad='';
   if(lv.length>1){
     const shown=lv.slice(0,5);
     // The headline figure is weighted down to zero past LIQ_BAND_CENTS (a level near the edge of
     // this top-5 cutoff can still be real price-wise far away) — the individual rows below stay
-    // raw/unweighted so the actual book levels are still visible as posted.
-    const w=weightedNear(shown, Number(o.price));
+    // raw/unweighted so the actual book levels are still visible as posted, same as this popup's
+    // own headline price above them.
+    const w=weightedNear(shown, Number(cp.price));
     const rows=shown.map(l=>`<span>${usd(l.size)} at ${fmtAm(l.price)} <span class="wp">(${Math.round(Number(winPct(l.price)))}%)</span></span>`).join('<span class="bladsep">|</span>');
     lad = `<div class="blad">${w?`<div class="bladsum">${usd(w.size)} at ${fmtAm(w.avg)} weighted odds</div>`:''}<div class="bladrows">${rows}</div></div>`;
   }
   const bt = betTarget(b, sd, o, ctxKey, `${sd}|${b.key}`);
   const betHtml = bt ? `<${bt.tag} class="dtlbet" ${bt.attrs}>Bet ↗</${bt.tag}>` : '';
-  return `<div class="bdl"><span class="s ${cls}">${esc(b.name)} — ${label}${b.line!=null?' '+b.line:''}</span><span>${fmtAm(o.price)}</span>${pct}${liq}${opTxt}${clv}${betHtml}${trk}</div>${lad}`;
+  return `<div class="bdl"><span class="s ${cls}">${esc(b.name)} — ${label}${b.line!=null?' '+b.line:''}</span><span>${fmtAm(cp.price)}</span>${pct}${liq}${opTxt}${clv}${betHtml}${trk}</div>${lad}`;
 }
 // Row's own reference price (Over if it has one, else Under, else the single side) — the value
 // "best"/"worst" sort by, since a two-sided row can't independently rank both columns.
@@ -2386,15 +2400,14 @@ function gridRowHtml(p, mkey, side){
   // here reads off "single" instead, not whatever the (irrelevant, leftover) O/U toggle state is.
   const mlMode = SPORTS[sportKey].ml;
   const sk = mlMode ? 'single' : (side==='under'?'under':'over');
-  // A min-liq filter only screens who's ELIGIBLE for "best" -- an exchange quoting the best price
-  // with nothing real behind it isn't actually the best price you can get, so it drops out of
-  // this pick (its own book cell still shows its real price/size untouched either way).
-  const sorted=list.filter(b=>{
-    const o=b[sk]; if(!o) return false;
-    if(gridMinLiq>0 && b.ex){ const top=levelsOf(o)[0]?.size||0; if(top<gridMinLiq) return false; }
-    return true;
-  }).sort((a,b)=>toDec(b[sk].price)-toDec(a[sk].price));
-  const best=sorted[0];
+  // Same cellPrice() every per-book cell renders from, so "best" means best REAL price (an
+  // exchange quoting a thin top-of-book number doesn't win on a price nobody can actually get),
+  // and whatever price/size the Best Odds box shows for a book always matches that same book's
+  // own column cell exactly -- no more two different numbers for "the same" price.
+  const picks=list.filter(b=>b[sk]).map(b=>({b, cp:cellPrice(b, b[sk])})).filter(x=>x.cp.qualifies).sort((a,b)=>toDec(b.cp.price)-toDec(a.cp.price));
+  const bestPick=picks[0];
+  const best=bestPick?bestPick.b:null;
+  const bestCp=bestPick?bestPick.cp:null;
   const f=fixtures.find(x=>x.id===p.fixtureId);
   const dateBadge=f?`${esc(etDateKey(f.start))} · ${esc(etTime(f.start))}`:'';
   const matchup=f?`${esc(f.away.ab||f.away.name)} @ ${esc(f.home.ab||f.home.name)}`:'';
@@ -2402,13 +2415,18 @@ function gridRowHtml(p, mkey, side){
   const curLine=gridStore.sel[ctx]!=null?gridStore.sel[ctx]:mainLine;
   const bestO=best?best[sk]:null;
   const bestBt=(best&&bestO)?betTarget(best, sk, bestO, ctx, `${sk}|${best.key}`):null;
-  const bestLiq=best&&bestO?liqFor(best,bestO):null;
+  // Same rule as every other exchange cell: the depth-style liq figure ("$X at price") is
+  // Weighted-toggle-only clutter, not part of the plain view; a flat posted limit (Pinnacle/
+  // bet105) isn't depth and always shows.
+  const bestLiq = bestCp && bestCp.size!=null && (best.ex ? bestCp.weighted : SHOW_MAX.has(best.key))
+    ? (best.ex ? `${usd(bestCp.size)} at ${fmtAm(bestCp.price)}` : usd(bestCp.size))
+    : null;
   const bestLgHtml = bestLg
-    ? (bestBt ? `<${bestBt.tag} class="gdlgwrap betlogo" ${bestBt.attrs}><img class="gdlg" src="${esc(bestLg)}" alt=""></${bestBt.tag}>` : `<span class="gdlgwrap"><img class="gdlg" src="${esc(bestLg)}" alt=""></span>`)
+    ? (bestBt ? `<${bestBt.tag} class="gdlgwrap gdbetlg" ${bestBt.attrs}><img class="gdlg" src="${esc(bestLg)}" alt=""></${bestBt.tag}>` : `<span class="gdlgwrap"><img class="gdlg" src="${esc(bestLg)}" alt=""></span>`)
     : '';
   const lineLabel = mlMode ? '' : `${side==='under'?'u':'o'}${curLine??''} / `;
-  const bestVal=best
-    ? `<span class="gdv">${lineLabel}${fmtAm(bestO.price)}</span>${bestLgHtml}${bestLiq?`<span class="gdbliq">${esc(bestLiq)}</span>`:''}`
+  const bestVal=bestCp
+    ? `<span class="gdv">${lineLabel}${fmtAm(bestCp.price)}</span>${bestLgHtml}${bestLiq?`<span class="gdbliq">${esc(bestLiq)}</span>`:''}`
     : `<span class="gddash">—</span>`;
   // Same alt-line stepper the player screen has, just living inside the Best Odds box instead of
   // a header row -- stepping it re-pulls this one row with every book at the new line. Moneyline
