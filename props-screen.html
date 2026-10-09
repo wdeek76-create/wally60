@@ -297,6 +297,8 @@ main{flex:1;padding:12px calc(var(--sar) + 12px) 160px calc(var(--sal) + 12px)}
 .reolbl{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:700;color:#fff;flex:1;min-width:0}
 .reolg{width:16px;height:16px;border-radius:4px;object-fit:cover}
 .gsetreset{width:100%;margin-top:16px;padding:10px;border-radius:10px;border:1px dashed var(--line2);background:transparent;color:#fff;opacity:.6;font-size:12px;font-weight:700}
+.gsetbackuprow{display:flex;gap:8px}
+.gsetbk{flex:1;padding:10px;border-radius:10px;border:1px solid rgba(34,197,94,.45);background:rgba(34,197,94,.1);color:var(--purple);font-size:12px;font-weight:800}
 .gmwrap{border:1px solid var(--line2);border-radius:14px;background:var(--bg2);overflow:hidden}
 .gm{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px;cursor:pointer}
 .gm .tmwrap{min-width:0}
@@ -1057,10 +1059,16 @@ function suggest(q){
   });
 }
 
-// Season-ending injuries (out for the year, IR with no return timeline) aren't useful as a
-// "might not play this game" flag -- the player's just off the slate -- so they're filtered out
-// of the injury pill/popup entirely rather than shown like a day-to-day Questionable/Doubtful.
-function isSeasonEnding(i){ return /season.?(e|-)nd|out.?for.?(the.?)?season|season.?out|\(soy\)/i.test(`${i.status} ${i.note}`); }
+// Season-ending injuries (out for the year, IR/IL/PUP-style reserve designations with no real
+// return timeline) aren't useful as a "might not play this game" flag -- the player's just off
+// the slate -- so they're filtered out of the injury pill/popup entirely rather than shown like
+// a day-to-day Questionable/Doubtful.
+function isSeasonEnding(i){
+  const status=String(i.status||'').trim();
+  if(/season.?(e|-)nd|out.?for.?(the.?)?season|season.?out|\(soy\)/i.test(`${status} ${i.note||''}`)) return true;
+  if(/^(ir(-r)?|il|\d+.?day.?il|pup|nfi|injured reserve)$/i.test(status)) return true;
+  return false;
+}
 function injuryFor(p){ const i=(p.pid && injuries.byPid[p.pid]) || injuries.byName[normName(p.name)] || null; return (i && !isSeasonEnding(i)) ? i : null; }
 function injClass(st){ const s=String(st||'').toLowerCase(); if(/out|ir|suspend|inactive/.test(s)) return 'out'; if(/quest|doubt|gtd|game.?time|day.?to.?day|dtd/.test(s)) return 'q'; return 'p'; }
 function injShort(st){ const s=String(st||'').toLowerCase(); if(/^out\b|out\b/.test(s)) return 'OUT'; if(/injured reserve|\bir\b/.test(s)) return 'IR'; if(/doubt/.test(s)) return 'D'; if(/quest/.test(s)) return 'Q'; if(/game.?time|gtd/.test(s)) return 'GTD'; if(/day.?to.?day|dtd/.test(s)) return 'DTD'; if(/prob/.test(s)) return 'P'; if(/suspend/.test(s)) return 'SUSP'; return String(st||'').slice(0,6).toUpperCase()||'INJ'; }
@@ -2211,6 +2219,40 @@ function orderedMarketDefs(sk){
 }
 function getBookPrefs(){ try{ const raw=LS.get('props_bookorder',''); return raw?JSON.parse(raw):null; }catch(e){ return null; } }
 function setBookPrefs(prefs){ LS.set('props_bookorder', JSON.stringify(prefs)); }
+// Every saved preference (market/book order+visibility, tracked props, exchange display toggles,
+// last sport, custom backend) as one copyable blob -- so reloading a freshly-sent build on a
+// phone (a new file -- new origin, no localStorage carried over) can pick up right where the last
+// one left off instead of starting from scratch.
+const SETTINGS_KEY_RE = /^(props_sport|props_exweighted|props_exmode|props_tracked|props_grid|props_bookorder|props_minliq|oo_backend_url|props_mkorder_.+)$/;
+function exportSettingsJson(){
+  const obj={};
+  Object.keys(localStorage).forEach(k=>{ if(SETTINGS_KEY_RE.test(k)) obj[k]=localStorage.getItem(k); });
+  return JSON.stringify(obj);
+}
+async function copySettingsBackup(){
+  const json=exportSettingsJson();
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    try{ await navigator.clipboard.writeText(json); toast('Settings copied'); return; }
+    catch(e){ console.warn('[props] clipboard write failed', e.message); }
+  }
+  const ta=document.createElement('textarea');
+  ta.value=json; ta.style.position='fixed'; ta.style.opacity='0';
+  document.body.appendChild(ta); ta.focus(); ta.select();
+  try{ document.execCommand('copy'); toast('Settings copied'); }
+  catch(e){ prompt('Copy this text to back up your settings:', json); }
+  ta.remove();
+}
+function restoreSettingsBackup(){
+  const txt=prompt('Paste your settings backup here:','');
+  if(!txt) return;
+  let obj;
+  try{ obj=JSON.parse(txt); }catch(e){ toast('That doesn\'t look like a valid backup'); return; }
+  let n=0;
+  Object.entries(obj).forEach(([k,v])=>{ if(SETTINGS_KEY_RE.test(k) && typeof v==='string'){ localStorage.setItem(k,v); n++; } });
+  if(!n){ toast('Nothing to restore in that text'); return; }
+  toast('Settings restored — reloading…');
+  setTimeout(()=>location.reload(), 700);
+}
 function orderedBooks(){
   const prefs=getBookPrefs(); if(!prefs) return BOOKS;
   const have=new Set(BOOKS); const hidden=new Set(prefs.hidden||[]);
@@ -2262,6 +2304,11 @@ function gridSettingsHtml(){
     <div class="gseth" style="margin-top:14px"><span>Books</span></div>
     <div class="reolist" id="bkReorder">${bkRows}</div>
     <button class="gsetreset" id="gsetreset">Reset to default</button>
+    <div class="gseth" style="margin-top:14px"><span>Backup &amp; Restore</span></div>
+    <div class="gsetbackuprow">
+      <button class="gsetbk" id="gsetexport">Copy my settings</button>
+      <button class="gsetbk" id="gsetimport">Paste &amp; restore</button>
+    </div>
   </div>`;
 }
 function saveMarketOrderVis(){
@@ -2288,6 +2335,8 @@ function openGridSettings(){
   ov.addEventListener('click',e=>{ if(e.target===ov){ ov.remove(); renderGrid(); } });
   ov.querySelector('#gsetclose').addEventListener('click',()=>{ ov.remove(); renderGrid(); });
   ov.querySelector('#gsetreset').addEventListener('click',()=>{ setMarketPrefs(sportKey,null); LS.set('props_mkorder_'+sportKey,''); LS.set('props_bookorder',''); ov.remove(); openGridSettings(); });
+  ov.querySelector('#gsetexport').addEventListener('click', copySettingsBackup);
+  ov.querySelector('#gsetimport').addEventListener('click', restoreSettingsBackup);
 }
 let gridMarket=null, gridSide='over', gridSearch='';
 let gridMinLiq=Number(LS.get('props_minliq','0'))||0;
