@@ -2068,20 +2068,32 @@ function render() {
       const myPriceFor = c => c.isRef ? { price: r.pin.mine, liq: refLiq }
         : EXCH.has(c.name.toLowerCase()) ? (() => { const opp = oppPriceFor(c); return opp?.price != null ? { price: -opp.price, liq: opp.liq } : null; })()
         : (() => { const b = r.books.find(x => x.book.toLowerCase() === c.name.toLowerCase()); return b ? { price: b.price, liq: b.liq } : null; })();
+      // Regular books (FanDuel etc.) never need to agree with anything to show -- they're always
+      // real, independently-bettable prices. Exchanges are different: a lone exchange's mirrored
+      // price can drift or be thin, so it needs a corroborating ally before it earns a column --
+      // either it agrees with Pinnacle itself (1 exchange + Pinnacle), or it agrees with ANOTHER
+      // exchange even if neither is close to Pinnacle (2 exchanges converging independently is
+      // still real signal). An exchange with no ally at all doesn't belong in the grid.
+      const exchCols = cols.filter(c => !c.isRef && EXCH.has(c.name.toLowerCase()));
+      const exchMine = {}; exchCols.forEach(c => { exchMine[c.name.toLowerCase()] = myPriceFor(c); });
+      const exchAllowed = new Set();
+      exchCols.forEach(c => {
+        const key = c.name.toLowerCase(); const mine = exchMine[key]; if (mine?.price == null) return;
+        const backsPin = r.pin.mine != null && centsDiff(mine.price, r.pin.mine) <= EXCH_ALIGN_CENTS;
+        const hasExchAlly = exchCols.some(c2 => {
+          const k2 = c2.name.toLowerCase(); if (k2 === key) return false;
+          const other = exchMine[k2]; return other?.price != null && centsDiff(mine.price, other.price) <= EXCH_ALIGN_CENTS;
+        });
+        if (backsPin || hasExchAlly) exchAllowed.add(key);
+      });
       // Our own bettable book always shows (it IS the play). Every other column only earns a spot
       // if betting our actual price against THAT book's own opposite-side number is a genuine,
       // positive play -- "only show ref books that the play's good to", not just any book that
-      // happens to have a number. An exchange column additionally has to actually AGREE with
-      // Pinnacle (within EXCH_ALIGN_CENTS, same band the sharp-backing badge uses) on its own
-      // mirrored price -- a drifted/thin exchange quote doesn't belong in the grid at all, not
-      // shown-with-a-warning: if it's not close to Pinnacle, it just doesn't earn a column.
+      // happens to have a number.
       const colsLive = cols.filter(c => {
         if (c.name.toLowerCase() === r.best.book.toLowerCase()) return true;
         const opp = oppPriceFor(c); if (opp?.price == null) return false;
-        if (!c.isRef && EXCH.has(c.name.toLowerCase())) {
-          const mine = myPriceFor(c);
-          if (mine?.price == null || r.pin.mine == null || centsDiff(mine.price, r.pin.mine) > EXCH_ALIGN_CENTS) return false;
-        }
+        if (!c.isRef && EXCH.has(c.name.toLowerCase()) && !exchAllowed.has(c.name.toLowerCase())) return false;
         return 1 - (imp(r.best.price) + imp(opp.price)) > 0;
       });
       const headCells = colsLive.map(c => { const clg = logoOf(c.name); return `<th>${clg ? `<img src="${esc(clg)}" alt="${esc(c.name)}" title="${esc(c.name)}">` : `<span class="bk">${esc(c.name.slice(0,3))}</span>`}</th>`; }).join('');
