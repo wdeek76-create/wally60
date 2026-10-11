@@ -404,6 +404,8 @@ a.p{color:#fff;text-decoration:none;border-color:rgba(34,197,94,.55)!important}
 .plbet{font-family:var(--mono);font-size:12px;color:#fff;margin-top:2px}
 .plrows{margin-top:8px;display:flex;flex-direction:column;gap:4px}
 .plrow{display:grid;grid-template-columns:1fr auto auto;gap:8px;font-family:var(--mono);font-size:12px;padding:3px 0;border-top:1px solid var(--line2)}
+.plrow.best{color:var(--green);font-weight:800;border-radius:8px;background:rgba(34,197,94,.1);padding:4px 6px;border-top:none}
+.label{font-size:9px;font-weight:800;letter-spacing:.5px;text-transform:uppercase;color:var(--dim);margin:10px 0 6px}
 .plrow:first-child{border-top:none}
 .plbk{color:var(--dim)}
 .plsum{margin-top:8px;display:flex;justify-content:space-between;font-size:12px;font-family:var(--mono)}
@@ -2163,6 +2165,21 @@ function oppRowsForLeg(leg, rows){
   return [];
 }
 const parlayComboPrice = () => parlay.length ? toAm(parlay.reduce((a,l)=>a*toDec(l.price),1)) : null;
+// What the WHOLE parlay actually pays at each book, not just each leg priced separately -- only
+// a book that currently posts every single leg can take this parlay at all, so the comparison is
+// restricted to books present on every leg's own side, then each such book's own price per leg is
+// multiplied together (decimal odds compose multiplicatively) for that book's real combined price.
+function parlayBookPrices(){
+  if(!parlay.length) return [];
+  const legMaps = parlay.map(leg=>{
+    const rows=rowsForLeg(leg); const mine=myRowsForLeg(leg,rows); const byBook={};
+    mine.forEach(o=>{ const k=canonBook(o.sportsbook); const pr=Number(o.price); if(!byBook[k]||pr>byBook[k]) byBook[k]=pr; });
+    return byBook;
+  });
+  let common=new Set(Object.keys(legMaps[0]||{}));
+  for(let i=1;i<legMaps.length;i++) common=new Set([...common].filter(k=>k in legMaps[i]));
+  return [...common].map(k=>({ book:k, price: toAm(legMaps.reduce((a,m)=>a*toDec(m[k]),1)) })).sort((a,b)=>toDec(b.price)-toDec(a.price));
+}
 function parlayLegHtml(leg){
   const rows=rowsForLeg(leg);
   const mine=bestFirst(myRowsForLeg(leg,rows));
@@ -2183,7 +2200,15 @@ function renderParlay(){
   clearGstripDock(); const view=$('#view'); $('.sw').style.display='none';
   if(!parlay.length){ view.innerHTML='<div class="empty">No parlay legs yet.<br>Open any pick and tap <b>+Parlay</b>.</div>'; $('#stat').textContent='Parlay · empty'; return; }
   const combo=parlayComboPrice();
-  const comboHtml = `<div class="ttsum"><div class="ttsumh"><span>Parlay · ${parlay.length} leg${parlay.length===1?'':'s'}</span><button class="rm" id="plclear" style="background:var(--bg2)">Clear all</button></div><div class="ttrow"><b>Combined price at added odds: ${combo!=null?fmtAm(combo):'—'}</b></div></div>`;
+  const bookRows=parlayBookPrices();
+  const bookRowsHtml = bookRows.length
+    ? bookRows.map((r,i)=>`<div class="plrow${i===0?' best':''}"><span class="plbk">${esc(bookShort(r.book))}</span><span class="plpx">${fmtAm(r.price)}</span><span class="plwp">${winPct(r.price)}%</span></div>`).join('')
+    : `<div class="plrow dim">No single book currently posts all ${parlay.length} legs.</div>`;
+  const comboHtml = `<div class="ttsum"><div class="ttsumh"><span>Parlay · ${parlay.length} leg${parlay.length===1?'':'s'}</span><button class="rm" id="plclear" style="background:var(--bg2)">Clear all</button></div>
+    <div class="label">Best book for this exact parlay</div>
+    <div class="plrows">${bookRowsHtml}</div>
+    <div class="ttrow" style="margin-top:8px"><span class="dim">At added odds: ${combo!=null?fmtAm(combo):'—'}</span></div>
+  </div>`;
   view.innerHTML = comboHtml + parlay.map(parlayLegHtml).join('');
   $('#plclear')?.addEventListener('click',()=>{ parlay=[]; saveParlay(); renderTabs(); renderParlay(); });
   view.querySelectorAll('[data-plrm]').forEach(b=>b.addEventListener('click',()=>removeFromParlay(b.dataset.plrm)));
