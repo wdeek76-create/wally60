@@ -396,6 +396,8 @@ a.p{color:#fff;text-decoration:none;border-color:rgba(34,197,94,.55)!important}
 .ttrow{display:grid;grid-template-columns:1.3fr auto auto auto;align-items:center;gap:8px;padding:3px 0;font-size:11px;font-family:var(--mono)}
 .ttrow>span:last-child,.ttrow>span:nth-last-child(2){text-align:right}
 .ttrow .pos{color:var(--green)}.ttrow .neg{color:var(--red)}
+.tkbkrow{display:flex;gap:8px}
+.tkbkrow .rm{flex:1;padding:8px;border-radius:9px;font-size:11px;font-weight:700;text-align:center}
 .tkh .bet span{color:#fff;opacity:1}
 .tkh .st{font-family:var(--mono);font-size:10px;color:var(--dim);text-align:right;white-space:nowrap}
 .tkh .st .live{color:var(--red);font-weight:800}
@@ -2113,6 +2115,23 @@ function ttRecord(list){
   const roi=staked>0 ? (u/staked*100) : null;
   return { w,l,p,u,n:list.length,roi };
 }
+// Day key in ET, year-first so plain string sort puts the most recent day first -- etDateKey's
+// "Oct 10" display string isn't safe to sort on (no year, re-parsing it back to a Date is
+// fragile), so grouping uses this separate sortable key and only displays etDateKey's label.
+const dayKeyOf = iso => { try{ return new Intl.DateTimeFormat('en-CA',{timeZone:'America/New_York',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(iso)); }catch(e){ return 'unknown'; } };
+function dailyRecordHtml(){
+  const graded = tracked.filter(t=>t.final && t.result);
+  if(!graded.length) return '';
+  const byDay = {};
+  graded.forEach(t=>{
+    const key = t.start ? dayKeyOf(t.start) : 'unknown';
+    (byDay[key] = byDay[key] || { label: t.start?etDateKey(t.start):'Unknown date', list:[] }).list.push(t);
+  });
+  const row=(label,r)=>`<div class="ttrow"><span>${esc(label)} <span class="dim">(${r.n})</span></span><span>${r.w}-${r.l}-${r.p}</span><span class="${r.u>0?'pos':r.u<0?'neg':''}">${r.u>=0?'+':''}${r.u.toFixed(2)}u</span><span class="dim">${r.roi!=null?r.roi.toFixed(1)+'% ROI':'—'}</span></div>`;
+  const keys=Object.keys(byDay).sort((a,b)=>b.localeCompare(a));
+  const rows=keys.map(k=>row(byDay[k].label, ttRecord(byDay[k].list))).join('');
+  return `<div class="ttsum"><div class="ttsumh"><span>Daily Record</span></div>${row('All time', ttRecord(graded))}${rows}</div>`;
+}
 function teamTotalsSummaryHtml(){
   const tts=tracked.filter(t=>t.isTeam);
   const row=(label,r)=>`<div class="ttrow"><span>${esc(label)} <span class="dim">(${r.n})</span></span><span>${r.w}-${r.l}-${r.p}</span><span class="${r.u>0?'pos':r.u<0?'neg':''}">${r.u>=0?'+':''}${r.u.toFixed(2)}u</span><span class="dim">${r.roi!=null?r.roi.toFixed(1)+'% ROI':'—'}</span></div>`;
@@ -2188,10 +2207,38 @@ function trackCardHtml(t){
   </div>`;
 }
 let historyShown=false;
+// Lets the whole tracked list (every tracked bet, graded or not) travel as one copyable blob --
+// same clipboard-first/prompt-fallback pattern as the grid's settings backup -- so a freshly
+// sent build (new origin, no carried-over localStorage) can pick the tracker back up instead of
+// starting over. Restoring reloads the page so every view picks up the restored data.
+async function copyTrackerBackup(){
+  const json=JSON.stringify(tracked);
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    try{ await navigator.clipboard.writeText(json); toast('Tracker backup copied'); return; }
+    catch(e){ console.warn('[props] clipboard write failed', e.message); }
+  }
+  const ta=document.createElement('textarea');
+  ta.value=json; ta.style.position='fixed'; ta.style.opacity='0';
+  document.body.appendChild(ta); ta.focus(); ta.select();
+  try{ document.execCommand('copy'); toast('Tracker backup copied'); }
+  catch(e){ prompt('Copy this text to back up your tracker:', json); }
+  ta.remove();
+}
+function restoreTrackerBackup(){
+  const txt=prompt('Paste your tracker backup here:',''); if(!txt) return;
+  let list; try{ list=JSON.parse(txt); }catch(e){ toast('That doesn\'t look like a valid backup'); return; }
+  if(!Array.isArray(list)){ toast('That doesn\'t look like a valid backup'); return; }
+  tracked=list; saveTracked(); toast(`Restored ${list.length} tracked bet${list.length===1?'':'s'} — reloading…`);
+  setTimeout(()=>location.reload(), 700);
+}
+const tkBackupHtml = `<div class="ttsum"><div class="ttsumh"><span>Backup &amp; Restore</span></div>
+  <div class="tkbkrow"><button id="tkexport" class="rm" style="background:var(--bg2)">Copy backup</button><button id="tkimport" class="rm" style="background:var(--bg2)">Paste &amp; restore</button></div>
+</div>`;
 function renderTracker(){
   clearGstripDock(); const view=$('#view'); $('.sw').style.display='none';
   if(!tracked.length){
-    view.innerHTML=teamTotalsSummaryHtml()+'<div class="empty">Nothing tracked yet.<br>Open a player and tap <b>Track</b> on a side.</div>';
+    view.innerHTML=tkBackupHtml+teamTotalsSummaryHtml()+'<div class="empty">Nothing tracked yet.<br>Open a player and tap <b>Track</b> on a side.</div>';
+    $('#tkexport')?.addEventListener('click',copyTrackerBackup); $('#tkimport')?.addEventListener('click',restoreTrackerBackup);
     $('#stat').textContent='Tracker · empty'; return;
   }
   // Graded bets drop out of the main list entirely -- they're done, no reason to keep scrolling
@@ -2202,7 +2249,9 @@ function renderTracker(){
   const historyHtml = historyList.length
     ? `<div class="tkhist"><button class="tkhisttoggle" id="tkhisttoggle">Bet History (${historyList.length}) ${historyShown?'▴ hide':'▾ show'}</button>${historyShown?historyList.map(trackCardHtml).join(''):''}</div>`
     : '';
-  view.innerHTML = teamTotalsSummaryHtml() + openHtml + historyHtml;
+  view.innerHTML = tkBackupHtml + dailyRecordHtml() + teamTotalsSummaryHtml() + openHtml + historyHtml;
+  $('#tkexport')?.addEventListener('click',copyTrackerBackup);
+  $('#tkimport')?.addEventListener('click',restoreTrackerBackup);
   $('#tkhisttoggle')?.addEventListener('click',()=>{ historyShown=!historyShown; renderTracker(); });
   view.querySelectorAll('[data-rm]').forEach(b=>b.addEventListener('click',()=>{ tracked=tracked.filter(t=>t.id!==b.dataset.rm); saveTracked(); renderTracker(); }));
   const showEd=(id,on)=>{ const f=view.querySelector(`.tked[data-ed="${id}"]`); if(f) f.style.display=on?'grid':'none'; };
@@ -2220,7 +2269,7 @@ function editHtml(t){
   return `<div class="tked" data-ed="${t.id}" style="display:none">
     <label>Side<select name="side"${sides.length<2?' disabled':''}>${sides.map(([v,l])=>`<option value="${v}"${t.side===v?' selected':''}>${l}</option>`).join('')}</select></label>
     <label>Line<input name="line" type="text" inputmode="decimal" value="${t.line??''}" placeholder="${t.side==='ML'?'—':'27.5'}"${t.side==='ML'?' disabled':''}></label>
-    <label>Price<input name="price" type="text" inputmode="numeric" value="${t.price!=null?fmtAm(t.price):''}" placeholder="-110"></label>
+    <label>Price<input name="price" type="text" value="${t.price!=null?fmtAm(t.price):''}" placeholder="-110"></label>
     <label>Book<select name="book"><option value="">Best available</option>${books.map(b=>`<option value="${esc(b)}"${t.bookKey===b?' selected':''}>${esc(bookLabel(b))}</option>`).join('')}</select></label>
     <label>Result (manual grade)<select name="result"><option value=""${curResult===''?' selected':''}>Pending / auto-grade</option><option value="win"${curResult==='win'?' selected':''}>Win</option><option value="loss"${curResult==='loss'?' selected':''}>Loss</option><option value="push"${curResult==='push'?' selected':''}>Push</option></select></label>
     <div class="note">Correcting line/price/book re-pulls open / close, so CLV follows what you actually took. Setting a result grades it yourself -- use this when a game's over and auto-grading hasn't caught up; it also moves the bet into Bet History.</div>
