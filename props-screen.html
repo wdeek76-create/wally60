@@ -61,6 +61,10 @@ button{cursor:pointer;border:none;background:none;color:inherit}
 .status{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:8px;font-family:var(--mono);font-size:10px;color:#fff;letter-spacing:.4px;text-transform:uppercase}
 .status .r{display:flex;gap:6px;align-items:center}
 .ib{width:30px;height:30px;border-radius:50%;border:1px solid var(--line2);background:var(--bg2);display:flex;align-items:center;justify-content:center;color:#fff;font-size:13px}
+.exlinks{display:flex;gap:5px;align-items:center}
+.exlinks a{width:24px;height:24px;border-radius:7px;overflow:hidden;display:flex;align-items:center;justify-content:center;border:1px solid var(--line2);background:var(--bg2)}
+.exlinks a img{width:100%;height:100%;object-fit:cover}
+.exlinks a .rlogotxt{font-size:6.5px;font-weight:800;color:#fff}
 .ib.wide{width:auto;padding:0 10px;border-radius:999px;font-size:11px;font-weight:800;letter-spacing:.2px}
 .ib.p{border-color:rgba(34,197,94,.5);color:var(--purple);background:rgba(34,197,94,.12)}
 .ib.on{border-color:var(--green);color:var(--green);background:rgba(34,197,94,.2)}
@@ -120,6 +124,14 @@ main{flex:1;padding:12px calc(var(--sar) + 12px) 160px calc(var(--sal) + 12px)}
    right on its own price cell), so both sides always read best-to-worst top to bottom without
    needing any other highlight to call out which cell is the best price. */
 .bboard{padding:4px 8px 2px;border-left:1px solid var(--line2);border-right:1px solid var(--line2)}
+.qarb{display:flex;flex-direction:column;gap:4px;margin:0 0 10px;padding:8px 10px;border-radius:12px;background:rgba(34,197,94,.06);border:1px solid rgba(34,197,94,.25)}
+.qarbrow{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.qarblbl{font-size:10px;font-weight:700;color:#fff;opacity:.6;text-transform:uppercase;letter-spacing:.3px}
+.qarbval{font-family:var(--mono);font-size:13px;font-weight:800;color:#fff}
+.qarbin{gap:6px}
+.qarbinput{width:54px;background:var(--bg2);border:1px solid var(--line2);border-radius:7px;padding:4px 6px;color:#fff;font-family:var(--mono);font-size:13px;font-weight:700;text-align:right}
+.qarbpctsym{font-size:12px;font-weight:700;color:#fff;opacity:.6;margin-left:-2px}
+.qarbout .qarbpost{font-family:var(--mono);font-size:15px;font-weight:800;color:var(--green)}
 .bhead.single{display:flex;justify-content:center;align-items:center;gap:6px;padding:0 2px 4px;font-size:10px;font-weight:800;letter-spacing:.6px;text-transform:uppercase;color:#fff;text-align:center}
 .bboard2{display:flex;flex-direction:column;gap:10px}
 .bcolwrap{display:flex;flex-direction:column;gap:6px;min-width:0}
@@ -241,6 +253,7 @@ main{flex:1;padding:12px calc(var(--sar) + 12px) 160px calc(var(--sal) + 12px)}
 /* Small segmented O/U pill, not a full-width two-button bar -- shared by the player screen's
    board and the grid's own toggle. */
 .sidetog{display:inline-flex;padding:0 0 10px}
+.bboard>.sidetog{display:flex;justify-content:center}
 .stbtn{padding:5px 14px;border:1px solid var(--line2);background:var(--bg2);color:#fff;font-weight:800;font-size:11px;letter-spacing:.3px}
 .stbtn:first-child{border-radius:999px 0 0 999px;border-right:none}
 .stbtn:last-child{border-radius:0 999px 999px 0}
@@ -616,6 +629,19 @@ const toDec = a => { a=Number(a); return a>0?1+a/100:1+100/Math.abs(a); };
 const toAm = d => (d-1)>=1 ? Math.round((d-1)*100) : -Math.round(100/(d-1));
 const winPct = a => { a=Number(a); const p=a>0?100/(a+100):Math.abs(a)/(Math.abs(a)+100); return (p*100).toFixed(1); };
 const usd = n => n>=1000 ? '$'+(n/1000).toFixed(1).replace(/\.0$/,'')+'k' : '$'+Math.round(n);
+// Same toImplied/calcPost math as the arb calculator, verbatim -- not a different formula. Given
+// the OTHER side's market price, what price on my side locks in a typed target edge: flip the
+// other side's price to its no-vig mirror (same identity used everywhere else in this app:
+// imp(-x)+imp(x)=1), then add the threshold before converting back to American odds.
+const toImplied = o => { o=Number(o); return o>0 ? 100/(o+100) : Math.abs(o)/(Math.abs(o)+100); };
+function calcPostPrice(otherSidePrice, threshPct){
+  const myImp = toImplied(-Number(otherSidePrice));
+  const postImp = myImp + (Number(threshPct)||0)/100;
+  if(postImp<=0 || postImp>=1) return null;
+  const am = postImp<0.5 ? Math.round(100/postImp-100) : Math.round(-postImp/(1-postImp)*100);
+  return am>0?'+'+am:String(am);
+}
+let qarbThresh = LS.get('props_qarbthresh','0');
 // Proper Title Case regardless of source casing, preserving short all-caps words already in the
 // source (initials like "T.J.", suffixes like "II"/"III"/"JR") instead of mangling them.
 const titleCase = s => String(s||'').split(/\s+/).map(w => w && w.length<=4 && w===w.toUpperCase() && /[A-Z]/.test(w) ? w : (w.charAt(0).toUpperCase()+w.slice(1).toLowerCase())).join(' ');
@@ -1400,8 +1426,21 @@ function boardHtml(rows, p, mkey, ctxKey, mainLine, pt, ro){
   const activeSide=oddsSide==='under'?'under':'over';
   const activeSorted=activeSide==='under'?underSorted:overSorted;
   const toggle=`<div class="sidetog"><button class="stbtn${activeSide==='over'?' on':''}" data-side="over">O</button><button class="stbtn${activeSide==='under'?' on':''}" data-side="under">U</button></div>`;
+  // Quick arb: tied to whichever side the toggle above is on (that's "my side"), against the
+  // best price the OTHER side is posting anywhere on the board right now. Same toImplied/
+  // calcPost math as the arb calculator, not a different formula -- type a target edge %, get
+  // the price my side needs to post to lock it in.
+  const oppSide=activeSide==='over'?'under':'over';
+  const oppBestBook=activeSide==='over'?underSorted[0]:overSorted[0];
+  const oppBestOdds=oppBestBook?oppBestBook[oppSide]:null;
+  const qarb=oppBestOdds?`<div class="qarb">
+    <div class="qarbrow"><span class="qarblbl">${esc(oppSide==='under'?'Under':'Over')} · ${esc(bookShort(oppBestBook.key))}</span><span class="qarbval" data-price="${oppBestOdds.price}">${fmtAm(oppBestOdds.price)}</span></div>
+    <div class="qarbrow qarbin"><span class="qarblbl">Target edge</span><input class="qarbinput" type="text" inputmode="decimal" value="${esc(qarbThresh)}"><span class="qarbpctsym">%</span></div>
+    <div class="qarbrow qarbout"><span class="qarblbl">Post ${esc(activeSide==='over'?'Over':'Under')} at</span><span class="qarbpost">${calcPostPrice(oppBestOdds.price,qarbThresh)??'—'}</span></div>
+  </div>`:'';
   return `<div class="bboard">
     ${toggle}
+    ${qarb}
     <div class="bcol">${activeSorted.map((b,i)=>bookBoxHtml(b,activeSide,b[activeSide],pt,ctxKey,i,ro)).join('')||'<div class="bempty">No books</div>'}</div>
     ${missingHtml}
   </div>`;
@@ -1489,7 +1528,13 @@ async function openPlayer(p, startAt, keepScroll){
   const psub = S.ml
     ? (f?`<span class="mupill">vs <b>${esc(normName(f.home.name)===p.key?f.away.name:f.home.name)}</b></span><span>${esc(f.card)}</span>${whenHtml}`:'')
     : `${teamAb?`<span><b>${esc(teamAb)}</b></span>`:''}${f?`<span class="mupill">${f.away.logo?`<img class="mtl" src="${esc(f.away.logo)}" alt="">`:''}${esc(f.away.ab)}<span class="at">@</span>${f.home.logo?`<img class="mtl" src="${esc(f.home.logo)}" alt="">`:''}${esc(f.home.ab)}</span>${whenHtml}`:''}`;
-  let h=`<div class="sh shback"><span class="t">${esc(S.label)}</span><span class="shr"><button class="ib" id="shot" title="Share">⇧</button><button class="back" id="back">‹ Slate</button></span></div><div class="pcard">
+  // Exchanges list a player only once they've actually posted a market on them -- these just open
+  // the exchange itself (not a player-specific deep link, no such URL is reliably known) so you
+  // can check/search there directly even when nothing's posted here yet.
+  const exLinks = `<div class="exlinks">${[['novig','https://novig.us'],['prophet x','https://prophetx.co'],['kalshi','https://kalshi.com']].map(([k,url])=>{
+    const lg=bookLogo(k); return `<a href="${url}" target="_blank" rel="noopener" title="${esc(bookLabel(k))}">${lg?`<img src="${esc(lg)}" alt="">`:`<span class="rlogotxt">${esc(bookShort(k))}</span>`}</a>`;
+  }).join('')}</div>`;
+  let h=`<div class="sh shback"><span class="t">${esc(S.label)}</span><span class="shr">${exLinks}<button class="ib" id="shot" title="Share">⇧</button><button class="back" id="back">‹ Slate</button></span></div><div class="pcard">
     <div class="ptop">${hsWrap}<div style="min-width:0;flex:1">
       <div class="pname">${teamLogo?`<img class="tl" src="${esc(teamLogo)}" alt="">`:''}${esc(titleCase(p.name))}${injPill(p)}</div>
       <div class="psub">${psub}</div>
@@ -1634,6 +1679,17 @@ let _delegatedBound = false;
 function bindView(p){
   if(_delegatedBound) return;
   _delegatedBound = true;
+  // Quick-arb threshold input: recompute the post price straight off the DOM (the other side's
+  // price is stashed on the value cell) instead of a full re-render, so typing doesn't fight the
+  // mobile keyboard for focus.
+  document.addEventListener('input', ev=>{
+    const qi = ev.target.closest('.qarbinput'); if(!qi) return;
+    qarbThresh = qi.value; LS.set('props_qarbthresh', qarbThresh);
+    const panel = qi.closest('.qarb');
+    const valEl = panel?.querySelector('.qarbval');
+    const postEl = panel?.querySelector('.qarbpost');
+    if(valEl && postEl) postEl.textContent = calcPostPrice(Number(valEl.dataset.price), qarbThresh) ?? '—';
+  });
   document.addEventListener('click', ev=>{
     const betlink = ev.target.closest('.mk [data-betlink]');
     if(betlink){ ev.stopPropagation(); return; }
