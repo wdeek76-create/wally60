@@ -393,6 +393,16 @@ a.p{color:#fff;text-decoration:none;border-color:rgba(34,197,94,.55)!important}
 .fdp.underdog{background:rgba(251,191,36,.18);color:var(--amber)}
 .ttsum{border-bottom:1px solid var(--line2);padding:0 0 10px;margin-bottom:12px}
 .ttsumh{display:flex;align-items:center;justify-content:space-between;font-weight:800;font-size:13px;margin-bottom:6px}
+.plleg{border:1px solid var(--line2);border-radius:16px;background:var(--bg2);padding:12px;margin-bottom:10px}
+.plhead{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.plnm{font-weight:800;font-size:14px}
+.plbet{font-family:var(--mono);font-size:12px;color:#fff;margin-top:2px}
+.plrows{margin-top:8px;display:flex;flex-direction:column;gap:4px}
+.plrow{display:grid;grid-template-columns:1fr auto auto;gap:8px;font-family:var(--mono);font-size:12px;padding:3px 0;border-top:1px solid var(--line2)}
+.plrow:first-child{border-top:none}
+.plbk{color:var(--dim)}
+.plsum{margin-top:8px;display:flex;justify-content:space-between;font-size:12px;font-family:var(--mono)}
+.plfair{color:var(--cyan);font-weight:800}
 .ttrow{display:grid;grid-template-columns:1.3fr auto auto auto;align-items:center;gap:8px;padding:3px 0;font-size:11px;font-family:var(--mono)}
 .ttrow>span:last-child,.ttrow>span:nth-last-child(2){text-align:right}
 .ttrow .pos{color:var(--green)}.ttrow .neg{color:var(--red)}
@@ -1388,6 +1398,7 @@ function pillDetail(b, sd, o, label, ctxKey, p, mkey, opm, ro){
   const dc = op!=null ? cents(Number(cp.price))-cents(op.price) : null;
   const clv = dc ? `<span class="clv">${dc>0?'+':''}${dc}¢ since</span>` : '';
   const trk = ro ? '' : `<button class="trk${isTracked(p,mkey,sd,b.line,b.key)?' on':''}" data-trackbk="${ctxKey}|${sd}|${b.line??''}|${b.key}">${isTracked(p,mkey,sd,b.line,b.key)?'Tracked':'Track '+esc(bookShort(b.key))}</button>`;
+  const plp = ro ? '' : `<button class="trk${isInParlay(p,mkey,sd,b.line,b.key)?' on':''}" data-parlaybk="${ctxKey}|${sd}|${b.line??''}|${b.key}">${isInParlay(p,mkey,sd,b.line,b.key)?'In parlay':'+Parlay'}</button>`;
   const atTop2 = cp.size;
   const showMax2 = b.ex || SHOW_MAX.has(b.key);
   const liqKey2 = `${ctxKey}|${ro?'open':'now'}|${sd}|${b.key}|${o.points??''}|liq`;
@@ -1412,7 +1423,7 @@ function pillDetail(b, sd, o, label, ctxKey, p, mkey, opm, ro){
   }
   const bt = betTarget(b, sd, o, ctxKey, `${sd}|${b.key}`);
   const betHtml = bt ? `<${bt.tag} class="dtlbet" ${bt.attrs}>Bet ↗</${bt.tag}>` : '';
-  return `<div class="bdl"><span class="s ${cls}">${esc(b.name)} — ${label}${b.line!=null?' '+b.line:''}</span><span>${fmtAm(cp.price)}</span>${pct}${liq}${opTxt}${clv}${betHtml}${trk}</div>${lad}`;
+  return `<div class="bdl"><span class="s ${cls}">${esc(b.name)} — ${label}${b.line!=null?' '+b.line:''}</span><span>${fmtAm(cp.price)}</span>${pct}${liq}${opTxt}${clv}${betHtml}${trk}${plp}</div>${lad}`;
 }
 // Row's own reference price (Over if it has one, else Under, else the single side) — the value
 // "best"/"worst" sort by, since a two-sided row can't independently rank both columns.
@@ -1867,6 +1878,10 @@ function showDetailPop(anchor, html, p){
     ev.stopPropagation(); const [key,mk2,side,ln,bk]=b.dataset.trackbk.split('|');
     trackProp(p,mk2,side,ln===''?null:Number(ln),cardSrc(p,mk2,`${p.key}|${mk2}`),bk); b.textContent='Tracked'; b.classList.add('on');
   }));
+  el.querySelectorAll('[data-parlaybk]').forEach(b=>b.addEventListener('click',ev=>{
+    ev.stopPropagation(); const [key,mk2,side,ln,bk]=b.dataset.parlaybk.split('|');
+    addToParlay(p,mk2,side,ln===''?null:Number(ln),cardSrc(p,mk2,`${p.key}|${mk2}`),bk); b.textContent='In parlay'; b.classList.add('on');
+  }));
   el.querySelectorAll('[data-betchoice]').forEach(btn=>btn.addEventListener('click',ev=>{
     ev.stopPropagation(); showBetChoice(btn, betChoices[btn.dataset.betchoice]||[]);
   }));
@@ -2000,6 +2015,18 @@ function openMap(p, mkey){
 // ───────────────────────── tracker ─────────────────────────
 let tracked = (()=>{ try{ return JSON.parse(LS.get('props_tracked','[]'))||[]; }catch(e){ return []; } })();
 const saveTracked = () => LS.set('props_tracked', JSON.stringify(tracked));
+// ───────────────────────── parlay comparator ─────────────────────────
+// A lightweight, separate list from the tracker -- legs you're considering for a parlay, not
+// bets you've placed. Each leg remembers enough (sportKey/fixtureId/market/side/line) to re-pull
+// every book currently posting it (plus the complementary side, for a no-vig fair price) without
+// needing the sport to still be the one on screen -- today's same-day sport cache covers that,
+// the same cache the app already keeps per sport for instant reloads.
+let parlay = (()=>{ try{ return JSON.parse(LS.get('props_parlay','[]'))||[]; }catch(e){ return []; } })();
+const saveParlay = () => LS.set('props_parlay', JSON.stringify(parlay));
+function isInParlay(p,mkey,label,line,bookKey){
+  const sk=sideKey(label);
+  return parlay.some(l=>l.playerKey===p.key&&l.fixtureId===p.fixtureId&&l.mkey===mkey&&l.side===sk&&Number(l.line??-1)===Number(line??-1)&&(bookKey==null||l.bookKey===bookKey));
+}
 // A single-sided market's side label depends on the MARKET, not just the sport -- UFC's whole
 // sport is moneyline-only (SPORTS[sportKey].ml), but a team's moneyline/60-min-reg-moneyline/
 // spread pick on an otherwise prop-driven sport (NFL/NBA/NHL) needs its own distinct label so
@@ -2048,6 +2075,78 @@ function trackProp(p, mkey, label, line, srcRows, bookKey){
     snapshots:[snap], live:null, actual:null, result:null, open:null, close:null });
   saveTracked(); toast(`Tracking ${p.name} ${side==='over'?'o':side==='under'?'u':''}${line??''} ${marketLabel(sportKey,mkey)}${bestBook&&bookKey?' on '+bookLabel(bestBook[0]):''}`);
 }
+function addToParlay(p, mkey, label, line, srcRows, bookKey){
+  const side=sideKey(label); if(isInParlay(p,mkey,label,line,bookKey)){ toast('Already in parlay'); return; }
+  const f=fixtures.find(x=>x.id===p.fixtureId);
+  const rowsAll=rowsFor(p,mkey,srcRows||mainRows);
+  const snap=snapshotFrom(rowsAll, side, line);
+  const bestBook=(bookKey&&snap.byBook[bookKey]) ? [bookKey,snap.byBook[bookKey]] : Object.entries(snap.byBook).sort((a,b)=>b[1].price-a[1].price)[0];
+  parlay.unshift({ id:Date.now()+Math.random().toString(36).slice(2,6), sportKey, fixtureId:p.fixtureId, start:f?.start||null,
+    away:f?.away.ab||f?.away.name||'', home:f?.home.ab||f?.home.name||'',
+    playerKey:p.key, playerName:p.name, mkey, marketLabel:marketLabel(sportKey,mkey), marketNames:[...new Set(rowsAll.map(o=>o.market))],
+    side, line:line??null, price:bestBook?bestBook[1].price:snap.best, book:bestBook?bookLabel(bestBook[0]):null, bookKey:bestBook?bestBook[0]:null,
+    isTeam:!!p.isTeam, teamSide:p.isTeam?p.teamSide:null, isGame:!!p.isGame, addedAt:Date.now() });
+  saveParlay(); renderTabs(); toast(`Added ${p.name} ${side==='over'?'o':side==='under'?'u':''}${line??''} ${marketLabel(sportKey,mkey)} to parlay`);
+}
+function removeFromParlay(id){ parlay=parlay.filter(l=>l.id!==id); saveParlay(); renderTabs(); if(viewMode==='parlay') renderParlay(); }
+// Fair (no-vig) price for my side given the best price currently available on the COMPLEMENTARY
+// side of the same market -- same toImplied math as the quick-arb maker-order calc, just
+// combining two sides' implied probabilities (so the bookmaker's margin cancels out) instead of
+// comparing one side to itself.
+function devigFair(myPrice, oppPrice){
+  if(myPrice==null||oppPrice==null) return null;
+  const pMy=toImplied(myPrice), pOpp=toImplied(oppPrice), total=pMy+pOpp;
+  if(!total) return null;
+  const fairP=pMy/total; if(fairP<=0||fairP>=1) return null;
+  const am = fairP<0.5 ? Math.round(100/fairP-100) : Math.round(-fairP/(1-fairP)*100);
+  return am>0?'+'+am:String(am);
+}
+// Every book currently posting THIS leg's market at this fixture, for a sport that may not be
+// the one on screen right now -- live mainRows if it is, else today's same-day sport cache.
+function rowsForLeg(leg){
+  const rows = leg.sportKey===sportKey ? mainRows : (loadSportCache(leg.sportKey)?.mainRows||[]);
+  return rows.filter(o=>o._fx===leg.fixtureId && marketKeyFor(leg.sportKey,o.market)===leg.mkey);
+}
+function myRowsForLeg(leg, rows){
+  if(leg.side==='over'||leg.side==='under') return rows.filter(o=>sideOf(o)===leg.side && (leg.isGame||normName(cleanSel(o.selection||o.name))===leg.playerKey) && (leg.line==null||Number(o.points)===Number(leg.line)));
+  return rows.filter(o=>normName(cleanSel(o.selection||o.name))===leg.playerKey);
+}
+function oppRowsForLeg(leg, rows){
+  if(leg.side==='over'||leg.side==='under'){
+    const oppSide=leg.side==='over'?'under':'over';
+    return rows.filter(o=>sideOf(o)===oppSide && (leg.isGame||normName(cleanSel(o.selection||o.name))===leg.playerKey) && (leg.line==null||Number(o.points)===Number(leg.line)));
+  }
+  if(leg.side==='ML'||leg.side==='ML60'||leg.side==='ATS') return rows.filter(o=>normName(cleanSel(o.selection||o.name))!==leg.playerKey);
+  return [];
+}
+const parlayComboPrice = () => parlay.length ? toAm(parlay.reduce((a,l)=>a*toDec(l.price),1)) : null;
+function parlayLegHtml(leg){
+  const rows=rowsForLeg(leg);
+  const mine=bestFirst(myRowsForLeg(leg,rows));
+  const opp=bestFirst(oppRowsForLeg(leg,rows));
+  const fair = (mine[0]&&opp[0]) ? devigFair(Number(mine[0].price), Number(opp[0].price)) : null;
+  const avgImp = mine.length ? mine.reduce((a,o)=>a+toImplied(Number(o.price)),0)/mine.length : null;
+  const avgAm = avgImp!=null ? (avgImp<0.5?Math.round(100/avgImp-100):Math.round(-avgImp/(1-avgImp)*100)) : null;
+  const rowsHtml = mine.map(o=>`<div class="plrow"><span class="plbk">${esc(bookShort(canonBook(o.sportsbook)))}</span><span class="plpx">${fmtAm(o.price)}</span><span class="plwp">${winPct(o.price)}%</span></div>`).join('') || '<div class="plrow dim">No books posting this right now.</div>';
+  const sideTxt = leg.side==='over'?'o':leg.side==='under'?'u':leg.side==='ML60'?'ML (Reg.)':leg.side;
+  return `<div class="plleg" data-leg="${leg.id}">
+    <div class="plhead"><div class="plnm">${esc(titleCase(leg.playerName))} <span class="dim">${esc(leg.away)}@${esc(leg.home)}</span></div><button class="rm" data-plrm="${leg.id}">Remove</button></div>
+    <div class="plbet">${sideTxt}${leg.line!=null?' '+leg.line:''} ${esc(leg.marketLabel)} <span class="dim">added at ${fmtAm(leg.price)} ${esc(leg.book||'')}</span></div>
+    <div class="plrows">${rowsHtml}</div>
+    <div class="plsum">${avgAm!=null?`<span>Avg ${mine.length} book${mine.length===1?'':'s'}: ${fmtAm(avgAm)}</span>`:''}${fair?`<span class="plfair">No-vig fair: ${fmtAm(Number(fair))}</span>`:'<span class="dim">No-vig fair: need the other side posted</span>'}</div>
+  </div>`;
+}
+function renderParlay(){
+  clearGstripDock(); const view=$('#view'); $('.sw').style.display='none';
+  if(!parlay.length){ view.innerHTML='<div class="empty">No parlay legs yet.<br>Open any pick and tap <b>+Parlay</b>.</div>'; $('#stat').textContent='Parlay · empty'; return; }
+  const combo=parlayComboPrice();
+  const comboHtml = `<div class="ttsum"><div class="ttsumh"><span>Parlay · ${parlay.length} leg${parlay.length===1?'':'s'}</span><button class="rm" id="plclear" style="background:var(--bg2)">Clear all</button></div><div class="ttrow"><b>Combined price at added odds: ${combo!=null?fmtAm(combo):'—'}</b></div></div>`;
+  view.innerHTML = comboHtml + parlay.map(parlayLegHtml).join('');
+  $('#plclear')?.addEventListener('click',()=>{ parlay=[]; saveParlay(); renderTabs(); renderParlay(); });
+  view.querySelectorAll('[data-plrm]').forEach(b=>b.addEventListener('click',()=>removeFromParlay(b.dataset.plrm)));
+  $('#stat').textContent=`Parlay · ${parlay.length} leg${parlay.length===1?'':'s'}`;
+}
+function openParlay(){ viewMode='parlay'; current=null; clearInterval(trackerTimer); $('.sw').style.display='none'; renderTabs(); renderParlay(); }
 // stat resolution from /fixtures/player-results
 const STAT_CANDS = {
   pts:['points','pts'], reb:['rebounds','total_rebounds','reb'], ast:['assists','ast'], '3pm':['three_point_field_goals_made','three_pointers_made','three_points_made','threes_made','3pm','three_pointers'],
@@ -2917,10 +3016,12 @@ function renderTabs(){
     const c=sportGameCountsToday[k];
     return `<button class="tab${viewMode==='sport'&&k===sportKey?' on':''}" data-k="${k}">${s.label}${c!=null?`<span class="tcount">${c}</span>`:''}</button>`;
   }).join('')+`<button class="tab${viewMode==='injuries'?' on':''}" data-k="__injuries" style="margin-left:auto;border-color:rgba(251,191,36,.45);${viewMode==='injuries'?'background:rgba(251,191,36,.16);':''}">Injuries</button>`
+    +`<button class="tab${viewMode==='parlay'?' on':''}" data-k="__parlay" style="border-color:rgba(94,234,212,.45);${viewMode==='parlay'?'background:rgba(94,234,212,.16);':''}">Parlay${parlay.length?' · '+parlay.length:''}</button>`
     +`<button class="tab${viewMode==='tracker'?' on':''}" data-k="__tracker" style="border-color:rgba(34,197,94,.45);${viewMode==='tracker'?'background:rgba(34,197,94,.16);':''}">Tracker${tracked.length?' · '+tracked.filter(t=>!t.final).length:''}</button>`;
   $('#tabs').querySelectorAll('.tab').forEach(b=>b.addEventListener('click',()=>{
     if(b.dataset.k==='__tracker'){ openTracker(); return; }
     if(b.dataset.k==='__injuries'){ openInjuries(); return; }
+    if(b.dataset.k==='__parlay'){ openParlay(); return; }
     clearInterval(trackerTimer); viewMode='sport'; $('.sw').style.display='';
     const same=b.dataset.k===sportKey && mainRows.length;
     sportKey=b.dataset.k; LS.set('props_sport',sportKey); current=null; renderTabs();
@@ -2968,7 +3069,7 @@ setTimeout(()=>{ const s=document.getElementById('splash'); if(!s) return; s.cla
     const backBtn=document.getElementById('back');
     if(backBtn){ backBtn.click(); return; }
     // No in-page back button here (Tracker/Injuries) -- swipe back to whichever sport tab is active.
-    if(viewMode==='tracker'||viewMode==='injuries'){ document.querySelector(`#tabs .tab[data-k="${sportKey}"]`)?.click(); }
+    if(viewMode==='tracker'||viewMode==='injuries'||viewMode==='parlay'){ document.querySelector(`#tabs .tab[data-k="${sportKey}"]`)?.click(); }
   }, {passive:true});
 })();
 </script>
