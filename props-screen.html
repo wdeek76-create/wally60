@@ -2234,6 +2234,33 @@ function parlayBookPrices(){
   for(let i=1;i<legMaps.length;i++) common=new Set([...common].filter(k=>k in legMaps[i]));
   return [...common].map(k=>({ book:k, price: toAm(legMaps.reduce((a,m)=>a*toDec(m[k].price),1)), o: legMaps[0][k].o })).sort((a,b)=>toDec(b.price)-toDec(a.price));
 }
+// Parlay-only: devig off the WEIGHTED AVERAGE across every shop on each side, not just the single
+// best-vs-best price (that's what the Team Total vs Pinnacle comparison and the single-sided
+// board's own no-vig line use -- this one's deliberately different, averaged across the whole
+// market first so one outlier shop can't skew the fair number). Shared by each leg's own fair
+// price and the combined parlay-level fair price below, so they use the exact same math.
+function legFairPrice(leg){
+  const rows=rowsForLeg(leg);
+  const mine=bestFirst(myRowsForLeg(leg,rows));
+  const opp=bestFirst(oppRowsForLeg(leg,rows));
+  const avgImp = mine.length ? mine.reduce((a,o)=>a+toImplied(Number(o.price)),0)/mine.length : null;
+  const oppAvgImp = opp.length ? opp.reduce((a,o)=>a+toImplied(Number(o.price)),0)/opp.length : null;
+  const fairP = (avgImp!=null && oppAvgImp!=null && (avgImp+oppAvgImp)>0) ? avgImp/(avgImp+oppAvgImp) : null;
+  if(fairP==null || fairP<=0 || fairP>=1) return null;
+  return { fairP, mineCount: mine.length, avgImp };
+}
+// Combined fair price for the WHOLE parlay: each leg's true (devigged) probability multiplied
+// together -- not each leg's fair AMERICAN price converted to decimal and multiplied, which would
+// compound the rounding from each leg's own round-to-the-nearest-dollar conversion. Null if any
+// leg is missing its other side (can't devig that leg at all yet).
+function parlayFairSummary(){
+  const fairs = parlay.map(legFairPrice);
+  if(!fairs.length || fairs.some(f=>f==null)) return null;
+  const combinedP = fairs.reduce((a,f)=>a*f.fairP,1);
+  if(combinedP<=0||combinedP>=1) return null;
+  const fairAm = combinedP<0.5 ? Math.round(100/combinedP-100) : Math.round(-combinedP/(1-combinedP)*100);
+  return { fairAm, combinedP };
+}
 // One compact section per leg (not its own card) -- name/bet/remove on top, then every shop
 // currently posting that exact side+line as its own linked row, then the weighted-average no-vig
 // fair at the bottom. Several of these stack inside ONE outer panel in renderParlay, instead of
@@ -2241,16 +2268,10 @@ function parlayBookPrices(){
 function parlayLegHtml(leg){
   const rows=rowsForLeg(leg);
   const mine=bestFirst(myRowsForLeg(leg,rows));
-  const opp=bestFirst(oppRowsForLeg(leg,rows));
   const avgImp = mine.length ? mine.reduce((a,o)=>a+toImplied(Number(o.price)),0)/mine.length : null;
   const avgAm = avgImp!=null ? (avgImp<0.5?Math.round(100/avgImp-100):Math.round(-avgImp/(1-avgImp)*100)) : null;
-  // Parlay-only: devig off the WEIGHTED AVERAGE across every shop on each side, not just the
-  // single best-vs-best price (that's what the Team Total vs Pinnacle comparison and the
-  // single-sided board's own no-vig line use -- this one's deliberately different, averaged
-  // across the whole market first so one outlier shop can't skew the fair number).
-  const oppAvgImp = opp.length ? opp.reduce((a,o)=>a+toImplied(Number(o.price)),0)/opp.length : null;
-  const fairP = (avgImp!=null && oppAvgImp!=null && (avgImp+oppAvgImp)>0) ? avgImp/(avgImp+oppAvgImp) : null;
-  const fair = (fairP!=null && fairP>0 && fairP<1) ? (fairP<0.5?Math.round(100/fairP-100):Math.round(-fairP/(1-fairP)*100)) : null;
+  const legFair = legFairPrice(leg);
+  const fair = legFair ? (legFair.fairP<0.5?Math.round(100/legFair.fairP-100):Math.round(-legFair.fairP/(1-legFair.fairP)*100)) : null;
   const rowsHtml = mine.map(o=>`<div class="plrow">${shopLinkHtml(canonBook(o.sportsbook),bookShort(canonBook(o.sportsbook)),o)}<span class="plpx">${fmtAm(o.price)}</span><span class="plwp">${winPct(o.price)}%</span></div>`).join('') || '<div class="plrow dim">No shops posting this right now.</div>';
   const sideTxt = leg.side==='over'?'o':leg.side==='under'?'u':leg.side==='ML60'?'ML (Reg.)':leg.side;
   return `<div class="plleg" data-leg="${leg.id}">
@@ -2268,6 +2289,20 @@ function renderParlay(){
   const bookRowsHtml = bookRows.length
     ? bookRows.map((r,i)=>`<div class="plrow${i===0?' best':''}">${shopLinkHtml(r.book,bookShort(r.book),r.o)}<span class="plpx">${fmtAm(r.price)}</span><span class="plwp">${winPct(r.price)}%</span></div>`).join('')
     : `<div class="plrow dim">No single shop currently posts all ${parlay.length} legs.</div>`;
+  // Combined parlay-level no-vig fair (each leg's own devigged probability multiplied together,
+  // not each leg's rounded fair price converted back and multiplied -- see parlayFairSummary) plus
+  // the edge: how much better the best REAL price available (bookRows[0], the top of the per-shop
+  // comparison above) is than what the parlay is actually worth. Positive = the price beats fair.
+  const fairSummary=parlayFairSummary();
+  let fairHtml;
+  if(fairSummary){
+    const bestRow=bookRows[0];
+    const edgePct = bestRow ? (fairSummary.combinedP - toImplied(bestRow.price))*100 : null;
+    const edgeCls = edgePct>0?'pos':edgePct<0?'neg':'';
+    fairHtml = `<div class="ttrow" style="margin-top:4px"><span class="dim">Parlay no-vig fair: <b class="plfair">${fmtAm(fairSummary.fairAm)}</b></span>${edgePct!=null?`<span class="${edgeCls}">${edgePct>0?'+':''}${edgePct.toFixed(1)}% edge</span>`:''}</div>`;
+  } else {
+    fairHtml = `<div class="ttrow" style="margin-top:4px"><span class="dim">Parlay no-vig fair: needs every leg's other side posted</span></div>`;
+  }
   // One panel for the whole parlay -- the per-shop comparison up top, then each leg as a divided
   // section underneath instead of its own separate card, so a 2-3 leg parlay doesn't take 3-4
   // cards' worth of chrome (borders/radius/padding) to show.
@@ -2276,6 +2311,7 @@ function renderParlay(){
     <div class="label">Best shop for this exact parlay</div>
     <div class="plrows">${bookRowsHtml}</div>
     <div class="ttrow" style="margin-top:8px"><span class="dim">At added odds: ${combo!=null?fmtAm(combo):'—'}</span></div>
+    ${fairHtml}
     ${parlay.map(parlayLegHtml).join('')}
   </div>`;
   $('#plclear')?.addEventListener('click',()=>{ parlay=[]; saveParlay(); renderTabs(); renderParlay(); });
