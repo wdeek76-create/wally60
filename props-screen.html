@@ -435,6 +435,15 @@ a.p{color:var(--text);text-decoration:none;border-color:rgba(34,197,94,.55)!impo
 .plbk{color:var(--dim);text-decoration:none}
 a.plbk{color:var(--cyan)}
 .plsum{margin-top:8px;display:flex;justify-content:space-between;font-size:12px;font-family:var(--mono)}
+.autorow{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:7px 0;border-top:1px solid var(--line2)}
+.autorow:first-child{border-top:none}
+.autorow label{font-size:12px;font-weight:700;color:var(--dim)}
+.autorow select{background:var(--bg2);border:1px solid var(--line2);border-radius:8px;color:var(--text);font-size:12px;padding:6px 8px;max-width:60%}
+.autostepper{display:flex;align-items:center;gap:10px;font-family:var(--mono);font-weight:800}
+.autostepper button{width:26px;height:26px;border-radius:50%;border:1px solid var(--line2);background:var(--bg2);color:var(--text);font-size:15px;line-height:1}
+.autobasis{display:flex;gap:6px}
+.abbtn{padding:5px 10px;border-radius:999px;border:1px solid var(--line2);background:var(--bg2);color:var(--text);font-size:11px;font-weight:700}
+.abbtn.on{border-color:var(--purple);background:rgba(34,197,94,.16);color:var(--green)}
 .plfair{color:var(--cyan);font-weight:800}
 .ttrow{display:grid;grid-template-columns:1.3fr auto auto auto;align-items:center;gap:8px;padding:3px 0;font-size:11px;font-family:var(--mono)}
 .ttrow>span:last-child,.ttrow>span:nth-last-child(2){text-align:right}
@@ -2281,9 +2290,113 @@ function parlayLegHtml(leg){
     <div class="plsum">${avgAm!=null?`<span>Avg ${mine.length} shop${mine.length===1?'':'s'}: ${fmtAm(avgAm)}</span>`:''}${fair?`<span class="plfair">No-vig fair: ${fmtAm(Number(fair))}</span>`:'<span class="dim">No-vig fair: need the other side posted</span>'}</div>
   </div>`;
 }
+// ───────────────────────── auto parlay builder ─────────────────────────
+// Scans every pick currently loaded for the active sport (same-sport only -- same constraint the
+// manual parlay legs already have) and auto-adds the best-edge ones. "Edge" is the same no-vig
+// devig math as everywhere else in this tool: each pick's fair probability (weighted average
+// across every book on both sides) vs. the actual price available from the chosen reference --
+// Pinnacle specifically, the best price currently backed by real exchange liquidity, or whichever
+// of the two is better ("mix").
+let autoLegs = Math.max(1, Number(LS.get('props_autolegs','3'))||3);
+let autoBasis = LS.get('props_autobasis','mix'); // 'pin' | 'exch' | 'mix'
+let autoEdge = Number(LS.get('props_autoedge','1'))||0;
+let autoFixture = '';
+let autoOpen = LS.get('props_autoopen','1')==='1';
+function fairPFromRows(myRows, oppRows){
+  const avgImp = myRows.length ? myRows.reduce((a,o)=>a+toImplied(Number(o.price)),0)/myRows.length : null;
+  const oppAvgImp = oppRows.length ? oppRows.reduce((a,o)=>a+toImplied(Number(o.price)),0)/oppRows.length : null;
+  if(avgImp==null||oppAvgImp==null||(avgImp+oppAvgImp)<=0) return null;
+  return avgImp/(avgImp+oppAvgImp);
+}
+function buildAutoCandidates(){
+  const S=SPORTS[sportKey];
+  const out=[];
+  players.forEach(p=>{
+    if(autoFixture && p.fixtureId!==autoFixture) return;
+    if(fixtureIsLive(p.fixtureId)) return;
+    p.marketKeys.forEach(mkey=>{
+      const rows=rowsFor(p,mkey,mainRows); if(!rows.length) return;
+      const single = S.ml || SINGLE_SIDED_MKS.has(mkey);
+      const sides = single ? ['single'] : ['over','under'];
+      sides.forEach(side=>{
+        const myAll = side==='single' ? rows : rows.filter(o=>sideOf(o)===side);
+        if(!myAll.length) return;
+        const line = side==='single' ? null : mainLineOf(rows, side);
+        const myRows = line==null ? myAll : myAll.filter(o=>Number(o.points)===Number(line));
+        const oppRows = side==='single'
+          ? rows.filter(o=>normName(cleanSel(o.selection||o.name))!==p.key)
+          : rows.filter(o=>sideOf(o)===(side==='over'?'under':'over') && (line==null||Number(o.points)===Number(line)));
+        const fairP = fairPFromRows(myRows, oppRows); if(fairP==null) return;
+        const pinRow = bestFirst(myRows.filter(o=>canonBook(o.sportsbook)==='pinnacle'))[0] || null;
+        const exchRow = bestFirst(myRows.filter(o=>EXCH.has(canonBook(o.sportsbook))))[0] || null;
+        let refRow = autoBasis==='pin' ? pinRow : autoBasis==='exch' ? exchRow
+          : [pinRow,exchRow].filter(Boolean).sort((a,b)=>toDec(b.price)-toDec(a.price))[0] || null;
+        if(!refRow) return;
+        const edgePct = (fairP - toImplied(Number(refRow.price)))*100;
+        if(edgePct < autoEdge) return;
+        out.push({ p, mkey, side, line, refRow, fairP, edgePct });
+      });
+    });
+  });
+  out.sort((a,b)=>b.edgePct-a.edgePct);
+  return out;
+}
+function runAutoBuild(){
+  const candidates=buildAutoCandidates();
+  const used=new Set(parlay.map(l=>l.playerKey+'|'+l.mkey));
+  const picks=[];
+  for(const c of candidates){
+    const k=c.p.key+'|'+c.mkey; if(used.has(k)) continue;
+    used.add(k); picks.push(c);
+    if(picks.length>=autoLegs) break;
+  }
+  if(!picks.length){ toast('No picks cleared that edge threshold'); return; }
+  picks.forEach(c=>{
+    const label = c.side==='single' ? singleSideLabel(c.mkey) : (c.side==='over'?'Over':'Under');
+    addToParlay(c.p, c.mkey, label, c.line, mainRows, canonBook(c.refRow.sportsbook));
+  });
+  toast(`Added ${picks.length} auto-built leg${picks.length===1?'':'s'}`);
+  renderTabs(); renderParlay();
+}
+function autoBuildHtml(){
+  const fxOpts = fixtures.filter(f=>!f.live).map(f=>`<option value="${esc(f.id)}"${autoFixture===f.id?' selected':''}>${esc(f.away.ab||f.away.name)} @ ${esc(f.home.ab||f.home.name)}</option>`).join('');
+  return `<div class="ttsum">
+    <div class="ttsumh" id="autoHead" role="button"><span>Auto Build</span><span class="dim">${autoOpen?'▴':'▾'}</span></div>
+    <div id="autoBody"${autoOpen?'':' style="display:none"'}>
+      <div class="autorow"><label>Legs</label><div class="autostepper"><button data-autoleg="-1">−</button><b>${autoLegs}</b><button data-autoleg="1">+</button></div></div>
+      <div class="autorow"><label>Game</label><select id="autoFixtureSel"><option value="">All games</option>${fxOpts}</select></div>
+      <div class="autorow"><label>Basis</label><div class="autobasis">
+        <button class="abbtn${autoBasis==='pin'?' on':''}" data-basis="pin">Pinnacle</button>
+        <button class="abbtn${autoBasis==='exch'?' on':''}" data-basis="exch">Exchanges</button>
+        <button class="abbtn${autoBasis==='mix'?' on':''}" data-basis="mix">Mix</button>
+      </div></div>
+      <div class="autorow" style="align-items:flex-start"><label style="margin-top:4px">Min edge</label><div class="qarbrow qarbpresets" style="border-bottom:none;padding-bottom:0">
+        ${[0,1,2,5,10].map(v=>`<button class="qarbchip${autoEdge===v?' on':''}" data-autoedgechip="${v}">${v}%</button>`).join('')}
+      </div></div>
+      <button class="big" id="autoGenerate" style="width:100%;margin-top:10px">Generate parlay</button>
+    </div>
+  </div>`;
+}
+function bindAutoBuild(view){
+  $('#autoHead')?.addEventListener('click',()=>{ autoOpen=!autoOpen; LS.set('props_autoopen',autoOpen?'1':''); renderParlay(); });
+  view.querySelectorAll('[data-autoleg]').forEach(b=>b.addEventListener('click',()=>{
+    autoLegs=Math.max(1,Math.min(10,autoLegs+Number(b.dataset.autoleg))); LS.set('props_autolegs',String(autoLegs)); renderParlay();
+  }));
+  $('#autoFixtureSel')?.addEventListener('change',e=>{ autoFixture=e.target.value; });
+  view.querySelectorAll('[data-basis]').forEach(b=>b.addEventListener('click',()=>{
+    autoBasis=b.dataset.basis; LS.set('props_autobasis',autoBasis); renderParlay();
+  }));
+  view.querySelectorAll('[data-autoedgechip]').forEach(b=>b.addEventListener('click',()=>{
+    autoEdge=Number(b.dataset.autoedgechip); LS.set('props_autoedge',String(autoEdge)); renderParlay();
+  }));
+  $('#autoGenerate')?.addEventListener('click',runAutoBuild);
+}
 function renderParlay(){
   clearGstripDock(); const view=$('#view'); $('.sw').style.display='none';
-  if(!parlay.length){ view.innerHTML='<div class="empty">No parlay legs yet.<br>Open any pick and tap <b>+Parlay</b>.</div>'; $('#stat').textContent='Parlay · empty'; return; }
+  if(!parlay.length){
+    view.innerHTML = '<div class="empty">No parlay legs yet.<br>Open any pick and tap <b>+Parlay</b>, or generate one below.</div>' + autoBuildHtml();
+    bindAutoBuild(view); $('#stat').textContent='Parlay · empty'; return;
+  }
   const combo=parlayComboPrice();
   const bookRows=parlayBookPrices();
   const bookRowsHtml = bookRows.length
@@ -2306,7 +2419,7 @@ function renderParlay(){
   // One panel for the whole parlay -- the per-shop comparison up top, then each leg as a divided
   // section underneath instead of its own separate card, so a 2-3 leg parlay doesn't take 3-4
   // cards' worth of chrome (borders/radius/padding) to show.
-  view.innerHTML = `<div class="ttsum plwrap">
+  view.innerHTML = autoBuildHtml() + `<div class="ttsum plwrap">
     <div class="ttsumh"><span>Parlay · ${parlay.length} leg${parlay.length===1?'':'s'}</span><button class="rm" id="plclear" style="background:var(--bg2)">Clear all</button></div>
     <div class="label">Best shop for this exact parlay</div>
     <div class="plrows">${bookRowsHtml}</div>
@@ -2314,6 +2427,7 @@ function renderParlay(){
     ${fairHtml}
     ${parlay.map(parlayLegHtml).join('')}
   </div>`;
+  bindAutoBuild(view);
   $('#plclear')?.addEventListener('click',()=>{ parlay=[]; saveParlay(); renderTabs(); renderParlay(); });
   view.querySelectorAll('[data-plrm]').forEach(b=>b.addEventListener('click',()=>removeFromParlay(b.dataset.plrm)));
   $('#stat').textContent=`Parlay · ${parlay.length} leg${parlay.length===1?'':'s'}`;
