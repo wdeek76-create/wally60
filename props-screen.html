@@ -132,6 +132,8 @@ main{flex:1;padding:12px calc(var(--sar) + 12px) 160px calc(var(--sal) + 12px)}
 .qarbrow{display:flex;align-items:center;justify-content:space-between;gap:8px}
 .qarblbl{font-size:10px;font-weight:700;color:#fff;opacity:.6;text-transform:uppercase;letter-spacing:.3px}
 .qarbval{font-family:var(--mono);font-size:13px;font-weight:800;color:#fff}
+.qarbvalwrap{display:flex;flex-direction:column;align-items:flex-end;flex:0 0 auto}
+.qarbvalpct{font-family:var(--mono);font-size:9.5px;font-weight:700;color:#fff;opacity:.55}
 .qarbpresets{justify-content:flex-start;gap:6px;flex-wrap:wrap;padding-bottom:6px;border-bottom:1px solid rgba(34,197,94,.2)}
 .qarbchip{padding:4px 9px;border-radius:999px;border:1px solid var(--line2);background:var(--bg2);color:#fff;font-size:11px;font-weight:700}
 .qarbchip.on{border-color:rgba(34,197,94,.9);background:rgba(34,197,94,.16);color:var(--green)}
@@ -643,13 +645,14 @@ const toDec = a => { a=Number(a); return a>0?1+a/100:1+100/Math.abs(a); };
 const toAm = d => (d-1)>=1 ? Math.round((d-1)*100) : -Math.round(100/(d-1));
 const winPct = a => { a=Number(a); const p=a>0?100/(a+100):Math.abs(a)/(Math.abs(a)+100); return (p*100).toFixed(1); };
 const usd = n => n>=1000 ? '$'+(n/1000).toFixed(1).replace(/\.0$/,'')+'k' : '$'+Math.round(n);
-// Same toImplied/calcPost math as the arb calculator, verbatim -- not a different formula. Given
-// the OTHER side's market price, what price on my side locks in a typed target edge: flip the
-// other side's price to its no-vig mirror (same identity used everywhere else in this app:
-// imp(-x)+imp(x)=1), then add the threshold before converting back to American odds.
+// Same toImplied/calcPost math as the arb calculator, verbatim -- not a different formula. This
+// is a maker-order price, not a hedge: given another book's price on the SAME side I'm about to
+// post, what price should I post at to be a typed target edge better for me than that reference
+// (same side in, same side out -- no cross-side mirroring, that was the wrong math for "I'm
+// posting an order," which isn't a two-leg arb against the opposite side at all).
 const toImplied = o => { o=Number(o); return o>0 ? 100/(o+100) : Math.abs(o)/(Math.abs(o)+100); };
-function calcPostPrice(otherSidePrice, threshPct){
-  const myImp = toImplied(-Number(otherSidePrice));
+function calcPostPrice(refPrice, threshPct){
+  const myImp = toImplied(Number(refPrice));
   const postImp = myImp + (Number(threshPct)||0)/100;
   if(postImp<=0 || postImp>=1) return null;
   const am = postImp<0.5 ? Math.round(100/postImp-100) : Math.round(-postImp/(1-postImp)*100);
@@ -1451,28 +1454,30 @@ function boardHtml(rows, p, mkey, ctxKey, mainLine, pt, ro){
   const activeSide=oddsSide==='under'?'under':'over';
   const activeSorted=activeSide==='under'?underSorted:overSorted;
   const toggle=`<div class="sidetog"><button class="stbtn${activeSide==='over'?' on':''}" data-side="over">O</button><button class="stbtn${activeSide==='under'?' on':''}" data-side="under">U</button></div>`;
-  // Quick arb: tied to whichever side the toggle above is on (that's "my side"). Every book
-  // posting the OTHER side gets its own row, not just the single best -- same toImplied/calcPost
-  // math as the arb calculator for each one. Preset chips (0.3/0.5/1/2%) or free-typing both set
-  // the same qarbThresh, so every row's post price (and its ¢/% implied, same exPctMode toggle
-  // the grid uses) updates together.
-  const oppSide=activeSide==='over'?'under':'over';
-  const oppBooks=activeSide==='over'?underSorted:overSorted;
+  // Quick arb: tied to whichever side the toggle above is on (that's the side I'm about to post
+  // an order on). Every OTHER book posting that SAME side gets its own row, not a cross-side
+  // hedge -- this is a maker's order, not a two-leg arb, so the reference is what else is out
+  // there on my own side, and the post price undercuts it by the target edge. Preset chips
+  // (0.3/0.5/1/2%) or free-typing both set the same qarbThresh, so every row's post price (and
+  // its ¢/% implied, same exPctMode toggle the grid uses) updates together. Each reference price
+  // shows its own ¢/% too, so both ends of the arrow read the same way.
+  const sameBooks=activeSorted;
   const QARB_PRESETS=[0.3,0.5,1,2];
-  const qarbRows=oppBooks.map(b=>{
-    const o=b[oppSide]; const post=calcPostPrice(o.price,qarbThresh);
+  const qarbRows=sameBooks.map(b=>{
+    const o=b[activeSide]; const refPct=`${Math.round(Number(winPct(o.price)))}${exPctMode==='cents'?'¢':'%'}`;
+    const post=calcPostPrice(o.price,qarbThresh);
     const postPct=post!=null?`${Math.round(Number(winPct(post)))}${exPctMode==='cents'?'¢':'%'}`:'';
     const lg=bookLogo(b.key);
     return `<div class="qarbrow qarbline">
       <span class="qarbbk">${lg?`<img src="${esc(lg)}" alt="">`:`<span class="rlogotxt">${esc(bookShort(b.key))}</span>`}<span class="qarblbl">${esc(bookShort(b.key))}</span></span>
-      <span class="qarbval" data-price="${o.price}">${fmtAm(o.price)}</span>
+      <span class="qarbvalwrap"><span class="qarbval" data-price="${o.price}">${fmtAm(o.price)}</span><span class="qarbvalpct">${refPct}</span></span>
       <span class="qarbarrow">→</span>
       <span class="qarbpostwrap"><span class="qarbpost">${post??'—'}</span>${post!=null?`<span class="qarbpostpct">${postPct}</span>`:''}</span>
     </div>`;
   }).join('');
-  const qarb=oppBooks.length?`<div class="qarb${qarbOpen?' open':''}">
+  const qarb=sameBooks.length?`<div class="qarb${qarbOpen?' open':''}">
     <button class="qarbhead" type="button">
-      <span class="qarbheadt">Quick arb · ${esc(activeSide==='over'?'Over':'Under')} vs every ${esc(oppSide==='under'?'Under':'Over')}</span>
+      <span class="qarbheadt">Quick arb · ${esc(activeSide==='over'?'Over':'Under')} fills</span>
       <span class="qarbcaret">${qarbOpen?'▴':'▾'}</span>
     </button>
     <div class="qarbbody"${qarbOpen?'':' style="display:none"'}>
