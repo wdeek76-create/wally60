@@ -172,6 +172,10 @@ main{flex:1;padding:12px calc(var(--sar) + 12px) 160px calc(var(--sal) + 12px)}
 .bbxinfo{display:flex;align-items:center;gap:7px;min-width:0;flex:1 1 auto}
 .bbxnm{font-size:11px;font-weight:800;color:#fff;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}
 .bbxln{font-family:var(--mono);font-weight:700;color:#fff;opacity:.6}
+.vspin{font-family:var(--mono);font-size:9px;font-weight:800;padding:1px 6px;border-radius:5px;white-space:nowrap;margin-left:auto}
+.vspin.up{background:rgba(34,197,94,.16);color:var(--green)}
+.vspin.dn{background:rgba(255,92,92,.16);color:var(--red)}
+.vspin.fl{background:rgba(255,255,255,.08);color:var(--dim)}
 .bbx .rcell{align-items:flex-end;text-align:right;flex:0 0 auto}
 .bbx .rcell .rmeta{justify-content:flex-end}
 .rlogo{width:20px;height:20px;border-radius:6px;flex:0 0 auto;overflow:hidden;position:relative;border:1px solid rgba(255,255,255,.14);box-shadow:inset 0 1px 1px rgba(255,255,255,.5),inset 0 -1px 2px rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;background:rgba(23,27,36,.6)}
@@ -1375,14 +1379,18 @@ function bookRowHtml(b, sd, o, pt, ctxKey, i, ro){
 // sideCellHtml verbatim underneath, so tap-for-detail (price movement, limit spikes, Track) and
 // flashing keep working unchanged. Betting is the logo itself now (see betTarget) -- a ringed,
 // tappable book logo instead of a separate Bet button crowding the price cell.
-function bookBoxHtml(b, sd, o, pt, ctxKey, i, ro){
+function bookBoxHtml(b, sd, o, pt, ctxKey, i, ro, pinCents){
   const lg=bookLogo(b.key);
   const logo = lg ? `<img src="${esc(lg)}" alt="">` : `<span class="rlogotxt">${esc(bookShort(b.key))}</span>`;
   const rowPill = (o && !b.ex) ? ` role="button" data-pill="${ctxKey}|${sd}|${b.key}"` : '';
   const bt = o ? betTarget(b, sd, o, ctxKey, `${sd}|${b.key}`) : null;
   const logoEl = bt ? `<${bt.tag} class="rlogo betlogo" ${bt.attrs}>${logo}</${bt.tag}>` : `<div class="rlogo">${logo}</div>`;
+  const vsPin = (pinCents!=null && o)
+    ? (b.key==='pinnacle' ? `<span class="vspin fl">Pinnacle (ref)</span>`
+      : (cents(Number(o.price))!=null ? (() => { const d=cents(Number(o.price))-pinCents; return d ? `<span class="vspin ${d>0?'up':'dn'}">${d>0?'+':''}${d}¢ vs Pin</span>` : `<span class="vspin fl">matches Pin</span>`; })() : ''))
+    : '';
   return `<div class="bbx${i%2===1?' alt':''}"${rowPill}>
-    <div class="bbxinfo">${logoEl}<div class="bbxnm">${esc(b.name)}${b.line!=null?` <span class="bbxln">${b.line}</span>`:''}</div></div>
+    <div class="bbxinfo">${logoEl}<div class="bbxnm">${esc(b.name)}${b.line!=null?` <span class="bbxln">${b.line}</span>`:''}</div>${vsPin}</div>
     ${sideCellHtml(b, sd, o, pt, ctxKey, ro)}
   </div>`;
 }
@@ -1546,9 +1554,14 @@ function boardHtml(rows, p, mkey, ctxKey, mainLine, pt, ro){
       ${qarbRows}
     </div>
   </div>`:'';
+  // Team Total: anchor every book's price to Pinnacle's own number on this side+line specifically
+  // (the sharp reference), not just a generic cross-book list -- each box shows how many cents
+  // off Pinnacle it is, so you can tell at a glance who's actually beating the sharp line.
+  const pinBox = mkey==='tt' ? list.find(x=>x.key==='pinnacle') : null;
+  const pinCents = (pinBox && pinBox[activeSide] && cents(Number(pinBox[activeSide].price))!=null) ? cents(Number(pinBox[activeSide].price)) : null;
   return `<div class="bboard">
     ${toggle}
-    <div class="bcol">${activeSorted.map((b,i)=>bookBoxHtml(b,activeSide,b[activeSide],pt,ctxKey,i,ro)).join('')||'<div class="bempty">No books</div>'}</div>
+    <div class="bcol">${activeSorted.map((b,i)=>bookBoxHtml(b,activeSide,b[activeSide],pt,ctxKey,i,ro,pinCents)).join('')||'<div class="bempty">No books</div>'}</div>
     ${qarb}
   </div>`;
 }
@@ -2414,38 +2427,43 @@ function trackCardHtml(t){
   </div>`;
 }
 let historyShown=false;
-// Lets the whole tracked list (every tracked bet, graded or not) travel as one copyable blob --
-// same clipboard-first/prompt-fallback pattern as the grid's settings backup -- so a freshly
-// sent build (new origin, no carried-over localStorage) can pick the tracker back up instead of
-// starting over. Restoring reloads the page so every view picks up the restored data.
-async function copyTrackerBackup(){
-  const json=JSON.stringify(tracked);
-  if(navigator.clipboard && navigator.clipboard.writeText){
-    try{ await navigator.clipboard.writeText(json); toast('Tracker backup copied'); return; }
-    catch(e){ console.warn('[props] clipboard write failed', e.message); }
-  }
-  const ta=document.createElement('textarea');
-  ta.value=json; ta.style.position='fixed'; ta.style.opacity='0';
-  document.body.appendChild(ta); ta.focus(); ta.select();
-  try{ document.execCommand('copy'); toast('Tracker backup copied'); }
-  catch(e){ prompt('Copy this text to back up your tracker:', json); }
-  ta.remove();
+// Lets the whole tracked list (every tracked bet, graded or not) travel as a real .json file --
+// so a freshly sent build (new origin, no carried-over localStorage) can pick the tracker back up
+// instead of starting over. Restoring reloads the page so every view picks up the restored data.
+function downloadTrackerBackup(){
+  const json=JSON.stringify(tracked, null, 2);
+  const blob=new Blob([json], {type:'application/json'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');
+  a.href=url; a.download=`pocket-market-tracker-${new Date().toISOString().slice(0,10)}.json`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(url), 1000);
+  toast('Tracker backup downloaded');
 }
-function restoreTrackerBackup(){
-  const txt=prompt('Paste your tracker backup here:',''); if(!txt) return;
-  let list; try{ list=JSON.parse(txt); }catch(e){ toast('That doesn\'t look like a valid backup'); return; }
-  if(!Array.isArray(list)){ toast('That doesn\'t look like a valid backup'); return; }
-  tracked=list; saveTracked(); toast(`Restored ${list.length} tracked bet${list.length===1?'':'s'} — reloading…`);
-  setTimeout(()=>location.reload(), 700);
+function restoreTrackerBackupFile(file){
+  const reader=new FileReader();
+  reader.onload=()=>{
+    let list; try{ list=JSON.parse(reader.result); }catch(e){ toast('That doesn\'t look like a valid backup'); return; }
+    if(!Array.isArray(list)){ toast('That doesn\'t look like a valid backup'); return; }
+    tracked=list; saveTracked(); toast(`Restored ${list.length} tracked bet${list.length===1?'':'s'} — reloading…`);
+    setTimeout(()=>location.reload(), 700);
+  };
+  reader.onerror=()=>toast('Could not read that file');
+  reader.readAsText(file);
 }
 const tkBackupHtml = `<div class="ttsum"><div class="ttsumh"><span>Backup &amp; Restore</span></div>
-  <div class="tkbkrow"><button id="tkexport" class="rm" style="background:var(--bg2)">Copy backup</button><button id="tkimport" class="rm" style="background:var(--bg2)">Paste &amp; restore</button></div>
+  <div class="tkbkrow"><button id="tkexport" class="rm" style="background:var(--bg2)">Download backup (.json)</button><button id="tkimport" class="rm" style="background:var(--bg2)">Import backup (.json)</button><input id="tkimportfile" type="file" accept="application/json,.json" style="display:none"></div>
 </div>`;
+function bindTkBackup(){
+  $('#tkexport')?.addEventListener('click',downloadTrackerBackup);
+  $('#tkimport')?.addEventListener('click',()=>$('#tkimportfile')?.click());
+  $('#tkimportfile')?.addEventListener('change',e=>{ const f=e.target.files[0]; if(f) restoreTrackerBackupFile(f); e.target.value=''; });
+}
 function renderTracker(){
   clearGstripDock(); const view=$('#view'); $('.sw').style.display='none';
   if(!tracked.length){
     view.innerHTML=tkBackupHtml+teamTotalsSummaryHtml()+'<div class="empty">Nothing tracked yet.<br>Open a player and tap <b>Track</b> on a side.</div>';
-    $('#tkexport')?.addEventListener('click',copyTrackerBackup); $('#tkimport')?.addEventListener('click',restoreTrackerBackup);
+    bindTkBackup();
     $('#stat').textContent='Tracker · empty'; return;
   }
   // Graded bets drop out of the main list entirely -- they're done, no reason to keep scrolling
@@ -2457,8 +2475,7 @@ function renderTracker(){
     ? `<div class="tkhist"><button class="tkhisttoggle" id="tkhisttoggle">Bet History (${historyList.length}) ${historyShown?'▴ hide':'▾ show'}</button>${historyShown?historyList.map(trackCardHtml).join(''):''}</div>`
     : '';
   view.innerHTML = tkBackupHtml + dailyRecordHtml() + teamTotalsSummaryHtml() + openHtml + historyHtml;
-  $('#tkexport')?.addEventListener('click',copyTrackerBackup);
-  $('#tkimport')?.addEventListener('click',restoreTrackerBackup);
+  bindTkBackup();
   $('#tkhisttoggle')?.addEventListener('click',()=>{ historyShown=!historyShown; renderTracker(); });
   view.querySelectorAll('[data-rm]').forEach(b=>b.addEventListener('click',()=>{ tracked=tracked.filter(t=>t.id!==b.dataset.rm); saveTracked(); renderTracker(); }));
   const showEd=(id,on)=>{ const f=view.querySelector(`.tked[data-ed="${id}"]`); if(f) f.style.display=on?'grid':'none'; };
