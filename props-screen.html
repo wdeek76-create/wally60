@@ -631,10 +631,23 @@ const GAME_BYPASS_PERIOD = new Set(['spread']);
 // Best-effort matchers -- tune against your real OpticOdds market-name strings once you see what
 // the feed actually sends; these follow the same has()-keyword heuristic as every other matcher
 // in this file rather than guessing exact strings.
-const ml60Match    = m => has(m,'moneyline') && (has(m,'regulation')||has(m,'60 min')||has(m,'60min'));
-const mlMatch     = m => has(m,'moneyline') && !ml60Match(m) && !has(m,'alternate') && !has(m,'1st')&&!has(m,'2nd')&&!has(m,'3rd')&&!has(m,'quarter')&&!has(m,'half');
-const spreadMatch = m => (has(m,'point spread')||m==='spread'||has(m,'handicap')) && !has(m,'alternate') && !has(m,'team') && !has(m,'1st')&&!has(m,'2nd')&&!has(m,'3rd')&&!has(m,'quarter')&&!has(m,'half');
-const totalMatch  = m => (has(m,'total')&&(has(m,'point')||has(m,'goal')||has(m,'run')||m==='total')) && !has(m,'team') && !has(m,'alternate') && !has(m,'player');
+// Tuned against a real NHL feed dump (see the in-app Markets tab): hockey's 60-min-regulation
+// moneyline comes through as "Moneyline 3-Way" (regulation can end tied, hence 3-way), not
+// anything saying "regulation" -- and "Moneyline + Total Goals" is a same-game-parlay combo
+// market, not a plain moneyline, so it's excluded like every other "+" combo market.
+const ml60Match    = m => has(m,'moneyline') && (has(m,'3-way')||has(m,'3 way')||has(m,'regulation')||has(m,'60 min')||has(m,'60min'));
+const mlMatch     = m => has(m,'moneyline') && !ml60Match(m) && !m.includes('+') && !has(m,'alternate') && !has(m,'1st')&&!has(m,'2nd')&&!has(m,'3rd')&&!has(m,'quarter')&&!has(m,'half');
+const spreadMatch = m => (has(m,'point spread')||m==='spread'||has(m,'handicap')) && !has(m,'alternate') && !has(m,'team') && !m.includes('+') && !has(m,'1st')&&!has(m,'2nd')&&!has(m,'3rd')&&!has(m,'quarter')&&!has(m,'half');
+// Same regulation-time split for totals: "Total Goals Reg Time" is a different line than "Total
+// Goals" (which includes OT/SO), so they need their own key instead of silently merging under one
+// tab where whichever line happens to be more common wins.
+const total60Match = m => has(m,'total') && (has(m,'point')||has(m,'goal')||has(m,'run')) && has(m,'reg') && !has(m,'team') && !has(m,'player') && !m.includes('+');
+const totalMatch  = m => (has(m,'total')&&(has(m,'point')||has(m,'goal')||has(m,'run')||m==='total')) && !total60Match(m) && !has(m,'team') && !has(m,'alternate') && !has(m,'player') && !m.includes('+');
+// "Team Total Power Play Goals" / "...Short Handed Goals" are narrower situational props, not the
+// main team total, so has(m,'team total') alone over-matched them -- same regulation-time split
+// as moneyline/total for the real "Team Total Reg Time" variant.
+const tt60Match = m => has(m,'team total') && has(m,'reg') && !has(m,'power') && !has(m,'short handed') && !has(m,'shorthanded') && !m.includes('+');
+const ttMatch = m => has(m,'team total') && !tt60Match(m) && !has(m,'power') && !has(m,'short handed') && !has(m,'shorthanded') && !m.includes('+');
 const SPORTS = {
   nfl:  { label:'NFL',  sport:'football',   league:'nfl',  days:7, markets:[
           ['pass_yds','Pass Yds', m=>has(m,'passing yards')&&!m.includes('+')],
@@ -649,20 +662,25 @@ const SPORTS = {
           ['ml','Moneyline',      mlMatch],
           ['spread','Spread',     spreadMatch],
           ['total','Total',       totalMatch],
-          ['tt','Team Total',     m=>has(m,'team total')],
+          ['tt','Team Total',     ttMatch],
         ]},
   nba:  { label:'NBA',  sport:'basketball', league:'nba',  days:2, markets:NBA_MKTS },
   wnba: { label:'WNBA', sport:'basketball', league:'wnba', days:2, markets:NBA_MKTS },
   nhl:  { label:'NHL',  sport:'hockey',     league:'nhl',  days:2, markets:[
-          ['sog','Shots',   m=>!m.includes('+')&&(has(m,'shots on goal')||has(m,'shots'))],
-          ['pts','Points',  m=>!m.includes('+')&&has(m,'point')&&!has(m,'power')],
-          ['g','Goals',     m=>!m.includes('+')&&has(m,'goal')&&!has(m,'shots')&&!has(m,'total goals')&&!has(m,'team total')&&!has(m,'power')],
-          ['a','Assists',   m=>!m.includes('+')&&has(m,'assist')],
-          ['sv','Saves',    m=>!m.includes('+')&&has(m,'save')],
+          // "Most X Player" is a leaderboard/outright market (one winner across the whole game),
+          // not a per-player Over/Under line -- excluded everywhere below, same as "Anytime Goal
+          // Scorer" (single-sided Yes/No) and "Blocked Shots" (a different stat than shots on goal).
+          ['sog','Shots',   m=>!m.includes('+')&&(has(m,'shots on goal')||has(m,'shots'))&&!has(m,'blocked')&&!has(m,'most')],
+          ['pts','Points',  m=>!m.includes('+')&&has(m,'point')&&!has(m,'power')&&!has(m,'most')],
+          ['g','Goals',     m=>!m.includes('+')&&has(m,'goal')&&!has(m,'shots')&&!has(m,'total goals')&&!has(m,'team total')&&!has(m,'power')&&!has(m,'anytime')&&!has(m,'most')],
+          ['a','Assists',   m=>!m.includes('+')&&has(m,'assist')&&!has(m,'most')],
+          ['sv','Saves',    m=>!m.includes('+')&&has(m,'save')&&!has(m,'most')],
           ['ml','Moneyline',    mlMatch],
           ['ml60','60 Min ML',  ml60Match],
           ['total','Total',     totalMatch],
-          ['tt','Team Total', m=>has(m,'team total')],
+          ['total60','Total (Reg.)', total60Match],
+          ['tt','Team Total', ttMatch],
+          ['tt60','Team Total (Reg.)', tt60Match],
         ]},
   mlb:  { label:'MLB',  sport:'baseball',   league:'mlb',  days:1, markets:MLB_MKTS },
   ufc:  { label:'UFC',  sport:'mma',        league:'ufc',  ml:true, markets:[['ml','Moneyline', m=>MMA_ML.has(m)]] },
@@ -685,8 +703,8 @@ const marketLabel = (sportKey, key) => (SPORTS[sportKey].markets.find(m=>m[0]===
 // Markets where the OpticOdds selection IS a team name (moneyline/spread/team total) -- indexed
 // the same team-keyed way 'tt' already was. 'total' (game total) is different: selection is
 // Over/Under, not a team, so it gets its own per-fixture pseudo-entry (see GAME_MKS below).
-const TEAM_MKS = new Set(['tt','ml','ml60','spread']);
-const GAME_MKS = new Set(['total']);
+const TEAM_MKS = new Set(['tt','tt60','ml','ml60','spread']);
+const GAME_MKS = new Set(['total','total60']);
 // Markets with no Over/Under choice at all (moneyline, 60-min reg moneyline, spread -- each
 // selection is its own single bet, not a line you pick a side of) -- same board/grid shape UFC's
 // sport-wide single-sided mode already uses, just keyed per-market instead of per-sport so a
@@ -2092,7 +2110,7 @@ function mainLineOf(rows, side){ const c={}; rows.forEach(o=>{ if(o.points==null
 // actual game line. Returns null (not tracked as either) when no moneyline row is found.
 function moneylineFavDog(fixtureId, teamSel){
   const key=normName(teamSel);
-  const row=mainRows.find(o=>o._fx===fixtureId && /moneyline/i.test(String(o.market||'')) && !/regulation|60.?min/i.test(String(o.market||'')) && normName(cleanSel(o.selection||o.name))===key && o.price!=null);
+  const row=mainRows.find(o=>o._fx===fixtureId && /moneyline/i.test(String(o.market||'')) && !/regulation|60.?min|3.?way|\+/i.test(String(o.market||'')) && normName(cleanSel(o.selection||o.name))===key && o.price!=null);
   return row ? (Number(row.price)<0 ? 'favorite' : 'underdog') : null;
 }
 const unitsFor=(price,stake)=>{ price=Number(price); return price>0 ? stake*price/100 : stake*100/Math.abs(price); };
