@@ -603,6 +603,21 @@ const MLB_MKTS = [
   ['wa','Walks Allowed',  m=>has(m,'walk')&&has(m,'allow')],
   ['out','Pitching Outs', m=>has(m,'out')],
 ];
+// Game-level markets (moneyline/spread/total), shared matcher fragments. These get appended to
+// each non-UFC sport's own `markets` list below -- same [key,label,matcher] shape every player
+// prop uses -- so every existing bit of code that walks S.markets (swipe order, prefs, search,
+// alt-line nav...) picks them up automatically with zero other changes. The only special case is
+// 'spread': "Point Spread" contains the word "spread", which PERIOD (built to reject period/
+// alternate PLAYER markets) also matches, so marketKeyFor below explicitly bypasses PERIOD for
+// keys in GAME_BYPASS_PERIOD rather than loosening PERIOD itself.
+const GAME_BYPASS_PERIOD = new Set(['spread']);
+// Best-effort matchers -- tune against your real OpticOdds market-name strings once you see what
+// the feed actually sends; these follow the same has()-keyword heuristic as every other matcher
+// in this file rather than guessing exact strings.
+const ml60Match    = m => has(m,'moneyline') && (has(m,'regulation')||has(m,'60 min')||has(m,'60min'));
+const mlMatch     = m => has(m,'moneyline') && !ml60Match(m) && !has(m,'alternate') && !has(m,'1st')&&!has(m,'2nd')&&!has(m,'3rd')&&!has(m,'quarter')&&!has(m,'half');
+const spreadMatch = m => (has(m,'point spread')||m==='spread'||has(m,'handicap')) && !has(m,'alternate') && !has(m,'team') && !has(m,'1st')&&!has(m,'2nd')&&!has(m,'3rd')&&!has(m,'quarter')&&!has(m,'half');
+const totalMatch  = m => (has(m,'total')&&(has(m,'point')||has(m,'goal')||has(m,'run')||m==='total')) && !has(m,'team') && !has(m,'alternate') && !has(m,'player');
 const SPORTS = {
   nfl:  { label:'NFL',  sport:'football',   league:'nfl',  days:7, markets:[
           ['pass_yds','Pass Yds', m=>has(m,'passing yards')&&!m.includes('+')],
@@ -614,6 +629,10 @@ const SPORTS = {
           ['rec_yds','Rec Yds',   m=>has(m,'receiving yards')&&!m.includes('+')],
           ['rec','Receptions',    m=>has(m,'reception')&&!has(m,'longest')&&!m.includes('+')],
           ['atd','Anytime TD',    m=>has(m,'anytime')&&has(m,'touchdown')],
+          ['ml','Moneyline',      mlMatch],
+          ['spread','Spread',     spreadMatch],
+          ['total','Total',       totalMatch],
+          ['tt','Team Total',     m=>has(m,'team total')],
         ]},
   nba:  { label:'NBA',  sport:'basketball', league:'nba',  days:2, markets:NBA_MKTS },
   wnba: { label:'WNBA', sport:'basketball', league:'wnba', days:2, markets:NBA_MKTS },
@@ -623,18 +642,39 @@ const SPORTS = {
           ['g','Goals',     m=>!m.includes('+')&&has(m,'goal')&&!has(m,'shots')&&!has(m,'total goals')&&!has(m,'team total')&&!has(m,'power')],
           ['a','Assists',   m=>!m.includes('+')&&has(m,'assist')],
           ['sv','Saves',    m=>!m.includes('+')&&has(m,'save')],
+          ['ml','Moneyline',    mlMatch],
+          ['ml60','60 Min ML',  ml60Match],
+          ['total','Total',     totalMatch],
           ['tt','Team Total', m=>has(m,'team total')],
         ]},
   mlb:  { label:'MLB',  sport:'baseball',   league:'mlb',  days:1, markets:MLB_MKTS },
   ufc:  { label:'UFC',  sport:'mma',        league:'ufc',  ml:true, markets:[['ml','Moneyline', m=>MMA_ML.has(m)]] },
 };
+// NBA/WNBA share NBA_MKTS by reference -- append game markets to it once, after SPORTS exists, so
+// both sports get them without duplicating the array.
+NBA_MKTS.push(['ml','Moneyline', mlMatch], ['spread','Spread', spreadMatch], ['total','Total', totalMatch]);
 const marketKeyFor = (sportKey, name) => {
   const m = String(name||'').toLowerCase();
-  if (!SPORTS[sportKey].ml && PERIOD.test(m)) return null;
-  const hit = SPORTS[sportKey].markets.find(([,,t]) => t(m));
+  const S = SPORTS[sportKey];
+  if (!S.ml){
+    const bypass = S.markets.find(([k,,t]) => GAME_BYPASS_PERIOD.has(k) && t(m));
+    if (bypass) return bypass[0];
+    if (PERIOD.test(m)) return null;
+  }
+  const hit = S.markets.find(([,,t]) => t(m));
   return hit ? hit[0] : null;
 };
 const marketLabel = (sportKey, key) => (SPORTS[sportKey].markets.find(m=>m[0]===key)||[])[1] || key;
+// Markets where the OpticOdds selection IS a team name (moneyline/spread/team total) -- indexed
+// the same team-keyed way 'tt' already was. 'total' (game total) is different: selection is
+// Over/Under, not a team, so it gets its own per-fixture pseudo-entry (see GAME_MKS below).
+const TEAM_MKS = new Set(['tt','ml','ml60','spread']);
+const GAME_MKS = new Set(['total']);
+// Markets with no Over/Under choice at all (moneyline, 60-min reg moneyline, spread -- each
+// selection is its own single bet, not a line you pick a side of) -- same board/grid shape UFC's
+// sport-wide single-sided mode already uses, just keyed per-market instead of per-sport so a
+// prop-driven sport's ml/spread tab gets it too without flipping every player market into it.
+const SINGLE_SIDED_MKS = new Set(['ml','ml60','spread']);
 
 // ───────────────────────── helpers ─────────────────────────
 const $ = s => document.querySelector(s);
@@ -1038,15 +1078,25 @@ async function loadSport(force){
     const idx={}; const multiPid={};
     mainRows.forEach(o=>{
       const mk=marketKeyFor(sportKey,o.market); if(!mk) return;
+      // Game total: selection is "Over"/"Under", not a team -- one pseudo-entry per fixture.
+      if(GAME_MKS.has(mk)){
+        const key='game:'+o._fx;
+        if(!idx[key]){
+          const f=fixtures.find(x=>x.id===o._fx);
+          idx[key]={ key, name:'Total', pid:null, pids:new Set(), fixtureId:o._fx, marketKeys:new Set(), isTeam:false, isGame:true, teamSide:null };
+        }
+        idx[key].marketKeys.add(mk);
+        return;
+      }
       const sel=cleanSel(o.selection||o.name); if(!sel) return;
-      const isTeamTotal = mk==='tt';
-      if(!S.ml && !isTeamTotal && !o.player_id) return;
-      if(!isTeamTotal && isCombo(sel)) return;         // two-player combos are not players
+      const isTeamLevel = TEAM_MKS.has(mk);
+      if(!S.ml && !isTeamLevel && !o.player_id) return;
+      if(!isTeamLevel && isCombo(sel)) return;         // two-player combos are not players
       if(S.ml && /^(draw|tie|no contest|neither|either)\b/.test(normName(sel))) return;
       const key=normName(sel); if(!key) return;
       if(!idx[key]){
-        idx[key]={ key, name:sel, pid:o.player_id||null, pids:new Set(), fixtureId:o._fx, marketKeys:new Set(), isTeam:isTeamTotal };
-        if(isTeamTotal){
+        idx[key]={ key, name:sel, pid:o.player_id||null, pids:new Set(), fixtureId:o._fx, marketKeys:new Set(), isTeam:isTeamLevel };
+        if(isTeamLevel){
           const f=fixtures.find(x=>x.id===o._fx);
           idx[key].teamSide = f && normName(f.home.name)===key ? 'home' : f && normName(f.away.name)===key ? 'away' : null;
         }
@@ -1149,6 +1199,7 @@ async function fetchPlayerInfo(p){
   return playerInfo[p.pid]||null;
 }
 function rowsFor(p, mkey, rows){
+  if(p.isGame) return rows.filter(o=>o._fx===p.fixtureId && marketKeyFor(sportKey,o.market)===mkey);
   return rows.filter(o=>o._fx===p.fixtureId && marketKeyFor(sportKey,o.market)===mkey && normName(cleanSel(o.selection||o.name))===p.key);
 }
 function sideOf(o){ const s=String(o.selection_line||'').toLowerCase(); return s==='over'||s==='under' ? s : 'single'; }
@@ -1432,12 +1483,13 @@ function boardHtml(rows, p, mkey, ctxKey, mainLine, pt, ro){
   list.forEach(b=>{
     ['over','under','single'].forEach(sd=>{
       const o=b[sd]; if(!o) return;
-      const label=sd==='single'?(SPORTS[sportKey].ml?'ML':'Yes'):(sd==='over'?'Over':'Under');
+      const label=sd==='single'?singleSideLabel(mkey):(sd==='over'?'Over':'Under');
       detailPops[`${ctxKey}|${sd}|${b.key}`]=pillDetail(b,sd,o,label,ctxKey,p,mkey,opm,ro);
     });
   });
   if(single){
-    return `<div class="bboard">${mlCompare}<div class="bhead single"><span>${SPORTS[sportKey].ml?'ML':'YES'}</span></div>${sorted.filter(b=>b.single).map((b,i)=>bookRowHtml(b,'single',b.single,pt,ctxKey,i,ro)).join('')||'<div class="bempty">No books</div>'}</div>`;
+    const hdrLbl=singleSideLabel(mkey);
+    return `<div class="bboard">${mlCompare}<div class="bhead single"><span>${hdrLbl==='Yes'?'YES':hdrLbl}</span></div>${sorted.filter(b=>b.single).map((b,i)=>bookRowHtml(b,'single',b.single,pt,ctxKey,i,ro)).join('')||'<div class="bempty">No books</div>'}</div>`;
   }
   // Over and Under are sorted independently by their own best price — a book that's the best
   // Over might be middling on Under (or not post it at all), so each column gets its own order
@@ -1948,7 +2000,13 @@ function openMap(p, mkey){
 // ───────────────────────── tracker ─────────────────────────
 let tracked = (()=>{ try{ return JSON.parse(LS.get('props_tracked','[]'))||[]; }catch(e){ return []; } })();
 const saveTracked = () => LS.set('props_tracked', JSON.stringify(tracked));
-const sideKey = lbl => String(lbl).toLowerCase()==='over'?'over':String(lbl).toLowerCase()==='under'?'under':(String(lbl)==='ML'?'ML':'Yes');
+// A single-sided market's side label depends on the MARKET, not just the sport -- UFC's whole
+// sport is moneyline-only (SPORTS[sportKey].ml), but a team's moneyline/60-min-reg-moneyline/
+// spread pick on an otherwise prop-driven sport (NFL/NBA/NHL) needs its own distinct label so
+// grading (gradeTracked/refreshTracker) and the tracker card can tell them apart from a generic
+// single-sided Yes/No prop like Anytime TD.
+const singleSideLabel = mkey => mkey==='ml'?'ML':mkey==='ml60'?'ML60':mkey==='spread'?'ATS':(SPORTS[sportKey].ml?'ML':'Yes');
+const sideKey = lbl => { const l=String(lbl); const ll=l.toLowerCase(); if(ll==='over') return 'over'; if(ll==='under') return 'under'; if(l==='ML'||l==='ML60'||l==='ATS') return l; return 'Yes'; };
 function isTracked(p,mkey,label,line,bookKey){ const sk=sideKey(label); return tracked.some(t=>t.playerKey===p.key&&t.fixtureId===p.fixtureId&&t.mkey===mkey&&t.side===sk&&Number(t.line??-1)===Number(line??-1)&&(bookKey==null||t.bookKey===bookKey)); }
 function snapshotFrom(rows, side, line){
   const at=Date.now(); const byBook={};
@@ -1962,7 +2020,7 @@ function mainLineOf(rows, side){ const c={}; rows.forEach(o=>{ if(o.points==null
 // actual game line. Returns null (not tracked as either) when no moneyline row is found.
 function moneylineFavDog(fixtureId, teamSel){
   const key=normName(teamSel);
-  const row=mainRows.find(o=>o._fx===fixtureId && /moneyline/i.test(String(o.market||'')) && normName(cleanSel(o.selection||o.name))===key && o.price!=null);
+  const row=mainRows.find(o=>o._fx===fixtureId && /moneyline/i.test(String(o.market||'')) && !/regulation|60.?min/i.test(String(o.market||'')) && normName(cleanSel(o.selection||o.name))===key && o.price!=null);
   return row ? (Number(row.price)<0 ? 'favorite' : 'underdog') : null;
 }
 const unitsFor=(price,stake)=>{ price=Number(price); return price>0 ? stake*price/100 : stake*100/Math.abs(price); };
@@ -1986,7 +2044,7 @@ function trackProp(p, mkey, label, line, srcRows, bookKey){
     mkey, marketLabel:marketLabel(sportKey,mkey), marketNames:[...new Set(rowsAll.map(o=>o.market))], side, line:line??null,
     price:bestBook?bestBook[1].price:snap.best, book:bestBook?bookLabel(bestBook[0]):null, bookKey:bestBook?bestBook[0]:null, pinned:!!bookKey, trackedAt:Date.now(),
     mainLineAtTrack: mainLineOf(rowsFor(p,mkey,mainRows), side),
-    isTeam:!!p.isTeam, teamSide:p.isTeam?p.teamSide:null, favDog:p.isTeam?moneylineFavDog(p.fixtureId,p.name):null, stakeUnits:p.isTeam?1:null,
+    isTeam:!!p.isTeam, teamSide:p.isTeam?p.teamSide:null, favDog:p.isTeam?moneylineFavDog(p.fixtureId,p.name):null, stakeUnits:p.isTeam?1:null, isGame:!!p.isGame,
     snapshots:[snap], live:null, actual:null, result:null, open:null, close:null });
   saveTracked(); toast(`Tracking ${p.name} ${side==='over'?'o':side==='under'?'u':''}${line??''} ${marketLabel(sportKey,mkey)}${bestBook&&bookKey?' on '+bookLabel(bestBook[0]):''}`);
 }
@@ -2037,7 +2095,7 @@ async function refreshTracker(){
       if(st&&st!=='unplayed') continue; // odds are gone once it starts
       const rows=[];
       for(const bk of chunk(BOOK_REQ,5)){ try{ const r=await oo('/fixtures/odds',{fixture_id:[g.fixtureId],sportsbook:bk,market:g.marketNames}); (r?.data?.[0]?.odds||[]).forEach(o=>rows.push(o)); }catch(e){} }
-      g.items.forEach(t=>{ const mine=rows.filter(o=>normName(cleanSel(o.selection||o.name))===t.playerKey); const snap=snapshotFrom(mine,t.side,t.line); snap.mainLine=mainLineOf(mine,t.side);
+      g.items.forEach(t=>{ const mine=t.isGame ? rows : rows.filter(o=>normName(cleanSel(o.selection||o.name))===t.playerKey); const snap=snapshotFrom(mine,t.side,t.line); snap.mainLine=mainLineOf(mine,t.side);
         const last=t.snapshots[t.snapshots.length-1];
         // only add a new row when the value actually moved — a re-check that finds no
         // change just refreshes the "now" timestamp on the last row instead of duplicating it
@@ -2051,7 +2109,12 @@ async function refreshTracker(){
     for(const g of Object.values(groups)){
       const rows=[];
       for(const bk of chunk(BOOK_REQ,5)){ try{ const r=await oo('/fixtures/odds/historical',{fixture_id:g.fixtureId,sportsbook:bk,market:g.marketNames}); (r?.data?.[0]?.odds||[]).forEach(o=>rows.push(o)); }catch(e){} }
-      g.items.forEach(t=>{ const allMine=rows.filter(o=>normName(cleanSel(o.selection||o.name))===t.playerKey && (t.side==='ML'||t.side==='Yes'||sideOf(o)===t.side) && (t.line==null||Number(o.clv?.points??o.olv?.points??o.points)===Number(t.line)));
+      g.items.forEach(t=>{ const allMine=rows.filter(o=>{
+          // Game totals: selection is "Over"/"Under" itself, not t.playerKey (which is the
+          // synthetic 'game:<fixtureId>' key) -- match by side alone, same as sideOf already does.
+          if(t.isGame) return sideOf(o)===t.side && (t.line==null||Number(o.clv?.points??o.olv?.points??o.points)===Number(t.line));
+          return normName(cleanSel(o.selection||o.name))===t.playerKey && (t.side==='ML'||t.side==='Yes'||t.side==='ATS'||t.side==='ML60'||sideOf(o)===t.side) && (t.line==null||Number(o.clv?.points??o.olv?.points??o.points)===Number(t.line));
+        });
         let mine=allMine;
         if(t.pinned && t.bookKey){ const pinnedRows=mine.filter(o=>canonBook(o.sportsbook)===t.bookKey); if(pinnedRows.length) mine=pinnedRows; }
         const pick=(list,o)=>{ const a=list.filter(x=>x[o]&&x[o].price!=null).map(x=>Number(x[o].price)); return a.length?Math.max(...a):null; };
@@ -2070,11 +2133,36 @@ async function refreshTracker(){
       t.clock = st==='half' ? 'Half' : (R.in_play ? ((R.in_play.period?('Q'+R.in_play.period):'')+' '+(R.in_play.clock||'')).trim() : '');
       t.score = R.scores ? `${R.scores.away?.total??''}-${R.scores.home?.total??''}` : '';
       // Team totals grade off the fixture's OWN score for that side, not a per-player stat lookup
-      // — there's no "player" row to find in player-results for a team-level market.
-      if(t.isTeam){ const v=t.teamSide==='home'?R.scores?.home?.total:t.teamSide==='away'?R.scores?.away?.total:null; if(v!=null&&!isNaN(Number(v))) t.actual=Number(v); }
+      // — there's no "player" row to find in player-results for a team-level market. Game totals
+      // (no team side at all) grade off the combined score of both sides.
+      if(t.isGame){ const hm=R.scores?.home?.total, aw=R.scores?.away?.total; if(hm!=null&&aw!=null&&!isNaN(Number(hm))&&!isNaN(Number(aw))) t.actual=Number(hm)+Number(aw); }
+      else if(t.isTeam){ const v=t.teamSide==='home'?R.scores?.home?.total:t.teamSide==='away'?R.scores?.away?.total:null; if(v!=null&&!isNaN(Number(v))) t.actual=Number(v); }
       else { const P=pr[t.fixtureId]; if(P){ const r=(P.results||[]).find(x=>normName(cleanSel(x.player?.name))===t.playerKey); if(r){ const v=statFor(r,t.mkey,t.sportKey,t.marketNames); if(v!=null&&!isNaN(v)) t.actual=v; } } }
-      if(st==='completed'){ t.final=true; if(t.side==='ML'&&R.scores){ const aw=Number(R.scores.away?.total), hm=Number(R.scores.home?.total); const iAmHome=normName(R.fixture?.home_competitors?.[0]?.name||'')===t.playerKey; if(!isNaN(aw)&&!isNaN(hm)) t.result=(iAmHome?hm>aw:aw>hm)?'win':(aw===hm?'push':'loss'); } }
-      t.result = t.side==='ML' ? t.result : gradeTracked(t);
+      if(st==='completed'){
+        t.final=true;
+        if((t.side==='ML'||t.side==='ATS') && R.scores){
+          const aw=Number(R.scores.away?.total), hm=Number(R.scores.home?.total);
+          if(!isNaN(aw)&&!isNaN(hm)){
+            const iAmHome = t.teamSide ? t.teamSide==='home' : normName(R.fixture?.home_competitors?.[0]?.name||'')===t.playerKey;
+            if(t.side==='ML'){ t.result=(iAmHome?hm>aw:aw>hm)?'win':(aw===hm?'push':'loss'); }
+            else { // ATS: my team's own margin vs the spread number I took (e.g. -3.5 fav, +6.5 dog)
+              const margin=(iAmHome?hm-aw:aw-hm), need=margin+Number(t.line);
+              t.result = need>0?'win':need===0?'push':'loss';
+            }
+          }
+        } else if(t.side==='ML60' && R.scores){
+          // Regulation-only moneyline: only grade off period scores (skip OT/SO entirely) when the
+          // feed gives us a period breakdown; otherwise leave it final-but-ungraded so it shows up
+          // for a manual grade (editHtml) instead of silently grading against the full-game score.
+          const regOf = side => { const s=R.scores?.[side]; const per=Array.isArray(s?.periods)?s.periods:null; return per&&per.length>=3 ? per.slice(0,3).reduce((a,p)=>a+(Number(p.total??p.score??p)||0),0) : null; };
+          const awR=regOf('away'), hmR=regOf('home');
+          if(awR!=null && hmR!=null){
+            const iAmHome = t.teamSide==='home';
+            t.result = awR===hmR ? 'push' : (iAmHome ? (hmR>awR?'win':'loss') : (awR>hmR?'win':'loss'));
+          }
+        }
+      }
+      t.result = (t.side==='ML'||t.side==='ATS'||t.side==='ML60') ? t.result : gradeTracked(t);
     });
     saveTracked();
   }catch(e){ console.error(e); }
@@ -2191,7 +2279,7 @@ function trackCardHtml(t){
   const headshot = t.headshot || teamLogo;
   const hs=headshot?`<div class="hs"><img src="${esc(headshot)}" alt="" onerror="this.parentNode.textContent='${initials}'"></div>`:`<div class="hs">${initials}</div>`;
   const favDogPill = t.isTeam && t.favDog ? `<span class="fdp ${t.favDog}">${t.favDog==='favorite'?'FAV':'DOG'}</span>` : '';
-  const betStr = t.side==='ML' ? `ML ${fmtAm(t.price)}` : `${t.side==='over'?'o':t.side==='under'?'u':''}${t.line??''} ${esc(t.marketLabel)} ${favDogPill}<span>${fmtAm(t.price)} ${esc(t.book||'')}</span>`;
+  const betStr = (t.side==='ML'||t.side==='ML60') ? `${t.side==='ML60'?'ML (Reg.)':'ML'} ${fmtAm(t.price)}` : `${t.side==='over'?'o':t.side==='under'?'u':''}${t.line??''} ${esc(t.marketLabel)} ${favDogPill}<span>${fmtAm(t.price)} ${esc(t.book||'')}</span>`;
   // progress
   let prog='';
   if(t.side==='over'||t.side==='under'){
@@ -2214,7 +2302,7 @@ function trackCardHtml(t){
   const pinClv = (t.bookKey!=='pinnacle' && t.closePin!=null && cents(t.price)!=null && cents(t.closePin)!=null)
     ? `<div class="mvc"><div class="l">Close @ Pin</div><div class="v">${fmtAm(t.closePin)}<small class="${cents(t.price)-cents(t.closePin)>0?'up':cents(t.price)-cents(t.closePin)<0?'dn':'fl'}">${(cents(t.price)-cents(t.closePin)>0?'+':'')+(cents(t.price)-cents(t.closePin))}¢ CLV v Pin</small></div></div>`
     : '';
-  const mv = t.side==='ML' ? `<div class="mv"><div class="mvc"><div class="l">${t.pinned&&t.book?esc(t.book):'Price'}</div><div class="v">${fmtAm(t.price)} → ${mine!=null?fmtAm(mine):'—'}<small class="${pm.cls}">${pm.txt}</small></div></div><div class="mvc"><div class="l">Open / ${t.close!=null?'Close':'Now'}</div><div class="v">${t.open!=null?fmtAm(t.open):'—'} / ${t.close!=null?fmtAm(t.close):(mine!=null?fmtAm(mine):'—')}</div></div>${pinClv}</div>`
+  const mv = (t.side==='ML'||t.side==='ML60') ? `<div class="mv"><div class="mvc"><div class="l">${t.pinned&&t.book?esc(t.book):'Price'}</div><div class="v">${fmtAm(t.price)} → ${mine!=null?fmtAm(mine):'—'}<small class="${pm.cls}">${pm.txt}</small></div></div><div class="mvc"><div class="l">Open / ${t.close!=null?'Close':'Now'}</div><div class="v">${t.open!=null?fmtAm(t.open):'—'} / ${t.close!=null?fmtAm(t.close):(mine!=null?fmtAm(mine):'—')}</div></div>${pinClv}</div>`
     : `<div class="mv"><div class="mvc"><div class="l">Line</div><div class="v">${t.mainLineAtTrack??'—'} → ${t.mainLineNow??t.mainLineAtTrack??'—'}<small class="${lm.cls}">${lm.txt}</small></div></div><div class="mvc"><div class="l">${t.pinned&&t.book?esc(t.book)+(t.line!=null?' @ '+t.line:''):'Best'+(t.line!=null?' @ '+t.line:'')}</div><div class="v">${fmtAm(t.price)} → ${mine!=null?fmtAm(mine):'—'}<small class="${pm.cls}">${pm.txt}</small></div></div>${t.open!=null||t.close!=null?`<div class="mvc"><div class="l">Open</div><div class="v">${t.open!=null?fmtAm(t.open):'—'}</div></div><div class="mvc"><div class="l">${t.close!=null?'Close':'Now vs open'}</div><div class="v">${t.close!=null?fmtAm(t.close):(mine!=null?fmtAm(mine):'—')}${t.close!=null&&cents(t.price)!=null&&cents(t.close)!=null?`<small class="${cents(t.price)-cents(t.close)>0?'up':cents(t.price)-cents(t.close)<0?'dn':'fl'}">${(cents(t.price)-cents(t.close)>0?'+':'')+(cents(t.price)-cents(t.close))}¢ CLV</small>`:''}</div></div>`:''}${pinClv}</div>`;
   // books now at your line — pinned book (the one you tracked to) shown first, rest by best price for reference
   const books = last ? Object.entries(last.byBook).sort((a,b)=> (t.pinned&&t.bookKey ? (a[0]===t.bookKey?-1:b[0]===t.bookKey?1:b[1].price-a[1].price) : b[1].price-a[1].price)).map(([k,b])=>{ const was=first?.byBook?.[k]?.price; const d=was!=null?Number(b.price)-Number(was):0; const lg=bookLogo(k); const pin=t.pinned&&t.bookKey===k; return `<span class="tb${pin?' pin':''}">${lg?`<span class="logow"><img src="${esc(lg)}" alt=""></span>`:''}${esc(bookShort(k))} ${fmtAm(b.price)}${EXCH.has(k)?`<span class="d">(${winPct(b.price)}%)</span>`:''}${d?`<span class="${d<0?'g':'r'}">${d<0?'▼':'▲'}</span>`:''}</span>`; }).join('') : '';
@@ -2283,12 +2371,13 @@ function renderTracker(){
   $('#stat').textContent=`Tracker · ${tracked.length} tracked · ${open} open${live?' · '+live+' live':''}`;
 }
 function editHtml(t){
-  const sides = t.side==='ML'||t.side==='Yes' ? [[t.side,t.side]] : [['over','Over'],['under','Under']];
+  const singleSided = t.side==='ML'||t.side==='Yes'||t.side==='ML60';
+  const sides = singleSided ? [[t.side,t.side]] : [['over','Over'],['under','Under']];
   const books = [...new Set([...BOOKS.map(b=>b.toLowerCase()), t.bookKey].filter(Boolean))];
   const curResult = t.manualGrade ? t.result : '';
   return `<div class="tked" data-ed="${t.id}" style="display:none">
     <label>Side<select name="side"${sides.length<2?' disabled':''}>${sides.map(([v,l])=>`<option value="${v}"${t.side===v?' selected':''}>${l}</option>`).join('')}</select></label>
-    <label>Line<input name="line" type="text" inputmode="decimal" value="${t.line??''}" placeholder="${t.side==='ML'?'—':'27.5'}"${t.side==='ML'?' disabled':''}></label>
+    <label>Line<input name="line" type="text" inputmode="decimal" value="${t.line??''}" placeholder="${singleSided?'—':'27.5'}"${singleSided?' disabled':''}></label>
     <label>Price<input name="price" type="text" value="${t.price!=null?fmtAm(t.price):''}" placeholder="-110"></label>
     <label>Book<select name="book"><option value="">Best available</option>${books.map(b=>`<option value="${esc(b)}"${t.bookKey===b?' selected':''}>${esc(bookLabel(b))}</option>`).join('')}</select></label>
     <label>Result (manual grade)<select name="result"><option value=""${curResult===''?' selected':''}>Pending / auto-grade</option><option value="win"${curResult==='win'?' selected':''}>Win</option><option value="loss"${curResult==='loss'?' selected':''}>Loss</option><option value="push"${curResult==='push'?' selected':''}>Push</option></select></label>
@@ -2569,14 +2658,15 @@ function gridRowHtml(p, mkey, side){
   list.forEach(b=>{
     ['over','under','single'].forEach(sd=>{
       const o=b[sd]; if(!o) return;
-      const label=sd==='single'?(SPORTS[sportKey].ml?'ML':'Yes'):(sd==='over'?'Over':'Under');
+      const label=sd==='single'?singleSideLabel(mkey):(sd==='over'?'Over':'Under');
       detailPops[`${ctx}|${sd}|${b.key}`]=pillDetail(b,sd,o,label,ctx,p,mkey,opm,false);
     });
   });
   // Moneyline sports (UFC etc) only ever post the single side -- there's no Over/Under to pick
   // between, so the grid's O/U toggle is hidden for them (see sideToggle below) and every cell
   // here reads off "single" instead, not whatever the (irrelevant, leftover) O/U toggle state is.
-  const mlMode = SPORTS[sportKey].ml;
+  // Same applies to a single-sided market tab (ml/ml60/spread) on an otherwise prop-driven sport.
+  const mlMode = SPORTS[sportKey].ml || SINGLE_SIDED_MKS.has(mkey);
   const sk = mlMode ? 'single' : (side==='under'?'under':'over');
   // Same cellPrice() every per-book cell renders from, so "best" means best REAL price (an
   // exchange quoting a thin top-of-book number doesn't win on a price nobody can actually get),
@@ -2658,7 +2748,7 @@ function renderGrid(){
     <div class="brand gdbrand"><svg class="brand-chart" viewBox="0 0 100 56" preserveAspectRatio="none" aria-hidden="true"><defs><linearGradient id="gdBrandLine" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="#22c55e" stop-opacity=".45"/><stop offset="100%" stop-color="#5eead4"/></linearGradient></defs><polyline class="bline" points="0,42 22,32 44,36 66,14 88,20 100,12" fill="none" stroke="url(#gdBrandLine)" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/><circle class="bdot" cx="100" cy="12" r="7" fill="#5eead4"/></svg><span class="p1">Pocket</span><span class="p2">Market</span></div>
   </div>`;
   const tabs=`<div class="gdtabsrow"><div class="gdtabs">${mkDefs.map(m=>`<button class="gdtab${m[0]===gridMarket?' on':''}" data-mk="${m[0]}">${esc(m[1])}</button>`).join('')}</div><button class="gdset" id="gdset" title="Customize markets &amp; books">⚙</button></div>`;
-  const sideToggle = S.ml ? '' : `<div class="sidetog"><button class="stbtn${gridSide==='over'?' on':''}" data-side="over">O</button><button class="stbtn${gridSide==='under'?' on':''}" data-side="under">U</button></div>`;
+  const sideToggle = (S.ml || SINGLE_SIDED_MKS.has(gridMarket)) ? '' : `<div class="sidetog"><button class="stbtn${gridSide==='over'?' on':''}" data-side="over">O</button><button class="stbtn${gridSide==='under'?' on':''}" data-side="under">U</button></div>`;
   // Exchange-only controls: weighted price (avg across nearby levels instead of raw top quote),
   // win-prob label as ¢ or %, and a minimum size an exchange needs at its price to even be
   // eligible for the Best Odds pick.
