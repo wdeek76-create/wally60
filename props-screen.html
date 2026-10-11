@@ -404,12 +404,14 @@ a.p{color:#fff;text-decoration:none;border-color:rgba(34,197,94,.55)!important}
 .res{font-size:10px;font-weight:800;padding:3px 8px;border-radius:6px;letter-spacing:.4px}
 .res.win{background:rgba(34,197,94,.16);color:var(--green)}.res.loss{background:rgba(255,92,92,.16);color:var(--red)}.res.push{background:rgba(251,191,36,.16);color:var(--amber)}
 .prog{margin-top:10px}
-.prog .nums{display:flex;justify-content:space-between;font-family:var(--mono);font-size:12px;margin-bottom:4px}
+.prog .nums{display:flex;justify-content:space-between;font-family:var(--mono);font-size:12px;margin-bottom:8px}
 .prog .nums b{font-size:16px;color:#fff}
-.bar{height:8px;border-radius:999px;background:rgba(255,255,255,.07);overflow:hidden;position:relative}
-.bar i{display:block;height:100%;background:linear-gradient(90deg,var(--purple),var(--cyan));border-radius:999px;transition:width .3s}
+.bar{height:26px;border-radius:999px;background:rgba(255,255,255,.07);position:relative;margin:0 17px}
+.bar i{display:block;height:100%;border-radius:999px;background:linear-gradient(90deg,var(--purple),var(--cyan));transition:width .3s}
 .bar i.g{background:var(--green)}.bar i.r{background:var(--red)}
-.bar em{position:absolute;top:-3px;bottom:-3px;width:2px;background:#fff;opacity:.7}
+.bar b{position:absolute;top:50%;left:var(--bp,0%);width:34px;height:34px;border-radius:50%;background:var(--bg2);border:2px solid var(--purple);color:var(--purple);font-weight:800;font-size:13px;font-family:var(--mono);display:flex;align-items:center;justify-content:center;transform:translate(-50%,-50%);box-shadow:0 2px 8px rgba(0,0,0,.45)}
+.bar.g b{border-color:var(--green);color:var(--green)}
+.bar.r b{border-color:var(--red);color:var(--red)}
 .mv{margin-top:10px;display:grid;grid-template-columns:1fr 1fr;gap:6px}
 .mvc{background:rgba(23,27,36,.35);border:1px solid var(--line);border-radius:10px;padding:8px 10px}
 .mvc .l{font-size:9px;font-weight:800;letter-spacing:.5px;text-transform:uppercase;color:#fff;opacity:1}
@@ -2049,10 +2051,17 @@ async function refreshTracker(){
     for(const g of Object.values(groups)){
       const rows=[];
       for(const bk of chunk(BOOK_REQ,5)){ try{ const r=await oo('/fixtures/odds/historical',{fixture_id:g.fixtureId,sportsbook:bk,market:g.marketNames}); (r?.data?.[0]?.odds||[]).forEach(o=>rows.push(o)); }catch(e){} }
-      g.items.forEach(t=>{ let mine=rows.filter(o=>normName(cleanSel(o.selection||o.name))===t.playerKey && (t.side==='ML'||t.side==='Yes'||sideOf(o)===t.side) && (t.line==null||Number(o.clv?.points??o.olv?.points??o.points)===Number(t.line)));
+      g.items.forEach(t=>{ const allMine=rows.filter(o=>normName(cleanSel(o.selection||o.name))===t.playerKey && (t.side==='ML'||t.side==='Yes'||sideOf(o)===t.side) && (t.line==null||Number(o.clv?.points??o.olv?.points??o.points)===Number(t.line)));
+        let mine=allMine;
         if(t.pinned && t.bookKey){ const pinnedRows=mine.filter(o=>canonBook(o.sportsbook)===t.bookKey); if(pinnedRows.length) mine=pinnedRows; }
-        const pick=o=>{ const a=mine.filter(x=>x[o]&&x[o].price!=null).map(x=>Number(x[o].price)); return a.length?Math.max(...a):null; };
-        t.open=pick('olv'); const st=res[t.fixtureId]?.fixture?.status; if(st&&st!=='unplayed') t.close=pick('clv'); });
+        const pick=(list,o)=>{ const a=list.filter(x=>x[o]&&x[o].price!=null).map(x=>Number(x[o].price)); return a.length?Math.max(...a):null; };
+        const st=res[t.fixtureId]?.fixture?.status;
+        t.open=pick(mine,'olv'); if(st&&st!=='unplayed') t.close=pick(mine,'clv');
+        // CLV vs Pinnacle specifically -- the real professional benchmark, independent of
+        // whatever book the bet itself was placed at. Pinnacle's own closing number, not
+        // best-available across books (that's what t.close already is).
+        const pinMine=allMine.filter(o=>canonBook(o.sportsbook)==='pinnacle');
+        t.openPin=pick(pinMine,'olv'); if(st&&st!=='unplayed') t.closePin=pick(pinMine,'clv'); });
     }
     // 5) live stats + grade
     open.forEach(t=>{
@@ -2186,16 +2195,27 @@ function trackCardHtml(t){
   // progress
   let prog='';
   if(t.side==='over'||t.side==='under'){
-    const a=t.actual, L=Number(t.line); const pct=a==null?0:Math.min(100,Math.round(a/(L*1.25)*100)); const mark=Math.round(100/1.25);
-    const cls = t.final ? (t.result==='win'?'g':t.result==='loss'?'r':'') : (a!=null && ((t.side==='over'&&a>L)||(t.side==='under'&&a>L)) ? (t.side==='over'?'g':'r') : '');
-    prog=`<div class="prog"><div class="nums"><span><b>${a==null?'—':a}</b> <span class="dim">/ ${L} ${esc(t.marketLabel)}</span></span><span class="dim">${t.score?esc(t.score):''}</span></div><div class="bar"><i class="${cls}" style="width:${pct}%"></i><em style="left:${mark}%"></em></div></div>`;
+    const a=t.actual, L=Number(t.line); const pct=a==null?0:Math.min(100,Math.round(a/(L*1.25)*100));
+    // While live (not yet final): green only when the actual is currently on the winning side
+    // of the line for THIS side of the bet -- over wants above, under wants below. The old
+    // check tested a>L for both sides, so an Under bet that was actually winning (a<L) never
+    // lit up green live, only ever at final grading.
+    const liveGood = a!=null && (t.side==='over' ? a>L : a<L);
+    const cls = t.final ? (t.result==='win'?'g':t.result==='loss'?'r':'') : (liveGood?'g':'');
+    prog=`<div class="prog"><div class="nums"><span><b>${a==null?'—':a}</b> <span class="dim">/ ${L} ${esc(t.marketLabel)}</span></span><span class="dim">${t.score?esc(t.score):''}</span></div><div class="bar ${cls}" style="--bp:${pct}%"><i class="${cls}" style="width:${pct}%"></i><b>${a==null?'—':a}</b></div></div>`;
   }
   // movement
   const lm=withYou(t,'line',t.mainLineAtTrack,t.mainLineNow??t.mainLineAtTrack);
   const mine = t.pinned && t.bookKey ? (last?.byBook?.[t.bookKey]?.price ?? null) : (last?.best ?? null);
   const pm=withYou(t,'price',t.price,mine);
-  const mv = t.side==='ML' ? `<div class="mv"><div class="mvc"><div class="l">${t.pinned&&t.book?esc(t.book):'Price'}</div><div class="v">${fmtAm(t.price)} → ${mine!=null?fmtAm(mine):'—'}<small class="${pm.cls}">${pm.txt}</small></div></div><div class="mvc"><div class="l">Open / ${t.close!=null?'Close':'Now'}</div><div class="v">${t.open!=null?fmtAm(t.open):'—'} / ${t.close!=null?fmtAm(t.close):(mine!=null?fmtAm(mine):'—')}</div></div></div>`
-    : `<div class="mv"><div class="mvc"><div class="l">Line</div><div class="v">${t.mainLineAtTrack??'—'} → ${t.mainLineNow??t.mainLineAtTrack??'—'}<small class="${lm.cls}">${lm.txt}</small></div></div><div class="mvc"><div class="l">${t.pinned&&t.book?esc(t.book)+(t.line!=null?' @ '+t.line:''):'Best'+(t.line!=null?' @ '+t.line:'')}</div><div class="v">${fmtAm(t.price)} → ${mine!=null?fmtAm(mine):'—'}<small class="${pm.cls}">${pm.txt}</small></div></div>${t.open!=null||t.close!=null?`<div class="mvc"><div class="l">Open</div><div class="v">${t.open!=null?fmtAm(t.open):'—'}</div></div><div class="mvc"><div class="l">${t.close!=null?'Close':'Now vs open'}</div><div class="v">${t.close!=null?fmtAm(t.close):(mine!=null?fmtAm(mine):'—')}${t.close!=null&&cents(t.price)!=null&&cents(t.close)!=null?`<small class="${cents(t.price)-cents(t.close)>0?'up':cents(t.price)-cents(t.close)<0?'dn':'fl'}">${(cents(t.price)-cents(t.close)>0?'+':'')+(cents(t.price)-cents(t.close))}¢ CLV</small>`:''}</div></div>`:''}</div>`;
+  // CLV measured against Pinnacle's own closing number specifically, regardless of which book
+  // the bet was placed/pinned at -- the standard sharp benchmark, separate from t.close (which
+  // tracks the pinned book, or best-available if unpinned).
+  const pinClv = (t.bookKey!=='pinnacle' && t.closePin!=null && cents(t.price)!=null && cents(t.closePin)!=null)
+    ? `<div class="mvc"><div class="l">Close @ Pin</div><div class="v">${fmtAm(t.closePin)}<small class="${cents(t.price)-cents(t.closePin)>0?'up':cents(t.price)-cents(t.closePin)<0?'dn':'fl'}">${(cents(t.price)-cents(t.closePin)>0?'+':'')+(cents(t.price)-cents(t.closePin))}¢ CLV v Pin</small></div></div>`
+    : '';
+  const mv = t.side==='ML' ? `<div class="mv"><div class="mvc"><div class="l">${t.pinned&&t.book?esc(t.book):'Price'}</div><div class="v">${fmtAm(t.price)} → ${mine!=null?fmtAm(mine):'—'}<small class="${pm.cls}">${pm.txt}</small></div></div><div class="mvc"><div class="l">Open / ${t.close!=null?'Close':'Now'}</div><div class="v">${t.open!=null?fmtAm(t.open):'—'} / ${t.close!=null?fmtAm(t.close):(mine!=null?fmtAm(mine):'—')}</div></div>${pinClv}</div>`
+    : `<div class="mv"><div class="mvc"><div class="l">Line</div><div class="v">${t.mainLineAtTrack??'—'} → ${t.mainLineNow??t.mainLineAtTrack??'—'}<small class="${lm.cls}">${lm.txt}</small></div></div><div class="mvc"><div class="l">${t.pinned&&t.book?esc(t.book)+(t.line!=null?' @ '+t.line:''):'Best'+(t.line!=null?' @ '+t.line:'')}</div><div class="v">${fmtAm(t.price)} → ${mine!=null?fmtAm(mine):'—'}<small class="${pm.cls}">${pm.txt}</small></div></div>${t.open!=null||t.close!=null?`<div class="mvc"><div class="l">Open</div><div class="v">${t.open!=null?fmtAm(t.open):'—'}</div></div><div class="mvc"><div class="l">${t.close!=null?'Close':'Now vs open'}</div><div class="v">${t.close!=null?fmtAm(t.close):(mine!=null?fmtAm(mine):'—')}${t.close!=null&&cents(t.price)!=null&&cents(t.close)!=null?`<small class="${cents(t.price)-cents(t.close)>0?'up':cents(t.price)-cents(t.close)<0?'dn':'fl'}">${(cents(t.price)-cents(t.close)>0?'+':'')+(cents(t.price)-cents(t.close))}¢ CLV</small>`:''}</div></div>`:''}${pinClv}</div>`;
   // books now at your line — pinned book (the one you tracked to) shown first, rest by best price for reference
   const books = last ? Object.entries(last.byBook).sort((a,b)=> (t.pinned&&t.bookKey ? (a[0]===t.bookKey?-1:b[0]===t.bookKey?1:b[1].price-a[1].price) : b[1].price-a[1].price)).map(([k,b])=>{ const was=first?.byBook?.[k]?.price; const d=was!=null?Number(b.price)-Number(was):0; const lg=bookLogo(k); const pin=t.pinned&&t.bookKey===k; return `<span class="tb${pin?' pin':''}">${lg?`<span class="logow"><img src="${esc(lg)}" alt=""></span>`:''}${esc(bookShort(k))} ${fmtAm(b.price)}${EXCH.has(k)?`<span class="d">(${winPct(b.price)}%)</span>`:''}${d?`<span class="${d<0?'g':'r'}">${d<0?'▼':'▲'}</span>`:''}</span>`; }).join('') : '';
   const snaps = t.snapshots.length>1 ? snapsHtml(t) : '';
