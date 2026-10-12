@@ -1303,6 +1303,36 @@ function rowsFor(p, mkey, rows){
   return rows.filter(o=>o._fx===p.fixtureId && marketKeyFor(sportKey,o.market)===mkey && normName(cleanSel(o.selection||o.name))===p.key);
 }
 function sideOf(o){ const s=String(o.selection_line||'').toLowerCase(); return s==='over'||s==='under' ? s : 'single'; }
+// Exchanges (Novig/Prophet X/Kalshi) are peer-to-peer order books, and the feed's own Over/Under
+// label on their rows runs backwards from what the exchange's own app shows -- "Over -106" there
+// is actually the fill you'd get taking Under, at the exact sign-flipped price (+106). That flip
+// is mathematically exact for a zero-vig two-outcome market (the complementary American price is
+// always the other side's number with the sign reversed), so no real data is lost using it this
+// way. Scoped to the parlay tool (auto-build included) and the UFC-style exchange-liquidity
+// comparison -- the two places that make an automated side/price call off this data -- not the
+// general board/grid/tracker, which still show the feed's own label as posted. Team-level
+// single-sided rows (moneyline/spread) aren't touched here: "flipping" those means reassigning
+// the row to the opponent team entirely, a bigger transform than a same-market side+price mirror.
+function mirrorExRows(rows){
+  return rows.map(o=>{
+    if(!EXCH.has(canonBook(o.sportsbook))) return o;
+    const s=sideOf(o); if(s!=='over'&&s!=='under') return o;
+    const flip = s==='over'?'under':'over';
+    // Depth matters too (liquidity floors, the parlay chips' own $ badges) -- parse the order book
+    // off the ORIGINAL unmirrored row first (levelsOf's price/size column guess needs the real,
+    // correctly-scaled numbers to work). Each level is the SAME size at the sign-flipped price,
+    // but mirroring can reorder which level is actually "best" (a deeper, worse price on the
+    // original side becomes a BETTER price on the flipped side) -- so the row's own quoted price
+    // has to come from the new top of the re-sorted mirrored levels, not a naive negation of the
+    // old top, or the chip's displayed price and its liquidity badge end up describing two
+    // different levels. No order_book at all (just a flat top price, no depth) falls back to a
+    // plain top-price mirror.
+    const lv=levelsOf(o);
+    if(!lv.length) return {...o, selection_line:flip, price:-Number(o.price)};
+    const mirroredLv = lv.map(l=>({price:-l.price, size:l.size})).sort((a,b)=>b.price-a.price);
+    return {...o, selection_line:flip, price:mirroredLv[0].price, order_book:mirroredLv.map(l=>[l.price,l.size])};
+  });
+}
 function bestFirst(rows){
   // dedupe by canon book (DK clones), keep best price per book
   const by={}; rows.forEach(o=>{ const k=canonBook(o.sportsbook); if(!by[k]||Number(o.price)>Number(by[k].price)) by[k]=o; });
@@ -1544,14 +1574,19 @@ function boardHtml(rows, p, mkey, ctxKey, mainLine, pt, ro){
     if(av==null) return 1; if(bv==null) return -1;
     return bv-av;
   });
-  // UFC (or any single-sided ml sport): pool every exchange's own order-book depth for this
-  // fighter into one size-weighted average price + $ total (same weighting depthSummary uses for
-  // one book, just combined across Novig/Prophet X/Kalshi together), then do the same for the
-  // opponent, so it's obvious which side of the fight actually has more real money behind it.
+  // UFC (or any single-sided ml sport): pool every exchange's own order-book depth into one
+  // size-weighted average price + $ total, then do the same for the opponent, so it's obvious
+  // which side of the fight actually has more real money behind it. `mirrorRows` flags which raw
+  // row set (this fighter's own, or the opponent's) the stake is actually read FROM -- exchange
+  // rows are mislabeled the same way as the over/under case (see mirrorExRows): a Novig/Prophet X/
+  // Kalshi row filed under "Fighter A" is actually a fill on FIGHTER B at the sign-flipped price,
+  // so this fighter's real exchange stake lives in the OPPONENT's own raw rows, mirrored at
+  // accumulation time (parsed from the row's own unmutated order_book via levelsOf first, so the
+  // size/price column heuristic there still sees the data in its original, correctly-scaled form).
   const exchangeStakeFor = rows => {
     const list = bookBoard(rows).filter(b=>b.ex && b.single);
     let totalSize=0, totalNotionalDec=0;
-    list.forEach(b=>{ levelsOf(b.single).forEach(l=>{ totalSize+=l.size; totalNotionalDec+=l.size*toDec(l.price); }); });
+    list.forEach(b=>{ levelsOf(b.single).forEach(l=>{ totalSize+=l.size; totalNotionalDec+=l.size*toDec(-l.price); }); });
     return { totalSize, avg: totalSize ? toAm(totalNotionalDec/totalSize) : null };
   };
   let mlCompare='';
@@ -1560,7 +1595,7 @@ function boardHtml(rows, p, mkey, ctxKey, mainLine, pt, ro){
     if(f){
       const oppName = normName(f.home.name)===p.key ? f.away.name : f.home.name;
       const oppRows = rowsFor({fixtureId:p.fixtureId, key:normName(oppName)}, mkey, mainRows);
-      const my = exchangeStakeFor(rows), opp = exchangeStakeFor(oppRows);
+      const my = exchangeStakeFor(oppRows), opp = exchangeStakeFor(rows);
       if(my.totalSize || opp.totalSize){
         const tied = my.totalSize===opp.totalSize;
         const leader = tied ? null : (my.totalSize>opp.totalSize ? p.name : oppName);
@@ -2251,7 +2286,8 @@ function devigFair(myPrice, oppPrice){
 // the one on screen right now -- live mainRows if it is, else today's same-day sport cache.
 function rowsForLeg(leg){
   const rows = leg.sportKey===sportKey ? mainRows : (loadSportCache(leg.sportKey)?.mainRows||[]);
-  return rows.filter(o=>o._fx===leg.fixtureId && marketKeyFor(leg.sportKey,o.market)===leg.mkey);
+  const own = rows.filter(o=>o._fx===leg.fixtureId && marketKeyFor(leg.sportKey,o.market)===leg.mkey);
+  return mirrorExRows(own);
 }
 function myRowsForLeg(leg, rows){
   if(leg.side==='over'||leg.side==='under') return rows.filter(o=>sideOf(o)===leg.side && (leg.isGame||normName(cleanSel(o.selection||o.name))===leg.playerKey) && (leg.line==null||Number(o.points)===Number(leg.line)));
@@ -2457,7 +2493,7 @@ function buildAutoCandidates(){
       const isMain = S.ml || MAIN_MKS.has(mkey);
       if(autoScope==='props' && isMain) return;
       if(autoScope==='mains' && !isMain) return;
-      const rows=rowsFor(p,mkey,mainRows); if(!rows.length) return;
+      const rows=mirrorExRows(rowsFor(p,mkey,mainRows)); if(!rows.length) return;
       const single = S.ml || SINGLE_SIDED_MKS.has(mkey);
       // Single-sided team markets (moneyline/spread) need the WHOLE market's rows to find the
       // opponent's own selection -- `rows` above is already filtered down to just this team's own
