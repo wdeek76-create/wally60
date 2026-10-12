@@ -2298,9 +2298,11 @@ function parlayLegHtml(leg){
 // Pinnacle specifically, the best price currently backed by real exchange liquidity, or whichever
 // of the two is better ("mix").
 let autoLegs = Math.max(1, Number(LS.get('props_autolegs','3'))||3);
-let autoBasis = LS.get('props_autobasis','mix'); // 'pin' | 'exch' | 'mix'
+let autoBasis = LS.get('props_autobasis','mix'); // 'pin' | 'exch' | 'mix' -- ignored when autoTargetBook is set
 let autoEdge = Number(LS.get('props_autoedge','1'))||0;
 let autoFixture = '';
+let autoLeague = ''; // '' = whichever sport tab is currently active
+let autoTargetBook = ''; // '' = any (use autoBasis); else only that shop's own price counts
 let autoOpen = LS.get('props_autoopen','1')==='1';
 function fairPFromRows(myRows, oppRows){
   const avgImp = myRows.length ? myRows.reduce((a,o)=>a+toImplied(Number(o.price)),0)/myRows.length : null;
@@ -2308,6 +2310,9 @@ function fairPFromRows(myRows, oppRows){
   if(avgImp==null||oppAvgImp==null||(avgImp+oppAvgImp)<=0) return null;
   return avgImp/(avgImp+oppAvgImp);
 }
+// Reads off whatever sport's data is CURRENTLY loaded in the globals (sportKey/fixtures/
+// mainRows/players) -- runAutoBuild temporarily swaps those to another league's same-day cache
+// when autoLeague differs from the active tab, so this never needs to know about that itself.
 function buildAutoCandidates(){
   const S=SPORTS[sportKey];
   const out=[];
@@ -2323,14 +2328,24 @@ function buildAutoCandidates(){
         if(!myAll.length) return;
         const line = side==='single' ? null : mainLineOf(rows, side);
         const myRows = line==null ? myAll : myAll.filter(o=>Number(o.points)===Number(line));
+        // Real opposite-side rows -- each book's (exchanges included) own actual posted price on
+        // the other side, never a mirrored/flipped number. Same rule as oppRowsForLeg/the rest of
+        // this tool's devig math.
         const oppRows = side==='single'
           ? rows.filter(o=>normName(cleanSel(o.selection||o.name))!==p.key)
           : rows.filter(o=>sideOf(o)===(side==='over'?'under':'over') && (line==null||Number(o.points)===Number(line)));
         const fairP = fairPFromRows(myRows, oppRows); if(fairP==null) return;
-        const pinRow = bestFirst(myRows.filter(o=>canonBook(o.sportsbook)==='pinnacle'))[0] || null;
-        const exchRow = bestFirst(myRows.filter(o=>EXCH.has(canonBook(o.sportsbook))))[0] || null;
-        let refRow = autoBasis==='pin' ? pinRow : autoBasis==='exch' ? exchRow
-          : [pinRow,exchRow].filter(Boolean).sort((a,b)=>toDec(b.price)-toDec(a.price))[0] || null;
+        let refRow;
+        if(autoTargetBook){
+          // Only this one shop's own price counts -- skip the pick entirely if it doesn't post it,
+          // rather than falling back to some other shop (defeats the point of targeting one).
+          refRow = bestFirst(myRows.filter(o=>canonBook(o.sportsbook)===autoTargetBook))[0] || null;
+        } else {
+          const pinRow = bestFirst(myRows.filter(o=>canonBook(o.sportsbook)==='pinnacle'))[0] || null;
+          const exchRow = bestFirst(myRows.filter(o=>EXCH.has(canonBook(o.sportsbook))))[0] || null;
+          refRow = autoBasis==='pin' ? pinRow : autoBasis==='exch' ? exchRow
+            : [pinRow,exchRow].filter(Boolean).sort((a,b)=>toDec(b.price)-toDec(a.price))[0] || null;
+        }
         if(!refRow) return;
         const edgePct = (fairP - toImplied(Number(refRow.price)))*100;
         if(edgePct < autoEdge) return;
@@ -2342,34 +2357,55 @@ function buildAutoCandidates(){
   return out;
 }
 function runAutoBuild(){
-  const candidates=buildAutoCandidates();
-  const used=new Set(parlay.map(l=>l.playerKey+'|'+l.mkey));
-  const picks=[];
-  for(const c of candidates){
-    const k=c.p.key+'|'+c.mkey; if(used.has(k)) continue;
-    used.add(k); picks.push(c);
-    if(picks.length>=autoLegs) break;
+  const targetLeague = autoLeague || sportKey;
+  const usingOtherLeague = targetLeague!==sportKey;
+  let saved=null;
+  if(usingOtherLeague){
+    const cache=loadSportCache(targetLeague);
+    if(!cache){ toast(`Open the ${SPORTS[targetLeague].label} tab once today first -- no data cached for it yet`); return; }
+    saved={ sportKey, fixtures, mainRows, players };
+    sportKey=targetLeague; fixtures=cache.fixtures; mainRows=cache.mainRows; players=cache.players;
   }
-  if(!picks.length){ toast('No picks cleared that edge threshold'); return; }
-  picks.forEach(c=>{
-    const label = c.side==='single' ? singleSideLabel(c.mkey) : (c.side==='over'?'Over':'Under');
-    addToParlay(c.p, c.mkey, label, c.line, mainRows, canonBook(c.refRow.sportsbook));
-  });
-  toast(`Added ${picks.length} auto-built leg${picks.length===1?'':'s'}`);
+  try{
+    const candidates=buildAutoCandidates();
+    const used=new Set(parlay.map(l=>l.playerKey+'|'+l.mkey));
+    const picks=[];
+    for(const c of candidates){
+      const k=c.p.key+'|'+c.mkey; if(used.has(k)) continue;
+      used.add(k); picks.push(c);
+      if(picks.length>=autoLegs) break;
+    }
+    if(!picks.length){ toast('No picks cleared that edge threshold'); return; }
+    picks.forEach(c=>{
+      const label = c.side==='single' ? singleSideLabel(c.mkey) : (c.side==='over'?'Over':'Under');
+      addToParlay(c.p, c.mkey, label, c.line, mainRows, canonBook(c.refRow.sportsbook));
+    });
+    toast(`Added ${picks.length} auto-built leg${picks.length===1?'':'s'}`);
+  } finally {
+    if(saved){ sportKey=saved.sportKey; fixtures=saved.fixtures; mainRows=saved.mainRows; players=saved.players; }
+  }
   renderTabs(); renderParlay();
 }
 function autoBuildHtml(){
-  const fxOpts = fixtures.filter(f=>!f.live).map(f=>`<option value="${esc(f.id)}"${autoFixture===f.id?' selected':''}>${esc(f.away.ab||f.away.name)} @ ${esc(f.home.ab||f.home.name)}</option>`).join('');
+  const leagueKey = autoLeague || sportKey;
+  // Fixtures for whichever league is picked -- the active tab's live globals if it matches,
+  // else that other league's same-day cache (same source runAutoBuild itself reads from).
+  const fxSrc = leagueKey===sportKey ? fixtures : (loadSportCache(leagueKey)?.fixtures || []);
+  const fxOpts = fxSrc.filter(f=>!f.live).map(f=>`<option value="${esc(f.id)}"${autoFixture===f.id?' selected':''}>${esc(f.away.ab||f.away.name)} @ ${esc(f.home.ab||f.home.name)}</option>`).join('');
+  const leagueOpts = Object.entries(SPORTS).map(([k,s])=>`<option value="${k}"${leagueKey===k?' selected':''}>${esc(s.label)}</option>`).join('');
+  const bookOpts = BOOKS.map(b=>`<option value="${b.toLowerCase()}"${autoTargetBook===b.toLowerCase()?' selected':''}>${esc(b)}</option>`).join('');
   return `<div class="ttsum">
     <div class="ttsumh" id="autoHead" role="button"><span>Auto Build</span><span class="dim">${autoOpen?'▴':'▾'}</span></div>
     <div id="autoBody"${autoOpen?'':' style="display:none"'}>
       <div class="autorow"><label>Legs</label><div class="autostepper"><button data-autoleg="-1">−</button><b>${autoLegs}</b><button data-autoleg="1">+</button></div></div>
+      <div class="autorow"><label>League</label><select id="autoLeagueSel">${leagueOpts}</select></div>
       <div class="autorow"><label>Game</label><select id="autoFixtureSel"><option value="">All games</option>${fxOpts}</select></div>
-      <div class="autorow"><label>Basis</label><div class="autobasis">
+      <div class="autorow"><label>Target shop</label><select id="autoBookSel"><option value="">Any (use basis)</option>${bookOpts}</select></div>
+      ${autoTargetBook ? '' : `<div class="autorow"><label>Basis</label><div class="autobasis">
         <button class="abbtn${autoBasis==='pin'?' on':''}" data-basis="pin">Pinnacle</button>
         <button class="abbtn${autoBasis==='exch'?' on':''}" data-basis="exch">Exchanges</button>
         <button class="abbtn${autoBasis==='mix'?' on':''}" data-basis="mix">Mix</button>
-      </div></div>
+      </div></div>`}
       <div class="autorow" style="align-items:flex-start"><label style="margin-top:4px">Min edge</label><div class="qarbrow qarbpresets" style="border-bottom:none;padding-bottom:0">
         ${[0,1,2,5,10].map(v=>`<button class="qarbchip${autoEdge===v?' on':''}" data-autoedgechip="${v}">${v}%</button>`).join('')}
       </div></div>
@@ -2382,7 +2418,9 @@ function bindAutoBuild(view){
   view.querySelectorAll('[data-autoleg]').forEach(b=>b.addEventListener('click',()=>{
     autoLegs=Math.max(1,Math.min(10,autoLegs+Number(b.dataset.autoleg))); LS.set('props_autolegs',String(autoLegs)); renderParlay();
   }));
+  $('#autoLeagueSel')?.addEventListener('change',e=>{ autoLeague=e.target.value; autoFixture=''; renderParlay(); });
   $('#autoFixtureSel')?.addEventListener('change',e=>{ autoFixture=e.target.value; });
+  $('#autoBookSel')?.addEventListener('change',e=>{ autoTargetBook=e.target.value; renderParlay(); });
   view.querySelectorAll('[data-basis]').forEach(b=>b.addEventListener('click',()=>{
     autoBasis=b.dataset.basis; LS.set('props_autobasis',autoBasis); renderParlay();
   }));
