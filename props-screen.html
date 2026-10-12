@@ -441,7 +441,8 @@ a.plbk{color:var(--cyan)}
 .autorow{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:7px 0;border-top:1px solid var(--line2)}
 .autorow:first-child{border-top:none}
 .autorow label{font-size:12px;font-weight:700;color:var(--dim)}
-.autorow select{background:var(--bg2);border:1px solid var(--line2);border-radius:8px;color:var(--text);font-size:12px;padding:6px 8px;max-width:60%}
+.autorow select,.autorow input{background:var(--bg2);border:1px solid var(--line2);border-radius:8px;color:var(--text);font-size:12px;padding:6px 8px;max-width:60%}
+.autorow input{width:90px;text-align:right;font-family:var(--mono)}
 .autostepper{display:flex;align-items:center;gap:10px;font-family:var(--mono);font-weight:800}
 .autostepper button{width:26px;height:26px;border-radius:50%;border:1px solid var(--line2);background:var(--bg2);color:var(--text);font-size:15px;line-height:1}
 .autobasis{display:flex;gap:6px}
@@ -2307,11 +2308,27 @@ let autoFixture = '';
 let autoLeague = ''; // '' = whichever sport tab is currently active
 let autoTargetBook = ''; // '' = any (use autoBasis); else only that shop's own price counts
 let autoOpen = LS.get('props_autoopen','1')==='1';
+let autoScope = LS.get('props_autoscope','both'); // 'props' | 'mains' | 'both'
+let autoMinLiqProps = Number(LS.get('props_autominliqprops','0'))||0;
+let autoMinLiqMains = Number(LS.get('props_autominliqmains','0'))||0;
+let autoSGP = LS.get('props_autosgp','')==='1';
+// Every main/team/game-level market key (moneyline, spread, totals, team totals, both the
+// full-game and regulation-time variants) -- everything else indexed is a player prop. Used to
+// split "Scope" (props-only/mains-only/both) and apply the right one of the two liquidity floors.
+const MAIN_MKS = new Set([...TEAM_MKS, ...GAME_MKS]);
 function fairPFromRows(myRows, oppRows){
   const avgImp = myRows.length ? myRows.reduce((a,o)=>a+toImplied(Number(o.price)),0)/myRows.length : null;
   const oppAvgImp = oppRows.length ? oppRows.reduce((a,o)=>a+toImplied(Number(o.price)),0)/oppRows.length : null;
   if(avgImp==null||oppAvgImp==null||(avgImp+oppAvgImp)<=0) return null;
   return avgImp/(avgImp+oppAvgImp);
+}
+// What a row's own real size actually is: an exchange's top-of-book depth at that exact price
+// (same number cellPrice/the cell UI would show), or a flat-limit book's posted max. Null (not 0)
+// when neither is known, so the liquidity floor below only filters picks it can actually evaluate.
+function rowLiquidity(o){
+  const k=canonBook(o.sportsbook);
+  if(EXCH.has(k)){ const lv=levelsOf(o); return lv.length?lv[0].size:null; }
+  return o.limits?.max!=null ? Number(o.limits.max) : null;
 }
 // Reads off whatever sport's data is CURRENTLY loaded in the globals (sportKey/fixtures/
 // mainRows/players) -- runAutoBuild temporarily swaps those to another league's same-day cache
@@ -2323,8 +2340,15 @@ function buildAutoCandidates(){
     if(autoFixture && p.fixtureId!==autoFixture) return;
     if(fixtureIsLive(p.fixtureId)) return;
     p.marketKeys.forEach(mkey=>{
+      const isMain = S.ml || MAIN_MKS.has(mkey);
+      if(autoScope==='props' && isMain) return;
+      if(autoScope==='mains' && !isMain) return;
       const rows=rowsFor(p,mkey,mainRows); if(!rows.length) return;
       const single = S.ml || SINGLE_SIDED_MKS.has(mkey);
+      // Single-sided team markets (moneyline/spread) need the WHOLE market's rows to find the
+      // opponent's own selection -- `rows` above is already filtered down to just this team's own
+      // rows (rowsFor matches on selection), so the opponent would never be in there at all.
+      const allMarketRows = single ? mainRows.filter(o=>o._fx===p.fixtureId && marketKeyFor(sportKey,o.market)===mkey) : null;
       const sides = single ? ['single'] : ['over','under'];
       sides.forEach(side=>{
         const myAll = side==='single' ? rows : rows.filter(o=>sideOf(o)===side);
@@ -2335,7 +2359,7 @@ function buildAutoCandidates(){
         // the other side, never a mirrored/flipped number. Same rule as oppRowsForLeg/the rest of
         // this tool's devig math.
         const oppRows = side==='single'
-          ? rows.filter(o=>normName(cleanSel(o.selection||o.name))!==p.key)
+          ? allMarketRows.filter(o=>normName(cleanSel(o.selection||o.name))!==p.key)
           : rows.filter(o=>sideOf(o)===(side==='over'?'under':'over') && (line==null||Number(o.points)===Number(line)));
         const fairP = fairPFromRows(myRows, oppRows); if(fairP==null) return;
         let refRow;
@@ -2350,9 +2374,15 @@ function buildAutoCandidates(){
             : [pinRow,exchRow].filter(Boolean).sort((a,b)=>toDec(b.price)-toDec(a.price))[0] || null;
         }
         if(!refRow) return;
+        // Liquidity floor: props and mains get their own threshold, since a prop's real size and
+        // a moneyline's real size are completely different scales. Only filters what it can
+        // actually measure -- a row with no known size (rowLiquidity returns null) passes through
+        // rather than getting excluded for lack of data.
+        const minLiq = isMain ? autoMinLiqMains : autoMinLiqProps;
+        if(minLiq>0){ const liq=rowLiquidity(refRow); if(liq!=null && liq<minLiq) return; }
         const edgePct = (fairP - toImplied(Number(refRow.price)))*100;
         if(edgePct < autoEdge) return;
-        out.push({ p, mkey, side, line, refRow, fairP, edgePct });
+        out.push({ p, mkey, side, line, refRow, fairP, edgePct, isMain });
       });
     });
   });
@@ -2370,6 +2400,13 @@ function runAutoBuild(){
     sportKey=targetLeague; fixtures=cache.fixtures; mainRows=cache.mainRows; players=cache.players;
   }
   try{
+    // Same Game Parlay: every leg has to come from one fixture -- default to the first upcoming
+    // one if nothing's picked yet, rather than silently building a multi-game parlay.
+    if(autoSGP && !autoFixture){
+      const first=fixtures.filter(f=>!f.live).sort((a,b)=>new Date(a.start)-new Date(b.start))[0];
+      if(!first){ toast('No upcoming games to build a same-game parlay from'); return; }
+      autoFixture=first.id;
+    }
     const candidates=buildAutoCandidates();
     const used=new Set(parlay.map(l=>l.playerKey+'|'+l.mkey));
     const picks=[];
@@ -2402,13 +2439,21 @@ function autoBuildHtml(){
     <div id="autoBody"${autoOpen?'':' style="display:none"'}>
       <div class="autorow"><label>Legs</label><div class="autostepper"><button data-autoleg="-1">−</button><b>${autoLegs}</b><button data-autoleg="1">+</button></div></div>
       <div class="autorow"><label>League</label><select id="autoLeagueSel">${leagueOpts}</select></div>
-      <div class="autorow"><label>Game</label><select id="autoFixtureSel"><option value="">All games</option>${fxOpts}</select></div>
+      <div class="autorow"><label>Same Game Parlay</label><button class="abbtn${autoSGP?' on':''}" id="autoSgpBtn">${autoSGP?'On':'Off'}</button></div>
+      <div class="autorow"><label>Game</label><select id="autoFixtureSel">${autoSGP?'':'<option value="">All games</option>'}${fxOpts}</select></div>
+      <div class="autorow"><label>Scope</label><div class="autobasis">
+        <button class="abbtn${autoScope==='both'?' on':''}" data-scope="both">Both</button>
+        <button class="abbtn${autoScope==='props'?' on':''}" data-scope="props">Props only</button>
+        <button class="abbtn${autoScope==='mains'?' on':''}" data-scope="mains">Mains only</button>
+      </div></div>
       <div class="autorow"><label>Target shop</label><select id="autoBookSel"><option value="">Any (use basis)</option>${bookOpts}</select></div>
       ${autoTargetBook ? '' : `<div class="autorow"><label>Basis</label><div class="autobasis">
         <button class="abbtn${autoBasis==='pin'?' on':''}" data-basis="pin">Pinnacle</button>
         <button class="abbtn${autoBasis==='exch'?' on':''}" data-basis="exch">Exchanges</button>
         <button class="abbtn${autoBasis==='mix'?' on':''}" data-basis="mix">Mix</button>
       </div></div>`}
+      <div class="autorow"><label>Min exch liq · props</label><input type="text" inputmode="numeric" id="autoLiqProps" placeholder="any" value="${autoMinLiqProps||''}"></div>
+      <div class="autorow"><label>Min exch liq · mains</label><input type="text" inputmode="numeric" id="autoLiqMains" placeholder="any" value="${autoMinLiqMains||''}"></div>
       <div class="autorow" style="align-items:flex-start"><label style="margin-top:4px">Min edge</label><div class="qarbrow qarbpresets" style="border-bottom:none;padding-bottom:0">
         ${[0,1,2,5,10].map(v=>`<button class="qarbchip${autoEdge===v?' on':''}" data-autoedgechip="${v}">${v}%</button>`).join('')}
       </div></div>
@@ -2422,8 +2467,14 @@ function bindAutoBuild(view){
     autoLegs=Math.max(1,Math.min(10,autoLegs+Number(b.dataset.autoleg))); LS.set('props_autolegs',String(autoLegs)); renderParlay();
   }));
   $('#autoLeagueSel')?.addEventListener('change',e=>{ autoLeague=e.target.value; autoFixture=''; renderParlay(); });
+  $('#autoSgpBtn')?.addEventListener('click',()=>{ autoSGP=!autoSGP; LS.set('props_autosgp',autoSGP?'1':''); if(!autoSGP) autoFixture=''; renderParlay(); });
   $('#autoFixtureSel')?.addEventListener('change',e=>{ autoFixture=e.target.value; });
+  view.querySelectorAll('[data-scope]').forEach(b=>b.addEventListener('click',()=>{
+    autoScope=b.dataset.scope; LS.set('props_autoscope',autoScope); renderParlay();
+  }));
   $('#autoBookSel')?.addEventListener('change',e=>{ autoTargetBook=e.target.value; renderParlay(); });
+  $('#autoLiqProps')?.addEventListener('change',e=>{ autoMinLiqProps=Number(e.target.value)||0; LS.set('props_autominliqprops',String(autoMinLiqProps)); });
+  $('#autoLiqMains')?.addEventListener('change',e=>{ autoMinLiqMains=Number(e.target.value)||0; LS.set('props_autominliqmains',String(autoMinLiqMains)); });
   view.querySelectorAll('[data-basis]').forEach(b=>b.addEventListener('click',()=>{
     autoBasis=b.dataset.basis; LS.set('props_autobasis',autoBasis); renderParlay();
   }));
