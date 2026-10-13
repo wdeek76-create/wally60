@@ -5495,7 +5495,8 @@ async function exportModelCardImage() {
     // Play-to = worst price that still holds a 2% edge: the American line
     // whose implied % is (model win % − 2).
     const pickProb  = f.predictedWinner === f.fighter1 ? f.f1Prob : f.f2Prob;
-    const playToAm  = fmtAm(impliedToAmerican(pickProb - EXPORT_MIN_EDGE));
+    const playToNum = impliedToAmerican(pickProb - EXPORT_MIN_EDGE);
+    const playToAm  = fmtAm(playToNum);
     // Every book's price for the pick from the last odds fetch, best first.
     // Falls back to the single best book when odds haven't been fetched.
     const pickMlKey = findMatchKey(card.ml || {}, pickName);
@@ -5504,7 +5505,11 @@ async function exportModelCardImage() {
       ? pickMlEntry.lastAutoFetch.allBooks.filter(x => x && x.odds != null).map(x => ({ book: x.book, odds: x.odds }))
       : [];
     if (!books.length && pickMl != null) books = [{ book: pickBook, odds: pickMl }];
+    // Only books still at-or-better than play-to — anything past it isn't a bet.
+    if (playToNum != null) books = books.filter(bk => bk.odds >= playToNum);
     books.sort((a, b) => b.odds - a.odds);
+    // Exchange liquidity down to the play-to price.
+    const liq = ooLiqToPlayTo(pickMlEntry?.lastAutoFetch?.allBooks, playToNum);
     // Wrap logo+price items into lines that fit left of the edge chip.
     const BOOK_LOGO = 14, BOOK_GAP = 6, ITEM_GAP = 14;
     const itemW = (bk) => (bk.book ? BOOK_LOGO + BOOK_GAP : 0) + measureText(fmtAm(bk.odds), FONT_VAL);
@@ -5522,7 +5527,7 @@ async function exportModelCardImage() {
       fight: f, rank: i + 1,
       fighterLines: fLines,
       modelPct, fairAm, marketAm, marketPct, pickBook, pickName, oppName, playToAm,
-      bookLines,
+      bookLines, liq,
     };
   });
 
@@ -5627,7 +5632,7 @@ async function exportModelCardImage() {
       img.onerror = () => resolve(null);
       img.src = url;
     });
-    const uniqueBooks = [...new Set(rowLayouts.flatMap(rl => rl.bookLines.flat().map(bk => bk.book)).filter(Boolean))];
+    const uniqueBooks = [...new Set(rowLayouts.flatMap(rl => [...rl.bookLines.flat().map(bk => bk.book), ...rl.liq.map(x => x.book)]).filter(Boolean))];
     await Promise.all(uniqueBooks.map(async book => {
       const key = _ooBookKey(book);
       bookLogoMap[key] = await loadDataUri(ooBookLogoUri(book));
@@ -5645,7 +5650,7 @@ async function exportModelCardImage() {
 
   // Row height budget: fighter lines + Model/Fair + Market (+ optional
   // record/country line, only when meta exists for that pick).
-  const rowH = (r) => 8 + r.fighterLines.length * 18 + 6 + Math.max(1, r.bookLines.length) * 18 + 18 + (r.hasMeta ? 14 : 0) + 10;
+  const rowH = (r) => 8 + r.fighterLines.length * 18 + 6 + Math.max(1, r.bookLines.length) * 18 + 18 + (r.liq.length ? 18 : 0) + (r.hasMeta ? 14 : 0) + 10;
 
   // Compact list layout — each row uses dynamic height based on its content
   // (fighter matchup wraps + optional trailing meta line). 8px gap between rows.
@@ -5809,7 +5814,7 @@ async function exportModelCardImage() {
 
     // Body geometry — chip centers on visible content
     const bodyTop = ry + 8;
-    const bodyH = fighterLines.length * 18 + 6 + Math.max(1, rl.bookLines.length) * 18 + 18 + (rl.hasMeta ? 14 : 0);
+    const bodyH = fighterLines.length * 18 + 6 + Math.max(1, rl.bookLines.length) * 18 + 18 + (rl.liq.length ? 18 : 0) + (rl.hasMeta ? 14 : 0);
     const bodyMidY = bodyTop + bodyH / 2;
 
     // Avatar (pick's headshot) on left, cover-fit into a circle with flag corner
@@ -5976,6 +5981,30 @@ async function exportModelCardImage() {
       ctx.fillText(playToAm, midX + measureText('PLAY TO', `600 9px ${FONT_STACK}`) + 6, fy);
     }
     fy += 18;
+
+    // Exchange liquidity down to play-to: LIQ  [logo] $848  [logo] $26k …
+    if (rl.liq.length) {
+      ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+      ctx.font = `600 9px ${FONT_STACK}`;
+      ctx.fillStyle = MUTED;
+      ctx.fillText('LIQ', midX, fy + 2);
+      let cx = midX + measureText('PLAY TO', `600 9px ${FONT_STACK}`) + 6;
+      rl.liq.forEach((x, j) => {
+        if (j) cx += 12;
+        const logoImg = bookLogoMap[_ooBookKey(x.book)];
+        if (logoImg) { ctx.drawImage(logoImg, cx, fy, 14, 14); cx += 14 + 5; }
+        else {
+          ctx.font = FONT_KEY; ctx.fillStyle = LABEL;
+          ctx.fillText(ooShort(x.book), cx, fy + 1);
+          cx += measureText(ooShort(x.book), FONT_KEY) + 5;
+        }
+        const amt = ooUsd(x.total);
+        ctx.font = `700 12px ${FONT_STACK}`; ctx.fillStyle = TEXT;
+        ctx.fillText(amt, cx, fy);
+        cx += measureText(amt, `700 12px ${FONT_STACK}`);
+      });
+      fy += 18;
+    }
 
     // Trailing line: <pick record  Age N>  vs  <opp record  Age N>   Weight class
     const pMeta = metaMap[pickName] || {};
@@ -7000,7 +7029,7 @@ async function renderUpcoming(force) {
         ? { ios: o.deep_link.ios || null, android: o.deep_link.android || null, desktop: o.deep_link.desktop || null }
         : (typeof o.deep_link === 'string' ? o.deep_link : null);
       const row = { odds: price, book: o.sportsbook, liq: o.limits?.max ?? (levels[0]?.size ?? null), exch, winPct: exch ? ooWinPct(price) : null, deepLink: dl,
-        depth: levels.length ? { total: levels.reduce((a, l) => a + l.size, 0), avg: ooToAm(levels.reduce((a, l) => a + ooToDec(l.price) * l.size, 0) / levels.reduce((a, l) => a + l.size, 0)), best: levels[0].price, worst: levels[levels.length - 1].price, n: levels.length } : null };
+        depth: levels.length ? { total: levels.reduce((a, l) => a + l.size, 0), avg: ooToAm(levels.reduce((a, l) => a + ooToDec(l.price) * l.size, 0) / levels.reduce((a, l) => a + l.size, 0)), best: levels[0].price, worst: levels[levels.length - 1].price, n: levels.length, levels: levels.map(l => [l.price, l.size]) } : null };
       const ent = (board[key] = board[key] || { all: [] }); const i = ent.all.findIndex(r => r.book === row.book); if (i >= 0) { if (row.odds > ent.all[i].odds) ent.all[i] = row; } else ent.all.push(row);
     });
     cards.forEach(c => c.fights.forEach(f => { f.homeBoard = (board[f.id + '|' + normalizeName(f.home.name)] || { all: [] }).all.sort((a, b) => b.odds - a.odds); f.awayBoard = (board[f.id + '|' + normalizeName(f.away.name)] || { all: [] }).all.sort((a, b) => b.odds - a.odds); }));
@@ -7105,7 +7134,7 @@ async function ooBuildMlForTarget(target) {
         ? { ios: o.deep_link.ios || null, android: o.deep_link.android || null, desktop: o.deep_link.desktop || null }
         : (typeof o.deep_link === 'string' ? o.deep_link : null);
     const row = { odds: price, book: o.sportsbook, liq: o.limits?.max ?? (levels[0]?.size ?? null), exch, winPct: exch ? ooWinPct(price) : null, deepLink: dl,
-      depth: levels.length ? { total: levels.reduce((a, l) => a + l.size, 0), avg: ooToAm(levels.reduce((a, l) => a + ooToDec(l.price) * l.size, 0) / levels.reduce((a, l) => a + l.size, 0)), best: levels[0].price, worst: levels[levels.length - 1].price, n: levels.length } : null };
+      depth: levels.length ? { total: levels.reduce((a, l) => a + l.size, 0), avg: ooToAm(levels.reduce((a, l) => a + ooToDec(l.price) * l.size, 0) / levels.reduce((a, l) => a + l.size, 0)), best: levels[0].price, worst: levels[levels.length - 1].price, n: levels.length, levels: levels.map(l => [l.price, l.size]) } : null };
     const slot = (byFx[o._fx] = byFx[o._fx] || {}); const ent = (slot[norm] = slot[norm] || { name: o.selection || o.name, all: [] });
     const i = ent.all.findIndex(r => r.book === row.book); if (i >= 0) { if (row.odds > ent.all[i].odds) ent.all[i] = row; } else ent.all.push(row);
   });
@@ -7170,7 +7199,7 @@ async function autoFetchOdds(cardId, opts = {}) {
     const exch = OO_EXCH.has(String(o.sportsbook).toLowerCase());
     const levels = exch ? ooLevels(o) : [];
     const row = { odds: price, book: o.sportsbook, liq: o.limits?.max ?? (levels[0]?.size ?? null), exch, winPct: exch ? ooWinPct(price) : null, deepLink: dl,
-      depth: levels.length ? { total: levels.reduce((a, l) => a + l.size, 0), avg: ooToAm(levels.reduce((a, l) => a + ooToDec(l.price) * l.size, 0) / levels.reduce((a, l) => a + l.size, 0)), best: levels[0].price, worst: levels[levels.length - 1].price, n: levels.length } : null };
+      depth: levels.length ? { total: levels.reduce((a, l) => a + l.size, 0), avg: ooToAm(levels.reduce((a, l) => a + ooToDec(l.price) * l.size, 0) / levels.reduce((a, l) => a + l.size, 0)), best: levels[0].price, worst: levels[levels.length - 1].price, n: levels.length, levels: levels.map(l => [l.price, l.size]) } : null };
     if (!priceMap[norm]) priceMap[norm] = { name: o.selection || o.name, best: { odds: price, book: o.sportsbook }, all: [] };
     // one row per book (best price) — DK clones etc. don't apply here
     const dupe = priceMap[norm].all.findIndex(r => r.book === row.book);
@@ -8833,6 +8862,26 @@ function ooBoardForBet(b, playToAm) {
     else if (r.depth.best >= playToAm) depth.push({ book: r.book, total: r.liq != null ? r.liq : r.depth.total, avg: r.depth.best, best: r.depth.best, worst: r.depth.best, partial: true });
   });
   return { all, ok, depth, fetchedAt: m.lastAutoFetch.fetchedAt };
+}
+// Exchange liquidity available at prices at-or-better than playToAm, per
+// exchange. Exact when raw levels were stored (fetches after this update);
+// otherwise falls back to the stored summary (whole book if its worst level
+// clears play-to, top level only if just the best price does).
+function ooLiqToPlayTo(allBooks, playToAm) {
+  const out = [];
+  (allBooks || []).filter(r => r && r.exch).forEach(r => {
+    const d = r.depth;
+    if (d && Array.isArray(d.levels) && d.levels.length) {
+      const ok = d.levels.filter(([p]) => playToAm == null || p >= playToAm);
+      const total = ok.reduce((a, [, sz]) => a + sz, 0);
+      if (total > 0) out.push({ book: r.book, total });
+    } else if (d && (playToAm == null || d.worst >= playToAm)) {
+      out.push({ book: r.book, total: d.total });
+    } else if (r.liq != null && (playToAm == null || r.odds >= playToAm)) {
+      out.push({ book: r.book, total: Number(r.liq) });
+    }
+  });
+  return out.filter(x => x.total > 0).sort((a, b) => b.total - a.total);
 }
 function ooBookLine(r) { return `${ooShort(r.book)} ${fmtAm(r.odds)}${r.exch && r.winPct != null ? `(${r.winPct}%)` : ''}${r.exch && r.liq != null ? ' ' + ooUsd(Number(r.liq)) : ''}`; }
 function ooDepthLine(d) { return d.map(x => `${ooShort(x.book)} ${ooUsd(x.total)} avg ${fmtAm(x.avg)}${x.partial ? '*' : ''}`).join(' · '); }
