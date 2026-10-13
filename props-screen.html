@@ -639,11 +639,11 @@ const getBackend = () => LS.get('oo_backend_url', BACKEND_DEFAULT);
 
 // Your books, in display order. Courtside / Onyx fold into DraftKings. Kalshi is an exchange.
 const BOOKS = ['Props Builder','FanDuel','Novig','Prophet X','Kalshi','Pinnacle','bet105','DraftKings','Fliff','BetOnline'];
-// Fetched too but not part of your main BOOKS list -- these only show up wherever a board already
-// lists whatever's actually posted (quick arb's reference rows among them), not in the Target shop
-// picker or the grid's own Shops settings. Harmless to request if a given fixture has none of them.
+const BOOK_REQ = [...BOOKS,'Courtside','Onyx Odds'];
+// NOT part of the main bulk load (BOOK_REQ) -- these are fetched separately, narrowly, only for
+// quick arb's own reference list (see ensureQarbExtras), so they never show up anywhere else:
+// not the regular board/boxes, not the grid, not the parlay tool, not the Target shop picker.
 const EXTRA_BOOK_REQ = ['Caesars','Hard Rock Bet','Kambi'];
-const BOOK_REQ = [...BOOKS,'Courtside','Onyx Odds',...EXTRA_BOOK_REQ];
 const EXCH = new Set(['novig','prophet x','kalshi']);
 const SHOW_MAX = new Set(['pinnacle','bet105']); // flat-limit books whose max we show under the odds too
 const SHORT = { 'props builder':'PB','fanduel':'FD','novig':'Novig','prophet x':'PX','kalshi':'Kalshi','pinnacle':'Pin','bet105':'b105','draftkings':'DK','fliff':'Fliff','betonline':'BOL','caesars':'Caes','hard rock bet':'HR','kambi':'Kambi' };
@@ -1703,7 +1703,17 @@ function boardHtml(rows, p, mkey, ctxKey, mainLine, pt, ro){
   // price shows its own ¢/% too, so both ends of the arrow read the same way. Exchanges excluded
   // entirely -- their own price is just the current top of a constantly-moving order book, not a
   // static reference worth undercutting the way a flat sportsbook's posted line is.
-  const sameBooks=activeSorted.filter(b=>!b.ex);
+  // Caesars/Hard Rock Bet/Kambi are folded in ONLY here, from their own narrow per-market fetch
+  // (see ensureQarbExtras) -- never into `list`/`rows` above, so the regular board/boxes, the
+  // grid, and the parlay tool never see them. First render has nothing cached yet (the fetch is
+  // fired below and re-renders this card once it resolves), so they simply aren't there yet.
+  const qarbExtraKey=`${p.fixtureId}|${marketNamesFor(p,mkey).join(',')}`;
+  const qarbExtraRows=qarbExtraCache[qarbExtraKey]||[];
+  if(!qarbExtraCache[qarbExtraKey]) ensureQarbExtras(p,mkey).then(rows=>{ if(rows.length) rerenderCard(p,ctxKey); });
+  const qarbList = qarbExtraRows.length ? bookBoard([...rows,...qarbExtraRows]) : list;
+  const qarbActiveSorted = (activeSide==='under'?qarbList.filter(b=>b.under).sort((a,b)=>toDec(b.under.price)-toDec(a.under.price))
+    : qarbList.filter(b=>b.over).sort((a,b)=>toDec(b.over.price)-toDec(a.over.price)));
+  const sameBooks=qarbActiveSorted.filter(b=>!b.ex);
   const QARB_PRESETS=[0.3,0.5,1,2];
   const qarbRows=sameBooks.map(b=>{
     const o=b[activeSide]; const refPct=`${Math.round(Number(winPct(o.price)))}${exPctMode==='cents'?'¢':'%'}`;
@@ -2170,6 +2180,25 @@ async function stepLine(p, ctx, dir, render, store){
   render();
 }
 const marketNamesFor = (p,mkey) => [...new Set(rowsFor(p,mkey,mainRows).map(o=>o.market))];
+// Caesars/Hard Rock Bet/Kambi, fetched ONLY for quick arb's own reference list -- one small,
+// narrow fetch (just this fixture+market, never the whole slate) per market card, cached so
+// swiping back to a market already seen doesn't refetch. boardHtml merges whatever comes back
+// into quick arb's own book list alone; nothing else on the card reads this cache.
+const qarbExtraCache = {};
+const qarbExtraPending = {};
+async function ensureQarbExtras(p, mkey){
+  const marketNames=marketNamesFor(p,mkey);
+  const ck=`${p.fixtureId}|${marketNames.join(',')}`;
+  if(qarbExtraCache[ck]) return qarbExtraCache[ck];
+  if(qarbExtraPending[ck]) return qarbExtraPending[ck];
+  if(!marketNames.length){ qarbExtraCache[ck]=[]; return []; }
+  qarbExtraPending[ck]=(async()=>{
+    const rows=[];
+    try{ const r=await oo('/fixtures/odds',{fixture_id:[p.fixtureId],sportsbook:EXTRA_BOOK_REQ,market:marketNames}); (r?.data?.[0]?.odds||[]).forEach(o=>{ o._fx=p.fixtureId; rows.push(o); }); }catch(e){}
+    qarbExtraCache[ck]=rows; delete qarbExtraPending[ck]; return rows;
+  })();
+  return qarbExtraPending[ck];
+}
 // One historical fetch per fixture, not per market. Try narrow first — scoped to just this
 // market's name(s), like the live feed does — since fetching a whole busy fixture's entire
 // history in one shot turned out too large/slow for real games and broke this for every sport.
