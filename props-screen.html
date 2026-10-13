@@ -2381,12 +2381,34 @@ function parlayBookPrices(){
 // board's own no-vig line use -- this one's deliberately different, averaged across the whole
 // market first so one outlier shop can't skew the fair number). Shared by each leg's own fair
 // price and the combined parlay-level fair price below, so they use the exact same math.
+// A straight average of every posted price is one bad data point away from a nonsense result --
+// one stale/garbage row (wrong market mapped in, an API glitch, a book that hasn't updated in
+// hours) sitting far off the rest of the group can drag the whole average toward it, especially
+// with only a handful of books to average over. Anchors on the group's own MEDIAN price first
+// (itself immune to a single outlier), then drops anything sitting unreasonably far from that
+// median before averaging what's left -- never ends up with nothing to average, though, so a
+// group that's ALL spread out (a genuinely volatile line) still returns its plain average rather
+// than an empty result. The band is deliberately wide: real books can legitimately disagree by
+// 100+ cents on the same side of the same game (that disagreement is often exactly the edge this
+// tool exists to find), so this only needs to catch something wildly off the rest of the group
+// (an actual bad feed value), not just a book pricing a side meaningfully differently.
+const FAIR_OUTLIER_BAND_CENTS = 150;
+function robustAvgImp(rows){
+  if(!rows.length) return null;
+  const prices=rows.map(o=>Number(o.price)).sort((a,b)=>a-b);
+  const n=prices.length;
+  const med = n%2 ? prices[(n-1)/2] : (prices[n/2-1]+prices[n/2])/2;
+  const medC=cents(med);
+  const kept = rows.filter(o=>Math.abs(cents(Number(o.price))-medC)<=FAIR_OUTLIER_BAND_CENTS);
+  const use = kept.length ? kept : rows;
+  return use.reduce((a,o)=>a+toImplied(Number(o.price)),0)/use.length;
+}
 function legFairPrice(leg){
   const rows=rowsForLeg(leg);
   const mine=bestFirst(myRowsForLeg(leg,rows));
   const opp=bestFirst(oppRowsForLeg(leg,rows));
-  const avgImp = mine.length ? mine.reduce((a,o)=>a+toImplied(Number(o.price)),0)/mine.length : null;
-  const oppAvgImp = opp.length ? opp.reduce((a,o)=>a+toImplied(Number(o.price)),0)/opp.length : null;
+  const avgImp = mine.length ? robustAvgImp(mine) : null;
+  const oppAvgImp = opp.length ? robustAvgImp(opp) : null;
   const fairP = (avgImp!=null && oppAvgImp!=null && (avgImp+oppAvgImp)>0) ? avgImp/(avgImp+oppAvgImp) : null;
   if(fairP==null || fairP<=0 || fairP>=1) return null;
   return { fairP, mineCount: mine.length, avgImp };
@@ -2496,8 +2518,8 @@ let autoSGP = LS.get('props_autosgp','')==='1';
 // split "Scope" (props-only/mains-only/both) and apply the right one of the two liquidity floors.
 const MAIN_MKS = new Set([...TEAM_MKS, ...GAME_MKS]);
 function fairPFromRows(myRows, oppRows){
-  const avgImp = myRows.length ? myRows.reduce((a,o)=>a+toImplied(Number(o.price)),0)/myRows.length : null;
-  const oppAvgImp = oppRows.length ? oppRows.reduce((a,o)=>a+toImplied(Number(o.price)),0)/oppRows.length : null;
+  const avgImp = myRows.length ? robustAvgImp(myRows) : null;
+  const oppAvgImp = oppRows.length ? robustAvgImp(oppRows) : null;
   if(avgImp==null||oppAvgImp==null||(avgImp+oppAvgImp)<=0) return null;
   return avgImp/(avgImp+oppAvgImp);
 }
@@ -2570,9 +2592,31 @@ function buildAutoCandidates(){
   out.sort((a,b)=>b.edgePct-a.edgePct);
   return out;
 }
+// League left on "Any" (autoLeague==='any'): scans every sport that has data right now -- the
+// active tab's live globals, plus every other sport's same-day cache -- instead of just one.
+// Each candidate remembers exactly which league's fixtures/mainRows it came from (_league/
+// _fixtures/_mainRows), since runAutoBuild has to swap the globals back to THAT league before
+// adding each pick to the parlay (addToParlay reads sportKey/fixtures off the globals directly).
+function buildAutoCandidatesAllLeagues(){
+  const savedSK=sportKey, savedFx=fixtures, savedRows=mainRows, savedPl=players;
+  const out=[];
+  try{
+    Object.keys(SPORTS).forEach(sk=>{
+      const data = sk===savedSK ? {fixtures:savedFx, mainRows:savedRows, players:savedPl} : loadSportCache(sk);
+      if(!data || !data.fixtures || !data.fixtures.length) return;
+      sportKey=sk; fixtures=data.fixtures; mainRows=data.mainRows; players=data.players;
+      buildAutoCandidates().forEach(c=>out.push({...c, _league:sk, _fixtures:data.fixtures, _mainRows:data.mainRows}));
+    });
+  } finally {
+    sportKey=savedSK; fixtures=savedFx; mainRows=savedRows; players=savedPl;
+  }
+  out.sort((a,b)=>b.edgePct-a.edgePct);
+  return out;
+}
 function runAutoBuild(){
-  const targetLeague = autoLeague || sportKey;
-  const usingOtherLeague = targetLeague!==sportKey;
+  const crossLeague = autoLeague==='any';
+  const targetLeague = crossLeague ? null : (autoLeague || sportKey);
+  const usingOtherLeague = !crossLeague && targetLeague!==sportKey;
   let saved=null;
   if(usingOtherLeague){
     const cache=loadSportCache(targetLeague);
@@ -2582,13 +2626,15 @@ function runAutoBuild(){
   }
   try{
     // Same Game Parlay: every leg has to come from one fixture -- default to the first upcoming
-    // one if nothing's picked yet, rather than silently building a multi-game parlay.
-    if(autoSGP && !autoFixture){
+    // one if nothing's picked yet, rather than silently building a multi-game parlay. Doesn't
+    // apply at all across leagues (there's no single fixture to default to), so SGP is ignored
+    // when League is "Any".
+    if(autoSGP && !crossLeague && !autoFixture){
       const first=fixtures.filter(f=>!f.live).sort((a,b)=>new Date(a.start)-new Date(b.start))[0];
       if(!first){ toast('No upcoming games to build a same-game parlay from'); return; }
       autoFixture=first.id;
     }
-    const candidates=buildAutoCandidates();
+    const candidates = crossLeague ? buildAutoCandidatesAllLeagues() : buildAutoCandidates();
     const used=new Set(parlay.map(l=>l.playerKey+'|'+l.mkey));
     // Moneyline/regulation-ML/spread are opposite sides of the SAME bet -- one team's own entity
     // and the other team's own entity on that market are mutually exclusive outcomes, never two
@@ -2607,10 +2653,22 @@ function runAutoBuild(){
       if(picks.length>=autoLegs) break;
     }
     if(!picks.length){ toast(autoEdge===''?'No picks available for that game/scope':'No picks cleared that edge threshold'); return; }
-    picks.forEach(c=>{
-      const label = c.side==='single' ? singleSideLabel(c.mkey) : (c.side==='over'?'Over':'Under');
-      addToParlay(c.p, c.mkey, label, c.line, mainRows, canonBook(c.refRow.sportsbook));
-    });
+    if(crossLeague){
+      // Each pick swaps the globals to its OWN league just long enough to add it, since
+      // addToParlay reads sportKey/fixtures directly off them.
+      const origSK=sportKey, origFx=fixtures, origRows=mainRows;
+      picks.forEach(c=>{
+        sportKey=c._league; fixtures=c._fixtures; mainRows=c._mainRows;
+        const label = c.side==='single' ? singleSideLabel(c.mkey) : (c.side==='over'?'Over':'Under');
+        addToParlay(c.p, c.mkey, label, c.line, c._mainRows, canonBook(c.refRow.sportsbook));
+      });
+      sportKey=origSK; fixtures=origFx; mainRows=origRows;
+    } else {
+      picks.forEach(c=>{
+        const label = c.side==='single' ? singleSideLabel(c.mkey) : (c.side==='over'?'Over':'Under');
+        addToParlay(c.p, c.mkey, label, c.line, mainRows, canonBook(c.refRow.sportsbook));
+      });
+    }
     // "Legs" is a target, not a guarantee -- say so explicitly when the candidate pool (this
     // fixture/scope/basis/liquidity combo) didn't have enough picks, instead of a plain "Added N
     // legs" that reads as if N was what was asked for.
@@ -2623,26 +2681,28 @@ function runAutoBuild(){
   renderTabs(); renderParlay();
 }
 function autoBuildHtml(){
-  const leagueKey = autoLeague || sportKey;
+  const crossLeague = autoLeague==='any';
+  const leagueKey = crossLeague ? null : (autoLeague || sportKey);
   // Fixtures for whichever league is picked -- the active tab's live globals if it matches,
-  // else that other league's same-day cache (same source runAutoBuild itself reads from).
-  const fxSrc = leagueKey===sportKey ? fixtures : (loadSportCache(leagueKey)?.fixtures || []);
+  // else that other league's same-day cache (same source runAutoBuild itself reads from). Not
+  // meaningful at all when League is "Any" (no single fixture list to offer).
+  const fxSrc = crossLeague ? [] : (leagueKey===sportKey ? fixtures : (loadSportCache(leagueKey)?.fixtures || []));
   const fxOpts = fxSrc.filter(f=>!f.live).map(f=>`<option value="${esc(f.id)}"${autoFixture===f.id?' selected':''}>${esc(f.away.ab||f.away.name)} @ ${esc(f.home.ab||f.home.name)}</option>`).join('');
-  const leagueOpts = Object.entries(SPORTS).map(([k,s])=>`<option value="${k}"${leagueKey===k?' selected':''}>${esc(s.label)}</option>`).join('');
+  const leagueOpts = `<option value="any"${crossLeague?' selected':''}>Any</option>` + Object.entries(SPORTS).map(([k,s])=>`<option value="${k}"${leagueKey===k?' selected':''}>${esc(s.label)}</option>`).join('');
   const bookOpts = BOOKS.map(b=>`<option value="${b.toLowerCase()}"${autoTargetBook===b.toLowerCase()?' selected':''}>${esc(b)}</option>`).join('');
   return `<div class="ttsum">
     <div class="ttsumh" id="autoHead" role="button"><span>Auto Build</span><span class="dim">${autoOpen?'▴':'▾'}</span></div>
     <div id="autoBody"${autoOpen?'':' style="display:none"'}>
+      <div class="autorow"><label>Target shop</label><select id="autoBookSel"><option value="">Any (use basis)</option>${bookOpts}</select></div>
       <div class="autorow"><label>Legs</label><div class="autostepper"><button data-autoleg="-1">−</button><b>${autoLegs}</b><button data-autoleg="1">+</button></div></div>
       <div class="autorow"><label>League</label><select id="autoLeagueSel">${leagueOpts}</select></div>
-      <div class="autorow"><label>Same Game Parlay</label><button class="abbtn${autoSGP?' on':''}" id="autoSgpBtn">${autoSGP?'On':'Off'}</button></div>
-      <div class="autorow"><label>Game</label><select id="autoFixtureSel">${autoSGP?'':'<option value="">All games</option>'}${fxOpts}</select></div>
+      ${crossLeague ? '' : `<div class="autorow"><label>Same Game Parlay</label><button class="abbtn${autoSGP?' on':''}" id="autoSgpBtn">${autoSGP?'On':'Off'}</button></div>
+      <div class="autorow"><label>Game</label><select id="autoFixtureSel">${autoSGP?'':'<option value="">All games</option>'}${fxOpts}</select></div>`}
       <div class="autorow"><label>Scope</label><div class="autobasis">
         <button class="abbtn${autoScope==='both'?' on':''}" data-scope="both">Both</button>
         <button class="abbtn${autoScope==='props'?' on':''}" data-scope="props">Props only</button>
         <button class="abbtn${autoScope==='mains'?' on':''}" data-scope="mains">Mains only</button>
       </div></div>
-      <div class="autorow"><label>Target shop</label><select id="autoBookSel"><option value="">Any (use basis)</option>${bookOpts}</select></div>
       ${autoTargetBook ? '' : `<div class="autorow"><label>Basis</label><div class="autobasis">
         <button class="abbtn${autoBasis==='pin'?' on':''}" data-basis="pin">Pinnacle</button>
         <button class="abbtn${autoBasis==='exch'?' on':''}" data-basis="exch">Exchanges</button>
