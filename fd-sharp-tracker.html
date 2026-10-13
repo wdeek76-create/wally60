@@ -123,6 +123,15 @@ header{padding:16px 16px 10px}
 .bookrow.best{border-color:rgba(94,194,255,.5);box-shadow:0 0 14px rgba(94,194,255,.22)}
 .bookrow.best .bkname{color:var(--text)}
 a.bookrow{text-decoration:none;cursor:pointer}
+.lochips{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.lochip{display:flex;flex-direction:column;gap:1px;padding:5px 9px;border-radius:10px;background:rgba(255,255,255,.03);border:1px solid var(--border);font-size:10px;min-width:92px}
+.lochip.pos{border-color:rgba(39,192,113,.4)}
+.lochip.neg{border-color:rgba(255,77,77,.4)}
+.locl{font-size:8.5px;font-weight:800;letter-spacing:.3px;text-transform:uppercase;color:var(--sub)}
+.locv{font-weight:800;font-size:11.5px;color:var(--text)}
+.locu{font-size:9.5px;font-weight:700;color:var(--sub)}
+.lochip.pos .locu{color:var(--green)}
+.lochip.neg .locu{color:var(--red)}
 a.bookrow:active{opacity:.75}
 /* ── LIVE SITUATIONAL ALERTS ── */
 /* Border-glow pulse, not an opacity flash — keeps the card's text fully readable while it's
@@ -216,6 +225,7 @@ a.bookrow:active{opacity:.75}
 
 <div class="date-toggle">
   <button class="date-btn active" id="vLive">Live <span class="dt-n" id="liveN"></span></button>
+  <button class="date-btn" id="vBetNow">Bet Now</button>
   <button class="date-btn" id="vTrack">Tracker <span class="dt-n" id="trackN">0</span></button>
 </div>
 
@@ -1221,9 +1231,104 @@ function updateRecordBar() {
   let units = 0; all.forEach(e => { if (e.status === 'won') units += unitsFor(e.fdPrice, e.stakeUnits); else if (e.status === 'lost') units -= e.stakeUnits; });
   const unitsEl = $('#sumUnits'); if (unitsEl) { unitsEl.textContent = `${units >= 0 ? '+' : ''}${units.toFixed(2)}`; unitsEl.className = 'record-val ' + (units > 0 ? 'pos' : units < 0 ? 'neg' : ''); }
 }
+// ───────────────────────────── bet now (live, ranked by your own graded history) ─────────────────────────────
+// Same live rows the "Live" tab already shows (same arb/value qualification, same bet links) --
+// this just re-ranks them by how every bucket they fall into has ACTUALLY performed so far,
+// using the exact same grouping math buildRecapText's own sections are built from (groupRecords/
+// groupByBook/groupByBookSide), run live against this tracker's own growing graded history
+// instead of a frozen snapshot. Time-of-game (quarter/half/hot situation) is left out of the
+// score on purpose. "FD vs Book" always means the bet is the OTHER side at that book (the hedge
+// leg), never FD's own side -- see groupByBook's own note above for why.
+function unitsMapFromGroups(groups) { const m = {}; groups.forEach(g => { m[g.key] = g.units; }); return m; }
+function buildBetNowStats() {
+  const isGraded = e => e.status === 'won' || e.status === 'lost' || e.status === 'push';
+  const mainGraded = Object.values(log).filter(isGraded);
+  const altGraded = Object.values(altLog).filter(isGraded).map(e => Object.assign({}, e, { side: 'over' }));
+  const all = [...mainGraded, ...altGraded];
+  return {
+    market: unitsMapFromGroups(groupRecords(all, e => e.market)),
+    side: unitsMapFromGroups(groupRecords(all, sideLabelFor)),
+    propSide: unitsMapFromGroups(groupRecords(all, propSideFor)),
+    oddsOnly: unitsMapFromGroups(groupRecords(all, e => oddsBucket(e.fdPrice))),
+    oddsSide: unitsMapFromGroups(groupRecords(all, e => `${oddsBucket(e.fdPrice)} · ${sideLabelFor(e)}`)),
+    qualKind: unitsMapFromGroups(groupRecords(mainGraded, qualKindOf)),
+    arbPct: unitsMapFromGroups(groupRecords(mainGraded.filter(e => e.arbCount >= MIN_ARB_BOOKS), e => arbBucket(e.bestArb))),
+    evPct: unitsMapFromGroups(groupRecords(all.filter(e => e.evPct != null), e => arbBucket(e.evPct))),
+    evSide: unitsMapFromGroups(groupRecords(all.filter(e => e.evPct != null), e => `${arbBucket(e.evPct)} · ${sideLabelFor(e)}`)),
+    combo: unitsMapFromGroups(groupRecords(mainGraded, comboFor)),
+    vsBook: unitsMapFromGroups(groupByBook(mainGraded, CONSENSUS_BOOKS)),
+    vsBookSide: unitsMapFromGroups(groupByBookSide(mainGraded, CONSENSUS_BOOKS)),
+  };
+}
+// Tags one live row (from `rows` or `altRows`) with every bucket it falls into, summing the
+// matched buckets' own units into a single score. Alt rows have no opposite side at all (single-
+// sided value only, same as buildRecapText treats them: forced to 'over', no arb/combo/vs-book
+// fields exist on them), so those sections are skipped rather than guessed at.
+function scoreLiveRow(r, stats, isAlt) {
+  const marketName = marketLabel(r.mkey);
+  const sideLbl = isAlt ? 'Over' : sideLabelFor(r);
+  const matches = [];
+  const add = (label, key, map) => { if (map[key] != null) matches.push({ label, key, units: map[key] }); };
+  add('Market', marketName, stats.market);
+  add('Side', sideLbl, stats.side);
+  add('Prop+Side', `${marketName} ${sideLbl}`, stats.propSide);
+  add('FD Odds', oddsBucket(r.fdPrice), stats.oddsOnly);
+  add('FD Odds+Side', `${oddsBucket(r.fdPrice)} · ${sideLbl}`, stats.oddsSide);
+  if (!isAlt) {
+    add('Arb/Value', qualKindOf(r), stats.qualKind);
+    if (r.arbCount >= MIN_ARB_BOOKS) add('Arb %', arbBucket(r.bestArb), stats.arbPct);
+  }
+  if (r.evPct != null) {
+    add('EV %', arbBucket(r.evPct), stats.evPct);
+    add('EV %+Side', `${arbBucket(r.evPct)} · ${sideLbl}`, stats.evSide);
+  }
+  if (!isAlt) {
+    add('Consensus', comboFor(r), stats.combo);
+    const hedgeSide = sideLbl === 'Over' ? 'Under' : 'Over';
+    (r.arbBooks || []).forEach(b => {
+      add(`FD vs ${b.book}`, `FD vs ${b.book}`, stats.vsBook);
+      add(`FD vs ${b.book}+Side`, `FD vs ${b.book} · ${hedgeSide}`, stats.vsBookSide);
+    });
+  }
+  return { score: matches.reduce((a, m) => a + m.units, 0), matches };
+}
+function betNowChipsHtml(matches) {
+  return matches.map(m => `<div class="lochip ${m.units>0?'pos':m.units<0?'neg':''}"><span class="locl">${esc(m.label)}</span><span class="locv">${esc(m.key)}</span><span class="locu">${m.units>0?'+':''}${m.units.toFixed(2)}u</span></div>`).join('');
+}
+function renderBetNow() {
+  const view = $('#view');
+  const stats = buildBetNowStats();
+  const mainScored = rows.map(r => Object.assign({}, r, scoreLiveRow(r, stats, false), { isAlt: false }));
+  const altScored = altRows.map(r => Object.assign({}, r, scoreLiveRow(r, stats, true), { isAlt: true }));
+  const all = [...mainScored, ...altScored].sort((a, b) => b.score - a.score);
+  if (!all.length) { setViewHtml(view, '<div class="empty">Nothing live clearing arb/value right now.</div>'); return; }
+  const card = r => {
+    const sideLabel = r.isAlt ? 'Yes' : (r.side === 'over' ? `Over ${r.line}` : r.side === 'under' ? `Under ${r.line}` : 'Yes');
+    const hedgeLabel = r.isAlt ? null : (r.side === 'over' ? `Under ${r.line}` : `Over ${r.line}`);
+    // The real bet: FD's own side when there's no hedge (value-only, or an alt line), the HEDGE
+    // side at whichever consensus book actually arbs when there is one -- that's the trade this
+    // whole tracker is built around (see groupByBook's note), not FD's own leg.
+    const fdRow = linkTag(r.fdLink, 'bookrow', `<span class="bkname">${bookName('FanDuel')}</span><span class="bkprice">${fmtAm(r.fdPrice)}</span><span class="bkmeta">${esc(sideLabel)} · reference</span>`);
+    const betRows = !r.isAlt && (r.arbBooks || []).length
+      ? r.arbBooks.map(b => linkTag(b.link, 'bookrow best', `<span class="bkname">${bookName(b.book)}</span><span class="bkprice">${fmtAm(b.oppPrice)}</span><span class="bkmeta">BET · ${esc(hedgeLabel)} · ${(b.arbPct*100).toFixed(2)}% arb</span>`)).join('')
+      : linkTag(r.fdLink, 'bookrow best', `<span class="bkname">${bookName('FanDuel')}</span><span class="bkprice">${fmtAm(r.fdPrice)}</span><span class="bkmeta">BET · ${esc(sideLabel)}</span>`);
+    return `<div class="row glass" data-key="${esc(r.key)}">
+      <div class="cardhead">
+        <div class="chleft"><span class="lg">NFL</span><span class="st live">LIVE</span></div>
+        <div class="chleft"><span class="autobadge${r.score>0?'':' strong'}" style="${r.score>0?'':'background:rgba(255,77,77,.16);border-color:rgba(255,77,77,.5);color:var(--red)'}">score ${r.score>0?'+':''}${r.score.toFixed(2)}u</span></div>
+      </div>
+      <div class="gm">${teamLogo(r.f.away.logo)}${esc(r.f.away.ab)} @ ${teamLogo(r.f.home.logo)}${esc(r.f.home.ab)}</div>
+      <div class="pick"><div class="m">${esc(marketLabel(r.mkey))}</div><div class="s">${esc(r.player)} — ${esc(sideLabel)}</div></div>
+      <div class="booklist">${fdRow}${betRows}</div>
+      <div class="lochips">${betNowChipsHtml(r.matches)}</div>
+    </div>`;
+  };
+  setViewHtml(view, sectionLabel('live', 'Bet Now · ranked by your own graded history', all.length) + '<div class="cards-grid">' + all.map(card).join('') + '</div>');
+}
 function render() {
   const view = $('#view');
   if (viewMode === 'tracker') { renderTracker(); return; }
+  if (viewMode === 'betnow') { renderBetNow(); return; }
   if (!rows.length) {
     const searchHtml = `<div class="searching">
       <div class="splash-icon mini"><svg class="splash-ring mini" viewBox="0 0 100 100"><circle cx="50" cy="50" r="42"></circle></svg></div>
@@ -1459,7 +1564,7 @@ function renderTracker() {
   view.querySelectorAll('[data-kdel]').forEach(b => b.addEventListener('click', () => { delete kalshiLog[b.dataset.kdel]; saveKalshiLog(); renderTracker(); }));
   updateRecordBar();
 }
-function setView(m) { viewMode = m; $('#vLive').classList.toggle('active', m === 'live'); $('#vTrack').classList.toggle('active', m === 'tracker'); render(); }
+function setView(m) { viewMode = m; $('#vLive').classList.toggle('active', m === 'live'); $('#vBetNow').classList.toggle('active', m === 'betnow'); $('#vTrack').classList.toggle('active', m === 'tracker'); render(); }
 
 // ───────────────────────────── flow ─────────────────────────────
 let busy = false, lastGradeAt = 0;
@@ -1497,6 +1602,7 @@ function setSync(state) { const dot = $('#syncDot'); if (!dot) return; dot.class
 function setLastUpdated() { const el = $('#lastUpdated'); if (el) el.textContent = new Date().toLocaleTimeString([], { hour:'numeric', minute:'2-digit' }); }
 
 $('#vLive').addEventListener('click', () => setView('live'));
+$('#vBetNow').addEventListener('click', () => setView('betnow'));
 $('#vTrack').addEventListener('click', () => setView('tracker'));
 $('#reload').addEventListener('click', () => load(true));
 $('#trackN').textContent = Object.keys(log).length;
