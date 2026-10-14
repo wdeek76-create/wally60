@@ -1306,16 +1306,16 @@ function rowsFor(p, mkey, rows){
   return rows.filter(o=>o._fx===p.fixtureId && marketKeyFor(sportKey,o.market)===mkey && normName(cleanSel(o.selection||o.name))===p.key);
 }
 function sideOf(o){ const s=String(o.selection_line||'').toLowerCase(); return s==='over'||s==='under' ? s : 'single'; }
-// Exchanges (Novig/Prophet X/Kalshi) are peer-to-peer order books that often only post ONE side
-// of a market explicitly, even though the complementary price is mathematically derivable: a
-// zero-vig two-outcome market's complementary American price is always the posted side's own
-// number with the sign reversed (exact, not an approximation). The feed's own side/selection
-// label on a posted row is correct as shown -- confirmed against the main board/grid, which
-// render it unchanged -- so this never relabels or discards a real row. It only ADDS a synthetic
-// opposite-side row when the real one isn't already posted, so the parlay tool's devig math
-// (which needs both sides to produce a fair price) and an opposite-side leg have something to
-// work with. Scoped to the parlay tool (auto-build included); the general board/grid/tracker
-// never see these synthesized rows.
+// Exchanges (Novig/Prophet X/Kalshi) are peer-to-peer order books where the complementary price is
+// mathematically derivable from either side: a zero-vig two-outcome market's complementary
+// American price is always the posted side's own number with the sign reversed (exact, not an
+// approximation). The REAL price this app ever shows for an exchange is always the mirror of the
+// OPPOSITE side's own quote, never a side's direct same-side number -- even when that side also has
+// a real quote posted. (A live two-sided exchange book routinely has the two sides disagree by a
+// few cents of spread; the opposite side is always treated as the authoritative source here, by
+// design, not a bug.) Only when there's no real opposite-side quote to mirror from does a side's
+// own direct real price stand, as a fallback. Scoped to the parlay tool (auto-build included); the
+// general board/grid/tracker never see these synthesized/overridden rows.
 // Depth matters too (liquidity floors, the parlay chips' own $ badges) -- parse the order book off
 // the ORIGINAL row first (levelsOf's price/size column guess needs the real, correctly-scaled
 // numbers to work). Each level is the SAME size at the sign-flipped price, but mirroring can
@@ -1333,28 +1333,63 @@ function mirroredPriceFields(o){
 // Over/under rows (props, game totals): adds a synthetic opposite-side row per book+line that
 // doesn't already have a real one posted.
 function addExMirrors(rows){
-  const have=new Set(rows.map(o=>`${canonBook(o.sportsbook)}|${o.points??''}|${sideOf(o)}`));
+  // Index each exchange book+line's real rows by side, first-seen wins -- used purely to find the
+  // real OPPOSITE row to mirror from, never to validate "is this side already covered".
+  const realBySide={};
+  rows.forEach(o=>{
+    if(!EXCH.has(canonBook(o.sportsbook))) return;
+    const s=sideOf(o); if(s!=='over'&&s!=='under') return;
+    const k=`${canonBook(o.sportsbook)}|${o.points??''}|${s}`;
+    if(!realBySide[k]) realBySide[k]=o;
+  });
+  const out=[];
+  rows.forEach(o=>{
+    if(!EXCH.has(canonBook(o.sportsbook))){ out.push(o); return; }
+    const s=sideOf(o);
+    if(s!=='over'&&s!=='under'){ out.push(o); return; } // single-sided exchange props untouched
+    const flip=s==='over'?'under':'over';
+    const oppReal=realBySide[`${canonBook(o.sportsbook)}|${o.points??''}|${flip}`];
+    // _mirroredFrom keeps a pointer back to the real row this was derived from, purely so the
+    // debug panel can show "which opposite-side order this came from and at what price" for an
+    // exchange entry instead of just the computed number.
+    out.push(oppReal ? {...o, ...mirroredPriceFields(oppReal), _mirroredFrom:oppReal} : o);
+  });
+  // A book+line still missing one side entirely (no real quote posted on either side's own
+  // selection) falls back to mirroring from this side's own number, same as before.
+  const haveSide=new Set(out.map(o=>`${canonBook(o.sportsbook)}|${o.points??''}|${sideOf(o)}`));
   const extra=[];
   rows.forEach(o=>{
     if(!EXCH.has(canonBook(o.sportsbook))) return;
     const s=sideOf(o); if(s!=='over'&&s!=='under') return;
     const flip=s==='over'?'under':'over';
-    if(have.has(`${canonBook(o.sportsbook)}|${o.points??''}|${flip}`)) return; // real one already posted
-    // _mirroredFrom keeps a pointer back to the real row this was derived from, purely so the
-    // debug panel can show "which opposite-side order this came from and at what price" for an
-    // exchange entry instead of just the computed number.
+    if(haveSide.has(`${canonBook(o.sportsbook)}|${o.points??''}|${flip}`)) return;
     extra.push({...o, selection_line:flip, ...mirroredPriceFields(o), _mirroredFrom:o});
   });
-  return extra.length ? [...rows, ...extra] : rows;
+  return extra.length ? [...out, ...extra] : out;
 }
-// Team-level single-sided rows (moneyline/spread): adds a synthetic row for the opponent team
-// (found elsewhere in the same market's rows -- only safe when exactly two distinct team
-// selections are present) per book that doesn't already have a real row posted for that team.
+// Team-level single-sided rows (moneyline/spread): same always-mirror-the-opposite-side rule as
+// addExMirrors, just keyed by team selection instead of over/under (only safe when exactly two
+// distinct team selections are present in the market's rows).
 function addExTeamMirrors(rows){
   const names=[...new Set(rows.map(o=>cleanSel(o.selection||o.name)).filter(Boolean))];
   if(names.length!==2) return rows;
   const [a,b]=names;
-  const have=new Set(rows.map(o=>`${canonBook(o.sportsbook)}|${cleanSel(o.selection||o.name)}`));
+  const realBySel={};
+  rows.forEach(o=>{
+    if(!EXCH.has(canonBook(o.sportsbook))) return;
+    const sel=cleanSel(o.selection||o.name);
+    const k=`${canonBook(o.sportsbook)}|${sel}`;
+    if(!realBySel[k]) realBySel[k]=o;
+  });
+  const out=[];
+  rows.forEach(o=>{
+    if(!EXCH.has(canonBook(o.sportsbook))){ out.push(o); return; }
+    const sel=cleanSel(o.selection||o.name); const opp=sel===a?b:sel===b?a:null;
+    if(!opp){ out.push(o); return; }
+    const oppReal=realBySel[`${canonBook(o.sportsbook)}|${opp}`];
+    out.push(oppReal ? {...o, ...mirroredPriceFields(oppReal), _mirroredFrom:oppReal} : o);
+  });
+  const have=new Set(out.map(o=>`${canonBook(o.sportsbook)}|${cleanSel(o.selection||o.name)}`));
   const extra=[];
   rows.forEach(o=>{
     if(!EXCH.has(canonBook(o.sportsbook))) return;
@@ -1363,7 +1398,7 @@ function addExTeamMirrors(rows){
     if(have.has(`${canonBook(o.sportsbook)}|${opp}`)) return; // real one already posted
     extra.push({...o, selection:opp, ...mirroredPriceFields(o), _mirroredFrom:o});
   });
-  return extra.length ? [...rows, ...extra] : rows;
+  return extra.length ? [...out, ...extra] : out;
 }
 function bestFirst(rows){
   // dedupe by canon book (DK clones), keep best price per book
