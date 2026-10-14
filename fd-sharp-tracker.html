@@ -1239,7 +1239,16 @@ function updateRecordBar() {
 // instead of a frozen snapshot. Time-of-game (quarter/half/hot situation) is left out of the
 // score on purpose. "FD vs Book" always means the bet is the OTHER side at that book (the hedge
 // leg), never FD's own side -- see groupByBook's own note above for why.
-function unitsMapFromGroups(groups) { const m = {}; groups.forEach(g => { m[g.key] = g.units; }); return m; }
+// Calibration: a bucket with only a handful of graded picks is noise, not a track record -- it's
+// dropped from the map entirely (never matched) rather than trusted at whatever units it happens
+// to show, so Bet Now can't get talked into a "good bet" by a 1-2 pick fluke.
+const MIN_BETNOW_SAMPLE = 5;
+// Caesars feeds the consensus/fair-price math same as DraftKings and Fliff, but it's not a book we
+// actually place the hedge bet at (same real-world restriction already applied to quick arb in the
+// main prop screen) -- so the only books Bet Now treats as a real "bet this side" destination are
+// DraftKings and Fliff.
+const BETTABLE_HEDGE_BOOKS = ['DraftKings', 'Fliff'];
+function unitsMapFromGroups(groups) { const m = {}; groups.forEach(g => { if (g.n >= MIN_BETNOW_SAMPLE) m[g.key] = g.units; }); return m; }
 function buildBetNowStats() {
   const isGraded = e => e.status === 'won' || e.status === 'lost' || e.status === 'push';
   const mainGraded = Object.values(log).filter(isGraded);
@@ -1256,8 +1265,8 @@ function buildBetNowStats() {
     evPct: unitsMapFromGroups(groupRecords(all.filter(e => e.evPct != null), e => arbBucket(e.evPct))),
     evSide: unitsMapFromGroups(groupRecords(all.filter(e => e.evPct != null), e => `${arbBucket(e.evPct)} · ${sideLabelFor(e)}`)),
     combo: unitsMapFromGroups(groupRecords(mainGraded, comboFor)),
-    vsBook: unitsMapFromGroups(groupByBook(mainGraded, CONSENSUS_BOOKS)),
-    vsBookSide: unitsMapFromGroups(groupByBookSide(mainGraded, CONSENSUS_BOOKS)),
+    vsBook: unitsMapFromGroups(groupByBook(mainGraded, BETTABLE_HEDGE_BOOKS)),
+    vsBookSide: unitsMapFromGroups(groupByBookSide(mainGraded, BETTABLE_HEDGE_BOOKS)),
   };
 }
 // Tags one live row (from `rows` or `altRows`) with every bucket it falls into, summing the
@@ -1285,7 +1294,7 @@ function scoreLiveRow(r, stats, isAlt) {
   if (!isAlt) {
     add('Consensus', comboFor(r), stats.combo);
     const hedgeSide = sideLbl === 'Over' ? 'Under' : 'Over';
-    (r.arbBooks || []).forEach(b => {
+    (r.arbBooks || []).filter(b => BETTABLE_HEDGE_BOOKS.includes(b.book)).forEach(b => {
       add(`FD vs ${b.book}`, `FD vs ${b.book}`, stats.vsBook);
       add(`FD vs ${b.book}+Side`, `FD vs ${b.book} · ${hedgeSide}`, stats.vsBookSide);
     });
@@ -1311,8 +1320,12 @@ function renderBetNow() {
     // side at whichever consensus book actually arbs when there is one -- that's the trade this
     // whole tracker is built around (see groupByBook's note), not FD's own leg.
     const fdRow = linkTag(r.fdLink, 'bookrow', `<span class="bkname">${bookName('FanDuel')}</span><span class="bkprice">${fmtAm(r.fdPrice)}</span><span class="bkmeta">${esc(sideLabel)} · reference</span>`);
-    const betRows = !r.isAlt && (r.arbBooks || []).length
-      ? r.arbBooks.map(b => linkTag(b.link, 'bookrow best', `<span class="bkname">${bookName(b.book)}</span><span class="bkprice">${fmtAm(b.oppPrice)}</span><span class="bkmeta">BET · ${esc(hedgeLabel)} · ${(b.arbPct*100).toFixed(2)}% arb</span>`)).join('')
+    // Caesars can be the book that makes a pick arb-qualified, but it's never the book we actually
+    // place the hedge at -- only a DraftKings/Fliff leg turns into a real "BET" row here; a
+    // Caesars-only arb falls back to FD's own side same as a value-only pick.
+    const hedgeBooks = (r.arbBooks || []).filter(b => BETTABLE_HEDGE_BOOKS.includes(b.book));
+    const betRows = !r.isAlt && hedgeBooks.length
+      ? hedgeBooks.map(b => linkTag(b.link, 'bookrow best', `<span class="bkname">${bookName(b.book)}</span><span class="bkprice">${fmtAm(b.oppPrice)}</span><span class="bkmeta">BET · ${esc(hedgeLabel)} · ${(b.arbPct*100).toFixed(2)}% arb</span>`)).join('')
       : linkTag(r.fdLink, 'bookrow best', `<span class="bkname">${bookName('FanDuel')}</span><span class="bkprice">${fmtAm(r.fdPrice)}</span><span class="bkmeta">BET · ${esc(sideLabel)}</span>`);
     return `<div class="row glass" data-key="${esc(r.key)}">
       <div class="cardhead">
