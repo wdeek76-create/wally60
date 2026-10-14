@@ -3627,6 +3627,22 @@ function deleteNhlPsRow(src, rid) {
 // Players the ensemble never logs, whatever the sources say (name match, any team/side/line).
 const NHL_PS_REJECT_PLAYERS = ["Elias Pettersson"];
 function _nhlPsRejected(name) { const k = nn(name || ""); return NHL_PS_REJECT_PLAYERS.some(n => nn(n) === k); }
+// Agreement check on the projections themselves: every source's projection has to sit on the
+// bet's side of the line (under: at/below it, over: at/above it), and the highest and lowest can't
+// be more than NHL_PS_MAX_SPREAD shots apart. Counts a source that shows a projection but no %, and
+// the missing source on a 3-of-3 pick when its uploaded CSV has the player.
+const NHL_PS_MAX_SPREAD = 0.5;
+function _nhlCsvProj(src, name) {
+  const k = nn(name || ""), hits = Object.values(srcs[src] || {}).filter(v => v && nn(v.name) === k && v.sog != null);
+  return hits.length === 1 ? Number(hits[0].sog) : null; // two players with this name: can't tell, skip
+}
+function _nhlPsProjsAligned(ou, line, projs) {
+  const ps = projs.filter(v => v != null && !isNaN(v) && v > 0);
+  if (!ps.length) return true;
+  const L = Number(line);
+  if (ou === "under" ? ps.some(v => v > L) : ps.some(v => v < L)) return false;
+  return Math.max(...ps) - Math.min(...ps) <= NHL_PS_MAX_SPREAD + 1e-9;
+}
 function computeNhlPsEnsemble() {
   const byKey = {};
   // Per-source player coverage (any side/line) — needed below to tell
@@ -3674,6 +3690,9 @@ function computeNhlPsEnsemble() {
     // source has to clear it), AND the worst present source can NOT be
     // negative — no grace either way.
     if (qualCount < 3 || minEv < 0) return;
+    const allProjs = entry.sources.map(x => Number(x.prop.proj));
+    if (requiredQual === 3) allProjs.push(_nhlCsvProj(missingSrcs[0], entry.player));
+    if (!_nhlPsProjsAligned(entry.ou, entry.line, allProjs)) return;
     let bestOddsN = -Infinity, bestOdds = null, bestBook = null, bestEv = null;
     entry.sources.forEach(({ prop }) => {
       const n = parseInt(prop.odds);
@@ -3718,7 +3737,7 @@ function renderNhlPsPanel() {
   const noteEl = document.getElementById('ps-panel-note');
   if (noteEl) {
     if (nhlPsTab === 'ensemble') {
-      noteEl.textContent = `Ensemble = 3-of-4 sources at ${NHL_PS_QUAL_EV}%+ EV, worst can't be negative, all 4 sets must have the exact same player/side/line — unless exactly one source never has that player at all (didn't paste them), in which case it's 3-of-3 off the other three. A source that has the player but on a different side/line still counts as a real disagreement, not a gap. Qualifying picks auto-log to the tracker the moment a paste completes them.`;
+      noteEl.textContent = `Ensemble = 3-of-4 sources at ${NHL_PS_QUAL_EV}%+ EV, worst can't be negative, all 4 sets must have the exact same player/side/line — unless exactly one source never has that player at all (didn't paste them), in which case it's 3-of-3 off the other three. A source that has the player but on a different side/line still counts as a real disagreement, not a gap. Every projection (including one with no %, and a missing source's uploaded CSV) must be on the bet's side of the line and within ${NHL_PS_MAX_SPREAD} shots of each other. Qualifying picks auto-log to the tracker the moment a paste completes them.`;
     } else {
       noteEl.textContent = `Pasting for ${_psSourceLabelNhl[nhlPsTab]} replaces this source's whole list — no need to clear first. Repeats within one paste collapse to the best odds.`;
     }
