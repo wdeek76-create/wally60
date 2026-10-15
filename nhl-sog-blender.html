@@ -6035,8 +6035,9 @@ function _nhltGradeOne(b, hs, as) {
   b.actual = actual;
   b.result = actual === b.line ? "void" : ((actual > b.line) === (b.side === "over") ? "hit" : "miss");
 }
-async function _nhltPinClose(b) {
-  const rows = await _nhlClvHistoricalOdds(b.fixtureId, "Pinnacle");
+async function _nhltPinClose(b, bookLabel) {
+  bookLabel = bookLabel || "Pinnacle";
+  const rows = await _nhlClvHistoricalOdds(b.fixtureId, bookLabel);
   if (!rows.length) return false;
   const f = { home: b.home, away: b.away, homeName: b.homeName || "", awayName: b.awayName || "", homeId: b.homeId, awayId: b.awayId };
   const cand = rows.filter(o => _nhltIsTotalsMarket(o.market) && String(o.selection_line || "").toLowerCase() === b.side && o.clv && o.clv.price != null)
@@ -6045,9 +6046,39 @@ async function _nhltPinClose(b) {
   const main = cand.find(o => o.is_main) || cand[0];
   const src = exact || main; if (!src) return false;
   const closeLine = Number(src.clv.points != null ? src.clv.points : src.points);
-  b.close = { book: "Pinnacle", price: Number(src.clv.price), line: closeLine, sameLine: closeLine === Number(b.line) };
-  b.clvPct = b.close.sameLine ? Math.round((oddsToDecimal(b.odds) / oddsToDecimal(b.close.price) - 1) * 1000) / 10 : null;
+  // A main-line close at a different number than ours isn't a like-for-like close; keep looking
+  // (other books, then our own pre-game snapshot) before settling for it.
+  if (closeLine !== Number(b.line) && !b._acceptOffLine) return false;
+  _nhltSetClose(b, { book: bookLabel, price: Number(src.clv.price), line: closeLine });
   return true;
+}
+function _nhltSetClose(b, c) {
+  b.close = Object.assign({ sameLine: Number(c.line) === Number(b.line) }, c);
+  b.clvPct = b.close.sameLine ? Math.round((oddsToDecimal(b.odds) / oddsToDecimal(b.close.price) - 1) * 1000) / 10 : null;
+}
+// Pre-game snapshots: in the last hour before puck drop, every poll records the current price on the
+// play's exact line/side (Pinnacle first, else the best of the logging books). If OpticOdds' historical
+// close never shows up for a game, the last snapshot from inside 30 minutes of the start is the close.
+async function _nhltSnapshotPrices() {
+  const now = Date.now();
+  const open = nhltBets.filter(b => b.result === "pending" && !b.close && b.start && b.fixtureId && new Date(b.start).getTime() > now && new Date(b.start).getTime() - now < 3600000);
+  const byFx = {};
+  open.forEach(b => { (byFx[b.fixtureId] = byFx[b.fixtureId] || []).push(b); });
+  let n = 0;
+  for (const fid of Object.keys(byFx)) {
+    const b0 = byFx[fid][0];
+    const f = { id: fid, home: b0.home, away: b0.away, homeName: b0.homeName || "", awayName: b0.awayName || "", homeId: b0.homeId, awayId: b0.awayId };
+    let lines;
+    try { lines = await nhltFetchFixtureLines(f); } catch (e) { continue; }
+    byFx[fid].forEach(b => {
+      const mk = b.market === "game" ? "game" : (lines[b.team] ? b.team : Object.keys(lines).find(k => k !== "game" && _nhlTeamCanon(k) === _nhlTeamCanon(b.team)));
+      const at = mk && lines[mk] && lines[mk][b.line] ? (lines[mk][b.line][b.side] || []) : [];
+      const pin = at.find(x => x.book === "Pinnacle");
+      const best = pin || at.filter(x => NHLT_ANCHOR_BOOKS.includes(x.book)).sort((x, y) => y.price - x.price)[0];
+      if (best) { b.lastSeen = { book: best.book, price: best.price, line: b.line, at: now }; n++; }
+    });
+  }
+  return n;
 }
 async function gradeNhlTotals(opts) {
   opts = opts || {};
@@ -6066,11 +6097,30 @@ async function gradeNhlTotals(opts) {
       if (x && isFinite(x.hs) && isFinite(x.as)) { g.actualHome = x.hs; g.actualAway = x.as; g.actualTotal = x.hs + x.as; }
     });
   }
+  let snaps = 0;
+  try { snaps = await _nhltSnapshotPrices(); } catch (e) { console.warn("[NHL totals] snapshot", e && e.message); }
   for (const b of nhltBets) {
     if (b.close || !b.start || new Date(b.start).getTime() > now) continue;
-    try { if (await _nhltPinClose(b)) closes++; } catch (e) {}
+    // 1) OpticOdds' tagged close, same line: Pinnacle, then FanDuel, then Prop Builder.
+    let got = false;
+    for (const bk of ["Pinnacle", "FanDuel", "Prop Builder"]) {
+      try { if (await _nhltPinClose(b, bk)) { got = true; break; } } catch (e) {}
+    }
+    // 2) Two hours after puck drop with still nothing: our own last pre-game snapshot (inside 30 min of
+    //    the start), else whatever main-line close OpticOdds has even if it's a different number.
+    if (!got && now - new Date(b.start).getTime() > 2 * 3600000) {
+      const ls = b.lastSeen;
+      if (ls && new Date(b.start).getTime() - ls.at <= 30 * 60000) { _nhltSetClose(b, { book: ls.book, price: ls.price, line: ls.line, snapshot: true, at: ls.at }); got = true; }
+      else {
+        b._acceptOffLine = true;
+        for (const bk of ["Pinnacle", "FanDuel", "Prop Builder"]) { try { if (await _nhltPinClose(b, bk)) { got = true; break; } } catch (e) {} }
+        delete b._acceptOffLine;
+      }
+      if (!got) console.log(`[NHL totals] no close found yet for ${b.away}@${b.home} ${b.market === "game" ? "game" : b.team} ${b.side} ${b.line}`);
+    }
+    if (got) closes++;
   }
-  if (graded || closes) nhltSave();
+  if (graded || closes || snaps) nhltSave();
   if (!opts.silent && (graded || closes)) showNhlToast(`Totals: ${graded} graded · ${closes} closes`);
   if (currentTab === "totals") renderNhlTotals();
 }
@@ -6146,7 +6196,7 @@ function renderNhlTotals() {
       ${td(b.saberMean != null ? b.saberMean.toFixed(2) : "—", "color:#00aaff;")}
       ${td(_nhltFmt(b.odds) + " " + b.book)}${td(_nhltFmt(b.fair))}
       ${td((b.ev >= 0 ? "+" : "") + b.ev + "%", "color:#22c55e;font-weight:700;")}${td(_nhltFmt(b.playTo))}
-      ${td(b.close ? `PIN ${_nhltFmt(b.close.price)}${b.close.sameLine ? "" : " @ " + b.close.line}${b.clvPct != null ? ` <span style="font-weight:800;color:${b.clvPct >= 0 ? "#22c55e" : "#f87171"};">${b.clvPct >= 0 ? "+" : ""}${b.clvPct}%</span>` : ""}` : "—")}
+      ${td(b.close ? `<span title="${b.close.snapshot ? "Last price seen before puck drop (no tagged close from OpticOdds)" : (b.close.book || "Pinnacle") + " close"}">${NHL_CLV_BOOK_SHORT[b.close.book || "Pinnacle"] || b.close.book}${b.close.snapshot ? "*" : ""}</span> ${_nhltFmt(b.close.price)}${b.close.sameLine ? "" : " @ " + b.close.line}${b.clvPct != null ? ` <span style="font-weight:800;color:${b.clvPct >= 0 ? "#22c55e" : "#f87171"};">${b.clvPct >= 0 ? "+" : ""}${b.clvPct}%</span>` : ""}` : "—")}
       ${td(b.actual != null ? b.actual : "—", "font-weight:800;color:" + rc + ";")}
       ${td(b.result === "pending" ? "—" : b.result === "void" ? "PUSH" : (plv >= 0 ? "+" : "") + plv.toFixed(2) + "u", "font-weight:800;color:" + rc + ";")}
       ${td(`<button onclick="nhltSetResult(${b.id},'hit')" class="result-btn hit">W</button><button onclick="nhltSetResult(${b.id},'miss')" class="result-btn miss">L</button><button onclick="nhltSetResult(${b.id},'void')" class="result-btn" style="background:#f59e0b22;color:#f59e0b;border:1px solid #f59e0b55;">P</button>`)}
