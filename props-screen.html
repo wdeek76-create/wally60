@@ -3076,10 +3076,14 @@ function statFor(r, mkey, sportKey, marketNames){
   if(mkey==='pra') return sum('pts','reb','ast'); if(mkey==='pr') return sum('pts','reb'); if(mkey==='pa') return sum('pts','ast'); if(mkey==='ra') return sum('reb','ast');
   return get(mkey);
 }
+// Regulation-only score for one side: the first three periods off the feed's period breakdown, or
+// null when there isn't one (never silently falls back to the full-game total, which includes OT).
+function regTotalOf(R, side, partial){ const s=R?.scores?.[side]; const per=Array.isArray(s?.periods)?s.periods:null; return per&&(per.length>=3||(partial&&per.length)) ? per.slice(0,3).reduce((a,p)=>a+(Number(p?.total??p?.score??p)||0),0) : null; }
 function gradeTracked(t){
   if(t.actual==null || !t.final) return null;
-  if(t.side==='over') return t.actual>t.line?'win':t.actual===t.line?'push':'loss';
-  if(t.side==='under') return t.actual<t.line?'win':t.actual===t.line?'push':'loss';
+  const a=Number(t.actual), L=Number(t.line); if(isNaN(a)||isNaN(L)) return null;
+  if(t.side==='over') return a>L?'win':a===L?'push':'loss';
+  if(t.side==='under') return a<L?'win':a===L?'push':'loss';
   return t.result||null;
 }
 let trackerBusy=false;
@@ -3145,10 +3149,11 @@ async function refreshTracker(){
       // — there's no "player" row to find in player-results for a team-level market. Game totals
       // (no team side at all) grade off the combined score of both sides.
       if(t.isGame){ const hm=R.scores?.home?.total, aw=R.scores?.away?.total; if(hm!=null&&aw!=null&&!isNaN(Number(hm))&&!isNaN(Number(aw))) t.actual=Number(hm)+Number(aw); }
+      else if(t.isTeam && t.mkey==='tt60'){ const v=(t.teamSide==='home'||t.teamSide==='away')?regTotalOf(R,t.teamSide,st!=='completed'):null; t.actual = v; }
       else if(t.isTeam){ const v=t.teamSide==='home'?R.scores?.home?.total:t.teamSide==='away'?R.scores?.away?.total:null; if(v!=null&&!isNaN(Number(v))) t.actual=Number(v); }
       else { const P=pr[t.fixtureId]; if(P){ const r=(P.results||[]).find(x=>normName(cleanSel(x.player?.name))===t.playerKey); if(r){ const v=statFor(r,t.mkey,t.sportKey,t.marketNames); if(v!=null&&!isNaN(v)) t.actual=v; } } }
       if(st==='completed'){
-        t.final=true;
+        t.final=true; if(t.mkey==='tt60') t.regGraded=true;
         if((t.side==='ML'||t.side==='ATS') && R.scores){
           const aw=Number(R.scores.away?.total), hm=Number(R.scores.home?.total);
           if(!isNaN(aw)&&!isNaN(hm)){
@@ -3163,8 +3168,7 @@ async function refreshTracker(){
           // Regulation-only moneyline: only grade off period scores (skip OT/SO entirely) when the
           // feed gives us a period breakdown; otherwise leave it final-but-ungraded so it shows up
           // for a manual grade (editHtml) instead of silently grading against the full-game score.
-          const regOf = side => { const s=R.scores?.[side]; const per=Array.isArray(s?.periods)?s.periods:null; return per&&per.length>=3 ? per.slice(0,3).reduce((a,p)=>a+(Number(p.total??p.score??p)||0),0) : null; };
-          const awR=regOf('away'), hmR=regOf('home');
+          const awR=regTotalOf(R,'away'), hmR=regTotalOf(R,'home');
           if(awR!=null && hmR!=null){
             const iAmHome = t.teamSide==='home';
             t.result = awR===hmR ? 'push' : (iAmHome ? (hmR>awR?'win':'loss') : (awR>hmR?'win':'loss'));
@@ -3238,28 +3242,30 @@ function dailyRecordHtml(){
   const rows=keys.map(k=>row(byDay[k].label, ttRecord(byDay[k].list))).join('');
   return `<div class="ttsum"><div class="ttsumh"><span>Daily Record</span></div>${row('All time', ttRecord(graded))}${rows}</div>`;
 }
+// NHL team totals only (full game + regulation) -- moneylines/spreads are team-level too but
+// aren't team totals. Records count graded bets only; open ones are shown as a separate count.
+const isNhlTT = t => t.isTeam && (t.mkey==='tt'||t.mkey==='tt60') && (t.sportKey||'nhl')==='nhl';
 function teamTotalsSummaryHtml(){
-  const tts=tracked.filter(t=>t.isTeam);
+  const all=tracked.filter(isNhlTT); const tts=all.filter(t=>t.result); const openN=all.length-tts.length;
   const row=(label,r)=>`<div class="ttrow"><span>${esc(label)} <span class="dim">(${r.n})</span></span><span>${r.w}-${r.l}-${r.p}</span><span class="${r.u>0?'pos':r.u<0?'neg':''}">${r.u>=0?'+':''}${r.u.toFixed(2)}u</span><span class="dim">${r.roi!=null?r.roi.toFixed(1)+'% ROI':'—'}</span></div>`;
-  const summary = tts.length ? `${row('Overall', ttRecord(tts))}${row('Favorites', ttRecord(tts.filter(t=>t.favDog==='favorite')))}${row('Underdogs', ttRecord(tts.filter(t=>t.favDog==='underdog')))}${row('Over bets', ttRecord(tts.filter(t=>t.side==='over')))}${row('Under bets', ttRecord(tts.filter(t=>t.side==='under')))}` : `<div class="dim" style="font-size:11px;padding:4px 0">No team totals tracked yet — browse to one and tap Track.</div>`;
-  return `<div class="ttsum"><div class="ttsumh"><span>Team Totals</span><button id="ttcopy" class="rm" style="background:var(--bg2)">Copy</button></div>
+  const summary = all.length ? `${row('Overall', ttRecord(tts))}${openN?`<div class="ttrow dim" style="font-size:10.5px">${openN} open / ungraded not counted</div>`:''}${row('Favorites', ttRecord(tts.filter(t=>t.favDog==='favorite')))}${row('Underdogs', ttRecord(tts.filter(t=>t.favDog==='underdog')))}${row('Over bets', ttRecord(tts.filter(t=>t.side==='over')))}${row('Under bets', ttRecord(tts.filter(t=>t.side==='under')))}` : `<div class="dim" style="font-size:11px;padding:4px 0">No team totals tracked yet — browse to one and tap Track.</div>`;
+  return `<div class="ttsum"><div class="ttsumh"><span>NHL Team Totals</span><button id="ttcopy" class="rm" style="background:var(--bg2)">Copy</button></div>
     ${summary}</div>`;
 }
 function buildTeamTotalsText(){
-  const tts=tracked.filter(t=>t.isTeam);
-  if(!tts.length) return 'No team totals tracked yet.';
+  const all=tracked.filter(isNhlTT); const tts=all.filter(t=>t.result);
+  if(!all.length) return 'No team totals tracked yet.';
   const recStr=list=>{ const r=ttRecord(list); return `${r.w}-${r.l}-${r.p}, ${r.u>=0?'+':''}${r.u.toFixed(2)}u${r.roi!=null?` (${r.roi>=0?'+':''}${r.roi.toFixed(1)}% ROI)`:''}`; };
   const lines=['POCKETMARKET - NHL TEAM TOTALS', 'Generated '+new Date().toLocaleString(), '',
-    `OVERALL: ${recStr(tts)} (${tts.length} tracked)`,
+    `OVERALL: ${recStr(tts)} (${tts.length} graded${all.length>tts.length?`, ${all.length-tts.length} open`:''})`,
     `FAVORITES: ${recStr(tts.filter(t=>t.favDog==='favorite'))}`,
     `UNDERDOGS: ${recStr(tts.filter(t=>t.favDog==='underdog'))}`,
     `OVER BETS: ${recStr(tts.filter(t=>t.side==='over'))}`,
     `UNDER BETS: ${recStr(tts.filter(t=>t.side==='under'))}`, ''];
-  [...tts].sort((a,b)=>new Date(b.start||0)-new Date(a.start||0)).forEach(t=>{
-    const sideLbl=t.side==='over'?`Over ${t.line}`:`Under ${t.line}`;
-    const res=t.result?t.result.toUpperCase():(t.final?'PENDING':'OPEN');
-    lines.push(`${t.away}@${t.home} · ${t.playerName} ${sideLbl} (${t.favDog||'?'}) · ${fmtAm(t.price)} ${t.book||''} · ${res}${t.actual!=null?` (actual ${t.actual})`:''}`);
-  });
+  const byDay={};
+  tts.forEach(t=>{ const k=t.start?dayKeyOf(t.start):'unknown'; (byDay[k]=byDay[k]||{label:t.start?etDateKey(t.start):'Unknown date',list:[]}).list.push(t); });
+  lines.push('DAILY:');
+  Object.keys(byDay).sort((a,b)=>b.localeCompare(a)).forEach(k=>lines.push(`${byDay[k].label}: ${recStr(byDay[k].list)}`));
   return lines.join('\n');
 }
 async function copyTeamTotalsText(){
@@ -3446,7 +3452,22 @@ async function openTrackedPick(t){
   await openPlayer(p, startIdxFor(p, t.mkey));
   if(refresh) loadSport(true);
 }
-function openTracker(){ viewMode='tracker'; renderTabs(); renderTracker(); refreshTracker(); clearInterval(trackerTimer); trackerTimer=setInterval(()=>{ if(viewMode==='tracker' && tracked.some(t=>!t.final)) refreshTracker(); },60000); }
+// Regulation team totals graded before regulation-only grading existed were scored off the full
+// game (OT included). Re-pull their results once and regrade off regulation; manual grades are
+// left alone, and anything without a period breakdown is left for a manual grade.
+async function regradeRegTT(){
+  const list=tracked.filter(t=>t.mkey==='tt60' && t.final && !t.manualGrade && !t.regGraded && t.fixtureId);
+  if(!list.length) return false;
+  const res={};
+  for(const ids of chunk([...new Set(list.map(t=>t.fixtureId))],5)){ try{ const r=await oo('/fixtures/results',{fixture_id:ids}); (r?.data||[]).forEach(x=>{ if(x?.fixture?.id) res[x.fixture.id]=x; }); }catch(e){ return false; } }
+  let changed=false;
+  list.forEach(t=>{ const R=res[t.fixtureId]; if(!R) return;
+    const v=(t.teamSide==='home'||t.teamSide==='away')?regTotalOf(R,t.teamSide):null;
+    t.actual=v; t.result=gradeTracked(t); t.regGraded=true; changed=true; });
+  if(changed) saveTracked();
+  return changed;
+}
+function openTracker(){ viewMode='tracker'; renderTabs(); renderTracker(); refreshTracker(); regradeRegTT().then(c=>{ if(c && viewMode==='tracker') renderTracker(); }); clearInterval(trackerTimer); trackerTimer=setInterval(()=>{ if(viewMode==='tracker' && tracked.some(t=>!t.final)) refreshTracker(); },60000); }
 function openInjuries(){ viewMode='injuries'; clearInterval(trackerTimer); $('.sw').style.display='none'; current=null; renderTabs(); renderInjuries(); }
 const fmtInjDate = d => { try{ return new Date(d).toLocaleString([], {month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}); }catch(e){ return ''; } };
 async function renderInjuries(){
