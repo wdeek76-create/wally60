@@ -2401,7 +2401,7 @@ async function runNhlModel(opts) {
         const sorted = have.slice().sort((a, b) => evs[a] - evs[b]);
         const anchor = evs[sorted[0]] >= NHL_PS_QUAL_EV ? sorted[0] : sorted[1];
         const fairProb = _nhlPoissonHit(ou, line, projs[anchor]);
-        rows.push({ player, line, ou, home, away, gameDateIso: iso, game: away + " @ " + home, odds: live.price, book: live.book,
+        rows.push({ player, line, ou, home, away, gameDateIso: iso, game: away + " @ " + home, odds: live.price, book: live.book, allBooks: live.allBooks,
           projs, evs, agree: qual, of: have.length, anchorEv: evs[anchor], playTo: _nhlPlayToFromProb(fairProb, NHL_PS_QUAL_EV) });
       }
     }
@@ -2420,6 +2420,44 @@ async function runNhlModel(opts) {
     if (!opts.silent || newCount) showNhlToast(`Model: ${rows.length} pick${rows.length === 1 ? "" : "s"}${newCount ? ` (${newCount} new)` : ""} — see MODEL tab`);
   } catch (e) { console.error("[NHL model] run failed", e); showNhlToast("Model run failed: " + (e && e.message)); }
   finally { _nhlModelBusy = false; renderNhlModelTab(); }
+}
+// Same card as Nick's (agree, sources, best price, books), built from the latest model run and copied
+// to the clipboard as an image (downloads instead if the browser won't allow a clipboard image).
+async function shareNhlModelCard() {
+  if (!_nhlModelRows || !_nhlModelRows.length) { showNhlToast("Run the model first"); return; }
+  const btn = document.getElementById("model-card-btn"), orig = btn ? btn.textContent : "";
+  if (btn) { btn.disabled = true; btn.textContent = "Building…"; }
+  const holder = document.createElement("div");
+  holder.style.cssText = "position:fixed;left:-9999px;top:0;pointer-events:none;";
+  document.body.appendChild(holder);
+  try {
+    // Player's team off the CSVs (one that names a team in this game), so the card shows team + opponent.
+    const teamOf = r => { for (const src of PS_SOURCE_KEYS_NHL) { const v = Object.values(srcs[src] || {}).find(x => x && nn(x.name) === nn(r.player) && x.team && (_nhlTeamCanon(x.team) === _nhlTeamCanon(r.home) || _nhlTeamCanon(x.team) === _nhlTeamCanon(r.away))); if (v) return _nhlTeamCanon(v.team); } return ""; };
+    const picks = _nhlModelRows.map((r, i) => ({ id: "m" + i, player: r.player, team: teamOf(r), game: r.game, ou: r.ou, line: r.line, stat: "SOG",
+      odds: r.odds, book: r.book, allBooks: r.allBooks || [], date: new Date(r.gameDateIso + "T12:00:00").toISOString(), playTo: r.playTo,
+      sourceProjs: r.projs, sourceEvs: r.evs }));
+    holder.innerHTML = await _buildNhlCard(picks, "model");
+    const h2c = await _ensureHtml2CanvasNhl();
+    try { await Promise.all(["400 12px Sora", "800 22px Sora", "700 12px 'IBM Plex Mono'"].map(f => document.fonts.load(f))); await document.fonts.ready; } catch (e) {}
+    const canvas = await h2c(holder.firstElementChild, { backgroundColor: "#060b14", scale: 2, logging: false, useCORS: true, allowTaint: false });
+    const blob = await new Promise(res => canvas.toBlob(res, "image/png"));
+    if (!blob) throw new Error("no image produced");
+    let copied = false;
+    if (window.ClipboardItem && navigator.clipboard && navigator.clipboard.write) {
+      try { await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]); copied = true; } catch (e) { console.warn("[NHL model] clipboard failed, downloading", e); }
+    }
+    if (!copied) {
+      const url = URL.createObjectURL(blob), a = document.createElement("a");
+      a.href = url; a.download = `nhl-sog-model-${_ymdLocal(new Date())}.png`;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+    if (btn) btn.textContent = copied ? "✓ COPIED" : "✓ SAVED";
+    setTimeout(() => { if (btn) { btn.textContent = orig; btn.disabled = false; } }, 1500);
+  } catch (e) {
+    console.error("[NHL model] card failed", e); alert("Model card failed: " + e.message);
+    if (btn) { btn.textContent = orig; btn.disabled = false; }
+  } finally { document.body.removeChild(holder); }
 }
 // Today's PropShop-ensemble picks (current Ensemble tab + anything already logged today).
 function _nhlModelPsKeys() {
@@ -2497,6 +2535,7 @@ function renderNhlModelTab() {
       <span style="font-size:15px;font-weight:800;color:#fff;">Model — our own ensemble off the uploaded CSVs and live prices</span>
       <button onclick="runNhlModel()" ${_nhlModelBusy ? "disabled" : ""} style="background:#0066cc;border:none;color:#fff;${btn}">${_nhlModelBusy ? "Running…" : "Run model"}</button>
       <button onclick="gradeNhlModelLog(true)" style="background:transparent;border:1px solid #0d2035;color:#fff;${btn}">Grade now</button>
+      ${_nhlModelRows && _nhlModelRows.length ? `<button id="model-card-btn" onclick="shareNhlModelCard()" style="background:#0a1628;border:1px solid #0d2035;color:#00cc66;${btn}">🖼 Model card</button>` : ""}
     </div>
     <div style="font-size:12px;color:#9fb8d6;margin-bottom:14px;">CSVs loaded: ${loaded.length ? loaded.join(", ") : "none — upload them on the Upload tab"}. Poisson on each projection → EV at the best Pinnacle / Prop Builder / FanDuel / Bet105 price. Same gate as the ensemble (3 at ${NHL_PS_QUAL_EV}%+, none negative). Picks are logged at 1u flat and graded on their own; nothing goes to the tracker.</div>
     ${matchHtml}${records}${today}`;
@@ -4501,7 +4540,8 @@ function _nhlSourceRecords() {
 function _nhlRecTxt(r) { return r ? `${r.w}-${r.l}` : "0-0"; }
 async function _buildNhlCard(picks, mode) {
   const forMe = mode === "me";
-  const forNick = mode === "nick" || forMe; // "my card" uses the full internal layout
+  const forModel = mode === "model";
+  const forNick = mode === "nick" || forMe || forModel; // "my card" and the model card use the full internal layout
   const headshotsMap = await buildHeadshotMapNhl(picks);
   const bookNames = [...new Set(picks.flatMap(p => [p.book].concat((p.allBooks || []).map(x => x.book))).filter(Boolean))];
   await _nhlLoadBookLogos(bookNames);
@@ -4700,7 +4740,7 @@ async function _buildNhlCard(picks, mode) {
   return `
     <div style="display:inline-block;min-width:520px;background:${cardBg};padding:14px;font-family:'Sora',sans-serif;box-sizing:border-box;">
       <div style="position:relative;text-align:center;padding:0 110px;margin-bottom:10px;">
-        <div style="font-size:22px;white-space:nowrap;font-weight:800;color:#fff;letter-spacing:.04em;">${new Date().toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" }).toUpperCase()} <span style="font-size:16px;margin-left:8px;">${forMe ? "NHL FD / NOVIG / PX WITHIN 10¢ OF PLAY-TO" : "NHL PROPS"}</span> <span style="font-size:16px;margin-left:14px;">${picks.length} PROP${picks.length === 1 ? "" : "S"}</span></div>
+        <div style="font-size:22px;white-space:nowrap;font-weight:800;color:#fff;letter-spacing:.04em;">${new Date().toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" }).toUpperCase()} <span style="font-size:16px;margin-left:8px;">${forMe ? "NHL FD / NOVIG / PX WITHIN 10¢ OF PLAY-TO" : forModel ? "NHL MODEL" : "NHL PROPS"}</span> <span style="font-size:16px;margin-left:14px;">${picks.length} PROP${picks.length === 1 ? "" : "S"}</span></div>
         <div style="position:absolute;right:0;top:50%;transform:translateY(-50%);font-size:13px;font-weight:800;color:#fff;letter-spacing:.06em;white-space:nowrap;">${gamesTag}</div>
       </div>
       <table style="width:100%;border-collapse:collapse;border:1px solid #0d2035;border-radius:10px;overflow:hidden;">
