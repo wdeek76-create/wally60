@@ -4300,15 +4300,20 @@ async function _buildNhlCard(picks, mode) {
     const et = effectiveTeam(p);
     return [...gm, ...(et ? [et] : [])];
   }))];
-  const teamLogosMap = {};
-  await Promise.all(teams.map(async t => { const uri = await _teamLogoAsDataUriNhl(t); if (uri) teamLogosMap[t] = uri; }));
-  // Puck-drop time per pick, off the OpticOdds fixture list (same date + one of the pick's teams).
   let fixList = [];
   try { fixList = await ooNhlFixtures(); } catch (e) { console.warn("[NHL] card fixtures", e && e.message); }
+  // The pick's game off the OpticOdds fixture list: same date, and the player's team (else the game string) matches.
+  const fixtureOf = p => {
+    const iso = _ymdLocal(new Date(p.date)), team = effectiveTeam(p);
+    const day = fixList.filter(f => f.date === iso);
+    return (team && day.find(f => _nhlTeamIs(team, f.home, f.homeName) || _nhlTeamIs(team, f.away, f.awayName)))
+      || day.find(f => _nhlBetMatchesFixture({ game: p.game }, f)) || null;
+  };
+  picks.forEach(p => { const f = fixtureOf(p); if (f) [f.home, f.away].forEach(t => { if (t && !teams.includes(t)) teams.push(t); }); });
+  const teamLogosMap = {};
+  await Promise.all(teams.filter(Boolean).map(async t => { const uri = await _teamLogoAsDataUriNhl(t); if (uri) teamLogosMap[t] = uri; }));
   const gameTimeOf = p => {
-    const iso = _ymdLocal(new Date(p.date));
-    const tms = [...String(p.game || "").split("@").map(s => s.trim().toUpperCase()), String(effectiveTeam(p) || "").toUpperCase()].filter(Boolean);
-    const f = fixList.find(f => f.date === iso && (tms.includes(f.home) || tms.includes(f.away)));
+    const f = fixtureOf(p);
     return f ? new Date(f.start).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }) : "";
   };
   const shotHeadshot = (player, size) => {
@@ -4333,14 +4338,21 @@ async function _buildNhlCard(picks, mode) {
     const gradeColor = n == null ? "#fff" : n >= 4 ? "#00cc66" : "#eab308";
     const bTeam = effectiveTeam(b);
     const gm = String(b.game || "").split("@").map(s => s.trim()).filter(Boolean);
-    const opp = gm.length === 2 ? (gm.find(t => t !== bTeam) || gm.find(t => t !== gm[0])) : null;
+    // Opponent from the fixture (proper abbreviation) — the pasted game string can name the same team
+    // twice in different forms ("SJS @ Sharks"), which showed the player's own team as the opponent.
+    const fx = fixtureOf(b);
+    let opp = null;
+    if (fx && bTeam) opp = _nhlTeamIs(bTeam, fx.home, fx.homeName) ? fx.away : _nhlTeamIs(bTeam, fx.away, fx.awayName) ? fx.home : null;
+    // No fixture: only trust a plain abbreviation from the game string that isn't the player's team.
+    if (!opp && !fx && gm.length === 2) opp = gm.find(t => /^[A-Z]{2,4}$/.test(t) && !_nhlTeamIs(t, bTeam, "")) || null;
+    const isHome = !!(fx && bTeam && _nhlTeamIs(bTeam, fx.home, fx.homeName)); // "vs" at home, "@" on the road
 
     const gTime = gameTimeOf(b);
     const playerGameCell = `<div style="display:flex;align-items:center;gap:10px;">
       ${shotHeadshot(b.player, 38)}
       <div style="min-width:0;">
         <div style="font-size:14px;font-weight:800;color:#fff;">${b.player}</div>
-        <div style="font-size:11px;color:#fff;margin-top:2px;display:flex;align-items:center;gap:5px;">${bTeam ? shotLogo(bTeam, 14) : ""}${bTeam || ""}${opp ? ` <span style="color:#fff;">@</span> ${shotLogo(opp, 14)}${opp}` : ""}${gTime ? ` <span style="color:#fff;font-weight:700;margin-left:6px;">${gTime}</span>` : ""}</div>
+        <div style="font-size:11px;color:#fff;margin-top:2px;display:flex;align-items:center;gap:5px;">${bTeam ? shotLogo(bTeam, 14) : ""}${bTeam || ""}${opp ? ` <span style="color:#fff;">${isHome ? "vs" : "@"}</span> ${shotLogo(opp, 14)}${opp}` : ""}${gTime ? ` <span style="color:#fff;font-weight:700;margin-left:6px;">${gTime}</span>` : ""}</div>
       </div>
     </div>`;
     const propCell = `<span style="font-size:17px;font-weight:700;color:#00aaff;white-space:nowrap;font-family:'IBM Plex Mono',monospace;">${b.line}</span>`;
