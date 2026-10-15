@@ -430,7 +430,10 @@ a.p{color:var(--text);text-decoration:none;border-color:rgba(34,197,94,.55)!impo
 .ttsum{border-bottom:1px solid var(--line2);padding:0 0 10px;margin-bottom:12px}
 .ttsumh{display:flex;align-items:center;justify-content:space-between;font-weight:800;font-size:13px;margin-bottom:6px}
 .plwrap{padding-bottom:4px}
-.plleg{padding:12px;margin-top:10px;border:1px solid var(--line2);border-radius:14px;background:var(--bg2)}
+.plleg{padding:12px 2px;margin-top:10px;border-top:1px solid var(--line2)}
+.plrm{width:30px;height:30px;border-radius:50%;border:1px solid var(--line2);background:var(--bg3);color:var(--text);font-size:14px;font-weight:800;line-height:1;cursor:pointer;flex:0 0 auto}
+.plpin,.plliq{font-family:var(--mono);font-size:11.5px;color:var(--text);margin-top:4px;line-height:1.45}
+.plpin .lbl,.plliq .lbl{font-weight:800}
 .plhead{display:flex;align-items:center;justify-content:space-between;gap:8px}
 .plwho{display:flex;align-items:center;gap:8px;min-width:0}
 .plwhotxt{min-width:0}
@@ -2691,6 +2694,54 @@ function parlayFairSummary(){
   const fairAm = combinedP<0.5 ? Math.round(100/combinedP-100) : Math.round(-combinedP/(1-combinedP)*100);
   return { fairAm, combinedP, estimated };
 }
+// ── Pinnacle movement on a parlay leg's side. Two sources, merged by time: the feed's own history
+// for this market (opening price, plus its timeline when it returns one) fetched once per leg and
+// refreshed every 10 min, and the app's own snapshots of Pinnacle's price + limit each time the
+// parlay renders. "Toward you" = this side's price getting shorter (market agreeing with the bet).
+const legPinPending={};
+async function ensureLegPinHist(leg){
+  if(legPinPending[leg.id] || (leg.pinHistAt && Date.now()-leg.pinHistAt<600000) || !leg.marketNames?.length) return;
+  legPinPending[leg.id]=true;
+  try{
+    const r=await oo('/fixtures/odds/historical',{fixture_id:leg.fixtureId,sportsbook:'Pinnacle',market:leg.marketNames});
+    const o=myRowsForLeg(leg,(r?.data?.[0]?.odds||[]).filter(x=>canonBook(x.sportsbook)==='pinnacle'))[0];
+    const L=parlay.find(x=>x.id===leg.id); if(!L) return;
+    if(o?.olv?.price!=null) L.pinOpen={price:Number(o.olv.price), at:o.olv.timestamp?Date.parse(o.olv.timestamp):null};
+    if(Array.isArray(o?.entries)) L.pinFeed=o.entries.map(e=>({at:Date.parse(e.timestamp||e.time||''), price:Number(e.price), max:e.limits?.max!=null?Number(e.limits.max):null})).filter(e=>!isNaN(e.price)&&!isNaN(e.at)).sort((a,b)=>a.at-b.at);
+    L.pinHistAt=Date.now(); saveParlay();
+    if(viewMode==='parlay') renderParlay();
+  }catch(e){} finally{ delete legPinPending[leg.id]; }
+}
+function recordPinSnap(leg, pin){
+  if(!pin) return;
+  const price=Number(pin.price), max=pin.limits?.max!=null?Number(pin.limits.max):null;
+  if(isNaN(price)) return;
+  const h=leg.pinSnaps||(leg.pinSnaps=[]); const last=h[h.length-1];
+  if(!last||last.price!==price||last.max!==max){ h.push({at:Date.now(),price,max}); if(h.length>80) h.splice(0,h.length-80); parlayDirty=true; }
+}
+let parlayDirty=false;
+function pinMoveTxt(from, to){
+  const d=cents(from)-cents(to);
+  if(!d) return '<span>flat</span>';
+  return `<span class="${d>0?'pos':'neg'}">${d>0?'▲':'▼'} ${Math.abs(d)}¢ ${d>0?'toward':'away'}</span>`;
+}
+function pinMoveHtml(leg, pin){
+  const series=[...(leg.pinFeed||[]), ...(leg.pinSnaps||[])].filter(e=>e&&!isNaN(e.price)&&!isNaN(e.at)).sort((a,b)=>a.at-b.at);
+  const now = pin ? Number(pin.price) : (series.length ? series[series.length-1].price : null);
+  if(now==null) return '';
+  const open = leg.pinOpen?.price ?? series[0]?.price ?? null;
+  const parts=[];
+  if(open!=null) parts.push(`open ${fmtAm(open)} → ${fmtAm(now)} ${pinMoveTxt(open, now)}`);
+  else parts.push(`now ${fmtAm(now)}`);
+  let up=null, prevMax=null;
+  series.forEach(e=>{ if(e.max==null) return; if(prevMax!=null && e.max>prevMax) up={...e, from:prevMax}; prevMax=e.max; });
+  if(up) parts.push(`since limit ↑ ${usd(up.from)}→${usd(up.max)} ${new Date(up.at).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})}: ${fmtAm(up.price)} → ${fmtAm(now)} ${pinMoveTxt(up.price, now)}`);
+  const lim = pin?.limits?.max!=null ? Number(pin.limits.max) : null;
+  if(lim!=null) parts.push(`limit ${usd(lim)}`);
+  return `<div class="plpin"><span class="lbl">Pin</span> ${parts.join(' · ')}</div>`;
+}
+// Weighted exchange depth near the price, per exchange posting this leg's side.
+function legExchDepths(mine){ return mine.filter(o=>EXCH.has(canonBook(o.sportsbook))).map(o=>({k:canonBook(o.sportsbook), d:exchDepth(o)})).filter(x=>x.d!=null&&!isNaN(x.d)); }
 // One compact section per leg (not its own card) -- name/bet/remove on top, then every shop
 // currently posting that exact side+line as its own linked row, then the weighted-average no-vig
 // fair at the bottom. Several of these stack inside ONE outer panel in renderParlay, instead of
@@ -2719,11 +2770,17 @@ function parlayLegHtml(leg){
   // still a real link, just the one you'd actually tap). Pinnacle/bet105 show their flat limit,
   // exchanges show their own top-of-book depth, so you can see what's actually fillable before
   // tapping out.
+  const pin = mine.find(o=>canonBook(o.sportsbook)==='pinnacle') || null;
+  recordPinSnap(leg, pin); ensureLegPinHist(leg);
+  const pinHtml = pinMoveHtml(leg, pin);
+  const exch = legExchDepths(mine);
+  const exchTot = exch.reduce((a,x)=>a+x.d,0);
+  const liqHtml = exch.length ? `<div class="plliq"><span class="lbl">Exch liq ${usd(exchTot)}</span> near price · ${exch.map(x=>`${esc(bookShort(x.k))} ${usd(x.d)}`).join(' · ')}</div>` : '';
   const cmpOrdered = hero ? [hero, ...mine.filter(o=>o!==hero)] : mine;
   const cmpHtml = cmpOrdered.length
     ? `<div class="plcmp">${cmpOrdered.map(o=>{
         const k=canonBook(o.sportsbook); const url=deepLinkFor(o)||BOOK_HOME[k]||'#'; const lg=bookLogo(k);
-        const liq=rowLiquidity(o); const liqTxt = liq!=null ? `<span class="plcmpliq">${usd(liq)}</span>` : '';
+        const liq=EXCH.has(k)?exchDepth(o):rowLiquidity(o); const liqTxt = liq!=null ? `<span class="plcmpliq">${usd(liq)}</span>` : '';
         return `<a class="plcmpchip${o===hero?' best':''}" href="${esc(url)}" rel="noopener">${lg?`<img src="${esc(lg)}" alt="">`:''}<span>${esc(bookShort(k))} ${fmtAm(o.price)}</span>${EXCH.has(k)?`<span class="plcmpliq">${winPct(o.price)}¢</span>`:''}${liqTxt}</a>`;
       }).join('')}</div>`
     : '<div class="plcmp dim" style="font-size:11px">No shops posting this right now.</div>';
@@ -2745,10 +2802,11 @@ function parlayLegHtml(leg){
   return `<div class="plleg" data-leg="${leg.id}">
     <div class="plhead">
       <div class="plwho">${legLogoHtml(leg)}<div class="plwhotxt"><div class="plnm">${esc(titleCase(leg.playerName))}</div><div class="plmatchup dim">${esc(leg.away)}@${esc(leg.home)}</div></div></div>
-      <button class="rm" data-plrm="${leg.id}">Remove</button>
+      <button class="plrm" data-plrm="${leg.id}" aria-label="Remove leg">✕</button>
     </div>
     <div class="plbet">${sideTxt}${leg.line!=null?' '+leg.line:''} ${esc(leg.marketLabel)}${fair?` <span class="plfair" title="Weighted-average no-vig price, devigged off the real price posted on the other side -- not just Pinnacle, not a mirrored/flipped number">No-vig fair ${fmtAm(Number(fair))}</span>`:''}${edgePct!=null?` <span class="${edgeCls}">${edgePct>0?'+':''}${edgePct.toFixed(1)}% edge</span>`:''}</div>
     ${addedNote}
+    ${pinHtml}${liqHtml}
     ${cmpHtml}
     ${debugHtml}
   </div>`;
@@ -3082,8 +3140,13 @@ function renderParlay(){
     <div style="margin-top:10px">${heroHtml}</div>
     <div class="ttrow" style="margin-top:4px"><span class="dim">At added odds: ${combo!=null?fmtAm(combo):'—'}</span></div>
     ${fairHtml}
+    ${(()=>{ if(parlay.length<2) return ''; const tots=parlay.map(l=>{ const m=bestFirst(myRowsForLeg(l,rowsForLeg(l))); const e=legExchDepths(m); return {l, t:e.length?e.reduce((a,x)=>a+x.d,0):null}; });
+      const known=tots.filter(x=>x.t!=null); if(!known.length) return `<div class="ttrow dim" style="font-size:11px;margin-top:4px">Exch liq: no exchange posting these legs</div>`;
+      const thin=known.sort((a,b)=>a.t-b.t)[0]; const missing=tots.length-known.length;
+      return `<div class="ttrow" style="font-size:11.5px;margin-top:4px;font-family:var(--mono)"><span>Exch liq: thinnest leg <b>${usd(thin.t)}</b> (${esc(titleCase(thin.l.playerName))})${missing?` · ${missing} leg${missing>1?'s':''} with no exchange`:''}</span></div>`; })()}
     ${parlay.map(parlayLegHtml).join('')}
   </div>`;
+  if(parlayDirty){ parlayDirty=false; saveParlay(); }
   bindAutoBuild(view);
   $('#plclear')?.addEventListener('click',()=>{ parlay=[]; saveParlay(); renderTabs(); renderParlay(); });
   view.querySelectorAll('[data-plrm]').forEach(b=>b.addEventListener('click',()=>removeFromParlay(b.dataset.plrm)));
