@@ -418,6 +418,8 @@ a.p{color:var(--text);text-decoration:none;border-color:rgba(34,197,94,.55)!impo
 .tk{border:1px solid var(--line2);border-radius:16px;background:linear-gradient(135deg,var(--bg2) 0%,var(--bg) 50%,var(--bg2) 100%);padding:12px;margin-bottom:10px;position:relative;overflow:hidden}
 .tk.win{border-color:rgba(34,197,94,.5)}.tk.loss{border-color:rgba(255,92,92,.5)}.tk.push{border-color:rgba(251,191,36,.5)}
 .tkh{display:flex;align-items:center;gap:10px}
+.tkh[data-open]{cursor:pointer}
+.tkh[data-open] .nm::after{content:' ›';color:var(--text);opacity:.45}
 .tkh .hs{width:40px;height:40px;font-size:12px}
 .tkh .who{flex:1;min-width:0}
 .tkh .nm{font-weight:800;font-size:14px;display:flex;align-items:center;gap:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -3174,7 +3176,7 @@ function trackCardHtml(t){
   const books = last ? Object.entries(last.byBook).sort((a,b)=> (t.pinned&&t.bookKey ? (a[0]===t.bookKey?-1:b[0]===t.bookKey?1:b[1].price-a[1].price) : b[1].price-a[1].price)).map(([k,b])=>{ const was=first?.byBook?.[k]?.price; const d=was!=null?Number(b.price)-Number(was):0; const lg=bookLogo(k); const pin=t.pinned&&t.bookKey===k; return `<span class="tb${pin?' pin':''}">${lg?`<span class="logow"><img src="${esc(lg)}" alt=""></span>`:''}${esc(bookShort(k))} ${fmtAm(b.price)}${EXCH.has(k)?`<span class="d">(${winPct(b.price)}%)</span>`:''}${d?`<span class="${d<0?'g':'r'}">${d<0?'▼':'▲'}</span>`:''}</span>`; }).join('') : '';
   const snaps = t.snapshots.length>1 ? snapsHtml(t) : '';
   return `<div class="tk ${t.result||''}">
-    <div class="tkh">${hs}<div class="who"><div class="nm">${teamLogo?`<img class="tl" src="${esc(teamLogo)}" alt="">`:''}${esc(t.playerName)} ${res}</div><div class="bet">${betStr}</div></div><div class="st">${st}<br><span class="dim">${esc(S.label)} · ${esc(t.away)}@${esc(t.home)}</span></div></div>
+    <div class="tkh"${t.final?'':` data-open="${t.id}"`}>${hs}<div class="who"><div class="nm">${teamLogo?`<img class="tl" src="${esc(teamLogo)}" alt="">`:''}${esc(t.playerName)} ${res}</div><div class="bet">${betStr}</div></div><div class="st">${st}<br><span class="dim">${esc(S.label)} · ${esc(t.away)}@${esc(t.home)}</span></div></div>
     ${prog}${mv}<div class="tkbooks">${books}</div>${snaps}
     <div class="tkf"><span class="dim" style="font-size:10px;font-family:var(--mono)">tracked ${new Date(t.trackedAt).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})}${t.edited?' · edited':''}${t.manualGrade?' · manually graded':''}</span><span><button class="ed" data-edit="${t.id}">Edit</button><button class="rm" data-rm="${t.id}">Remove</button></span></div>
     ${editHtml(t)}
@@ -3232,6 +3234,7 @@ function renderTracker(){
   bindTkBackup();
   $('#tkhisttoggle')?.addEventListener('click',()=>{ historyShown=!historyShown; renderTracker(); });
   view.querySelectorAll('[data-rm]').forEach(b=>b.addEventListener('click',()=>{ tracked=tracked.filter(t=>t.id!==b.dataset.rm); saveTracked(); renderTracker(); }));
+  view.querySelectorAll('.tkh[data-open]').forEach(el=>el.addEventListener('click',()=>{ const t=tracked.find(x=>x.id===el.dataset.open); if(t) openTrackedPick(t); }));
   const showEd=(id,on)=>{ const f=view.querySelector(`.tked[data-ed="${id}"]`); if(f) f.style.display=on?'grid':'none'; };
   view.querySelectorAll('[data-edit]').forEach(b=>b.addEventListener('click',()=>{ const f=view.querySelector(`.tked[data-ed="${b.dataset.edit}"]`); showEd(b.dataset.edit, f && f.style.display==='none'); }));
   view.querySelectorAll('[data-cancel]').forEach(b=>b.addEventListener('click',()=>showEd(b.dataset.cancel,false)));
@@ -3283,6 +3286,24 @@ function saveEdit(id){
   toast(resultRaw ? 'Graded — moved to Bet History' : 'Updated — re-pulling open / close');
 }
 let trackerTimer=null;
+// Jumps from a tracked bet back to its own pick page (player, team total or game total) at the
+// tracked market, switching sport first if needed -- from the sport's saved cache when there is one
+// (instant), then a background refresh, which re-opens the same page once fresh lines land.
+async function openTrackedPick(t){
+  clearInterval(trackerTimer); viewMode='sport'; $('.sw').style.display='';
+  let refresh=false;
+  if(t.sportKey!==sportKey || !players.length){
+    sportKey=t.sportKey; LS.set('props_sport',sportKey); current=null; mainRows=[]; players=[]; loadedAt=0;
+    const cached=loadSportCache(sportKey);
+    if(cached){ fixtures=cached.fixtures; mainRows=cached.mainRows; players=cached.players; loadedAt=cached.at; refresh=true; }
+    else { renderTabs(); $('#view').innerHTML=loadingHtml(SPORTS[sportKey].label); await loadSport(true); }
+  }
+  renderTabs();
+  const p=players.find(x=>x.key===t.playerKey && x.fixtureId===t.fixtureId);
+  if(!p){ toast("That game isn't on the board anymore"); renderSlate(); return; }
+  await openPlayer(p, startIdxFor(p, t.mkey));
+  if(refresh) loadSport(true);
+}
 function openTracker(){ viewMode='tracker'; renderTabs(); renderTracker(); refreshTracker(); clearInterval(trackerTimer); trackerTimer=setInterval(()=>{ if(viewMode==='tracker' && tracked.some(t=>!t.final)) refreshTracker(); },60000); }
 function openInjuries(){ viewMode='injuries'; clearInterval(trackerTimer); $('.sw').style.display='none'; current=null; renderTabs(); renderInjuries(); }
 const fmtInjDate = d => { try{ return new Date(d).toLocaleString([], {month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}); }catch(e){ return ''; } };
