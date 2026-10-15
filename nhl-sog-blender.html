@@ -3099,7 +3099,9 @@ let _nhlLiveLineCache = {};
 // pull at the same moment (13 bets = 13 copies of every request), which got requests rejected and
 // left books like FanDuel missing from the refreshed prices. Now it is one pull shared by all.
 function _nhlGetLiveLinesForDate(dateIso) {
-  if (_nhlLiveLineCache[dateIso]) return _nhlLiveLineCache[dateIso];
+  // Cached per date for 2 minutes only — an old pull (e.g. from a paste hours earlier) would log at stale prices.
+  const hit = _nhlLiveLineCache[dateIso];
+  if (hit && Date.now() - (hit._at || 0) < 120000) return hit;
   const job = (async () => {
     const byPlayerLine = {};
     try {
@@ -3112,6 +3114,7 @@ function _nhlGetLiveLinesForDate(dateIso) {
     } catch (e) { console.warn("[NHL PropShop] live line fetch failed", dateIso, e && e.message); }
     return byPlayerLine;
   })();
+  job._at = Date.now();
   _nhlLiveLineCache[dateIso] = job;
   return job;
 }
@@ -3576,7 +3579,8 @@ async function importPropShopNhl() {
   if (currentTab === 'res') renderNhlPsPanel();
   if (currentTab === 'tracker' && loggedCount) renderTracker();
   infoEl.textContent = `${_psSourceLabelNhl[psSource]}: reset to ${newCount} pick${newCount === 1 ? '' : 's'} (was ${prevCount})${collapsed ? `, collapsed ${collapsed} repeat(s)` : ''}${errors.length ? `, ${errors.length} parse error(s)` : ''}.` + (loggedCount ? ` Auto-logged ${loggedCount} 3+/4 pick${loggedCount === 1 ? '' : 's'} to the tracker.` : '');
-  showNhlToast(`${_psSourceLabelNhl[psSource]}: ${newCount} picks (reset)${loggedCount ? ` · ${loggedCount} auto-logged` : ''}`);
+  if (_nhlPsSkippedNeg.size) infoEl.textContent += ` Held back ${_nhlPsSkippedNeg.size} (negative EV at the live price): ${[..._nhlPsSkippedNeg].join(', ')}.`;
+  showNhlToast(`${_psSourceLabelNhl[psSource]}: ${newCount} picks (reset)${loggedCount ? ` · ${loggedCount} auto-logged` : ''}${_nhlPsSkippedNeg.size ? ` · ${_nhlPsSkippedNeg.size} held back (−EV live)` : ''}`);
   // Clear the paste box on every successful parse — the pasted text has
   // already been absorbed into this source's staging list, so leaving the
   // old text sitting there just invites a stale double-paste next time.
@@ -3676,7 +3680,10 @@ function computeNhlPsEnsemble() {
     // on this side/line — treat it as a data gap and allow 3-of-3 instead
     // of 3-of-4. A source that has the player on a different side/line is
     // a real disagreement, not a gap, and still requires all 4.
-    const onlyGapMissing = missingSrcs.length === 1 && !playerCoverageBySource[missingSrcs[0]].has(playerKey);
+    // ...and only once that source's paste is actually in. A source with nothing pasted yet isn't a
+    // gap, it's just not here yet — without this, picks auto-logged 3-of-3 the moment the third
+    // paste landed, before the 4th could agree or veto (then got topped up to look 4/4 later).
+    const onlyGapMissing = missingSrcs.length === 1 && (nhlPsBySource[missingSrcs[0]] || []).length > 0 && !playerCoverageBySource[missingSrcs[0]].has(playerKey);
     if (uniq.length < 4 && !(uniq.length === 3 && onlyGapMissing)) return;
     const requiredQual = uniq.length; // 4 normally, 3 when relief applies — display denominator only
     const evs = entry.sources.map(x => x.prop.ev || 0);
@@ -3844,6 +3851,7 @@ function _nhlPsAlreadyLogged(r) {
   const dedupeKey = nn(r.player) + '|' + gameDate.toDateString();
   return bets.some(b => (nn(b.player) + '|' + new Date(b.date).toDateString()) === dedupeKey);
 }
+const _nhlPsSkippedNeg = new Set(); // players held back on the last auto-log for negative live EV
 async function _nhlPsLogRow(r) {
   const gameDate = new Date(r.gameDateIso + 'T12:00:00');
   const gameDateStr = gameDate.toLocaleDateString();
@@ -3856,6 +3864,18 @@ async function _nhlPsLogRow(r) {
   const live = await _nhlLiveBookFor(r.player, r.line, r.ou, r.gameDateIso, teamHints);
   const odds = live ? live.price : parseInt(r.odds);
   const book = live ? live.book : (r.book || 'PropShop');
+  // The sources' edge is off the pasted price; the live trusted-book price can be a lot worse.
+  // Never log a pick that's negative EV at the price we'd actually log it at — it stays on the
+  // Ensemble tab and gets another try on the next paste.
+  if (live && r.anchorFairProb != null) {
+    const dec = oddsToDecimal(odds);
+    const liveEv = dec != null ? (r.anchorFairProb * dec - 1) * 100 : null;
+    if (liveEv != null && liveEv < 0) {
+      console.log(`[NHL ensemble] not logging ${r.player} ${r.ou} ${r.line}: best live ${odds > 0 ? '+' : ''}${odds} ${book} is ${liveEv.toFixed(1)}% vs fair (pasted ${r.odds} ${r.book || ''})`);
+      _nhlPsSkippedNeg.add(r.player);
+      return false;
+    }
+  }
   const s = calcStake(parseInt(odds));
   const now = new Date();
   // FAIR is fixed — the anchor source's (worst qualifying, else second-worst)
@@ -3879,16 +3899,18 @@ async function _nhlPsLogRow(r) {
 async function logNhlPsEnsembleRow(i) {
   const rows = window._nhlPsEnsembleRows || [];
   const r = rows[i]; if (!r) return;
+  _nhlPsSkippedNeg.clear();
   const ok = await _nhlPsLogRow(r);
   saveBets();
   if (currentTab === 'tracker') renderTracker();
-  showNhlToast(ok ? `Tracked ${r.player}` : `${r.player} already logged today`);
+  showNhlToast(ok ? `Tracked ${r.player}` : _nhlPsSkippedNeg.has(r.player) ? `${r.player}: negative EV at the live price — not logged` : `${r.player} already logged today`);
 }
 // Shared by both the manual button and the automatic post-import call —
 // logs every current 3-of-4+ agreement row (graded against the live
 // OpticOdds book for each pick), saves, and returns how many were actually
 // new (already-logged players are silently skipped, not re-added).
 async function _nhlAutoLogPsEnsemble() {
+  _nhlPsSkippedNeg.clear();
   const rows = computeNhlPsEnsemble();
   if (!rows.length) return 0;
   let added = 0;
