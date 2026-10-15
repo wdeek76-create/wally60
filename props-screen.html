@@ -950,6 +950,103 @@ async function buildShareImageBlob(p, mkey){
   c.fillText('Pocket Market', W-pad, H-16); c.globalAlpha=1; c.textAlign='left';
   return new Promise(resolve=>canvas.toBlob(b=>resolve(b),'image/png'));
 }
+// ── tracked-bet share: the side you bet, the price you took, and every book's CURRENT price at
+// your line. Pre-game it re-pulls this one market first so the card isn't stale; once the game is
+// live/final the books are gone, so it shows the last prices the tracker saw plus the live stat.
+async function freshTrackedSnap(t){
+  const last=t.snapshots[t.snapshots.length-1]||null;
+  if(t.live||t.final||!t.marketNames?.length) return last;
+  const rows=[];
+  for(const bk of chunk(BOOK_REQ,5)){ try{ const r=await oo('/fixtures/odds',{fixture_id:[t.fixtureId],sportsbook:bk,market:t.marketNames}); (r?.data?.[0]?.odds||[]).forEach(o=>rows.push(o)); }catch(e){} }
+  const mine=t.isGame ? rows : rows.filter(o=>normName(cleanSel(o.selection||o.name))===t.playerKey);
+  if(!mine.length) return last;
+  const snap=snapshotFrom(mine,t.side,t.line); snap.mainLine=mainLineOf(mine,t.side);
+  t.mainLineNow=snap.mainLine;
+  return snap;
+}
+function trackSideLabel(t){
+  if(t.side==='ML'||t.side==='ML60') return `${t.side==='ML60'?'ML (Reg.)':'Moneyline'}`;
+  if(t.side==='over'||t.side==='under') return `${t.side==='over'?'Over':'Under'} ${t.line??''} ${t.marketLabel}`;
+  return `${t.side||''} ${t.marketLabel}`.trim();
+}
+function trackShareData(t, snap){
+  const S=SPORTS[t.sportKey]||{label:t.sportKey};
+  const status = t.final ? `FINAL${t.score?' · '+t.score:''}` : t.live ? `LIVE ${t.clock||''}${t.score?' · '+t.score:''}` : (t.start?`${etDay(t.start)} ${etTime(t.start)} ET`:'');
+  const first=t.snapshots[0];
+  const books=snap ? Object.entries(snap.byBook).sort((a,b)=>b[1].price-a[1].price).map(([k,b])=>{
+    const was=first?.byBook?.[k]?.price; const d=was!=null?Number(b.price)-Number(was):0;
+    return { k, name:bookShort(k), price:Number(b.price), cents:EXCH.has(k)?winPct(b.price)+'¢':'', move:d, mine:t.bookKey===k };
+  }) : [];
+  const took = `${fmtAm(t.price)}${t.book?' @ '+t.book:''}`;
+  const best = books[0] || null;
+  const lineMove = (t.side==='over'||t.side==='under') && t.mainLineAtTrack!=null && t.mainLineNow!=null && t.mainLineNow!==t.mainLineAtTrack ? `Main line ${t.mainLineAtTrack} → ${t.mainLineNow}` : '';
+  const clv = t.close!=null && cents(t.price)!=null && cents(t.close)!=null ? `${cents(t.price)-cents(t.close)>0?'+':''}${cents(t.price)-cents(t.close)}¢ CLV (close ${fmtAm(t.close)})` : '';
+  const prog = (t.side==='over'||t.side==='under') && t.actual!=null ? `Now ${t.actual} / ${t.line} ${t.marketLabel}` : '';
+  const nowMine = books.find(b=>b.mine) || books[0] || null;
+  const beat = !t.final && !t.live && nowMine && cents(t.price)!=null && cents(nowMine.price)!=null ? cents(t.price)-cents(nowMine.price) : null;
+  const vsNow = beat ? `${beat>0?'Beating':'Behind'} ${nowMine.name} now (${fmtAm(nowMine.price)}) by ${Math.abs(beat)}¢` : '';
+  const result = t.result ? t.result.toUpperCase() : '';
+  return { S, status, books, took, best, lineMove, clv, prog, result, vsNow, at: snap?.at || null };
+}
+function trackShareText(t, d){
+  const lines=[`${titleCase(t.playerName)} — ${t.away} @ ${t.home}`, d.status, '', `BET: ${trackSideLabel(t)}`, `Took ${d.took}`];
+  if(d.result) lines.push(`Result: ${d.result}`);
+  if(d.prog) lines.push(d.prog);
+  if(d.vsNow) lines.push(d.vsNow);
+  if(d.lineMove) lines.push(d.lineMove);
+  if(d.clv) lines.push(d.clv);
+  if(d.books.length){ lines.push('', `${t.live||t.final?'Last prices':'Prices now'} · ${trackSideLabel(t)}`); d.books.forEach(b=>lines.push(`${b.name}: ${fmtAm(b.price)}${b.cents?' ('+b.cents+')':''}${b.mine?'  ← mine':''}`)); }
+  if(d.at) lines.push('', `Updated ${new Date(d.at).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})}`);
+  return lines.join('\n');
+}
+function trackShareImageBlob(t, d){
+  const W=640, pad=24, rowH=38;
+  const infoLines=[d.result?`Result: ${d.result}`:'', d.prog, d.vsNow, d.lineMove, d.clv].filter(Boolean);
+  const H=150 + infoLines.length*22 + 40 + Math.max(1,d.books.length)*rowH + 44;
+  const canvas=document.createElement('canvas'); canvas.width=W; canvas.height=H;
+  const c=canvas.getContext('2d'); const F='-apple-system,Helvetica,Arial';
+  c.fillStyle='#10131a'; c.fillRect(0,0,W,H);
+  c.fillStyle='#ffffff'; c.font=`700 26px ${F}`; c.fillText(titleCase(t.playerName), pad, 42);
+  c.fillStyle='#9aa4b2'; c.font=`400 14px ${F}`; c.fillText(`${d.S.label} · ${t.away} @ ${t.home}${d.status?' · '+d.status:''}`, pad, 64);
+  c.fillStyle='#22c55e'; c.font=`800 22px ${F}`; c.fillText(`BET: ${trackSideLabel(t)}`, pad, 100);
+  c.fillStyle='#e8ebf0'; c.font=`600 16px ${F}`; c.fillText(`Took ${d.took}`, pad, 126);
+  let y=126;
+  infoLines.forEach(s=>{ y+=22; c.fillStyle = s.startsWith('Result: WIN')||s.startsWith('Beating')?'#22c55e':s.startsWith('Result: LOSS')||s.startsWith('Behind')?'#ef4444':'#cbd2dc'; c.font=`500 14px ${F}`; c.fillText(s, pad, y); });
+  y+=40;
+  c.fillStyle='#ffffff'; c.globalAlpha=.55; c.font=`700 12px ${F}`; c.fillText(`${t.live||t.final?'LAST PRICES':'PRICES NOW'} · ${trackSideLabel(t).toUpperCase()}`, pad, y-12); c.globalAlpha=1;
+  if(!d.books.length){ c.fillStyle='#7d8694'; c.font=`400 14px ${F}`; c.fillText('No books posting this line right now', pad, y+14); }
+  d.books.forEach((b,i)=>{
+    const ry=y+i*rowH+14;
+    if(b.mine){ c.fillStyle='rgba(34,197,94,.12)'; c.fillRect(pad-10, ry-24, W-pad*2+20, rowH-4); }
+    else if(i%2===1){ c.fillStyle='rgba(255,255,255,.03)'; c.fillRect(pad-10, ry-24, W-pad*2+20, rowH-4); }
+    c.fillStyle='#e8ebf0'; c.font=`${b.mine?700:400} 15px ${F}`; c.textAlign='left'; c.fillText(`${b.name}${b.mine?'  (mine)':''}`, pad, ry);
+    c.textAlign='right';
+    if(b.move){ c.fillStyle=b.move<0?'#22c55e':'#ef4444'; c.font=`700 12px ${F}`; c.fillText(b.move<0?'▼':'▲', W-pad-150, ry); }
+    if(b.cents){ c.fillStyle='#7d8694'; c.font=`400 13px ${F}`; c.fillText(b.cents, W-pad-80, ry); }
+    c.fillStyle=b.price>0?'#22c55e':'#ffffff'; c.font=`700 17px ${F}`; c.fillText(fmtAm(b.price), W-pad, ry);
+    c.textAlign='left';
+  });
+  c.fillStyle='#ffffff'; c.globalAlpha=.4; c.font=`700 13px ${F}`;
+  if(d.at){ c.fillText(`Updated ${new Date(d.at).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})}`, pad, H-16); }
+  c.textAlign='right'; c.fillText('Pocket Market', W-pad, H-16); c.globalAlpha=1; c.textAlign='left';
+  return new Promise(resolve=>canvas.toBlob(b=>resolve(b),'image/png'));
+}
+async function shareTracked(t){
+  toast('Getting latest prices…');
+  const snap=await freshTrackedSnap(t);
+  const d=trackShareData(t, snap);
+  const text=trackShareText(t, d);
+  try{
+    const blob=await trackShareImageBlob(t, d);
+    if(blob){
+      const file=new File([blob], `${t.playerName.replace(/\s+/g,'-')}-${t.mkey||'bet'}.png`, {type:'image/png'});
+      if(navigator.canShare && navigator.canShare({files:[file]})){ await navigator.share({files:[file], title:`${titleCase(t.playerName)} ${trackSideLabel(t)}`}); return; }
+    }
+  }catch(e){ if(e.name==='AbortError') return; console.warn('[props] tracked image share failed', e.message); }
+  if(navigator.share){ try{ await navigator.share({text}); return; }catch(e){ if(e.name==='AbortError') return; } }
+  if(navigator.clipboard && navigator.clipboard.writeText){ try{ await navigator.clipboard.writeText(text); toast('Copied'); return; }catch(e){} }
+  toast('Share failed');
+}
 // Share sheet first (iOS can hand a PNG straight to Messages/Mail/etc.), falling back to a plain
 // share of the text, and finally to a clipboard copy on anything with neither.
 async function shareBoard(){
@@ -3178,7 +3275,7 @@ function trackCardHtml(t){
   return `<div class="tk ${t.result||''}">
     <div class="tkh"${t.final?'':` data-open="${t.id}"`}>${hs}<div class="who"><div class="nm">${teamLogo?`<img class="tl" src="${esc(teamLogo)}" alt="">`:''}${esc(t.playerName)} ${res}</div><div class="bet">${betStr}</div></div><div class="st">${st}<br><span class="dim">${esc(S.label)} · ${esc(t.away)}@${esc(t.home)}</span></div></div>
     ${prog}${mv}<div class="tkbooks">${books}</div>${snaps}
-    <div class="tkf"><span class="dim" style="font-size:10px;font-family:var(--mono)">tracked ${new Date(t.trackedAt).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})}${t.edited?' · edited':''}${t.manualGrade?' · manually graded':''}</span><span><button class="ed" data-edit="${t.id}">Edit</button><button class="rm" data-rm="${t.id}">Remove</button></span></div>
+    <div class="tkf"><span class="dim" style="font-size:10px;font-family:var(--mono)">tracked ${new Date(t.trackedAt).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})}${t.edited?' · edited':''}${t.manualGrade?' · manually graded':''}</span><span><button class="ed" data-share="${t.id}">Share</button><button class="ed" data-edit="${t.id}">Edit</button><button class="rm" data-rm="${t.id}">Remove</button></span></div>
     ${editHtml(t)}
   </div>`;
 }
@@ -3234,6 +3331,7 @@ function renderTracker(){
   bindTkBackup();
   $('#tkhisttoggle')?.addEventListener('click',()=>{ historyShown=!historyShown; renderTracker(); });
   view.querySelectorAll('[data-rm]').forEach(b=>b.addEventListener('click',()=>{ tracked=tracked.filter(t=>t.id!==b.dataset.rm); saveTracked(); renderTracker(); }));
+  view.querySelectorAll('[data-share]').forEach(b=>b.addEventListener('click',()=>{ const t=tracked.find(x=>x.id===b.dataset.share); if(t) shareTracked(t); }));
   view.querySelectorAll('.tkh[data-open]').forEach(el=>el.addEventListener('click',()=>{ const t=tracked.find(x=>x.id===el.dataset.open); if(t) openTrackedPick(t); }));
   const showEd=(id,on)=>{ const f=view.querySelector(`.tked[data-ed="${id}"]`); if(f) f.style.display=on?'grid':'none'; };
   view.querySelectorAll('[data-edit]').forEach(b=>b.addEventListener('click',()=>{ const f=view.querySelector(`.tked[data-ed="${b.dataset.edit}"]`); showEd(b.dataset.edit, f && f.style.display==='none'); }));
