@@ -239,7 +239,7 @@ tr:hover td{background:#0a1628;}
         <div class="ss" id="ss-saber">No file loaded</div>
       </div>
     </div>
-    <button class="run" id="run-btn" onclick="runBlend()" disabled>RUN SOG BLEND</button>
+    <button class="run" id="run-btn" onclick="runBlend();_nhlModelAuto()" disabled>RUN SOG BLEND</button>
     <div style="display:flex;gap:8px;margin-top:10px;">
       <button class="fb" onclick="resetNhlBlendSources()" style="color:#4a6fa5;" title="Clear the 4 uploaded CSVs and the blended table — doesn't touch your tracker">↺ Reset blend</button>
       <button class="fb" onclick="clearNhlAllCache()" style="color:#f87171;border-color:#f8717155;" title="Wipe every tracked bet + PropShop staging list saved on this device">🗑 Clear cache / start fresh</button>
@@ -2357,10 +2357,18 @@ function _nhlModelCsvProj(src, name, home, away) {
   if (hits.length > 1) hits = hits.filter(v => v.team && (_nhlTeamCanon(v.team) === _nhlTeamCanon(home) || _nhlTeamCanon(v.team) === _nhlTeamCanon(away)));
   return hits.length === 1 ? Number(hits[0].sog) : null;
 }
-async function runNhlModel() {
+// Runs the model in the background alongside the normal flow (after a blend run and after every
+// PropShop paste), while it's being compared against the PropShop ensemble.
+function _nhlModelAuto() {
+  if (PS_SOURCE_KEYS_NHL.filter(k => srcs[k] && Object.keys(srcs[k]).length).length < 3) return;
+  clearTimeout(window._nhlModelAutoT);
+  window._nhlModelAutoT = setTimeout(() => runNhlModel({ silent: true }).catch(e => console.warn("[NHL model] auto run", e && e.message)), 1500);
+}
+async function runNhlModel(opts) {
+  opts = opts || {};
   if (_nhlModelBusy) return;
   const loaded = PS_SOURCE_KEYS_NHL.filter(k => srcs[k] && Object.keys(srcs[k]).length);
-  if (loaded.length < 3) { showNhlToast("Upload at least 3 source CSVs on the Upload tab first"); return; }
+  if (loaded.length < 3) { if (!opts.silent) showNhlToast("Upload at least 3 source CSVs on the Upload tab first"); return; }
   _nhlModelBusy = true; renderNhlModelTab();
   try {
     const iso = _ymdLocal(new Date());
@@ -2395,6 +2403,7 @@ async function runNhlModel() {
     rows.sort((a, b) => b.anchorEv - a.anchorEv);
     _nhlModelRows = rows; _nhlModelRunAt = new Date();
     // Log today's picks (first run's price sticks, like a real bet).
+    const logBefore = nhlModelLog.length;
     rows.forEach(r => {
       const k = r.gameDateIso + "|" + nn(r.player) + "|" + r.ou + "|" + r.line;
       if (nhlModelLog.some(x => x.key === k)) return;
@@ -2402,7 +2411,8 @@ async function runNhlModel() {
         ev: r.anchorEv, agree: r.agree, of: r.of, projs: r.projs, evs: r.evs, ps: _nhlModelPsKeys().has(nn(r.player) + "|" + r.ou + "|" + r.line), at: new Date().toISOString(), result: "pending", actual: null });
     });
     _nhlModelSave();
-    showNhlToast(`Model: ${rows.length} pick${rows.length === 1 ? "" : "s"}`);
+    const newCount = nhlModelLog.length - logBefore;
+    if (!opts.silent || newCount) showNhlToast(`Model: ${rows.length} pick${rows.length === 1 ? "" : "s"}${newCount ? ` (${newCount} new)` : ""} — see MODEL tab`);
   } catch (e) { console.error("[NHL model] run failed", e); showNhlToast("Model run failed: " + (e && e.message)); }
   finally { _nhlModelBusy = false; renderNhlModelTab(); }
 }
@@ -3743,6 +3753,7 @@ async function importPropShopNhl() {
   // already been absorbed into this source's staging list, so leaving the
   // old text sitting there just invites a stale double-paste next time.
   document.getElementById('propshop-paste-area').value = '';
+  _nhlModelAuto();
 }
 function setNhlPsTab(tab) {
   nhlPsTab = tab;
