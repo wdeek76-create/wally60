@@ -723,8 +723,7 @@ const totalMatch  = m => (has(m,'total')&&(has(m,'point')||has(m,'goal')||has(m,
 // as moneyline/total for the real "Team Total Reg Time" variant.
 const tt60Match = m => has(m,'team total') && has(m,'reg') && !has(m,'power') && !has(m,'short handed') && !has(m,'shorthanded') && !m.includes('+');
 const ttMatch = m => has(m,'team total') && !tt60Match(m) && !has(m,'power') && !has(m,'short handed') && !has(m,'shorthanded') && !m.includes('+');
-const SPORTS = {
-  nfl:  { label:'NFL',  sport:'football',   league:'nfl',  days:7, markets:[
+const NFL_MKTS = [
           ['pass_yds','Pass Yds', m=>has(m,'passing yards')&&!m.includes('+')],
           ['pass_td','Pass TD',   m=>has(m,'passing touchdown')&&!m.includes('+')],
           ['pass_att','Pass Att', m=>has(m,'passing attempt')&&!m.includes('+')],
@@ -738,8 +737,13 @@ const SPORTS = {
           ['spread','Spread',     spreadMatch],
           ['total','Total',       totalMatch],
           ['tt','Team Total',     ttMatch],
-        ]},
+        ];
+// College sports reuse the pro market lists (and the pro stat lookups via `base`).
+const SPORTS = {
+  nfl:  { label:'NFL',  sport:'football',   league:'nfl',  days:7, markets:NFL_MKTS },
+  cfb:  { label:'CFB',  sport:'football',   league:'ncaaf', days:7, markets:NFL_MKTS, base:'nfl' },
   nba:  { label:'NBA',  sport:'basketball', league:'nba',  days:2, markets:NBA_MKTS },
+  ncaab:{ label:'NCAAB', sport:'basketball', league:'ncaab', days:2, markets:NBA_MKTS, base:'nba' },
   wnba: { label:'WNBA', sport:'basketball', league:'wnba', days:2, markets:NBA_MKTS },
   nhl:  { label:'NHL',  sport:'hockey',     league:'nhl',  days:2, markets:[
           // "Most X Player" is a leaderboard/outright market (one winner across the whole game),
@@ -1250,12 +1254,15 @@ function betTarget(b, sd, o, ctxKey, key){
 const sportCacheKey = sk => `props_cache_${sk}`;
 const todayKey = () => etDateKey(new Date().toISOString());
 function saveSportCache(sk){
+  sportMem[sk]={ day:todayKey(), data:{ fixtures, mainRows, players, at:loadedAt } };
   try{
     const playersOut=players.map(p=>({...p, pids:[...p.pids], marketKeys:[...p.marketKeys]}));
     LS.set(sportCacheKey(sk), JSON.stringify({ day:todayKey(), fixtures, mainRows, players:playersOut, at:loadedAt }));
   }catch(e){ console.warn('[props] cache save failed', e.message); }
 }
+const sportMem={};   // sk -> {day, data}: in-memory copy of each sport's latest load
 function loadSportCache(sk){
+  const m=sportMem[sk]; if(m && m.day===todayKey()) return m.data;
   try{
     const raw=JSON.parse(LS.get(sportCacheKey(sk),'null')); if(!raw || raw.day!==todayKey()) return null;
     return { fixtures:raw.fixtures, mainRows:raw.mainRows, at:raw.at,
@@ -1271,8 +1278,95 @@ function purgeStaleSportCaches(){
     });
   }catch(e){}
 }
+// Everything a sport needs (fixtures in its window, main + prop lines from every book, the indexed
+// players/teams/games) fetched WITHOUT touching the on-screen globals -- so the parlay tool can load
+// any sport in the background, and loadSport just assigns the result for the sport on screen.
+async function fetchSportData(sk, status){
+  const S=SPORTS[sk]; const say=t=>{ if(status) status(t); };
+  say(`${S.label} · loading fixtures…`);
+  const raw=[]; let page=1;
+  for(let i=0;i<30;i++){ const r=await oo('/fixtures',{sport:S.sport,league:S.league,page}); (r?.data||[]).forEach(f=>raw.push(f)); if(!r?.has_more) break; page++; }
+  const now=Date.now();
+  // Team sports: next `days` days (NFL = the whole week). UFC: every upcoming fight, then the next 2 cards.
+  const upper = S.ml ? Infinity : now+(S.days||1)*24*3600e3;
+  let fx = raw.filter(f=>{ const t=new Date(f.start_date).getTime(); return t>=now-4*3600e3 && t<=upper && f.status!=='completed' && f.status!=='cancelled'; })
+    .map(f=>({ id:f.id, start:f.start_date, status:f.status, live:!!f.is_live, card:(f.tournament?.name)||etDateKey(f.start_date),
+      home:{id:f.home_competitors?.[0]?.id, name:f.home_competitors?.[0]?.name||f.home_team_display||'', ab:f.home_competitors?.[0]?.abbreviation||'', logo:f.home_competitors?.[0]?.logo||''},
+      away:{id:f.away_competitors?.[0]?.id, name:f.away_competitors?.[0]?.name||f.away_team_display||'', ab:f.away_competitors?.[0]?.abbreviation||'', logo:f.away_competitors?.[0]?.logo||''} }))
+    .sort((a,b)=>new Date(a.start)-new Date(b.start));
+  if(S.ml){
+    const order=[]; fx.forEach(f=>{ if(!order.includes(f.card)) order.push(f.card); });
+    const keep=new Set(order.slice(0,2));
+    fx=fx.filter(f=>keep.has(f.card));
+  }
+  console.log(`[props] ${S.label} fixtures: ${raw.length} fetched, ${fx.length} in window`);
+  if(!fx.length) return { fixtures:[], mainRows:[], players:[], injuries:null, at:Date.now() };
+  // injuries (best-effort; schema read defensively)
+  let inj=null;
+  if(!S.ml){ try{ say(`${S.label} · loading injuries…`); inj=await fetchInjuriesList(S); }catch(e){ console.warn('[props] injuries failed',e.message); } }
+  // main lines, 5 fixtures × 5 books per call
+  const rows=[]; let done=0; const fxChunks=chunk(fx,5), bkChunks=chunk(bookReqFor(sk),5); const total=fxChunks.length*bkChunks.length;
+  for(const fc of fxChunks) for(const bk of bkChunks){
+    say(`${S.label} · loading lines ${++done}/${total}…`);
+    try{ const r=await oo('/fixtures/odds',{fixture_id:fc.map(f=>f.id),sportsbook:bk,is_main:true}); (r?.data||[]).forEach(d=>(d.odds||[]).forEach(o=>{ o._fx=d.id; if(mainBookRow(sk,o)) rows.push(o); })); }
+    catch(e){ console.warn('[props] chunk failed',e.message); }
+  }
+  // index players from prop rows (player_id set) or fighters from moneyline selections (UFC)
+  // — team totals are the one entity here that's never a player: no player_id, selection is a
+  // TEAM name, so they're indexed separately, keyed and labeled off the fixture's own home/away
+  // names rather than off a player_id.
+  const idx={};
+  rows.forEach(o=>{
+    const mk=marketKeyFor(sk,o.market); if(!mk) return;
+    // Game total: selection is "Over"/"Under", not a team -- one pseudo-entry per fixture.
+    if(GAME_MKS.has(mk)){
+      const key='game:'+o._fx;
+      if(!idx[key]) idx[key]={ key, name:'Total', pid:null, pids:new Set(), fixtureId:o._fx, marketKeys:new Set(), isTeam:false, isGame:true, teamSide:null };
+      idx[key].marketKeys.add(mk);
+      return;
+    }
+    const sel=cleanSel(o.selection||o.name); if(!sel) return;
+    const isTeamLevel = TEAM_MKS.has(mk);
+    if(!S.ml && !isTeamLevel && !o.player_id) return;
+    if(!isTeamLevel && isCombo(sel)) return;         // two-player combos are not players
+    // A 3-way market (fight winner, or NHL's 60-min regulation moneyline, which can end tied
+    // before OT/SO) posts a real "Draw"/"Tie" selection alongside the two real sides -- that's
+    // not a team or fighter, so it never becomes a pseudo-entity of its own.
+    if((S.ml||isTeamLevel) && /^(draw|tie|no contest|neither|either)\b/.test(normName(sel))) return;
+    const key=normName(sel); if(!key) return;
+    if(!idx[key]){
+      idx[key]={ key, name:sel, pid:o.player_id||null, pids:new Set(), fixtureId:o._fx, marketKeys:new Set(), isTeam:isTeamLevel };
+      if(isTeamLevel){
+        const f=fx.find(x=>x.id===o._fx);
+        idx[key].teamSide = f && normName(f.home.name)===key ? 'home' : f && normName(f.away.name)===key ? 'away' : null;
+      }
+    }
+    if(o.player_id){ idx[key].pids.add(o.player_id); if(!idx[key].pid) idx[key].pid=o.player_id; }
+    idx[key].marketKeys.add(mk);
+  });
+  const pl=Object.values(idx).sort((a,b)=>a.name.localeCompare(b.name));
+  return { fixtures:fx, mainRows:rows, players:pl, injuries:inj, at:Date.now() };
+}
+function saveSportCacheData(sk, d){
+  sportMem[sk]={ day:todayKey(), data:d };
+  try{
+    const playersOut=d.players.map(p=>({...p, pids:[...p.pids], marketKeys:[...p.marketKeys]}));
+    LS.set(sportCacheKey(sk), JSON.stringify({ day:todayKey(), fixtures:d.fixtures, mainRows:d.mainRows, players:playersOut, at:d.at }));
+  }catch(e){ console.warn('[props] cache save failed', e.message); }
+}
+// A sport's data for the parlay tool without opening its tab: today's cache when it's fresher than
+// maxAge, otherwise a background fetch (saved to the cache for next time). One fetch per sport at a
+// time even if asked for repeatedly.
+const sportFetching={};
+async function ensureSportData(sk, maxAge=10*60e3, status){
+  if(sk===sportKey && mainRows.length && loadedAt && Date.now()-loadedAt<maxAge) return { fixtures, mainRows, players, at:loadedAt };
+  const c=loadSportCache(sk);
+  if(c && c.at && Date.now()-c.at<maxAge) return c;
+  if(!sportFetching[sk]) sportFetching[sk]=fetchSportData(sk, status).then(d=>{ saveSportCacheData(sk,d); if(d.injuries) injuriesBySport[sk]={list:d.injuries, at:Date.now()}; return d; }).finally(()=>{ delete sportFetching[sk]; });
+  try{ return await sportFetching[sk]; }catch(e){ console.warn('[props] background load failed for',sk,e.message); return c; }
+}
 async function loadSport(force){
-  const S=SPORTS[sportKey]; const stat=$('#stat');
+  const S=SPORTS[sportKey]; const stat=$('#stat'); const sk=sportKey;
   if(!force && loadedAt && Date.now()-loadedAt<180000 && mainRows.length){ stat.textContent=`${S.label} · ${players.length} players · cached`; return; }
   if(!force && !mainRows.length){
     const cached=loadSportCache(sportKey);
@@ -1283,88 +1377,21 @@ async function loadSport(force){
       else if(viewMode==='sport') renderSlate();
     }
   }
-  stat.textContent=`${S.label} · loading fixtures…`;
   try{
-    const raw=[]; let page=1;
-    for(let i=0;i<30;i++){ const r=await oo('/fixtures',{sport:S.sport,league:S.league,page}); (r?.data||[]).forEach(f=>raw.push(f)); if(!r?.has_more) break; page++; }
-    const now=Date.now();
-    // Team sports: next `days` days (NFL = the whole week). UFC: every upcoming fight, then the next 2 cards.
-    const upper = S.ml ? Infinity : now+(S.days||1)*24*3600e3;
-    fixtures = raw.filter(f=>{ const t=new Date(f.start_date).getTime(); return t>=now-4*3600e3 && t<=upper && f.status!=='completed' && f.status!=='cancelled'; })
-      .map(f=>({ id:f.id, start:f.start_date, status:f.status, live:!!f.is_live, card:(f.tournament?.name)||etDateKey(f.start_date),
-        home:{id:f.home_competitors?.[0]?.id, name:f.home_competitors?.[0]?.name||f.home_team_display||'', ab:f.home_competitors?.[0]?.abbreviation||'', logo:f.home_competitors?.[0]?.logo||''},
-        away:{id:f.away_competitors?.[0]?.id, name:f.away_competitors?.[0]?.name||f.away_team_display||'', ab:f.away_competitors?.[0]?.abbreviation||'', logo:f.away_competitors?.[0]?.logo||''} }))
-      .sort((a,b)=>new Date(a.start)-new Date(b.start));
-    if(S.ml){
-      const order=[]; fixtures.forEach(f=>{ if(!order.includes(f.card)) order.push(f.card); });
-      const keep=new Set(order.slice(0,2));
-      fixtures=fixtures.filter(f=>keep.has(f.card));
-      console.log('[props] UFC cards kept:', [...keep]);
-    }
-    console.log(`[props] ${S.label} fixtures: ${raw.length} fetched, ${fixtures.length} in window`, fixtures.map(f=>`${f.away.ab||f.away.name}@${f.home.ab||f.home.name} ${f.status}`));
-    if(!fixtures.length){ stat.textContent=`${S.label} · no games in the next 30h`; mainRows=[]; players=[]; loadedAt=Date.now(); saveSportCache(sportKey); return; }
-    // injuries (best-effort; schema read defensively)
-    stat.textContent=`${S.label} · loading injuries…`;
+    const d=await fetchSportData(sk, t=>{ if(sportKey===sk) stat.textContent=t; });
+    if(sportKey!==sk) { saveSportCacheData(sk,d); return; }   // user switched tabs mid-load
+    fixtures=d.fixtures; mainRows=d.mainRows; players=d.players; loadedAt=d.at;
     injuries={ byPid:{}, byName:{}, at:Date.now() };
-    if(!S.ml){ try{
-      const list=await fetchInjuriesList(S);
-      list.forEach(rec=>{ if(rec.pid) injuries.byPid[rec.pid]=rec; if(rec.name) injuries.byName[normName(rec.name)]=rec; });
-      injuriesBySport[sportKey]={ list, at:Date.now() };
-      console.log(`[props] injuries: ${list.length} entries`);
-    }catch(e){ console.warn('[props] injuries failed',e.message); } }
-    // main lines, 5 fixtures × 5 books per call
-    mainRows=[]; let done=0; const fxChunks=chunk(fixtures,5), bkChunks=chunk(bookReqFor(sportKey),5); const total=fxChunks.length*bkChunks.length;
-    for(const fx of fxChunks) for(const bk of bkChunks){
-      stat.textContent=`${S.label} · loading lines ${++done}/${total}…`;
-      try{ const r=await oo('/fixtures/odds',{fixture_id:fx.map(f=>f.id),sportsbook:bk,is_main:true}); (r?.data||[]).forEach(d=>(d.odds||[]).forEach(o=>{ o._fx=d.id; if(mainBookRow(sportKey,o)) mainRows.push(o); })); }
-      catch(e){ console.warn('[props] chunk failed',e.message); }
-    }
-    // index players from prop rows (player_id set) or fighters from moneyline selections (UFC)
-    // — team totals are the one entity here that's never a player: no player_id, selection is a
-    // TEAM name, so they're indexed separately, keyed and labeled off the fixture's own home/away
-    // names rather than off a player_id.
-    const idx={}; const multiPid={};
-    mainRows.forEach(o=>{
-      const mk=marketKeyFor(sportKey,o.market); if(!mk) return;
-      // Game total: selection is "Over"/"Under", not a team -- one pseudo-entry per fixture.
-      if(GAME_MKS.has(mk)){
-        const key='game:'+o._fx;
-        if(!idx[key]){
-          const f=fixtures.find(x=>x.id===o._fx);
-          idx[key]={ key, name:'Total', pid:null, pids:new Set(), fixtureId:o._fx, marketKeys:new Set(), isTeam:false, isGame:true, teamSide:null };
-        }
-        idx[key].marketKeys.add(mk);
-        return;
-      }
-      const sel=cleanSel(o.selection||o.name); if(!sel) return;
-      const isTeamLevel = TEAM_MKS.has(mk);
-      if(!S.ml && !isTeamLevel && !o.player_id) return;
-      if(!isTeamLevel && isCombo(sel)) return;         // two-player combos are not players
-      // A 3-way market (fight winner, or NHL's 60-min regulation moneyline, which can end tied
-      // before OT/SO) posts a real "Draw"/"Tie" selection alongside the two real sides -- that's
-      // not a team or fighter, so it never becomes a pseudo-entity of its own.
-      if((S.ml||isTeamLevel) && /^(draw|tie|no contest|neither|either)\b/.test(normName(sel))) return;
-      const key=normName(sel); if(!key) return;
-      if(!idx[key]){
-        idx[key]={ key, name:sel, pid:o.player_id||null, pids:new Set(), fixtureId:o._fx, marketKeys:new Set(), isTeam:isTeamLevel };
-        if(isTeamLevel){
-          const f=fixtures.find(x=>x.id===o._fx);
-          idx[key].teamSide = f && normName(f.home.name)===key ? 'home' : f && normName(f.away.name)===key ? 'away' : null;
-        }
-      }
-      if(o.player_id){ idx[key].pids.add(o.player_id); if(!idx[key].pid) idx[key].pid=o.player_id; }
-      idx[key].marketKeys.add(mk);
-    });
-    players=Object.values(idx).sort((a,b)=>a.name.localeCompare(b.name));
+    if(d.injuries){ d.injuries.forEach(rec=>{ if(rec.pid) injuries.byPid[rec.pid]=rec; if(rec.name) injuries.byName[normName(rec.name)]=rec; }); injuriesBySport[sk]={ list:d.injuries, at:Date.now() }; }
+    if(!fixtures.length){ stat.textContent=`${S.label} · no games in the next 30h`; saveSportCache(sk); return; }
     players.filter(p=>p.pids.size>1).slice(0,3).forEach(p=>console.log('[props] same name, multiple player_ids:', p.name, [...p.pids]));
-    loadedAt=Date.now();
     console.log('[props] deep links present:', mainRows.some(o=>o.deep_link && (o.deep_link.ios||o.deep_link.desktop)));
     const seenMk=[...new Set(mainRows.map(o=>o.market))]; console.log('[props] markets seen:',seenMk);
     if(S.ml) console.log('[props] moneyline-ish markets seen:', seenMk.filter(m=>/moneyline|winner|win /i.test(m)), '| kept:', seenMk.filter(m=>MMA_ML.has(String(m).toLowerCase()))); console.log('[props] books seen:',[...new Set(mainRows.map(o=>o.sportsbook))]);
     stat.textContent= S.ml ? `UFC · ${[...new Set(fixtures.map(f=>f.card))].join(' + ')} · ${players.length} fighters`
                            : `${S.label} · ${fixtures.length} games · ${[...new Set(fixtures.map(f=>etDateKey(f.start)))].length}d · ${players.length} players`;
     if(current){ const again=players.find(p=>p.key===current.key); if(again) openPlayer(again, curMktIdx); }
-    saveSportCache(sportKey);
+    saveSportCache(sk);
   }catch(e){
     console.error(e); stat.textContent=`${S.label} · load failed`;
     $('#view').innerHTML=`<div class="err">${esc(e.message)}<br><span class="dim">Check the backend URL via ⚙.</span></div>`;
@@ -2957,14 +2984,25 @@ function buildAutoCandidatesAllLeagues(){
   out.sort((a,b)=>b.edgePct-a.edgePct);
   return out;
 }
-function runAutoBuild(){
+// Loads whatever leagues the build needs in the background first (no need to have opened their
+// tabs), then builds. "Any" = every league with games in its window (or not counted yet).
+async function runAutoBuild(){
+  const crossLeague = autoLeague==='any';
+  const targets = crossLeague ? Object.keys(SPORTS).filter(k=>sportGameCounts[k]==null || sportGameCounts[k]>0) : [autoLeague||sportKey];
+  const btn=$('#autoGenerate'); const btnTxt=btn?.textContent;
+  if(btn){ btn.disabled=true; btn.textContent=`Loading ${targets.map(k=>SPORTS[k].label).join(', ')} lines…`; }
+  try{ await Promise.all(targets.map(sk=>ensureSportData(sk))); }
+  finally{ if(btn){ btn.disabled=false; btn.textContent=btnTxt; } }
+  runAutoBuildNow();
+}
+function runAutoBuildNow(){
   const crossLeague = autoLeague==='any';
   const targetLeague = crossLeague ? null : (autoLeague || sportKey);
   const usingOtherLeague = !crossLeague && targetLeague!==sportKey;
   let saved=null;
   if(usingOtherLeague){
     const cache=loadSportCache(targetLeague);
-    if(!cache){ toast(`Open the ${SPORTS[targetLeague].label} tab once today first -- no data cached for it yet`); return; }
+    if(!cache){ toast(`Couldn't load ${SPORTS[targetLeague].label} lines -- try again`); return; }
     saved={ sportKey, fixtures, mainRows, players };
     sportKey=targetLeague; fixtures=cache.fixtures; mainRows=cache.mainRows; players=cache.players;
   }
@@ -3067,7 +3105,8 @@ function bindAutoBuild(view){
   view.querySelectorAll('[data-autoleg]').forEach(b=>b.addEventListener('click',()=>{
     autoLegs=Math.max(1,Math.min(10,autoLegs+Number(b.dataset.autoleg))); LS.set('props_autolegs',String(autoLegs)); renderParlay();
   }));
-  $('#autoLeagueSel')?.addEventListener('change',e=>{ autoLeague=e.target.value; autoFixture=''; renderParlay(); });
+  $('#autoLeagueSel')?.addEventListener('change',e=>{ autoLeague=e.target.value; autoFixture=''; renderParlay();
+    if(autoLeague && autoLeague!=='any' && autoLeague!==sportKey && !loadSportCache(autoLeague)) ensureSportData(autoLeague).then(()=>{ if(viewMode==='parlay') renderParlay(); }); });
   $('#autoSgpBtn')?.addEventListener('click',()=>{ autoSGP=!autoSGP; LS.set('props_autosgp',autoSGP?'1':''); if(!autoSGP) autoFixture=''; renderParlay(); });
   $('#autoFixtureSel')?.addEventListener('change',e=>{ autoFixture=e.target.value; });
   view.querySelectorAll('[data-scope]').forEach(b=>b.addEventListener('click',()=>{
@@ -3159,7 +3198,13 @@ function renderParlay(){
   view.querySelectorAll('[data-plrm]').forEach(b=>b.addEventListener('click',()=>removeFromParlay(b.dataset.plrm)));
   $('#stat').textContent=`Parlay · ${parlay.length} leg${parlay.length===1?'':'s'}`;
 }
-function openParlay(){ viewMode='parlay'; current=null; clearInterval(trackerTimer); $('.sw').style.display='none'; renderTabs(); renderParlay(); }
+// Legs from sports other than the one on screen price off that sport's cached lines -- refresh any
+// that are more than 5 minutes old in the background and re-render when they land.
+function refreshParlayLegSports(){
+  const sks=[...new Set(parlay.map(l=>l.sportKey).filter(sk=>sk && sk!==sportKey && SPORTS[sk]))];
+  sks.forEach(sk=>ensureSportData(sk, 5*60e3).then(()=>{ if(viewMode==='parlay') renderParlay(); }));
+}
+function openParlay(){ refreshParlayLegSports(); viewMode='parlay'; current=null; clearInterval(trackerTimer); $('.sw').style.display='none'; renderTabs(); renderParlay(); }
 // stat resolution from /fixtures/player-results
 const STAT_CANDS = {
   pts:['points','pts'], reb:['rebounds','total_rebounds','reb'], ast:['assists','ast'], '3pm':['three_point_field_goals_made','three_pointers_made','three_points_made','threes_made','3pm','three_pointers'],
@@ -3174,8 +3219,9 @@ function statFor(r, mkey, sportKey, marketNames){
   for(const mn of (marketNames||[])){ if(ms[mn]!=null) return Number(ms[mn]); const k=Object.keys(ms).find(x=>x.toLowerCase()===String(mn).toLowerCase()); if(k) return Number(ms[k]); }
   const get=k=>{ for(const c of (STAT_CANDS[k]||[])) if(all[c]!=null) return Number(all[c]); const flat=k.replace(/_/g,''); const kk=Object.keys(all).find(x=>x.toLowerCase().replace(/_/g,'')===flat); return kk?Number(all[kk]):null; };
   const sum=(...ks)=>{ const v=ks.map(get); return v.some(x=>x==null)?null:v.reduce((a,b)=>a+b,0); };
-  if(sportKey==='nfl'){ if(mkey==='atd'){ const t=sum('rushing_touchdowns','receiving_touchdowns'); return t; } return get(mkey); }
-  if(sportKey==='nhl'){ if(mkey==='pts') return get('points'); return get(mkey); }
+  const base=SPORTS[sportKey]?.base||sportKey;
+  if(base==='nfl'){ if(mkey==='atd'){ const t=sum('rushing_touchdowns','receiving_touchdowns'); return t; } return get(mkey); }
+  if(base==='nhl'){ if(mkey==='pts') return get('points'); return get(mkey); }
   if(mkey==='pra') return sum('pts','reb','ast'); if(mkey==='pr') return sum('pts','reb'); if(mkey==='pa') return sum('pts','ast'); if(mkey==='ra') return sum('reb','ast');
   return get(mkey);
 }
