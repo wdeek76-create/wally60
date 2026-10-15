@@ -897,58 +897,106 @@ function liqFor(b,o){
   if(SHOW_MAX.has(b.key) && o.limits?.max!=null) return usd(Number(o.limits.max));
   return null;
 }
-// Draws a shareable card for whatever market is currently open -- player header, both Over and
-// Under, every book's price plus its liq/max figure -- as an actual PNG instead of plain text, so
-// the iOS share sheet can hand it straight to Messages as an image attachment.
+// ── share images: drawn on a canvas from the app's own look (theme colors off the live CSS
+// vars, Sora/IBM Plex Mono, rounded book rows with logos, the PocketMarket wordmark) so a saved
+// image reads like a screenshot of the app, not a generic table. Logos that can't be read
+// cross-origin fall back to the same short-name tile the app shows when a logo is missing.
+function shareTheme(){
+  const cs=getComputedStyle(document.documentElement); const v=n=>cs.getPropertyValue(n).trim();
+  return { bg:v('--bg')||'#000', bg2:v('--bg2')||'#0d0d0f', bg3:v('--bg3')||'#17181b', line:v('--line2')||'#28282c', text:v('--text')||'#fff', green:v('--green')||'#22c55e', red:v('--red')||'#ff5c5c', ov:v('--ov')||'#4ade80', un:v('--un')||'#fb7185',
+    sans:"Sora,'Helvetica Neue',Helvetica,Arial,sans-serif", mono:"'IBM Plex Mono',Menlo,monospace" };
+}
+async function shareFontsReady(){ try{ await Promise.race([Promise.all(['700 20px Sora','800 20px Sora','600 14px Sora','600 14px "IBM Plex Mono"','700 14px "IBM Plex Mono"'].map(f=>document.fonts.load(f))), new Promise(r=>setTimeout(r,1500))]); }catch(e){} }
+function shareImg(url){
+  if(!url) return Promise.resolve(null);
+  return new Promise(res=>{ const im=new Image(); let done=false; const fin=v=>{ if(!done){ done=true; res(v); } };
+    if(!String(url).startsWith('data:')) im.crossOrigin='anonymous';
+    im.onload=()=>fin(im); im.onerror=()=>fin(null); setTimeout(()=>fin(null),2500); im.src=url; });
+}
+function rrect(c,x,y,w,h,r){ c.beginPath(); c.moveTo(x+r,y); c.arcTo(x+w,y,x+w,y+h,r); c.arcTo(x+w,y+h,x,y+h,r); c.arcTo(x,y+h,x,y,r); c.arcTo(x,y,x+w,y,r); c.closePath(); }
+function shareAlpha(col,a){ const m=/^#([0-9a-f]{6})$/i.exec(col); if(!m) return col; const n=parseInt(m[1],16); return `rgba(${n>>16},${(n>>8)&255},${n&255},${a})`; }
+function shareCanvas(W,H){ const k=2, cv=document.createElement('canvas'); cv.width=W*k; cv.height=H*k; const c=cv.getContext('2d'); c.scale(k,k); return {cv,c}; }
+async function shareLogos(keys){ const out={}; await Promise.all([...new Set(keys)].map(async k=>{ out[k]=await shareImg(bookLogo(k)); })); return out; }
+function drawLogoTile(c,T,x,y,sz,img,k){
+  c.save(); rrect(c,x,y,sz,sz,6); c.clip();
+  if(img){ c.drawImage(img,x,y,sz,sz); }
+  else { c.fillStyle=T.bg3; c.fillRect(x,y,sz,sz); c.fillStyle=T.text; c.font=`700 ${Math.round(sz*.32)}px ${T.sans}`; c.textAlign='center'; c.textBaseline='middle'; c.fillText(bookShort(k),x+sz/2,y+sz/2+1); }
+  c.restore(); c.textAlign='left'; c.textBaseline='alphabetic';
+}
+// One book row like the app's board rows: logo tile, book name, price right, liq/cents under it.
+function drawBookRow(c,T,x,y,w,h,r){
+  rrect(c,x,y,w,h,12); c.fillStyle=r.highlight?shareAlpha(T.green,.14):T.bg2; c.fill();
+  c.lineWidth=1; c.strokeStyle=r.highlight?shareAlpha(T.green,.55):T.line; c.stroke();
+  const sz=28; drawLogoTile(c,T,x+12,y+(h-sz)/2,sz,r.img,r.key);
+  c.fillStyle=T.text; c.font=`700 15px ${T.sans}`; c.textBaseline='middle';
+  c.fillText(r.name, x+12+sz+10, y+h/2+(r.nameSub?-7:0));
+  if(r.nameSub){ c.globalAlpha=.6; c.font=`600 11px ${T.mono}`; c.fillText(r.nameSub, x+12+sz+10, y+h/2+10); c.globalAlpha=1; }
+  c.textAlign='right'; c.font=`800 18px ${T.sans}`; c.fillStyle=T.text;
+  c.fillText(fmtAm(r.price), x+w-14, y+h/2+(r.sub?-7:0));
+  if(r.sub){ c.globalAlpha=.7; c.font=`600 11px ${T.mono}`; c.fillText(r.sub, x+w-14, y+h/2+11); c.globalAlpha=1; }
+  if(r.arrow){ c.font=`700 12px ${T.sans}`; c.fillStyle=r.arrow==='▼'?T.green:T.red; c.fillText(r.arrow, x+w-14-c.measureText(fmtAm(r.price)).width-26, y+h/2); }
+  c.textAlign='left'; c.textBaseline='alphabetic';
+}
+function drawShareHeader(c,T,W,{title,sub,pill,avatar,initials}){
+  const hh=pill?148:112;
+  rrect(c,16,16,W-32,hh,18); c.fillStyle=T.bg2; c.fill(); c.lineWidth=1; c.strokeStyle=T.line; c.stroke();
+  const g=c.createLinearGradient(16,16,W*.6,140); g.addColorStop(0,shareAlpha(T.green,.16)); g.addColorStop(1,shareAlpha(T.green,0));
+  c.save(); rrect(c,16,16,W-32,hh,18); c.clip(); c.fillStyle=g; c.fillRect(16,16,W-32,hh); c.restore();
+  const ax=36, ay=40, as=64;
+  c.save(); c.beginPath(); c.arc(ax+as/2,ay+as/2,as/2,0,Math.PI*2); c.fillStyle=T.bg3; c.fill(); c.lineWidth=2; c.strokeStyle=T.line; c.stroke(); c.clip();
+  if(avatar) c.drawImage(avatar,ax,ay,as,as); else { c.fillStyle=T.text; c.font=`800 22px ${T.sans}`; c.textAlign='center'; c.textBaseline='middle'; c.fillText(initials,ax+as/2,ay+as/2+1); }
+  c.restore(); c.textAlign='left'; c.textBaseline='alphabetic';
+  const tx=ax+as+16;
+  c.fillStyle=T.text; c.font=`800 26px ${T.sans}`; c.fillText(title, tx, 72);
+  c.globalAlpha=.75; c.font=`600 13px ${T.mono}`; c.fillText(sub, tx, 96); c.globalAlpha=1;
+  if(pill){
+    c.font=`700 15px ${T.mono}`; const lw=pill.line!=null?c.measureText(String(pill.line)).width:0;
+    c.font=`700 15px ${T.sans}`; const tw=c.measureText(pill.label).width; const pw=tw+(pill.line!=null?lw+10:0)+28;
+    rrect(c,tx,112,pw,34,17); c.fillStyle=shareAlpha(T.green,.16); c.fill(); c.strokeStyle=shareAlpha(T.green,.6); c.stroke();
+    c.fillStyle=T.text; c.textBaseline='middle'; c.fillText(pill.label, tx+14, 130);
+    if(pill.line!=null){ c.fillStyle=T.green; c.font=`700 15px ${T.mono}`; c.fillText(String(pill.line), tx+14+tw+10, 130); }
+    c.textBaseline='alphabetic';
+  }
+}
+function drawShareFooter(c,T,W,H,left){
+  c.font=`700 15px ${T.sans}`; c.textAlign='right';
+  const mk='Market', pk='Pocket'; const mw=c.measureText(mk).width;
+  c.fillStyle=T.green; c.fillText(mk, W-24, H-20); c.fillStyle=T.text; c.fillText(pk, W-24-mw, H-20);
+  if(left){ c.textAlign='left'; c.globalAlpha=.6; c.font=`600 12px ${T.mono}`; c.fillText(left, 24, H-20); c.globalAlpha=1; }
+  c.textAlign='left';
+}
+function shareSectionLabel(c,T,x,y,label,col){ c.fillStyle=col||T.text; c.font=`700 12px ${T.mono}`; c.fillText(label.toUpperCase(), x, y); }
 async function buildShareImageBlob(p, mkey){
+  await shareFontsReady(); const T=shareTheme();
   const f=fixtures.find(x=>x.id===p.fixtureId);
   const line=lineForMarket(p,mkey);
   const ctx=`${p.key}|${mkey}`;
-  const rows=cardRows(p,mkey,ctx);
-  const list=bookBoard(rows);
+  const list=bookBoard(cardRows(p,mkey,ctx));
   const single=list.every(b=>!b.over&&!b.under);
   const overSorted=single?[]:list.filter(b=>b.over).sort((a,b)=>toDec(b.over.price)-toDec(a.over.price));
   const underSorted=single?[]:list.filter(b=>b.under).sort((a,b)=>toDec(b.under.price)-toDec(a.under.price));
-  const singleSorted=single?list.filter(b=>b.single).sort((a,b)=>Number(b.single.price)-Number(b.single.price)):[];
-  const W=640, pad=24, rowH=46, colGap=20;
-  const colW=single ? (W-pad*2) : (W-pad*2-colGap)/2;
-  const rowsNeeded=single ? singleSorted.length : Math.max(overSorted.length,underSorted.length);
-  const headerH=110, colHeadH=34, footH=40;
-  const H=headerH+colHeadH+Math.max(1,rowsNeeded)*rowH+footH;
-  const canvas=document.createElement('canvas');
-  canvas.width=W; canvas.height=H;
-  const c=canvas.getContext('2d');
-  c.fillStyle='#10131a'; c.fillRect(0,0,W,H);
-  c.fillStyle='#ffffff'; c.font='700 26px -apple-system,Helvetica,Arial';
-  c.fillText(titleCase(p.name), pad, 42);
-  c.fillStyle='#9aa4b2'; c.font='400 14px -apple-system,Helvetica,Arial';
-  const matchup = f ? (SPORTS[sportKey].ml
-    ? `vs ${titleCase(normName(f.home.name)===p.key?f.away.name:f.home.name)}`
-    : `${f.away.ab||f.away.name} @ ${f.home.ab||f.home.name}`) : '';
-  c.fillText(matchup, pad, 64);
-  c.fillStyle='#22c55e'; c.font='700 17px -apple-system,Helvetica,Arial';
-  c.fillText(`${marketLabel(sportKey,mkey)}${line!=null?' '+line:''}`, pad, 90);
-  const drawRows = (rowsList, x, label, sideKey) => {
-    if(label){ c.fillStyle='#ffffff'; c.globalAlpha=.55; c.font='700 12px -apple-system,Helvetica,Arial'; c.fillText(label.toUpperCase(), x, headerH+colHeadH-12); c.globalAlpha=1; }
-    rowsList.forEach((b,i)=>{
-      const y=headerH+colHeadH+i*rowH;
-      if(i%2===1){ c.fillStyle='rgba(255,255,255,.03)'; c.fillRect(x-10,y-rowH+16,colW+20,rowH-6); }
-      const o=sideKey?b[sideKey]:b.single;
-      c.fillStyle='#e8ebf0'; c.font='400 14px -apple-system,Helvetica,Arial'; c.textAlign='left';
-      c.fillText(bookLabel(b.key), x, y);
-      c.fillStyle = Number(o.price)>0 ? '#22c55e' : '#ffffff';
-      c.font='700 16px -apple-system,Helvetica,Arial'; c.textAlign='right';
-      c.fillText(fmtAm(o.price), x+colW, y);
-      c.textAlign='left';
-      const liq=liqFor(b,o);
-      if(liq){ c.fillStyle='#7d8694'; c.font='400 11px -apple-system,Helvetica,Arial'; c.fillText(liq, x, y+16); }
-    });
+  const singleSorted=single?list.filter(b=>b.single).sort((a,b)=>Number(b.single.price)-Number(a.single.price)):[];
+  const logos=await shareLogos(list.map(b=>b.key));
+  const domAvatar = p===current ? document.querySelector('.pcard .hs img')?.src : null;
+  const teamLg = p.isTeam && f ? (p.teamSide==='home'?f.home.logo:p.teamSide==='away'?f.away.logo:'') : '';
+  const avatar = await shareImg(domAvatar || teamLg);
+  const W=640, rowH=58, gap=8, colGap=12, top=184;
+  const colW = single ? W-32 : (W-32-colGap)/2;
+  const n = single ? singleSorted.length : Math.max(overSorted.length, underSorted.length);
+  const H = top + 26 + Math.max(1,n)*(rowH+gap) + 44;
+  const {cv,c}=shareCanvas(W,H);
+  c.fillStyle=T.bg; c.fillRect(0,0,W,H);
+  const matchup = f ? (SPORTS[sportKey].ml ? `vs ${titleCase(normName(f.home.name)===p.key?f.away.name:f.home.name)}` : `${f.away.ab||f.away.name} @ ${f.home.ab||f.home.name}`) : '';
+  drawShareHeader(c,T,W,{ title:titleCase(p.name), sub:[matchup, f?.start?`${etDay(f.start)} ${etTime(f.start)}`:''].filter(Boolean).join(' · '), pill:{label:marketLabel(sportKey,mkey), line}, avatar, initials:p.name.split(' ').map(w=>w[0]).slice(0,2).join('').toUpperCase() });
+  const col=(rowsList,x,label,color,sideKey)=>{
+    shareSectionLabel(c,T,x+4,top+12,label,color);
+    rowsList.forEach((b,i)=>{ const o=sideKey?b[sideKey]:b.single; const liq=liqFor(b,o);
+      drawBookRow(c,T,x,top+26+i*(rowH+gap),colW,rowH,{ key:b.key, img:logos[b.key], name:single?bookLabel(b.key):bookShort(b.key), price:o.price, sub:[b.ex?winPct(o.price)+'¢':'', liq||''].filter(Boolean).join(' · ') }); });
   };
-  if(single){ drawRows(singleSorted, pad, SPORTS[sportKey].ml?'ML':'Yes', 'single'); }
-  else { drawRows(overSorted, pad, 'Over', 'over'); drawRows(underSorted, pad+colW+colGap, 'Under', 'under'); }
-  c.fillStyle='#ffffff'; c.globalAlpha=.4; c.font='700 13px -apple-system,Helvetica,Arial'; c.textAlign='right';
-  c.fillText('Pocket Market', W-pad, H-16); c.globalAlpha=1; c.textAlign='left';
-  return new Promise(resolve=>canvas.toBlob(b=>resolve(b),'image/png'));
+  if(single) col(singleSorted,16,SPORTS[sportKey].ml?'Moneyline':'Yes',T.green,null);
+  else { col(overSorted,16,'Over',T.ov,'over'); col(underSorted,16+colW+colGap,'Under',T.un,'under'); }
+  drawShareFooter(c,T,W,H,`Updated ${new Date().toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})}`);
+  return new Promise(resolve=>cv.toBlob(b=>resolve(b),'image/png'));
 }
 // ── tracked-bet share: the side you bet, the price you took, and every book's CURRENT price at
 // your line. Pre-game it re-pulls this one market first so the card isn't stale; once the game is
@@ -999,37 +1047,33 @@ function trackShareText(t, d){
   if(d.at) lines.push('', `Updated ${new Date(d.at).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})}`);
   return lines.join('\n');
 }
-function trackShareImageBlob(t, d){
-  const W=640, pad=24, rowH=38;
+async function trackShareImageBlob(t, d){
+  await shareFontsReady(); const T=shareTheme();
+  const logos=await shareLogos(d.books.map(b=>b.k));
+  const f=fixtures.find(x=>x.id===t.fixtureId);
+  const teamLg = t.teamLogo || (t.isTeam && f ? (t.teamSide==='home'?f.home.logo:t.teamSide==='away'?f.away.logo:'') : '');
+  const avatar=await shareImg(t.headshot || teamLg);
   const infoLines=[d.result?`Result: ${d.result}`:'', d.prog, d.vsNow, d.lineMove, d.clv].filter(Boolean);
-  const H=150 + infoLines.length*22 + 40 + Math.max(1,d.books.length)*rowH + 44;
-  const canvas=document.createElement('canvas'); canvas.width=W; canvas.height=H;
-  const c=canvas.getContext('2d'); const F='-apple-system,Helvetica,Arial';
-  c.fillStyle='#10131a'; c.fillRect(0,0,W,H);
-  c.fillStyle='#ffffff'; c.font=`700 26px ${F}`; c.fillText(titleCase(t.playerName), pad, 42);
-  c.fillStyle='#9aa4b2'; c.font=`400 14px ${F}`; c.fillText(`${d.S.label} · ${t.away} @ ${t.home}${d.status?' · '+d.status:''}`, pad, 64);
-  c.fillStyle='#22c55e'; c.font=`800 22px ${F}`; c.fillText(`BET: ${trackSideLabel(t)}`, pad, 100);
-  c.fillStyle='#e8ebf0'; c.font=`600 16px ${F}`; c.fillText(`Took ${d.took}`, pad, 126);
-  let y=126;
-  infoLines.forEach(s=>{ y+=22; c.fillStyle = s.startsWith('Result: WIN')||s.startsWith('Beating')?'#22c55e':s.startsWith('Result: LOSS')||s.startsWith('Behind')?'#ef4444':'#cbd2dc'; c.font=`500 14px ${F}`; c.fillText(s, pad, y); });
-  y+=40;
-  c.fillStyle='#ffffff'; c.globalAlpha=.55; c.font=`700 12px ${F}`; c.fillText(`${t.live||t.final?'LAST PRICES':'PRICES NOW'} · ${trackSideLabel(t).toUpperCase()}`, pad, y-12); c.globalAlpha=1;
-  if(!d.books.length){ c.fillStyle='#7d8694'; c.font=`400 14px ${F}`; c.fillText('No books posting this line right now', pad, y+14); }
-  d.books.forEach((b,i)=>{
-    const ry=y+i*rowH+14;
-    if(b.mine){ c.fillStyle='rgba(34,197,94,.12)'; c.fillRect(pad-10, ry-24, W-pad*2+20, rowH-4); }
-    else if(i%2===1){ c.fillStyle='rgba(255,255,255,.03)'; c.fillRect(pad-10, ry-24, W-pad*2+20, rowH-4); }
-    c.fillStyle='#e8ebf0'; c.font=`${b.mine?700:400} 15px ${F}`; c.textAlign='left'; c.fillText(`${b.name}${b.mine?'  (mine)':''}`, pad, ry);
-    c.textAlign='right';
-    if(b.move){ c.fillStyle=b.move<0?'#22c55e':'#ef4444'; c.font=`700 12px ${F}`; c.fillText(b.move<0?'▼':'▲', W-pad-150, ry); }
-    if(b.cents){ c.fillStyle='#7d8694'; c.font=`400 13px ${F}`; c.fillText(b.cents, W-pad-80, ry); }
-    c.fillStyle=b.price>0?'#22c55e':'#ffffff'; c.font=`700 17px ${F}`; c.fillText(fmtAm(b.price), W-pad, ry);
-    c.textAlign='left';
-  });
-  c.fillStyle='#ffffff'; c.globalAlpha=.4; c.font=`700 13px ${F}`;
-  if(d.at){ c.fillText(`Updated ${new Date(d.at).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})}`, pad, H-16); }
-  c.textAlign='right'; c.fillText('Pocket Market', W-pad, H-16); c.globalAlpha=1; c.textAlign='left';
-  return new Promise(resolve=>canvas.toBlob(b=>resolve(b),'image/png'));
+  const W=640, rowH=56, gap=8;
+  const betTop=148, betH=74 + infoLines.length*22;
+  const listTop=betTop+betH+34;
+  const H=listTop + Math.max(1,d.books.length)*(rowH+gap) + 44;
+  const {cv,c}=shareCanvas(W,H);
+  c.fillStyle=T.bg; c.fillRect(0,0,W,H);
+  drawShareHeader(c,T,W,{ title:titleCase(t.playerName), sub:`${d.S.label} · ${t.away} @ ${t.home}${d.status?' · '+d.status:''}`, pill:null, avatar, initials:t.playerName.split(' ').map(w=>w[0]).slice(0,2).join('').toUpperCase() });
+  // The bet itself, in the green-tinted style the app uses for the selected side.
+  rrect(c,16,betTop,W-32,betH,16); c.fillStyle=shareAlpha(T.green,.14); c.fill(); c.lineWidth=1; c.strokeStyle=shareAlpha(T.green,.55); c.stroke();
+  c.fillStyle=T.green; c.font=`700 12px ${T.mono}`; c.fillText('MY BET', 34, betTop+24);
+  c.fillStyle=T.text; c.font=`800 22px ${T.sans}`; c.fillText(trackSideLabel(t), 34, betTop+52);
+  c.textAlign='right'; c.font=`800 22px ${T.sans}`; c.fillText(fmtAm(t.price), W-34, betTop+52);
+  c.globalAlpha=.7; c.font=`600 12px ${T.mono}`; c.fillText(t.book?`@ ${t.book}`:'best available', W-34, betTop+24); c.globalAlpha=1; c.textAlign='left';
+  let y=betTop+52;
+  infoLines.forEach(s=>{ y+=22; c.fillStyle = s.startsWith('Result: WIN')||s.startsWith('Beating')?T.green:s.startsWith('Result: LOSS')||s.startsWith('Behind')?T.red:T.text; c.font=`600 13px ${T.mono}`; c.fillText(s, 34, y); });
+  shareSectionLabel(c,T,20,listTop-10,`${t.live||t.final?'Last prices':'Prices now'} · ${trackSideLabel(t)}`, t.side==='under'?T.un:T.ov);
+  if(!d.books.length){ c.globalAlpha=.6; c.fillStyle=T.text; c.font=`600 13px ${T.mono}`; c.fillText('No books posting this line right now', 20, listTop+24); c.globalAlpha=1; }
+  d.books.forEach((b,i)=>drawBookRow(c,T,16,listTop+i*(rowH+gap),W-32,rowH,{ key:b.k, img:logos[b.k], name:bookLabel(b.k), nameSub:b.mine?'my book':'', price:b.price, sub:b.cents, highlight:b.mine, arrow:b.move?(b.move<0?'▼':'▲'):'' }));
+  drawShareFooter(c,T,W,H, d.at?`Updated ${new Date(d.at).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})}`:'');
+  return new Promise(resolve=>cv.toBlob(b=>resolve(b),'image/png'));
 }
 async function shareTracked(t){
   toast('Getting latest prices…');
