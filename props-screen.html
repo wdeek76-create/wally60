@@ -2565,8 +2565,8 @@ const BOOK_HOME = {...EXCH_HOME, fanduel:'https://sportsbook.fanduel.com', draft
   betonline:'https://www.betonline.ag', bet105:'https://www.bet105.com', fliff:'https://www.getfliff.com',
   'props builder':'https://propsbuilder.com', pinnacle:'https://www.pinnacle.com', caesars:'https://sportsbook.caesars.com',
   'hard rock bet':'https://app.hardrock.bet'};
-function shopLinkHtml(bookKey, label, o){
-  const url = (o && deepLinkFor(o)) || BOOK_HOME[bookKey];
+function shopLinkHtml(bookKey, label, o, urlOverride){
+  const url = urlOverride || (o && deepLinkFor(o)) || BOOK_HOME[bookKey];
   const lg=bookLogo(bookKey); const logoEl = lg ? `<img class="plbklogo" src="${esc(lg)}" alt="">` : '';
   return url ? `<a class="plbk" href="${esc(url)}" rel="noopener">${logoEl}${esc(label)}</a>` : `<span class="plbk">${logoEl}${esc(label)}</span>`;
 }
@@ -2598,7 +2598,29 @@ function parlayBookPrices(){
   });
   let common=new Set(Object.keys(legMaps[0]||{}));
   for(let i=1;i<legMaps.length;i++) common=new Set([...common].filter(k=>k in legMaps[i]));
-  return [...common].map(k=>({ book:k, price: toAm(legMaps.reduce((a,m)=>a*toDec(m[k].price),1)), o: legMaps[0][k].o })).sort((a,b)=>toDec(b.price)-toDec(a.price));
+  return [...common].map(k=>{ const legs=legMaps.map(m=>m[k].o); return { book:k, price: toAm(legMaps.reduce((a,m)=>a*toDec(m[k].price),1)), o: legs[0], url: parlayLinkFor(k, legs) }; }).sort((a,b)=>toDec(b.price)-toDec(a.price));
+}
+// One link that loads the WHOLE parlay into the book's slip, where the book supports it. FanDuel's
+// addToBetslip takes indexed marketId/selectionId pairs; each leg's own pair is read off its row's
+// deep link. Anything that can't be combined falls back to the first leg's own link.
+function parlayLinkFor(book, rows){
+  if(rows.length>1 && book==='fanduel'){ const u=fdParlayLink(rows); if(u) return u; }
+  return deepLinkFor(rows[0]) || null;
+}
+function fdParlayLink(rows){
+  let origin='https://sportsbook.fanduel.com';
+  const pairs=[];
+  for(const o of rows){
+    const d=o?.deep_link||{}; let pair=null;
+    for(const raw of [d.desktop,d.ios,d.android].filter(Boolean)){
+      let str=String(raw); for(let i=0;i<2;i++){ try{ const dec=decodeURIComponent(str); if(dec===str) break; str=dec; }catch(e){ break; } }
+      const m=/marketId(?:\[\d*\])?=([^&#]+)/.exec(str), sel=/selectionId(?:\[\d*\])?=([^&#]+)/.exec(str);
+      if(m&&sel){ pair=[m[1],sel[1]]; const og=/^https:\/\/[a-z0-9.-]*sportsbook\.fanduel\.com/i.exec(str); if(og && pairs.length===0) origin=og[0]; break; }
+    }
+    if(!pair) return null;
+    pairs.push(pair);
+  }
+  return `${origin}/addToBetslip?${pairs.map(([m,sel],i)=>`marketId[${i}]=${encodeURIComponent(m)}&selectionId[${i}]=${encodeURIComponent(sel)}`).join('&')}`;
 }
 // Parlay-only: devig off the WEIGHTED AVERAGE across every shop on each side, not just the single
 // best-vs-best price (that's what the Team Total vs Pinnacle comparison and the single-sided
@@ -2771,6 +2793,14 @@ function rowLiquidity(o){
   if(EXCH.has(k)){ const lv=levelsOf(o); return lv.length?lv[0].size:null; }
   return o.limits?.max!=null ? Number(o.limits.max) : null;
 }
+// Exchange depth for the liquidity floor: size weighted by how close each level sits to the top
+// price (full weight at the top, fading to 0 at LIQ_BAND_CENTS out), not just the top level alone.
+// A mirrored row's depth is its real source order's depth -- same sizes, same distances.
+function exchDepth(o){
+  const src=o._mirroredFrom||o;
+  const w=weightedNear(levelsOf(src), Number(src.price));
+  return w ? w.size : rowLiquidity(o);
+}
 // Reads off whatever sport's data is CURRENTLY loaded in the globals (sportKey/fixtures/
 // mainRows/players) -- runAutoBuild temporarily swaps those to another league's same-day cache
 // when autoLeague differs from the active tab, so this never needs to know about that itself.
@@ -2825,14 +2855,13 @@ function buildAutoCandidates(){
         // null for it, and a null size was treated as "unmeasurable, let it through" -- silently
         // skipping the floor entirely rather than actually checking the exchange's own depth.
         // Props and mains get their own threshold, since a prop's real size and a moneyline's
-        // real size are completely different scales. Still only filters what it CAN measure --
-        // no exchange posting this pick at all passes through rather than getting excluded for
-        // lack of data.
+        // real size are completely different scales. With a minimum set, a pick needs an exchange
+        // with at least that much weighted depth near its price -- the deepest exchange posting
+        // it counts -- and one with no measurable exchange depth at all is left out.
         const minLiq = isMain ? autoMinLiqMains : autoMinLiqProps;
         if(minLiq>0){
-          const exchRow = bestFirst(myRows.filter(o=>EXCH.has(canonBook(o.sportsbook))))[0] || null;
-          const liq = exchRow ? rowLiquidity(exchRow) : null;
-          if(liq!=null && liq<minLiq) return;
+          const depths = myRows.filter(o=>EXCH.has(canonBook(o.sportsbook))).map(exchDepth).filter(v=>v!=null&&!isNaN(v));
+          if(!depths.length || Math.max(...depths)<minLiq) return;
         }
         const edgePct = (fairP - toImplied(Number(refRow.price)))*100;
         if(autoEdge!=='' && edgePct < autoEdge) return;
@@ -3007,7 +3036,7 @@ function renderParlay(){
   const targetRow = autoTargetBook ? (bookRows.find(r=>r.book===autoTargetBook)||null) : null;
   const heroRow = targetRow || bestRow;
   const bookRowsHtml = bookRows.length
-    ? bookRows.map(r=>`<div class="plrow${r===heroRow?' best':''}">${shopLinkHtml(r.book,bookShort(r.book),r.o)}${autoTargetBook&&r.book===autoTargetBook?'<span class="pltarget">target</span>':''}<span class="plpx">${fmtAm(r.price)}</span><span class="plwp">${winPct(r.price)}%</span></div>`).join('')
+    ? bookRows.map(r=>`<div class="plrow${r===heroRow?' best':''}">${shopLinkHtml(r.book,bookShort(r.book),r.o,r.url)}${autoTargetBook&&r.book===autoTargetBook?'<span class="pltarget">target</span>':''}<span class="plpx">${fmtAm(r.price)}</span><span class="plwp">${winPct(r.price)}%</span></div>`).join('')
     : `<div class="plrow dim">No single shop currently posts all ${parlay.length} legs.</div>`;
   // Combined parlay-level no-vig fair (each leg's own devigged probability multiplied together,
   // not each leg's rounded fair price converted back and multiplied -- see parlayFairSummary),
@@ -3022,7 +3051,7 @@ function renderParlay(){
   const sameGame=Object.values(fxCounts).some(n=>n>1);
   let fairHtml='', heroHtml='';
   if(heroRow){
-    const url = (heroRow.o && deepLinkFor(heroRow.o)) || BOOK_HOME[heroRow.book] || '#';
+    const url = heroRow.url || (heroRow.o && deepLinkFor(heroRow.o)) || BOOK_HOME[heroRow.book] || '#';
     heroHtml = `<a class="pltbtn" href="${esc(url)}" rel="noopener">${sameGame?`Open ${esc(bookShort(heroRow.book))}`:`Bet ${esc(bookShort(heroRow.book))} ${fmtAm(heroRow.price)}`}</a>`;
     if(!sameGame && targetRow && bestRow && targetRow!==bestRow){
       const worseByPct = (toImplied(targetRow.price) - toImplied(bestRow.price))*100;
