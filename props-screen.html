@@ -1056,13 +1056,13 @@ function trackShareData(t, snap){
   const first=t.snapshots[0];
   const books=snap ? Object.entries(snap.byBook).sort((a,b)=>b[1].price-a[1].price).map(([k,b])=>{
     const was=first?.byBook?.[k]?.price; const d=was!=null?Number(b.price)-Number(was):0;
-    return { k, name:bookShort(k), price:Number(b.price), cents:EXCH.has(k)?winPct(b.price)+'¢':'', move:d, mine:t.bookKey===k };
+    return { k, name:bookShort(k), price:Number(b.price), cents:EXCH.has(k)?winPct(b.price)+'¢':'', liq:b.liq!=null&&!isNaN(Number(b.liq))?Number(b.liq):null, move:d, mine:t.bookKey===k };
   }) : [];
   const took = `${fmtAm(t.price)}${t.book?' @ '+t.book:''}`;
   const best = books[0] || null;
   const lineMove = (t.side==='over'||t.side==='under') && t.mainLineAtTrack!=null && t.mainLineNow!=null && t.mainLineNow!==t.mainLineAtTrack ? `Main line ${t.mainLineAtTrack} → ${t.mainLineNow}` : '';
   const clv = t.close!=null && cents(t.price)!=null && cents(t.close)!=null ? `${cents(t.price)-cents(t.close)>0?'+':''}${cents(t.price)-cents(t.close)}¢ CLV (close ${fmtAm(t.close)})` : '';
-  const prog = (t.side==='over'||t.side==='under') && t.actual!=null ? `Now ${t.actual} / ${t.line} ${t.marketLabel}` : '';
+  const prog = (t.side==='over'||t.side==='under') && t.actual!=null ? `${t.final?'Final':'Now'} ${t.actual} / ${t.line} ${t.marketLabel}` : '';
   const nowMine = books.find(b=>b.mine) || books[0] || null;
   const beat = !t.final && !t.live && nowMine && cents(t.price)!=null && cents(nowMine.price)!=null ? cents(t.price)-cents(nowMine.price) : null;
   const vsNow = beat ? `${beat>0?'Beating':'Behind'} ${nowMine.name} now (${fmtAm(nowMine.price)}) by ${Math.abs(beat)}¢` : '';
@@ -1070,16 +1070,15 @@ function trackShareData(t, snap){
   return { S, status, books, took, best, lineMove, clv, prog, result, vsNow, at: snap?.at || null };
 }
 function trackShareText(t, d){
-  const lines=[`${titleCase(t.playerName)} — ${t.away} @ ${t.home}`, d.status, '', `BET: ${trackSideLabel(t)}`, `Took ${d.took}`];
+  const lines=[`${titleCase(t.playerName)} — ${t.away} @ ${t.home}`, d.status, '', trackSideLabel(t)];
   if(d.result) lines.push(`Result: ${d.result}`);
   if(d.prog) lines.push(d.prog);
-  if(d.vsNow) lines.push(d.vsNow);
-  if(d.lineMove) lines.push(d.lineMove);
-  if(d.clv) lines.push(d.clv);
-  if(d.books.length){ lines.push('', `${t.live||t.final?'Last prices':'Prices now'} · ${trackSideLabel(t)}`); d.books.forEach(b=>lines.push(`${b.name}: ${fmtAm(b.price)}${b.cents?' ('+b.cents+')':''}${b.mine?'  ← mine':''}`)); }
+  if(d.books.length){ lines.push('', t.live||t.final?'Last prices':'Prices now'); d.books.forEach(b=>lines.push(`${b.name}: ${fmtAm(b.price)}${b.cents?' ('+b.cents+')':''}${b.liq!=null?' · '+usd(b.liq):''}`)); }
   if(d.at) lines.push('', `Updated ${new Date(d.at).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})}`);
   return lines.join('\n');
 }
+// The side you're on and what every book is hanging on it right now, with each book's limit --
+// deliberately none of your own price, book or line movement (this one gets sent to people).
 async function trackShareImageBlob(t, d){
   await shareFontsReady(); const T=shareTheme();
   const logos=await shareLogos(d.books.map(b=>b.k));
@@ -1089,24 +1088,21 @@ async function trackShareImageBlob(t, d){
   const ff = f || { away:{ab:t.away}, home:{ab:t.home}, start:t.start };
   const status = t.final ? `FINAL${t.score?' '+t.score:''}` : t.live ? `LIVE ${t.clock||''}${t.score?' · '+t.score:''}`.trim() : undefined;
   const bits = await shareFixtureBits(ff, t.teamAb || (t.isTeam&&f?(t.teamSide==='home'?f.home.ab:f.away.ab):''), { status, statusColor: t.live?T.red:undefined });
-  const infoLines=[d.result?`Result: ${d.result}`:'', d.prog, d.vsNow, d.lineMove, d.clv].filter(Boolean);
+  const info=[d.result?`Result: ${d.result}`:'', d.prog].filter(Boolean);
+  const sideTxt = t.side==='over'||t.side==='under' ? `${t.side==='over'?'Over':'Under'} ${t.marketLabel}` : trackSideLabel(t);
+  const sideLine = t.side==='over'||t.side==='under' ? t.line : null;
   const W=640, rowH=64, gap=10;
-  const betTop=16+128+16, betH=88 + infoLines.length*26;
-  const listTop=betTop+betH+20+58;
+  const pillTop=16+128+16, infoTop=pillTop+44+(info.length?14:0);
+  const secTop=infoTop+info.length*26+20, listTop=secTop+58;
   const H=listTop + Math.max(1,d.books.length)*(rowH+gap) + 50;
   const {cv,c}=shareCanvas(W,H);
   c.fillStyle=T.bg; c.fillRect(0,0,W,H);
   drawShareHeader(c,T,W,{ title:titleCase(t.playerName), titleImg, initials:titleImg?null:t.playerName.split(' ').map(w=>w[0]).slice(0,2).join('').toUpperCase(), ...bits });
-  rrect(c,16,betTop,W-32,betH,18); c.fillStyle=shareAlpha(T.green,.14); c.fill(); c.lineWidth=1.5; c.strokeStyle=T.green; c.stroke();
-  c.fillStyle=T.green; c.font=`700 14px ${T.mono}`; c.fillText('MY BET', 36, betTop+30);
-  c.textAlign='right'; c.fillStyle=T.text; c.font=`700 14px ${T.mono}`; c.fillText(t.book?`@ ${t.book}`:'best available', W-36, betTop+30); c.textAlign='left';
-  c.fillStyle=T.text; c.font=`800 26px ${T.sans}`; c.fillText(trackSideLabel(t), 36, betTop+66);
-  c.textAlign='right'; c.font=`800 26px ${T.sans}`; c.fillText(fmtAm(t.price), W-36, betTop+66); c.textAlign='left';
-  let y=betTop+66;
-  infoLines.forEach(s=>{ y+=26; c.fillStyle = s.startsWith('Result: WIN')||s.startsWith('Beating')||/^\+\d+¢ CLV/.test(s)?T.green:s.startsWith('Result: LOSS')||s.startsWith('Behind')||/^-\d+¢ CLV/.test(s)?T.red:T.text; c.font=`700 15px ${T.mono}`; c.fillText(s, 36, y); });
-  drawPill(c,T,16,betTop+betH+20,t.live||t.final?'Last prices':'Prices now',null,{h:40,size:16,center:false});
+  drawPill(c,T,W/2,pillTop,sideTxt,sideLine);
+  info.forEach((s,i)=>{ c.textAlign='center'; c.fillStyle=s==='Result: WIN'?T.green:s==='Result: LOSS'?T.red:T.text; c.font=`700 16px ${T.mono}`; c.fillText(s, W/2, infoTop+18+i*26); c.textAlign='left'; });
+  drawPill(c,T,16,secTop,t.live||t.final?'Last prices':'Prices now',null,{h:40,size:16,center:false});
   if(!d.books.length){ c.fillStyle=T.text; c.font=`600 14px ${T.mono}`; c.fillText('No books posting this line right now', 24, listTop+30); }
-  d.books.forEach((b,i)=>drawBookRow(c,T,16,listTop+i*(rowH+gap),W-32,rowH,{ key:b.k, img:logos[b.k], name:bookLabel(b.k), line:t.line, nameSub:b.mine?'MY BOOK':'', price:b.price, sub:b.cents?Math.round(parseFloat(b.cents))+'¢':'', highlight:b.mine, arrow:b.move?(b.move<0?'▼':'▲'):'' }));
+  d.books.forEach((b,i)=>drawBookRow(c,T,16,listTop+i*(rowH+gap),W-32,rowH,{ key:b.k, img:logos[b.k], name:bookLabel(b.k), line:sideLine, price:b.price, sub:[b.cents?Math.round(parseFloat(b.cents))+'¢':'', b.liq!=null?usd(b.liq):''].filter(Boolean).join('  ') }));
   drawShareFooter(c,T,W,H, d.at?`Updated ${new Date(d.at).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})}`:'');
   return new Promise(resolve=>cv.toBlob(b=>resolve(b),'image/png'));
 }
@@ -2502,7 +2498,7 @@ const sideKey = lbl => { const l=String(lbl); const ll=l.toLowerCase(); if(ll===
 function isTracked(p,mkey,label,line,bookKey){ const sk=sideKey(label); return tracked.some(t=>t.playerKey===p.key&&t.fixtureId===p.fixtureId&&t.mkey===mkey&&t.side===sk&&Number(t.line??-1)===Number(line??-1)&&(bookKey==null||t.bookKey===bookKey)); }
 function snapshotFrom(rows, side, line){
   const at=Date.now(); const byBook={};
-  rows.forEach(o=>{ if(side==='over'||side==='under'){ if(sideOf(o)!==side) return; if(line!=null && Number(o.points)!==Number(line)) return; } const k=canonBook(o.sportsbook); if(!byBook[k]||Number(o.price)>Number(byBook[k].price)) byBook[k]={price:Number(o.price),points:o.points??null,liq:o.limits?.max??null}; });
+  rows.forEach(o=>{ if(side==='over'||side==='under'){ if(sideOf(o)!==side) return; if(line!=null && Number(o.points)!==Number(line)) return; } const k=canonBook(o.sportsbook); if(!byBook[k]||Number(o.price)>Number(byBook[k].price)) byBook[k]={price:Number(o.price),points:o.points??null,liq:rowLiquidity(o)}; });
   const prices=Object.values(byBook).map(b=>b.price); const best=prices.length?Math.max(...prices):null;
   return { at, byBook, best };
 }
@@ -2510,10 +2506,17 @@ function mainLineOf(rows, side){ const c={}; rows.forEach(o=>{ if(o.points==null
 // Favorite/underdog is read off that TEAM's own moneyline in the same game — a team total has no
 // over/under-style "favorite side" of its own, so the only honest source for that tag is the
 // actual game line. Returns null (not tracked as either) when no moneyline row is found.
+// Favorite/underdog off the full-game moneyline CONSENSUS (average implied probability across
+// every book posting it), this team vs its opponent -- one book's number alone can flip a near
+// pick'em game the wrong way.
 function moneylineFavDog(fixtureId, teamSel){
   const key=normName(teamSel);
-  const row=mainRows.find(o=>o._fx===fixtureId && /moneyline/i.test(String(o.market||'')) && !/regulation|60.?min|3.?way|\+/i.test(String(o.market||'')) && normName(cleanSel(o.selection||o.name))===key && o.price!=null);
-  return row ? (Number(row.price)<0 ? 'favorite' : 'underdog') : null;
+  const ml=mainRows.filter(o=>o._fx===fixtureId && /moneyline/i.test(String(o.market||'')) && !/regulation|60.?min|3.?way|\+/i.test(String(o.market||'')) && o.price!=null && !isNaN(Number(o.price)));
+  const avg=list=>list.length?list.reduce((a,o)=>a+toImplied(Number(o.price)),0)/list.length:null;
+  const mine=avg(ml.filter(o=>normName(cleanSel(o.selection||o.name))===key));
+  if(mine==null) return null;
+  const opp=avg(ml.filter(o=>normName(cleanSel(o.selection||o.name))!==key));
+  return (opp!=null ? mine>opp : mine>0.5) ? 'favorite' : 'underdog';
 }
 const unitsFor=(price,stake)=>{ price=Number(price); return price>0 ? stake*price/100 : stake*100/Math.abs(price); };
 function trackProp(p, mkey, label, line, srcRows, bookKey){
@@ -3368,7 +3371,7 @@ function trackCardHtml(t){
   const teamLogo = t.teamLogo || (t.isTeam && f ? (t.teamSide==='home'?f.home.logo:t.teamSide==='away'?f.away.logo:'') : '');
   const headshot = t.headshot || teamLogo;
   const hs=headshot?`<div class="hs"><img src="${esc(headshot)}" alt="" onerror="this.parentNode.textContent='${initials}'"></div>`:`<div class="hs">${initials}</div>`;
-  const favDogPill = t.isTeam && t.favDog ? `<span class="fdp ${t.favDog}">${t.favDog==='favorite'?'FAV':'DOG'}</span>` : '';
+  const favDogPill = t.isTeam && t.favDog ? `<span class="fdp ${t.favDog}">${t.favDog==='favorite'?'ML FAV':'ML DOG'}</span>` : '';
   const betStr = (t.side==='ML'||t.side==='ML60') ? `${t.side==='ML60'?'ML (Reg.)':'ML'} ${fmtAm(t.price)}` : `${t.side==='over'?'o':t.side==='under'?'u':''}${t.line??''} ${esc(t.marketLabel)} ${favDogPill}<span>${fmtAm(t.price)} ${esc(t.book||'')}</span>`;
   // progress
   let prog='';
