@@ -2623,8 +2623,10 @@ async function runAutoGrade(opts) {
 // differ (OpticOdds' own name is "Props Builder", with an s; same mismatch
 // that bit the card's book-logo lookup earlier).
 const NHL_CLV_BOOKS = ["Pinnacle", "FanDuel", "Prop Builder"];
-const NHL_CLV_BOOK_REQUEST_NAME = { "Pinnacle": "Pinnacle", "FanDuel": "FanDuel", "Prop Builder": "Props Builder" };
-const NHL_CLV_BOOK_SHORT = { "Pinnacle": "PIN", "FanDuel": "FD", "Prop Builder": "PB" };
+const NHL_CLV_BOOK_REQUEST_NAME = { "Pinnacle": "Pinnacle", "FanDuel": "FanDuel", "Prop Builder": "Props Builder", "Bookmaker": "BookMaker", "BetOnline": "BetOnline" };
+const NHL_CLV_BOOK_SHORT = { "Pinnacle": "PIN", "FanDuel": "FD", "Prop Builder": "PB", "Bookmaker": "BM", "BetOnline": "BOL" };
+// Totals closes: sharp books first, then the books we bet at.
+const NHLT_CLOSE_BOOKS = ["Pinnacle", "Bookmaker", "BetOnline", "FanDuel", "Prop Builder"];
 // cents: -110 -> -10, +105 -> +5 ; delta = bet - close (positive = you beat the close)
 function _nhlClvCents(betOdds, closeOdds) {
   const c = a => { a = parseInt(a); return isNaN(a) ? null : (a > 0 ? a - 100 : a + 100); };
@@ -3038,10 +3040,10 @@ async function ooCall(endpoint, params) {
 //   3. Anything else (DraftKings, Bookmaker, Fliff, Kambi, Onyx) — never
 //      anchors a pick. If only these clear, the pick is skipped rather than
 //      logged off one of them.
-const OO_BOOKS_REQUEST = ["FanDuel","Prop Builder","Props Builder","Novig","Prophet X","Fliff","DraftKings","BookMaker","Pinnacle","bet105","BetRivers","Kalshi","Onyx Odds","Courtside","BetMGM"];
+const OO_BOOKS_REQUEST = ["FanDuel","Prop Builder","Props Builder","Novig","Prophet X","Fliff","DraftKings","BookMaker","Pinnacle","bet105","BetRivers","Kalshi","Onyx Odds","Courtside","BetMGM","BetOnline"];
 const OO_BOOK_TO_LABEL = { "fanduel":"FanDuel", "prop builder":"Prop Builder", "propbuilder":"Prop Builder", "props builder":"Prop Builder", "propsbuilder":"Prop Builder", "novig":"Novig", "prophet x":"ProphetX", "fliff":"Fliff",
   "draftkings":"DraftKings", "onyx odds":"Onyx", "bookmaker":"Bookmaker", "pinnacle":"Pinnacle",
-  "bet105":"Bet105", "courtside":"Courtside", "betrivers":"Kambi", "kambi":"Kambi", "kalshi":"Kalshi", "betmgm":"BetMGM" }; // BetMGM: other-books list only — not in NHL_BOOK_PRIORITY, so it never anchors
+  "bet105":"Bet105", "courtside":"Courtside", "betrivers":"Kambi", "kambi":"Kambi", "kalshi":"Kalshi", "betmgm":"BetMGM", "betonline":"BetOnline", "betonlineag":"BetOnline" }; // BetMGM: other-books list only — not in NHL_BOOK_PRIORITY, so it never anchors
 const OO_EXCHANGES = ["novig", "prophet x", "kalshi"];
 // Resilient book-name matching — OpticOdds' sportsbook string doesn't always
 // come back in the exact casing/spacing OO_BOOK_TO_LABEL's keys assume
@@ -4396,6 +4398,7 @@ const _nhlCardBookStyle = {
   onyx: { label: "ONYX", bg: "#53d337", fg: "#000" },
   courtside: { label: "CS", bg: "#53d337", fg: "#000" },
   betmgm: { label: "MGM", bg: "#b9975b", fg: "#000" },
+  betonline: { label: "BOL", bg: "#c8102e", fg: "#fff" },
 };
 // Brian's own FanDuel mark — OpticOdds' own FD logo asset renders flat/off
 // on the card, so this one overrides it outright rather than going through
@@ -6073,8 +6076,8 @@ async function _nhltSnapshotPrices() {
     byFx[fid].forEach(b => {
       const mk = b.market === "game" ? "game" : (lines[b.team] ? b.team : Object.keys(lines).find(k => k !== "game" && _nhlTeamCanon(k) === _nhlTeamCanon(b.team)));
       const at = mk && lines[mk] && lines[mk][b.line] ? (lines[mk][b.line][b.side] || []) : [];
-      const pin = at.find(x => x.book === "Pinnacle");
-      const best = pin || at.filter(x => NHLT_ANCHOR_BOOKS.includes(x.book)).sort((x, y) => y.price - x.price)[0];
+      const sharp = ["Pinnacle", "Bookmaker", "BetOnline"].map(bk => at.find(x => x.book === bk)).find(Boolean);
+      const best = sharp || at.filter(x => NHLT_ANCHOR_BOOKS.includes(x.book)).sort((x, y) => y.price - x.price)[0];
       if (best) { b.lastSeen = { book: best.book, price: best.price, line: b.line, at: now }; n++; }
     });
   }
@@ -6101,9 +6104,9 @@ async function gradeNhlTotals(opts) {
   try { snaps = await _nhltSnapshotPrices(); } catch (e) { console.warn("[NHL totals] snapshot", e && e.message); }
   for (const b of nhltBets) {
     if (b.close || !b.start || new Date(b.start).getTime() > now) continue;
-    // 1) OpticOdds' tagged close, same line: Pinnacle, then FanDuel, then Prop Builder.
+    // 1) OpticOdds' tagged close, same line: Pinnacle, Bookmaker, BetOnline, then FanDuel, Prop Builder.
     let got = false;
-    for (const bk of ["Pinnacle", "FanDuel", "Prop Builder"]) {
+    for (const bk of NHLT_CLOSE_BOOKS) {
       try { if (await _nhltPinClose(b, bk)) { got = true; break; } } catch (e) {}
     }
     // 2) Two hours after puck drop with still nothing: our own last pre-game snapshot (inside 30 min of
@@ -6113,7 +6116,7 @@ async function gradeNhlTotals(opts) {
       if (ls && new Date(b.start).getTime() - ls.at <= 30 * 60000) { _nhltSetClose(b, { book: ls.book, price: ls.price, line: ls.line, snapshot: true, at: ls.at }); got = true; }
       else {
         b._acceptOffLine = true;
-        for (const bk of ["Pinnacle", "FanDuel", "Prop Builder"]) { try { if (await _nhltPinClose(b, bk)) { got = true; break; } } catch (e) {} }
+        for (const bk of NHLT_CLOSE_BOOKS) { try { if (await _nhltPinClose(b, bk)) { got = true; break; } } catch (e) {} }
         delete b._acceptOffLine;
       }
       if (!got) console.log(`[NHL totals] no close found yet for ${b.away}@${b.home} ${b.market === "game" ? "game" : b.team} ${b.side} ${b.line}`);
