@@ -3579,8 +3579,7 @@ async function importPropShopNhl() {
   if (currentTab === 'res') renderNhlPsPanel();
   if (currentTab === 'tracker' && loggedCount) renderTracker();
   infoEl.textContent = `${_psSourceLabelNhl[psSource]}: reset to ${newCount} pick${newCount === 1 ? '' : 's'} (was ${prevCount})${collapsed ? `, collapsed ${collapsed} repeat(s)` : ''}${errors.length ? `, ${errors.length} parse error(s)` : ''}.` + (loggedCount ? ` Auto-logged ${loggedCount} 3+/4 pick${loggedCount === 1 ? '' : 's'} to the tracker.` : '');
-  if (_nhlPsSkippedNeg.size) infoEl.textContent += ` Held back ${_nhlPsSkippedNeg.size} (negative EV at the live price): ${[..._nhlPsSkippedNeg].join(', ')}.`;
-  showNhlToast(`${_psSourceLabelNhl[psSource]}: ${newCount} picks (reset)${loggedCount ? ` · ${loggedCount} auto-logged` : ''}${_nhlPsSkippedNeg.size ? ` · ${_nhlPsSkippedNeg.size} held back (−EV live)` : ''}`);
+  showNhlToast(`${_psSourceLabelNhl[psSource]}: ${newCount} picks (reset)${loggedCount ? ` · ${loggedCount} auto-logged` : ''}`);
   // Clear the paste box on every successful parse — the pasted text has
   // already been absorbed into this source's staging list, so leaving the
   // old text sitting there just invites a stale double-paste next time.
@@ -3851,37 +3850,22 @@ function _nhlPsAlreadyLogged(r) {
   const dedupeKey = nn(r.player) + '|' + gameDate.toDateString();
   return bets.some(b => (nn(b.player) + '|' + new Date(b.date).toDateString()) === dedupeKey);
 }
-const _nhlPsSkippedNeg = new Set(); // players held back on the last auto-log for negative live EV
 async function _nhlPsLogRow(r) {
   const gameDate = new Date(r.gameDateIso + 'T12:00:00');
   const gameDateStr = gameDate.toLocaleDateString();
   if (_nhlPsAlreadyLogged(r) || _nhlPsRejected(r.player)) return false;
-  // Pull the live book/price off OpticOdds the same way every other pick in
-  // this tool does (scanNhlOpticOdds) — the PropShop paste's book is just
-  // whatever screenshot it came from, not necessarily the live market.
-  // Falls back to the pasted book/price if nothing live matches this line.
+  // Logged at the PASTED price/book — the price the sources' edge is actually on, so the logged
+  // EV is the real one. The live OpticOdds board is only pulled for the other-books list; the
+  // cards re-price everything live at send time anyway (and leave off anything out of range).
   const teamHints = r.team ? [r.team] : (r.game || '').split('@').map(s => s.trim());
   const live = await _nhlLiveBookFor(r.player, r.line, r.ou, r.gameDateIso, teamHints);
-  const odds = live ? live.price : parseInt(r.odds);
-  const book = live ? live.book : (r.book || 'PropShop');
-  // The sources' edge is off the pasted price; the live trusted-book price can be a lot worse.
-  // Never log a pick that's negative EV at the price we'd actually log it at — it stays on the
-  // Ensemble tab and gets another try on the next paste.
-  if (live && r.anchorFairProb != null) {
-    const dec = oddsToDecimal(odds);
-    const liveEv = dec != null ? (r.anchorFairProb * dec - 1) * 100 : null;
-    if (liveEv != null && liveEv < 0) {
-      console.log(`[NHL ensemble] not logging ${r.player} ${r.ou} ${r.line}: best live ${odds > 0 ? '+' : ''}${odds} ${book} is ${liveEv.toFixed(1)}% vs fair (pasted ${r.odds} ${r.book || ''})`);
-      _nhlPsSkippedNeg.add(r.player);
-      return false;
-    }
-  }
+  const odds = parseInt(r.odds);
+  const book = r.book || 'PropShop';
   const s = calcStake(parseInt(odds));
   const now = new Date();
   // FAIR is fixed — the anchor source's (worst qualifying, else second-worst)
-  // own real price+EV, backed out to a fair probability. odds is whatever we're actually logging at
-  // (live book if we found one, the pasted price otherwise); EV then
-  // recomputes fresh off THAT price against this same fair, same as NFL.
+  // own real price+EV, backed out to a fair probability. odds is the pasted price we log at;
+  // EV recomputes off THAT price against this same fair, same as NFL.
   const fairOdds = r.anchorFairOdds != null ? r.anchorFairOdds : null;
   bets.unshift({
     id: Date.now() + Math.floor(Math.random() * 1000),
@@ -3899,18 +3883,16 @@ async function _nhlPsLogRow(r) {
 async function logNhlPsEnsembleRow(i) {
   const rows = window._nhlPsEnsembleRows || [];
   const r = rows[i]; if (!r) return;
-  _nhlPsSkippedNeg.clear();
   const ok = await _nhlPsLogRow(r);
   saveBets();
   if (currentTab === 'tracker') renderTracker();
-  showNhlToast(ok ? `Tracked ${r.player}` : _nhlPsSkippedNeg.has(r.player) ? `${r.player}: negative EV at the live price — not logged` : `${r.player} already logged today`);
+  showNhlToast(ok ? `Tracked ${r.player}` : `${r.player} already logged today`);
 }
 // Shared by both the manual button and the automatic post-import call —
 // logs every current 3-of-4+ agreement row (graded against the live
 // OpticOdds book for each pick), saves, and returns how many were actually
 // new (already-logged players are silently skipped, not re-added).
 async function _nhlAutoLogPsEnsemble() {
-  _nhlPsSkippedNeg.clear();
   const rows = computeNhlPsEnsemble();
   if (!rows.length) return 0;
   let added = 0;
