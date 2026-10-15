@@ -457,6 +457,7 @@ a.plbk{color:var(--cyan)}
 .pladded{font-size:11px;margin-top:4px;font-family:var(--mono)}
 .plcmp{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
 .plcmpchip{display:inline-flex;align-items:center;gap:5px;padding:4px 9px;border-radius:999px;background:var(--bg3);border:1px solid var(--line2);font-family:var(--mono);font-size:11px;font-weight:700;color:var(--text);text-decoration:none}
+.plcmpchip.far{opacity:.45}
 .plcmpchip img{width:14px;height:14px;border-radius:4px;object-fit:contain}
 .plcmpliq{opacity:.65;font-size:9.5px}
 .plcmpchip.best{border-color:var(--green);background:var(--green);color:#06240f;padding:6px 12px;font-size:12px}
@@ -2741,7 +2742,7 @@ function pinMoveHtml(leg, pin){
   return `<div class="plpin"><span class="lbl">Pin</span> ${parts.join(' · ')}</div>`;
 }
 // Weighted exchange depth near the price, per exchange posting this leg's side.
-function legExchDepths(mine){ return mine.filter(o=>EXCH.has(canonBook(o.sportsbook))).map(o=>({k:canonBook(o.sportsbook), d:exchDepth(o)})).filter(x=>x.d!=null&&!isNaN(x.d)); }
+function legExchDepths(mine, refPrice){ return bestFirst(mine).filter(o=>EXCH.has(canonBook(o.sportsbook)) && nearRef(o, refPrice)).map(o=>({k:canonBook(o.sportsbook), d:exchDepth(o)})).filter(x=>x.d!=null&&!isNaN(x.d)); }
 // One compact section per leg (not its own card) -- name/bet/remove on top, then every shop
 // currently posting that exact side+line as its own linked row, then the weighted-average no-vig
 // fair at the bottom. Several of these stack inside ONE outer panel in renderParlay, instead of
@@ -2773,15 +2774,16 @@ function parlayLegHtml(leg){
   const pin = mine.find(o=>canonBook(o.sportsbook)==='pinnacle') || null;
   recordPinSnap(leg, pin); ensureLegPinHist(leg);
   const pinHtml = pinMoveHtml(leg, pin);
-  const exch = legExchDepths(mine);
+  const exch = legExchDepths(mine, hero?.price);
   const exchTot = exch.reduce((a,x)=>a+x.d,0);
-  const liqHtml = exch.length ? `<div class="plliq"><span class="lbl">Exch liq ${usd(exchTot)}</span> near price · ${exch.map(x=>`${esc(bookShort(x.k))} ${usd(x.d)}`).join(' · ')}</div>` : '';
+  const liqHtml = `<div class="plliq"><span class="lbl">Exch liq ${exch.length?usd(exchTot):'$0'}</span> within ${LIQ_BAND_CENTS}¢ of ${hero?esc(bookShort(canonBook(hero.sportsbook)))+' '+fmtAm(hero.price):'price'}${exch.length?' · '+exch.map(x=>`${esc(bookShort(x.k))} ${usd(x.d)}`).join(' · '):''}</div>`;
   const cmpOrdered = hero ? [hero, ...mine.filter(o=>o!==hero)] : mine;
   const cmpHtml = cmpOrdered.length
     ? `<div class="plcmp">${cmpOrdered.map(o=>{
         const k=canonBook(o.sportsbook); const url=deepLinkFor(o)||BOOK_HOME[k]||'#'; const lg=bookLogo(k);
-        const liq=EXCH.has(k)?exchDepth(o):rowLiquidity(o); const liqTxt = liq!=null ? `<span class="plcmpliq">${usd(liq)}</span>` : '';
-        return `<a class="plcmpchip${o===hero?' best':''}" href="${esc(url)}" rel="noopener">${lg?`<img src="${esc(lg)}" alt="">`:''}<span>${esc(bookShort(k))} ${fmtAm(o.price)}</span>${EXCH.has(k)?`<span class="plcmpliq">${winPct(o.price)}¢</span>`:''}${liqTxt}</a>`;
+        const far=EXCH.has(k) && !nearRef(o, hero?.price);
+        const liq=EXCH.has(k)?(far?null:exchDepth(o)):rowLiquidity(o); const liqTxt = liq!=null ? `<span class="plcmpliq">${usd(liq)}</span>` : '';
+        return `<a class="plcmpchip${o===hero?' best':''}${far?' far':''}" href="${esc(url)}" rel="noopener">${lg?`<img src="${esc(lg)}" alt="">`:''}<span>${esc(bookShort(k))} ${fmtAm(o.price)}</span>${EXCH.has(k)?`<span class="plcmpliq">${winPct(o.price)}¢</span>`:''}${liqTxt}</a>`;
       }).join('')}</div>`
     : '<div class="plcmp dim" style="font-size:11px">No shops posting this right now.</div>';
   // Raw inputs behind the fair/edge above, tucked under a native <details> so it's invisible
@@ -2854,6 +2856,10 @@ function rowLiquidity(o){
 // Exchange depth for the liquidity floor: size weighted by how close each level sits to the top
 // price (full weight at the top, fading to 0 at LIQ_BAND_CENTS out), not just the top level alone.
 // A mirrored row's depth is its real source order's depth -- same sizes, same distances.
+// An exchange price only counts as real liquidity for a pick when it's near the price you'd
+// actually bet (target book / reference) -- a stale or one-sided quote 100s of cents away isn't
+// fillable at anything like your number.
+const nearRef = (o, refPrice) => refPrice==null || Math.abs(cents(Number(o.price))-cents(Number(refPrice)))<=LIQ_BAND_CENTS;
 function exchDepth(o){
   const src=o._mirroredFrom||o;
   const w=weightedNear(levelsOf(src), Number(src.price));
@@ -2913,13 +2919,13 @@ function buildAutoCandidates(){
         // null for it, and a null size was treated as "unmeasurable, let it through" -- silently
         // skipping the floor entirely rather than actually checking the exchange's own depth.
         // Props and mains get their own threshold, since a prop's real size and a moneyline's
-        // real size are completely different scales. With a minimum set, a pick needs an exchange
-        // with at least that much weighted depth near its price -- the deepest exchange posting
-        // it counts -- and one with no measurable exchange depth at all is left out.
+        // real size are completely different scales. With a minimum set, the TOTAL weighted depth
+        // across exchanges priced within LIQ_BAND_CENTS of the reference price has to reach it;
+        // exchanges quoting far off that price don't count, and no countable depth = left out.
         const minLiq = isMain ? autoMinLiqMains : autoMinLiqProps;
         if(minLiq>0){
-          const depths = myRows.filter(o=>EXCH.has(canonBook(o.sportsbook))).map(exchDepth).filter(v=>v!=null&&!isNaN(v));
-          if(!depths.length || Math.max(...depths)<minLiq) return;
+          const tot = legExchDepths(myRows, refRow.price).reduce((a,x)=>a+x.d,0);
+          if(tot<minLiq) return;
         }
         const edgePct = (fairP - toImplied(Number(refRow.price)))*100;
         if(autoEdge!=='' && edgePct < autoEdge) return;
@@ -3140,7 +3146,7 @@ function renderParlay(){
     <div style="margin-top:10px">${heroHtml}</div>
     <div class="ttrow" style="margin-top:4px"><span class="dim">At added odds: ${combo!=null?fmtAm(combo):'—'}</span></div>
     ${fairHtml}
-    ${(()=>{ if(!parlay.length) return ''; const tots=parlay.map(l=>{ const m=bestFirst(myRowsForLeg(l,rowsForLeg(l))); const e=legExchDepths(m); return {l, t:e.length?e.reduce((a,x)=>a+x.d,0):null}; });
+    ${(()=>{ if(!parlay.length) return ''; const tots=parlay.map(l=>{ const m=bestFirst(myRowsForLeg(l,rowsForLeg(l))); const tgt=autoTargetBook?m.find(o=>canonBook(o.sportsbook)===autoTargetBook):null; const e=legExchDepths(m,(tgt||m[0])?.price); return {l, t:e.length?e.reduce((a,x)=>a+x.d,0):null}; });
       const known=tots.filter(x=>x.t!=null); if(!known.length) return `<div class="ttrow dim" style="font-size:11px;margin-top:4px">Exch liq: no exchange posting these legs</div>`;
       const thin=known.sort((a,b)=>a.t-b.t)[0]; const missing=tots.length-known.length;
       const total=known.reduce((a,x)=>a+x.t,0);
