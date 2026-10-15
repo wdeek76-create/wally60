@@ -3644,6 +3644,30 @@ function _nhlPsProjsAligned(ou, line, projs) {
   const L = Number(line);
   return ou === "under" ? ps.every(v => v <= L) : ps.every(v => v >= L);
 }
+// Over/under hit probability for a SOG projection — Poisson, which is what PropShop's EVs come out of
+// (checked: it reproduces each source's posted EV from its projection and price).
+const NHL_PS_MISSING_MIN_EV = 1;
+function _nhlPoissonHit(ou, line, lam) {
+  if (!(lam > 0)) return null;
+  const k = Math.floor(Number(line)); // under hits at <= k, over at >= k+1 (x.5 lines)
+  let term = Math.exp(-lam), cdf = term;
+  for (let i = 1; i <= k; i++) { term *= lam / i; cdf += term; }
+  return ou === "under" ? cdf : 1 - cdf;
+}
+function _nhlPsMissingSrcEv(entry, proj) {
+  const evAt = (pr, odds) => { const p = _nhlPoissonHit(entry.ou, entry.line, pr), d = oddsToDecimal(odds); return p == null || d == null ? null : (p * d - 1) * 100; };
+  const rows = entry.sources.map(x => x.prop).filter(r => r.ev != null && r.proj != null && r.odds != null);
+  if (!rows.length) return { verified: false };
+  // Projections are posted to 2 decimals, so allow the EV that half a hundredth either way can move.
+  const verified = rows.every(r => {
+    const lo = evAt(Number(r.proj) - 0.005, r.odds), hi = evAt(Number(r.proj) + 0.005, r.odds);
+    if (lo == null || hi == null) return false;
+    return Number(r.ev) >= Math.min(lo, hi) - 0.15 && Number(r.ev) <= Math.max(lo, hi) + 0.15;
+  });
+  if (!verified) return { verified: false };
+  const bestOdds = Math.max(...rows.map(r => parseInt(r.odds, 10)).filter(n => !isNaN(n))); // most generous price on the board
+  return { verified: true, ev: evAt(Number(proj), bestOdds) };
+}
 function computeNhlPsEnsemble() {
   const byKey = {};
   // Per-source player coverage (any side/line) — needed below to tell
@@ -3698,6 +3722,17 @@ function computeNhlPsEnsemble() {
     const missingProj = requiredQual === 3 ? _nhlCsvProj(missingSrcs[0], entry.player) : null;
     allProjs.push(missingProj);
     if (!_nhlPsProjsAligned(entry.ou, entry.line, allProjs)) return;
+    // 3-of-3 with the missing source's CSV projection: hold it to the same 1% bar it would have
+    // needed to show up in its paste. Its EV comes from the same Poisson math PropShop uses — but
+    // only once that math reproduces every present source's own EV on this exact pick. If it
+    // doesn't (or can't be checked), the pick is skipped rather than guessed at.
+    if (missingProj != null) {
+      const chk = _nhlPsMissingSrcEv(entry, missingProj);
+      if (!chk.verified || chk.ev < NHL_PS_MISSING_MIN_EV) {
+        console.log(`[NHL ensemble] skip ${entry.player} ${entry.ou} ${entry.line}: ${missingSrcs[0]} CSV ${missingProj} → ${chk.verified ? chk.ev.toFixed(1) + '% (needs ' + NHL_PS_MISSING_MIN_EV + '%+)' : 'model could not be verified against the other sources'}`);
+        return;
+      }
+    }
     let bestOddsN = -Infinity, bestOdds = null, bestBook = null, bestEv = null;
     entry.sources.forEach(({ prop }) => {
       const n = parseInt(prop.odds);
