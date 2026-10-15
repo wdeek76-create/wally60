@@ -212,6 +212,7 @@ tr:hover td{background:#0a1628;}
   <button class="tab-btn" onclick="switchTab('totals')">TOTALS</button>
   <button class="tab-btn" onclick="switchTab('discord')">DISCORD</button>
   <button class="tab-btn" onclick="switchTab('solo')">SOLO SOURCES</button>
+  <button class="tab-btn" onclick="switchTab('model')">MODEL</button>
 </div>
 <div id="main">
   <div id="up-tab">
@@ -878,7 +879,9 @@ function switchTab(t){
   document.getElementById('totals-tab').style.display=t==='totals'?'block':'none';
   document.getElementById('discord-tab').style.display=t==='discord'?'block':'none';
   document.getElementById('solo-tab').style.display=t==='solo'?'block':'none';
-  document.querySelectorAll('.tab-btn').forEach((b,i)=>b.classList.toggle('active',['up','res','tracker','ag','totals','discord','solo'][i]===t));
+  document.getElementById('model-tab').style.display=t==='model'?'block':'none';
+  document.querySelectorAll('.tab-btn').forEach((b,i)=>b.classList.toggle('active',['up','res','tracker','ag','totals','discord','solo','model'][i]===t));
+  if(t==='model') renderNhlModelTab();
   if(t==='solo') renderNhlSoloTab();
   if(t==='discord') renderNhlDiscordTab();
   if(t==='totals') renderNhlTotals();
@@ -2260,12 +2263,21 @@ function _nhlSoloCapture(src, results) {
 }
 async function gradeNhlSoloLog(manual) {
   if (_nhlSoloGrading) return 0;
-  const today = _ymdLocal(new Date());
-  const pending = nhlSoloLog.filter(x => x.result === "pending" && x.gameDateIso <= today);
-  if (!pending.length) { if (manual) showNhlToast("Nothing to grade yet"); return 0; }
   _nhlSoloGrading = true;
   let graded = 0;
-  try {
+  try { graded = await _nhlGradeShadowLog(nhlSoloLog); } finally { _nhlSoloGrading = false; }
+  if (graded) { _nhlSoloSave(); if (currentTab === "solo") renderNhlSoloTab(); }
+  if (manual) showNhlToast(graded ? graded + " solo line" + (graded === 1 ? "" : "s") + " graded" : "Nothing new to grade");
+  return graded;
+}
+// Grades any list of { player, game, team, gameDateIso, ou, line, result:"pending" } rows off the final
+// box scores (OpticOdds, ESPN fallback). Used by the solo-source log and the model log.
+async function _nhlGradeShadowLog(log) {
+  const today = _ymdLocal(new Date());
+  const pending = log.filter(x => x.result === "pending" && x.gameDateIso <= today);
+  if (!pending.length) return 0;
+  let graded = 0;
+  {
     const fixtures = await ooNhlFixtures();
     for (const date of [...new Set(pending.map(x => x.gameDateIso))]) {
       const finals = fixtures.filter(f => f.date === date && f.status === "completed");
@@ -2289,9 +2301,7 @@ async function gradeNhlSoloLog(manual) {
         graded++;
       }
     }
-  } finally { _nhlSoloGrading = false; }
-  if (graded) { _nhlSoloSave(); if (currentTab === "solo") renderNhlSoloTab(); }
-  if (manual) showNhlToast(graded ? graded + " solo line" + (graded === 1 ? "" : "s") + " graded" : "No finished games among open solo lines");
+  }
   return graded;
 }
 function _nhlSoloWin(x) { return x.odds > 0 ? x.odds / 100 : 100 / Math.abs(x.odds); }
@@ -2328,6 +2338,135 @@ function renderNhlSoloTab() {
     </div>
     <div style="font-size:12px;color:#9fb8d6;margin-bottom:14px;">Logged from each PropShop paste, bet or not. Separate from the tracker. Units/ROI at the pasted price; pushes and DNPs don't count.</div>
     ${nhlSoloLog.length ? tables : `<div style="color:#9fb8d6;font-size:13px;">Nothing logged yet — paste a source on the Results tab and its ${NHL_SOLO_MIN_EV}%+ lines start showing up here.</div>`}`;
+}
+// ── MODEL ─────────────────────────────────────────────────────────────────
+// Our own version of the ensemble, no PropShop: each uploaded CSV projection → Poisson hit chance
+// (the exact math PropShop's % comes from) → EV at the best live trusted-book price
+// (Pinnacle / Prop Builder / FanDuel / Bet105). Same gate as the ensemble: 3 sources at 3%+ and none
+// negative; a player one source doesn't project at all needs all 3 others at 3%+.
+// Each run's picks are saved to their own log (flat 1u at the run's price) and graded — kept apart
+// from the tracker, so it can be compared against the PropShop ensemble before trusting it.
+let nhlModelLog = [];
+try { nhlModelLog = JSON.parse(localStorage.getItem("nhl_model_log") || "[]") || []; } catch (e) { nhlModelLog = []; }
+let _nhlModelRows = null, _nhlModelRunAt = null, _nhlModelBusy = false, _nhlModelGrading = false;
+function _nhlModelSave() { try { localStorage.setItem("nhl_model_log", JSON.stringify(nhlModelLog)); } catch (e) { console.warn("[NHL model] save failed", e); } }
+// One source's CSV projection for a player in this game (name, then team if the name is shared).
+function _nhlModelCsvProj(src, name, home, away) {
+  const k = nn(name || "");
+  let hits = Object.values(srcs[src] || {}).filter(v => v && nn(v.name) === k && v.sog > 0);
+  if (hits.length > 1) hits = hits.filter(v => v.team && (_nhlTeamCanon(v.team) === _nhlTeamCanon(home) || _nhlTeamCanon(v.team) === _nhlTeamCanon(away)));
+  return hits.length === 1 ? Number(hits[0].sog) : null;
+}
+async function runNhlModel() {
+  if (_nhlModelBusy) return;
+  const loaded = PS_SOURCE_KEYS_NHL.filter(k => srcs[k] && Object.keys(srcs[k]).length);
+  if (loaded.length < 3) { showNhlToast("Upload at least 3 source CSVs on the Upload tab first"); return; }
+  _nhlModelBusy = true; renderNhlModelTab();
+  try {
+    const iso = _ymdLocal(new Date());
+    delete _nhlLiveLineCache[iso]; // fresh prices
+    const byPL = await _nhlGetLiveLinesForDate(iso);
+    const rows = [];
+    for (const key of Object.keys(byPL)) {
+      const ents = byPL[key]; if (!ents || !ents.length) continue;
+      const player = ents[0].player, line = Number(ents[0].line), home = ents[0].home, away = ents[0].away;
+      if (!isFinite(line) || Number.isInteger(line) || _nhlPsRejected(player)) continue;
+      const projs = {};
+      PS_SOURCE_KEYS_NHL.forEach(src => { const v = _nhlModelCsvProj(src, player, home, away); if (v != null) projs[src] = v; });
+      const have = Object.keys(projs);
+      if (have.length < 3) continue;
+      for (const ou of ["over", "under"]) {
+        const live = await _nhlLiveBookFor(player, line, ou, iso, [home, away]);
+        if (!live) continue;
+        const d = oddsToDecimal(live.price); if (d == null) continue;
+        const evs = {};
+        have.forEach(src => { evs[src] = Math.round((_nhlPoissonHit(ou, line, projs[src]) * d - 1) * 1000) / 10; });
+        const vals = have.map(s => evs[s]);
+        const qual = vals.filter(e => e >= NHL_PS_QUAL_EV).length, minEv = Math.min(...vals);
+        if (qual < 3 || minEv < 0) continue;
+        // Fair = worst source that clears the bar, else the second-worst (same anchor as the ensemble).
+        const sorted = have.slice().sort((a, b) => evs[a] - evs[b]);
+        const anchor = evs[sorted[0]] >= NHL_PS_QUAL_EV ? sorted[0] : sorted[1];
+        const fairProb = _nhlPoissonHit(ou, line, projs[anchor]);
+        rows.push({ player, line, ou, home, away, gameDateIso: iso, game: away + " @ " + home, odds: live.price, book: live.book,
+          projs, evs, agree: qual, of: have.length, anchorEv: evs[anchor], playTo: _nhlPlayToFromProb(fairProb, NHL_PS_QUAL_EV) });
+      }
+    }
+    rows.sort((a, b) => b.anchorEv - a.anchorEv);
+    _nhlModelRows = rows; _nhlModelRunAt = new Date();
+    // Log today's picks (first run's price sticks, like a real bet).
+    rows.forEach(r => {
+      const k = r.gameDateIso + "|" + nn(r.player) + "|" + r.ou + "|" + r.line;
+      if (nhlModelLog.some(x => x.key === k)) return;
+      nhlModelLog.push({ key: k, player: r.player, game: r.game, team: "", gameDateIso: r.gameDateIso, ou: r.ou, line: r.line, odds: r.odds, book: r.book,
+        ev: r.anchorEv, agree: r.agree, of: r.of, projs: r.projs, evs: r.evs, ps: _nhlModelPsKeys().has(nn(r.player) + "|" + r.ou + "|" + r.line), at: new Date().toISOString(), result: "pending", actual: null });
+    });
+    _nhlModelSave();
+    showNhlToast(`Model: ${rows.length} pick${rows.length === 1 ? "" : "s"}`);
+  } catch (e) { console.error("[NHL model] run failed", e); showNhlToast("Model run failed: " + (e && e.message)); }
+  finally { _nhlModelBusy = false; renderNhlModelTab(); }
+}
+// Today's PropShop-ensemble picks (current Ensemble tab + anything already logged today).
+function _nhlModelPsKeys() {
+  const iso = _ymdLocal(new Date()), keys = new Set();
+  try { computeNhlPsEnsemble().filter(r => r.gameDateIso === iso).forEach(r => keys.add(nn(r.player) + "|" + r.ou + "|" + Number(r.line))); } catch (e) {}
+  bets.filter(b => b._psEnsemble && _ymdLocal(new Date(b.date)) === iso).forEach(b => keys.add(nn(b.player) + "|" + b.ou + "|" + Number(b.line)));
+  return keys;
+}
+async function gradeNhlModelLog(manual) {
+  if (_nhlModelGrading) return 0;
+  _nhlModelGrading = true;
+  let graded = 0;
+  try { graded = await _nhlGradeShadowLog(nhlModelLog); } finally { _nhlModelGrading = false; }
+  if (graded) { _nhlModelSave(); if (currentTab === "model") renderNhlModelTab(); }
+  if (manual) showNhlToast(graded ? graded + " model pick" + (graded === 1 ? "" : "s") + " graded" : "Nothing new to grade");
+  return graded;
+}
+function renderNhlModelTab() {
+  const el = document.getElementById("model-tab"); if (!el) return;
+  const fmt = n => (n > 0 ? "+" : "") + n;
+  const btn = "border-radius:5px;padding:5px 12px;font-size:12px;font-weight:700;cursor:pointer;";
+  // Records: model picks overall, split by whether PropShop's ensemble had the same pick.
+  const rec = list => { const r = { w: 0, l: 0, pl: 0, open: 0 }; list.forEach(x => { if (x.result === "hit") { r.w++; r.pl += _nhlSoloWin(x); } else if (x.result === "miss") { r.l++; r.pl -= 1; } else if (x.result === "pending") r.open++; }); return r; };
+  const recTxt = r => { const n = r.w + r.l; return n ? `${r.w}-${r.l} <span style="color:#9fb8d6;">${(r.w / n * 100).toFixed(0)}%</span> <span style="color:${r.pl >= 0 ? "#22c55e" : "#f87171"};">${r.pl >= 0 ? "+" : ""}${r.pl.toFixed(2)}u ${(r.pl / n * 100).toFixed(1)}%</span>${r.open ? ` <span style="color:#00aaff;">${r.open} open</span>` : ""}` : (r.open ? `<span style="color:#00aaff;">${r.open} open</span>` : `<span style="color:#3b4b63;">—</span>`); };
+  const modelDates = new Set(nhlModelLog.map(x => x.gameDateIso));
+  const psBets = bets.filter(b => b._psEnsemble && modelDates.has(_ymdLocal(new Date(b.date))));
+  const psRec = { w: 0, l: 0, pl: 0, open: 0 };
+  psBets.forEach(b => { const st = Number(b.stake) || 1, o = Number(b.odds), win = o > 0 ? o / 100 : 100 / Math.abs(o); if (b.result === "hit") { psRec.w++; psRec.pl += win; } else if (b.result === "miss") { psRec.l++; psRec.pl -= 1; } else if (b.result === "pending") psRec.open++; });
+  const stat = (label, html) => `<div style="background:#0a1628;border:1px solid #0d2035;border-radius:8px;padding:10px 14px;min-width:200px;"><div style="font-size:11px;letter-spacing:.06em;color:#9fb8d6;font-weight:800;text-transform:uppercase;margin-bottom:4px;">${label}</div><div style="font-size:14px;font-weight:800;color:#fff;">${html}</div></div>`;
+  const records = `<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px;">
+    ${stat("Model — all picks", recTxt(rec(nhlModelLog)))}
+    ${stat("Model + PropShop agree", recTxt(rec(nhlModelLog.filter(x => x.ps))))}
+    ${stat("Model only", recTxt(rec(nhlModelLog.filter(x => !x.ps))))}
+    ${stat("PropShop ensemble (same days, 1u)", recTxt(psRec))}
+  </div>`;
+  // Today's comparison.
+  let today = "";
+  if (_nhlModelRows) {
+    const psKeys = _nhlModelPsKeys();
+    const mKeys = new Set(_nhlModelRows.map(r => nn(r.player) + "|" + r.ou + "|" + r.line));
+    const both = _nhlModelRows.filter(r => psKeys.has(nn(r.player) + "|" + r.ou + "|" + r.line)).length;
+    const psOnly = [...psKeys].filter(k => !mKeys.has(k));
+    const chip = (src, r) => r.projs[src] == null ? "" : `<span style="display:inline-block;white-space:nowrap;margin:1px 4px 1px 0;padding:2px 6px;border:1px solid #1e40af99;border-radius:4px;font-size:11px;"><b style="color:#7dd3fc;">${_NHL_SRC_TAG[src]}</b> ${r.projs[src].toFixed(2)} <span style="color:${r.evs[src] >= NHL_PS_QUAL_EV ? "#00cc66" : r.evs[src] >= 0 ? "#eab308" : "#f87171"};font-weight:800;">${fmt(r.evs[src])}%</span></span>`;
+    const td = (h, x) => `<td style="padding:6px 9px;border-top:1px solid #0d2035;font-size:13px;${x || ""}">${h}</td>`;
+    const rowsHtml = _nhlModelRows.map(r => {
+      const inPs = psKeys.has(nn(r.player) + "|" + r.ou + "|" + r.line);
+      const srcOrder = Object.keys(r.projs).sort((a, b) => r.projs[a] - r.projs[b]);
+      return `<tr>${td(`<b>${escapeHtmlBasic(r.player)}</b> <span style="color:#9fb8d6;font-size:11px;">${escapeHtmlBasic(r.game)}</span>`)}${td(`<span style="color:${r.ou === "over" ? "#fb923c" : "#38bdf8"};font-weight:800;">${r.ou === "over" ? "O" : "U"}${r.line}</span>`)}${td(`${fmt(r.odds)} <span style="color:#9fb8d6;">${escapeHtmlBasic(r.book)}</span>`, "white-space:nowrap;")}${td(r.playTo != null ? fmt(r.playTo) : "—")}${td(`${r.agree}/${r.of}`)}${td(srcOrder.map(s => chip(s, r)).join(""))}${td(inPs ? `<span style="color:#00cc66;font-weight:800;">✓ PS</span>` : `<span style="color:#eab308;font-weight:800;">model only</span>`)}</tr>`;
+    }).join("");
+    const head = ["Player", "Side", "Best price", "Play to", "Agree", "Sources (proj · EV at this price)", "PropShop"].map(h => `<th style="padding:6px 9px;font-size:11px;text-align:left;letter-spacing:.5px;text-transform:uppercase;white-space:nowrap;">${h}</th>`).join("");
+    today = `<div style="font-size:13px;color:#fff;font-weight:700;margin-bottom:8px;">Run at ${_nhlModelRunAt.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}: ${_nhlModelRows.length} model picks · ${both} also PropShop · ${_nhlModelRows.length - both} model only · ${psOnly.length} PropShop only</div>
+      ${psOnly.length ? `<div style="font-size:12px;color:#9fb8d6;margin-bottom:10px;">PropShop only: ${psOnly.map(k => { const [n, ou, ln] = k.split("|"); const b = bets.find(x => nn(x.player) === n) || (window._nhlPsEnsembleRows || []).find(x => nn(x.player) === n); return escapeHtmlBasic((b ? b.player : n) + " " + (ou === "over" ? "O" : "U") + ln); }).join(", ")}</div>` : ""}
+      ${_nhlModelRows.length ? `<div style="overflow-x:auto;border:1px solid #0d2035;border-radius:8px;"><table style="border-collapse:collapse;color:#fff;width:100%;"><thead style="background:#0a1628;"><tr>${head}</tr></thead><tbody>${rowsHtml}</tbody></table></div>` : `<div style="color:#9fb8d6;font-size:13px;">No line clears the bar at current prices.</div>`}`;
+  }
+  const loaded = PS_SOURCE_KEYS_NHL.filter(k => srcs[k] && Object.keys(srcs[k]).length).map(k => _NHL_SRC_TAG[k]);
+  el.innerHTML = `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:6px;">
+      <span style="font-size:15px;font-weight:800;color:#fff;">Model — our own ensemble off the uploaded CSVs and live prices</span>
+      <button onclick="runNhlModel()" ${_nhlModelBusy ? "disabled" : ""} style="background:#0066cc;border:none;color:#fff;${btn}">${_nhlModelBusy ? "Running…" : "Run model"}</button>
+      <button onclick="gradeNhlModelLog(true)" style="background:transparent;border:1px solid #0d2035;color:#fff;${btn}">Grade now</button>
+    </div>
+    <div style="font-size:12px;color:#9fb8d6;margin-bottom:14px;">CSVs loaded: ${loaded.length ? loaded.join(", ") : "none — upload them on the Upload tab"}. Poisson on each projection → EV at the best Pinnacle / Prop Builder / FanDuel / Bet105 price. Same gate as the ensemble (3 at ${NHL_PS_QUAL_EV}%+, none negative). Picks are logged at 1u flat and graded on their own; nothing goes to the tracker.</div>
+    ${records}${today}`;
 }
 // opts.silent — used by the auto-trigger poll below so it doesn't fight with
 // the Auto Grade tab's own log/UI when nobody's looking at it; a toast is
@@ -2619,6 +2758,7 @@ function _nhlStartAutoGradePolling() {
   const tick = () => {
     if (!agRunning && bets.some(b => b.result === "pending")) runAutoGrade({ silent: true });
     gradeNhlSoloLog().catch(e => console.warn("[NHL solo] grade", e && e.message));
+    gradeNhlModelLog().catch(e => console.warn("[NHL model] grade", e && e.message));
     runNhlClvCapture({ silent: true }).catch(() => {});
     nhlBackfillCrossTimes().catch(() => {});
   };
@@ -3732,6 +3872,13 @@ function computeNhlPsEnsemble() {
         console.log(`[NHL ensemble] skip ${entry.player} ${entry.ou} ${entry.line}: ${missingSrcs[0]} CSV ${missingProj} → ${chk.verified ? chk.ev.toFixed(1) + '% (needs ' + NHL_PS_MISSING_MIN_EV + '%+)' : 'model could not be verified against the other sources'}`);
         return;
       }
+    }
+    // Same 1% bar for a pasted source that shows a projection but no % (it would otherwise count as 0%).
+    for (const { src, prop } of entry.sources) {
+      if (prop.ev != null || prop.proj == null || prop.odds == null) continue;
+      const pr = _nhlPoissonHit(entry.ou, entry.line, Number(prop.proj)), d = oddsToDecimal(prop.odds);
+      const ev = pr != null && d != null ? (pr * d - 1) * 100 : null;
+      if (ev == null || ev < NHL_PS_MISSING_MIN_EV) { console.log(`[NHL ensemble] skip ${entry.player} ${entry.ou} ${entry.line}: ${src} has no % and works out to ${ev == null ? '?' : ev.toFixed(1) + '%'}`); return; }
     }
     let bestOddsN = -Infinity, bestOdds = null, bestBook = null, bestEv = null;
     entry.sources.forEach(({ prop }) => {
@@ -5442,6 +5589,7 @@ function scheduleNextTickerRefresh() {
   <div id="totals-tab" style="display:none;"></div>
   <div id="discord-tab" style="display:none;padding:24px 32px;"></div>
   <div id="solo-tab" style="display:none;padding:24px 32px;"></div>
+  <div id="model-tab" style="display:none;padding:24px 32px;"></div>
 
 <!-- PROPSHOP PASTE MODAL -->
 <div id="propshop-modal">
