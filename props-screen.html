@@ -644,9 +644,13 @@ const BOOK_REQ = [...BOOKS,'Courtside','Onyx Odds'];
 // quick arb's own reference list (see ensureQarbExtras), so they never show up anywhere else:
 // not the regular board/boxes, not the grid, not the parlay tool, not the Target shop picker.
 const EXTRA_BOOK_REQ = ['Caesars','Hard Rock Bet','Kambi'];
+// BookMaker is NHL main lines + team totals only: requested for NHL, and any row it returns for a
+// player prop is dropped (mainBookRow) so it never shows outside those markets.
+const bookReqFor = sk => sk==='nhl' ? [...BOOK_REQ,'BookMaker'] : BOOK_REQ;
+const mainBookRow = (sk,o) => canonBook(o.sportsbook)!=='bookmaker' || (()=>{ const mk=marketKeyFor(sk,o.market); return !!mk && (TEAM_MKS.has(mk)||GAME_MKS.has(mk)); })();
 const EXCH = new Set(['novig','prophet x','kalshi']);
 const SHOW_MAX = new Set(['pinnacle','bet105']); // flat-limit books whose max we show under the odds too
-const SHORT = { 'props builder':'PB','fanduel':'FD','novig':'Novig','prophet x':'PX','kalshi':'Kalshi','pinnacle':'Pin','bet105':'b105','draftkings':'DK','fliff':'Fliff','betonline':'BOL','caesars':'Caes','hard rock bet':'HR','kambi':'Kambi' };
+const SHORT = { 'props builder':'PB','fanduel':'FD','novig':'Novig','prophet x':'PX','kalshi':'Kalshi','pinnacle':'Pin','bet105':'b105','draftkings':'DK','fliff':'Fliff','betonline':'BOL','caesars':'Caes','hard rock bet':'HR','kambi':'Kambi','bookmaker':'BKM' };
 const canonBook = n => { const k=String(n||'').toLowerCase(); if(k==='courtside'||k==='onyx odds') return 'draftkings'; return k; };
 const bookLabel = n => { const k=canonBook(n); return BOOKS.find(b=>b.toLowerCase()===k) || n; };
 const bookShort = n => SHORT[canonBook(n)] || n;
@@ -1165,10 +1169,10 @@ async function loadSport(force){
       console.log(`[props] injuries: ${list.length} entries`);
     }catch(e){ console.warn('[props] injuries failed',e.message); } }
     // main lines, 5 fixtures × 5 books per call
-    mainRows=[]; let done=0; const fxChunks=chunk(fixtures,5), bkChunks=chunk(BOOK_REQ,5); const total=fxChunks.length*bkChunks.length;
+    mainRows=[]; let done=0; const fxChunks=chunk(fixtures,5), bkChunks=chunk(bookReqFor(sportKey),5); const total=fxChunks.length*bkChunks.length;
     for(const fx of fxChunks) for(const bk of bkChunks){
       stat.textContent=`${S.label} · loading lines ${++done}/${total}…`;
-      try{ const r=await oo('/fixtures/odds',{fixture_id:fx.map(f=>f.id),sportsbook:bk,is_main:true}); (r?.data||[]).forEach(d=>(d.odds||[]).forEach(o=>{ o._fx=d.id; mainRows.push(o); })); }
+      try{ const r=await oo('/fixtures/odds',{fixture_id:fx.map(f=>f.id),sportsbook:bk,is_main:true}); (r?.data||[]).forEach(d=>(d.odds||[]).forEach(o=>{ o._fx=d.id; if(mainBookRow(sportKey,o)) mainRows.push(o); })); }
       catch(e){ console.warn('[props] chunk failed',e.message); }
     }
     // index players from prop rows (player_id set) or fighters from moneyline selections (UFC)
@@ -1924,7 +1928,7 @@ async function refreshBoardOdds(){
   if(!p || viewMode!=='sport' || !document.querySelector('.pcard')){ clearInterval(boardTimer); boardTimer=null; return; }
   const fx=p.fixtureId;
   const rows=[];
-  try{ for(const bk of chunk(BOOK_REQ,5)){ const r=await oo('/fixtures/odds',{fixture_id:[fx],sportsbook:bk,is_main:true}); (r?.data||[]).forEach(d=>(d.odds||[]).forEach(o=>{ o._fx=d.id; rows.push(o); })); } }
+  try{ for(const bk of chunk(bookReqFor(sportKey),5)){ const r=await oo('/fixtures/odds',{fixture_id:[fx],sportsbook:bk,is_main:true}); (r?.data||[]).forEach(d=>(d.odds||[]).forEach(o=>{ o._fx=d.id; if(mainBookRow(sportKey,o)) rows.push(o); })); } }
   catch(e){ console.warn('[props] board refresh failed', e.message); return; }
   if(current!==p || viewMode!=='sport' || !document.querySelector('.pcard')) return;
   mainRows = mainRows.filter(o=>o._fx!==fx).concat(rows);
@@ -2162,7 +2166,7 @@ async function ensureAlts(p, mkey){
   if(altPending[ck]) return altPending[ck];
   altPending[ck]=(async()=>{
     const rows=[];
-    for(const bk of chunk(BOOK_REQ,5)){ try{ const r=await oo('/fixtures/odds',{fixture_id:[p.fixtureId],sportsbook:bk,market:marketNames}); (r?.data?.[0]?.odds||[]).forEach(o=>{ o._fx=p.fixtureId; rows.push(o); }); }catch(e){ console.warn('[props] alts chunk failed',e.message); } }
+    for(const bk of chunk(bookReqFor(sportKey),5)){ try{ const r=await oo('/fixtures/odds',{fixture_id:[p.fixtureId],sportsbook:bk,market:marketNames}); (r?.data?.[0]?.odds||[]).forEach(o=>{ o._fx=p.fixtureId; if(mainBookRow(sportKey,o)) rows.push(o); }); }catch(e){ console.warn('[props] alts chunk failed',e.message); } }
     altCache[ck]=rows; delete altPending[ck]; return rows;
   })();
   return altPending[ck];
@@ -2410,7 +2414,7 @@ const parlayComboPrice = () => parlay.length ? toAm(parlay.reduce((a,l)=>a*toDec
 // target="_blank" -- same reasoning as those buttons, a same-tab nav gives a mobile OS its best
 // shot at handing off to the shop's own app instead of just opening its website.
 const EXCH_HOME = {novig:'https://novig.us','prophet x':'https://prophetx.co',kalshi:'https://kalshi.com'};
-const BOOK_HOME = {...EXCH_HOME, fanduel:'https://sportsbook.fanduel.com', draftkings:'https://sportsbook.draftkings.com',
+const BOOK_HOME = {...EXCH_HOME, fanduel:'https://sportsbook.fanduel.com', draftkings:'https://sportsbook.draftkings.com', bookmaker:'https://www.bookmaker.eu',
   betonline:'https://www.betonline.ag', bet105:'https://www.bet105.com', fliff:'https://www.getfliff.com',
   'props builder':'https://propsbuilder.com', pinnacle:'https://www.pinnacle.com', caesars:'https://sportsbook.caesars.com',
   'hard rock bet':'https://app.hardrock.bet'};
