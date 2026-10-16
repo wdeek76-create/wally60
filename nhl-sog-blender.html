@@ -1572,12 +1572,14 @@ function renderTracker() {
         <button id="me-btn" onclick="sendNhlCard('me')" title="For you only: open bets where FanDuel, Novig or ProphetX is within 10 cents of play-to" style="background:#0a1628;border:1px solid #0d2035;color:#00cc66;
           border-radius:6px;padding:7px 14px;font-size:13px;font-weight:600;cursor:pointer;
           font-family:'Inter',sans-serif;">🖼 My Card (FD/NV/PX)</button>
+        <button id="recheck-btn" onclick="recheckNhlEnsembleOpen()" title="Re-run the ensemble rules on today's open bets at the current live prices" style="background:#0a1628;border:1px solid #0d2035;color:#eab308;border-radius:6px;padding:7px 14px;font-size:13px;font-weight:600;cursor:pointer;font-family:'Inter',sans-serif;">🔄 Recheck ensemble</button>
         <button onclick="openQuickGrade()" style="background:#0066cc;border:none;color:#fff;border-radius:6px;padding:7px 16px;font-size:13px;font-weight:700;cursor:pointer;font-family:'Inter',sans-serif;">⚡ Quick Grade</button>
         <button id="tracker-export-btn" onclick="exportBets()">Backup to file</button>
         <button id="tracker-import-btn" onclick="importBets()">Restore from file</button>
       </div>
       <div id="nhl-card-report">${_nhlCardReportHtml()}</div>
       <div id="nhl-discord-box">${_nhlDiscordBoxHtml()}</div>
+      <div id="nhl-recheck-box">${_nhlRecheckHtml()}</div>
 
       <div class="overview-strip" style="margin:31px 16px 14px 0;">
         <div class="overview-stat">
@@ -3861,7 +3863,7 @@ function _nhlPsProjsAligned(ou, line, projs) {
 }
 // Over/under hit probability for a SOG projection — Poisson, which is what PropShop's EVs come out of
 // (checked: it reproduces each source's posted EV from its projection and price).
-const NHL_PS_MISSING_MIN_EV = 1;
+const NHL_PS_MISSING_MIN_EV = 0; // the 4th source just can't be negative — same as when it's in the paste
 function _nhlPoissonHit(ou, line, lam) {
   if (!(lam > 0)) return null;
   const k = Math.floor(Number(line)); // under hits at <= k, over at >= k+1 (x.5 lines)
@@ -3937,8 +3939,9 @@ function computeNhlPsEnsemble() {
     const missingProj = requiredQual === 3 ? _nhlCsvProj(missingSrcs[0], entry.player) : null;
     allProjs.push(missingProj);
     if (!_nhlPsProjsAligned(entry.ou, entry.line, allProjs)) return;
-    // 3-of-3 with the missing source's CSV projection: hold it to the same 1% bar it would have
-    // needed to show up in its paste. Its EV comes from the same Poisson math PropShop uses — but
+    // 3-of-3 with the missing source's CSV projection: work out its EV and hold it to the same
+    // "not negative" bar a pasted 4th source has (it's usually missing only because the paste drops <1% rows).
+    // Its EV comes from the same Poisson math PropShop uses — but
     // only once that math reproduces every present source's own EV on this exact pick. If it
     // doesn't (or can't be checked), the pick is skipped rather than guessed at.
     if (missingProj != null) {
@@ -3948,7 +3951,7 @@ function computeNhlPsEnsemble() {
         return;
       }
     }
-    // Same 1% bar for a pasted source that shows a projection but no % (it would otherwise count as 0%).
+    // Same "not negative" bar for a pasted source that shows a projection but no %.
     for (const { src, prop } of entry.sources) {
       if (prop.ev != null || prop.proj == null || prop.odds == null) continue;
       const pr = _nhlPoissonHit(entry.ou, entry.line, Number(prop.proj)), d = oddsToDecimal(prop.odds);
@@ -4922,6 +4925,112 @@ function renderNhlDiscordTab() {
   </div>`;
 }
 function _nhlPaintDiscordBox() { const el = document.getElementById("nhl-discord-box"); if (el) el.innerHTML = _nhlDiscordBoxHtml(); }
+// Recheck: today's open bets run back through the ensemble rules at the live price — every source's
+// EV redone with the Poisson math at the best trusted-book price now (3 at 3%+, none negative). Read-only:
+// nothing about the logged bets changes.
+let _nhlRecheck = null; // { at, rows }
+async function recheckNhlEnsembleOpen() {
+  const iso = _ymdLocal(new Date());
+  const open = bets.filter(b => b.result === "pending" && b.stat === "SOG" && _ymdLocal(new Date(b.date)) === iso && b.sourceProjs && Object.keys(b.sourceProjs).length);
+  const btn = document.getElementById("recheck-btn"), orig = btn ? btn.textContent : "";
+  if (btn) { btn.disabled = true; btn.textContent = "Checking prices…"; }
+  try {
+    const refreshed = open.length ? await _nhlRefreshPicksForCard(open) : [];
+    const fresh = await _nhlRecheckCandidates(iso);
+    const rows = refreshed.map(b => {
+      const projs = {};
+      PS_SOURCE_KEYS_NHL.forEach(src => {
+        const v = b.sourceProjs[src] != null ? Number(b.sourceProjs[src]) : (b.psMissingSrc === src && b.psMissingProj != null ? Number(b.psMissingProj) : null);
+        if (v != null) projs[src] = v;
+      });
+      if (!b._liveNow) return { b, projs, live: false };
+      const d = oddsToDecimal(b.odds), evs = {};
+      Object.keys(projs).forEach(src => { evs[src] = Math.round((_nhlPoissonHit(b.ou, b.line, projs[src]) * d - 1) * 1000) / 10; });
+      const vals = Object.values(evs), qual = vals.filter(e => e >= NHL_PS_QUAL_EV).length, minEv = Math.min(...vals);
+      const ok = qual >= 3 && minEv >= 0;
+      const why = ok ? "" : qual < 3 ? `only ${qual} source${qual === 1 ? "" : "s"} at ${NHL_PS_QUAL_EV}%+` : "a source is negative";
+      return { b, projs, evs, live: true, ok, why };
+    });
+    _nhlRecheck = { at: new Date(), rows, fresh };
+  } catch (e) { console.error("[NHL recheck] failed", e); showNhlToast("Recheck failed: " + (e && e.message)); }
+  finally { if (btn) { btn.disabled = false; btn.textContent = orig; } _nhlPaintRecheck(); }
+}
+// Not-yet-logged plays: every player/side/line in today's pastes, each source's projection (paste row,
+// else that source's CSV — they're identical) re-priced at the best trusted-book price now.
+async function _nhlRecheckCandidates(iso) {
+  const seen = new Map();
+  PS_SOURCE_KEYS_NHL.forEach(src => (nhlPsBySource[src] || []).forEach(r => {
+    if (r.gameDateIso && r.gameDateIso !== iso) return;
+    const k = nn(r.player) + "|" + r.ou + "|" + Number(r.line);
+    if (!seen.has(k)) seen.set(k, { player: r.player, team: r.team || "", game: r.game || "", ou: r.ou, line: Number(r.line), gameDateIso: iso, projs: {} });
+    if (r.proj != null) seen.get(k).projs[src] = Number(r.proj);
+  }));
+  delete _nhlLiveLineCache[iso];
+  const out = [];
+  for (const c of seen.values()) {
+    if (_nhlPsRejected(c.player) || _nhlPsAlreadyLogged(c)) continue;
+    const gm = String(c.game || "").split("@").map(x => x.trim());
+    PS_SOURCE_KEYS_NHL.forEach(src => { if (c.projs[src] == null) { const v = _nhlModelCsvProj(src, c.player, gm[0], gm[1]); if (v != null) c.projs[src] = v; } });
+    const have = Object.keys(c.projs); if (have.length < 3) continue;
+    const live = await _nhlLiveBookFor(c.player, c.line, c.ou, iso, c.team ? [c.team] : gm);
+    if (!live) continue;
+    const d = oddsToDecimal(live.price), evs = {};
+    have.forEach(src => { evs[src] = Math.round((_nhlPoissonHit(c.ou, c.line, c.projs[src]) * d - 1) * 1000) / 10; });
+    const vals = have.map(x => evs[x]);
+    if (vals.filter(e => e >= NHL_PS_QUAL_EV).length < 3 || Math.min(...vals) < 0) continue;
+    const sorted = have.slice().sort((a, b) => evs[a] - evs[b]);
+    const anchor = evs[sorted[0]] >= NHL_PS_QUAL_EV ? sorted[0] : sorted[1];
+    const fp = _nhlPoissonHit(c.ou, c.line, c.projs[anchor]);
+    out.push(Object.assign(c, { odds: live.price, book: live.book, allBooks: live.allBooks, evs, sourcesAgreed: have, requiredQual: have.length,
+      anchorFairProb: fp, anchorFairOdds: p2american(fp), anchorEv: evs[anchor], minEv: Math.min(...vals), qualCount: vals.filter(e => e >= NHL_PS_QUAL_EV).length }));
+  }
+  return out.sort((a, b) => b.anchorEv - a.anchorEv);
+}
+// Log a recheck play at the live price it qualified at (same bet shape as an ensemble pick).
+async function _nhlRecheckTrack(i) {
+  const list = (_nhlRecheck && _nhlRecheck.fresh) || [];
+  const idx = i == null ? list.map((_, j) => j) : [i];
+  let n = 0;
+  for (const j of idx) {
+    const c = list[j]; if (!c || c._tracked) continue;
+    const r = Object.assign({}, c, { sourceProjs: c.projs, sourceEvs: c.evs, missingSrc: null, missingProj: null, proj: Object.values(c.projs).reduce((a, b) => a + b, 0) / Object.keys(c.projs).length });
+    if (await _nhlPsLogRow(r)) { c._tracked = true; n++; }
+  }
+  if (n) { saveBets(); renderTracker(); }
+  showNhlToast(n ? `Tracked ${n} play${n === 1 ? "" : "s"}` : "Already tracked");
+}
+function _nhlRecheckHtml() {
+  if (!_nhlRecheck) return "";
+  const fmt = n => (n > 0 ? "+" : "") + n;
+  const inN = _nhlRecheck.rows.filter(r => r.ok).length, outN = _nhlRecheck.rows.filter(r => r.live && !r.ok).length, noLive = _nhlRecheck.rows.filter(r => !r.live).length;
+  const rows = _nhlRecheck.rows.slice().sort((a, b) => (a.ok === b.ok ? 0 : a.ok ? -1 : 1)).map(({ b, projs, evs, live, ok, why }) => {
+    const orig = bets.find(x => x.id === b.id) || b;
+    const head = `<b>${escapeHtmlBasic(b.player)}</b> <span style="color:${b.ou === "over" ? "#fb923c" : "#38bdf8"};font-weight:800;">${b.ou === "over" ? "O" : "U"}${b.line}</span>`;
+    const status = !live ? `<span style="color:#9fb8d6;font-weight:800;">no live line</span>` : ok ? `<span style="color:#00cc66;font-weight:800;">✓ still in</span>` : `<span style="color:#f87171;font-weight:800;">✗ out</span> <span style="color:#9fb8d6;">${why}</span>`;
+    const chips = live ? Object.keys(projs).sort((x, y) => projs[x] - projs[y]).map(src => `<span style="display:inline-block;white-space:nowrap;margin:1px 4px 1px 0;padding:1px 6px;border:1px solid #1e40af99;border-radius:4px;font-size:11px;"><b style="color:#7dd3fc;">${_NHL_SRC_TAG[src]}</b> ${projs[src].toFixed(2)} <span style="color:${evs[src] >= NHL_PS_QUAL_EV ? "#00cc66" : evs[src] >= 0 ? "#eab308" : "#f87171"};font-weight:800;">${fmt(evs[src])}%</span></span>`).join("") : "";
+    const td = (h, x) => `<td style="padding:5px 9px;border-top:1px solid #0d2035;font-size:12px;${x || ""}">${h}</td>`;
+    return `<tr>${td(head, "white-space:nowrap;")}${td(`${fmt(Number(orig.odds))} <span style="color:#9fb8d6;">${escapeHtmlBasic(orig.book || "")}</span>`, "white-space:nowrap;")}${td(live ? `${fmt(Number(b.odds))} <span style="color:#9fb8d6;">${escapeHtmlBasic(b.book || "")}</span>` : "—", "white-space:nowrap;")}${td(chips)}${td(status, "white-space:nowrap;")}</tr>`;
+  }).join("");
+  const th = h => `<th style="padding:5px 9px;font-size:10px;text-align:left;letter-spacing:.5px;text-transform:uppercase;white-space:nowrap;color:#9fb8d6;">${h}</th>`;
+  const fresh = _nhlRecheck.fresh || [];
+  const freshRows = fresh.map((c, i) => {
+    const td = (h, x) => `<td style="padding:5px 9px;border-top:1px solid #0d2035;font-size:12px;${x || ""}">${h}</td>`;
+    const chips = Object.keys(c.projs).sort((x, y) => c.projs[x] - c.projs[y]).map(src => `<span style="display:inline-block;white-space:nowrap;margin:1px 4px 1px 0;padding:1px 6px;border:1px solid #1e40af99;border-radius:4px;font-size:11px;"><b style="color:#7dd3fc;">${_NHL_SRC_TAG[src]}</b> ${c.projs[src].toFixed(2)} <span style="color:${c.evs[src] >= NHL_PS_QUAL_EV ? "#00cc66" : "#eab308"};font-weight:800;">${fmt(c.evs[src])}%</span></span>`).join("");
+    return `<tr>${td(`<b>${escapeHtmlBasic(c.player)}</b> <span style="color:${c.ou === "over" ? "#fb923c" : "#38bdf8"};font-weight:800;">${c.ou === "over" ? "O" : "U"}${c.line}</span>`, "white-space:nowrap;")}${td(`${fmt(c.odds)} <span style="color:#9fb8d6;">${escapeHtmlBasic(c.book)}</span>`, "white-space:nowrap;")}${td(chips)}${td(c._tracked ? `<span style="color:#00cc66;font-weight:800;">✓ tracked</span>` : `<button onclick="_nhlRecheckTrack(${i})" style="background:#7c3aed22;border:1px solid #a78bfa55;color:#c4b5fd;border-radius:4px;padding:2px 9px;font-size:11px;font-weight:700;cursor:pointer;">TRACK</button>`)}</tr>`;
+  }).join("");
+  const freshHtml = `<div style="font-size:12px;font-weight:800;color:#fff;margin:10px 0 4px;">Not logged yet — qualifies at the price now: ${fresh.length}${fresh.some(c => !c._tracked) && fresh.length > 1 ? ` <button onclick="_nhlRecheckTrack()" style="margin-left:8px;background:#7c3aed;border:none;color:#fff;border-radius:4px;padding:2px 10px;font-size:11px;font-weight:700;cursor:pointer;">TRACK ALL</button>` : ""}</div>
+    ${fresh.length ? `<div style="overflow-x:auto;"><table style="border-collapse:collapse;color:#fff;width:100%;"><thead><tr>${th("Play")}${th("Best now")}${th("Sources at the price now")}${th("")}</tr></thead><tbody>${freshRows}</tbody></table></div>` : `<div style="font-size:12px;color:#9fb8d6;">Nothing new clears the ensemble at current prices.</div>`}`;
+  return `<div style="margin:10px 0 0;padding:10px 12px;background:#0a1628;border:1px solid #eab308;border-radius:8px;max-width:1100px;">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;flex-wrap:wrap;">
+      <span style="font-size:13px;font-weight:800;color:#eab308;">Recheck at ${_nhlRecheck.at.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}: ${inN} still in · ${outN} out${noLive ? ` · ${noLive} no live line` : ""} · ${(_nhlRecheck.fresh || []).length} new</span>
+      <button onclick="recheckNhlEnsembleOpen()" style="background:transparent;border:1px solid #0d2035;color:#fff;border-radius:5px;padding:3px 10px;font-size:12px;cursor:pointer;">Refresh</button>
+      <button onclick="_nhlRecheck=null;_nhlPaintRecheck()" style="background:transparent;border:1px solid #0d2035;color:#fff;border-radius:5px;padding:3px 10px;font-size:12px;cursor:pointer;">Hide</button>
+    </div>
+    ${_nhlRecheck.rows.length ? `<div style="font-size:12px;font-weight:800;color:#fff;margin:4px 0;">Today's open bets</div><div style="overflow-x:auto;"><table style="border-collapse:collapse;color:#fff;width:100%;"><thead><tr>${th("Bet")}${th("Logged at")}${th("Best now")}${th("Sources at the price now")}${th("Ensemble now")}</tr></thead><tbody>${rows}</tbody></table></div>` : `<div style="font-size:12px;color:#9fb8d6;">No open ensemble bets logged today.</div>`}
+    ${freshHtml}
+  </div>`;
+}
+function _nhlPaintRecheck() { const el = document.getElementById("nhl-recheck-box"); if (el) el.innerHTML = _nhlRecheckHtml(); }
 function _nhlPaintCardReport() { const el = document.getElementById("nhl-card-report"); if (el) el.innerHTML = _nhlCardReportHtml(); }
 async function sendNhlCard(mode) {
   const picks = nhlPendingForSend();
