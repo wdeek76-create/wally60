@@ -5063,7 +5063,7 @@ async function makeDiscordCard(mode = 'partners') {
         const mkt = (MARKET_MAP[p.market] || { label: p.market }).label;
         const im = a => logos[a] ? `<img src="${logos[a]}" style="width:18px;height:18px;object-fit:contain;vertical-align:middle">` : '';
         const m = ooMatchProp(p, oddsByGame[p.game || ''] || []);
-        _ooWatchDiag(p, oddsByGame[p.game || ''] || [], m.exact.concat(m.other));
+        _ooWatchDiag(p, oddsByGame[p.game || ''] || [], m);
         // Live re-check: does each source's ORIGINAL fair probability (back-solved from
         // the odds/ev% it was captured at, hours ago) still hold up against the best
         // price actually available right now — independent of any stop, so this can't be
@@ -6283,18 +6283,35 @@ window._ooLast = {}; // player|market|side -> {p, m}
 function ooCopyOne(key){ const x=window._ooLast[key]; if(!x) return; navigator.clipboard.writeText(ooSendoutText(x.p,x.m)); }
 function ooCopyAll(){ const t=Object.values(window._ooLast).filter(x=>x.m.exact.length||x.m.other.length).map(x=>ooSendoutText(x.p,x.m)).join('\n\n'); navigator.clipboard.writeText(t); }
 
-// Odds rows for one game covering the given plays' markets. Cached per fixture for 3 minutes.
+// Combine the is_main fetch with the all-lines fetch. The all-lines rows used to REPLACE the
+// main rows outright, so if one book's chunk (e.g. the one with FanDuel) failed or came back
+// short on the second fetch, that book's main lines were thrown away too even though the
+// first fetch had them. Keep both, de-duped.
+function _ooMergeOdds(...lists) {
+  const seen = new Set(); const out = [];
+  lists.forEach(l => (l || []).forEach(o => {
+    const k = o.id || [o.sportsbook, o.market, o.selection || o.name, o.selection_line, o.points].join('|');
+    if (seen.has(k)) return; seen.add(k); out.push(o);
+  }));
+  return out;
+}
+
+// Odds rows for one game covering the given plays' markets. Cached for 3 minutes per fixture
+// AND per set of markets — the cache used to be keyed by fixture only, so if one send-out
+// (e.g. Consensus, only Rec Yds plays) ran first, the next send-out for that game within
+// 3 minutes reused rows that never included Pass Att / Rush Att, and every attempts play
+// came back with no books at all.
 const _ooGameOddsCache = {};
 async function ooOddsForGame(ev, plays) {
   if (!ev || ev.src !== 'oo') return [];
-  const ck = ev.id; const c = _ooGameOddsCache[ck];
+  const ck = ev.id + '|' + [...new Set(plays.map(p => p.market))].sort().join(','); const c = _ooGameOddsCache[ck];
   if (c && Date.now() - c.at < 180000) return c.rows;
   const main = await ooFetchFixtureOdds(ev.id, { is_main: true });
   const want = new Set();
   plays.forEach(p => main.odds.forEach(o => { if (_ooMarketMatches(o.market, p.market)) want.add(o.market); }));
   let rows = main.odds;
   const allErrs = main.errs.slice();
-  if (want.size) { const full = await ooFetchFixtureOdds(ev.id, { market: [...want] }); if (full.odds.length) rows = full.odds; allErrs.push(...full.errs); }
+  if (want.size) { const full = await ooFetchFixtureOdds(ev.id, { market: [...want] }); rows = _ooMergeOdds(full.odds, main.odds); allErrs.push(...full.errs); }
   // Surface any book-chunk that still failed after ooFetchFixtureOdds' retry, so a caller
   // (Copy Ensemble / Discord card) can warn "some books may be missing" instead of the
   // missing line just looking like it never existed.
@@ -6310,9 +6327,22 @@ async function ooOddsForGame(ev, plays) {
 // absent from this fetch, on the wrong side/market, or just a different line than tracked.
 // `matched` = the rows that DID make it through matching (e.g. m.exact.concat(m.other)).
 const _OO_WATCH_BOOKS = ['FanDuel', 'Kalshi'];
-function _ooWatchDiag(p, rows, matched) {
+function _ooWatchDiag(p, rows, m) {
+  const matched = m.exact.concat(m.other);
+  const pt = _ooPlayTo(p);
   _OO_WATCH_BOOKS.forEach(book => {
-    if (matched.some(o => o.sportsbook === book)) return; // already showing, nothing to explain
+    const ex = m.exact.filter(o => o.sportsbook === book);
+    const ot = m.other.filter(o => o.sportsbook === book);
+    // Found, but the send-out still hides it: priced below play-to, or only at a line we have no model play-to for
+    if (ex.length) {
+      if (!ex.some(o => _ooPlayable(o.price, pt?.odds))) console.log('[oo-watch]', book, 'has', p.player, p.market, p.side + p.line, 'at', ex.map(o => _ooFmtPrice(o.price)).join('/'), '— hidden: below play-to', pt ? _ooFmtPrice(pt.odds) : '');
+      return;
+    }
+    if (ot.length) {
+      const hidden = ot.filter(o => { const apt = _ooPlayToAtLine(p, o.points); return !apt || !_ooPlayable(o.price, apt.odds); });
+      if (hidden.length === ot.length) console.log('[oo-watch]', book, 'has', p.player, p.market, p.side, 'only at', ot.map(o => o.points + ' ' + _ooFmtPrice(o.price)).join(', '), '(your line', p.line + ') — hidden: no model play-to at that line, or below it');
+      return;
+    }
     const who = _ooNormName(p.player);
     const bookRowsAnyPlayer = rows.filter(o => o.sportsbook === book);
     const bookRowsThisPlayer = bookRowsAnyPlayer.filter(o => _ooNormName(o.selection || o.name) === who);
@@ -6329,7 +6359,7 @@ function _ooWatchDiag(p, rows, matched) {
 function ooCopyLinesForPlay(p, rows, indent, withSources = true) {
   if (!rows || !rows.length) return [];
   const m = ooMatchProp(p, rows); const pt = _ooPlayTo(p); const out = [];
-  _ooWatchDiag(p, rows, m.exact.concat(m.other));
+  _ooWatchDiag(p, rows, m);
   const fmt = o => { if (_ooIsExch(o.sportsbook)) { const w = _ooImplPct(o.price); return `${_ooFmtPrice(o.price)}${w ? ' (' + w + '%)' : ''} ${o.sportsbook}${o.limits?.max ? ' Liq $' + Math.round(o.limits.max) : ''}`; } return `${_ooFmtPrice(o.price)} ${o.sportsbook}`; };
   const ok = m.exact.filter(o => _ooPlayable(o.price, pt?.odds));
   ok.forEach(o => out.push(indent + fmt(o)));
@@ -6404,7 +6434,7 @@ async function fetchLiveOdds(id) {
       setStatus('Fetching all lines for matched markets…');
       const full = await ooFetchFixtureOdds(opticFixture.id, { market:[...wantMarkets] });
       console.log('[OpticOdds] full rows:', full.odds.length);
-      if (full.odds.length) odds = full.odds;
+      odds = _ooMergeOdds(full.odds, main.odds);
       errs = errs.concat(full.errs);
     }
 
