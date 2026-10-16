@@ -376,6 +376,7 @@ table colgroup col.avg-col{width:16%;}
 <div id="tabs">
   <button class="tab-btn active" onclick="switchTab('upload')">UPLOAD</button>
   <button class="tab-btn" onclick="switchTab('results')">PROJECTIONS</button>
+  <button class="tab-btn" onclick="switchTab('morning')" style="color:#c4b5fd;">MORNING</button>
   <button class="tab-btn" onclick="switchTab('tracker')">TRACKER</button>
   <button class="tab-btn" onclick="switchTab('gamelog')">GAME LOG</button>
   <button class="tab-btn" onclick="switchTab('expected')">EXPECTED</button>
@@ -525,6 +526,7 @@ table colgroup col.avg-col{width:16%;}
   </div>
 
   <div id="tracker-tab" style="display:none;"></div>
+  <div id="morning-tab" style="display:none;"></div>
   <div id="gamelog-tab" style="display:none;"></div>
 
   <div id="srcanalytics-tab" style="display:none;"></div>
@@ -1455,6 +1457,7 @@ function switchTab(tab) {
   document.getElementById("cap-tool-tab").style.display = tab==="captool"?"block":"none";
   document.getElementById("evcalc-tab").style.display = tab==="evcalc"?"block":"none";
   document.getElementById("pace-tab").style.display = tab==="pace"?"block":"none";
+  document.getElementById("morning-tab").style.display = tab==="morning"?"block":"none";
   if (tab==="tracker") renderTracker();
   if (tab==="gamelog") renderGameLog();
   if (tab==="expected") renderExpected();
@@ -1466,6 +1469,10 @@ function switchTab(tab) {
   if (tab==="pace") renderPace();
   if (tab==="captool") renderCapTool();
   if (tab==="evcalc") renderNbaModel();
+  if (tab==="morning") {
+    renderMorning();
+    try { const sy = JSON.parse(localStorage.getItem("nba_rw_api_synced_at") || "null"); if (!sy || Date.now() - sy.at > 20 * 60 * 1000) rwApiSyncAll(true); } catch (e) {}
+  }
 }
 
 function toggleConOnly() {
@@ -7565,7 +7572,8 @@ function updateBulkCopyBar() {
 // settings are added.
 const BACKUP_KEYS = [
   "nba_injuries_cache", "nba_injuries_show_all", "nba_blender_hidden_books",
-  "nba_totals_page_dimers_v1", "nba_starter_log_v1"
+  "nba_totals_page_dimers_v1", "nba_starter_log_v1",
+  "nba_morning_bets_v1", "nba_morning_ps_v1", "nba_rw_news_at", "nba_rw_api_url"
 ];
 function exportBets() {
   const extras = {};
@@ -7613,6 +7621,7 @@ function importBets() {
             }
           } catch (e) {}
           if (typeof updateInjuryPanel === "function") updateInjuryPanel();
+          if (typeof loadMorningBets === "function") { loadMorningBets(); loadMorningPs(); }
         } else { throw new Error("unrecognised backup"); }
         saveBets(); renderTracker();
       }
@@ -7996,7 +8005,7 @@ async function _fetchSeasonGameDay(isoDate) {
 // eating the quota instead of guessing.
 // Interactive storage manager: every key, its size, and a delete button.
 // Bets are protected — no delete button, no accidental loss.
-const STORAGE_PROTECTED = ["nba_blender_bets"];
+const STORAGE_PROTECTED = ["nba_blender_bets", "nba_morning_bets_v1"];
 // Keys that cost real work to replace if dropped (pasted/uploaded by hand).
 const STORAGE_SOURCE_KEYS = [
   "nba_injuries_cache", "nba_matchup_opp_avg_v1", "nba_bbref_adv_v1",
@@ -17014,7 +17023,8 @@ function parseRotoWireInjuriesPaste() {
 
   // Only keep entries dated today or yesterday — anything older is stale.
   // RW pages show multiple days of history; we only want current news.
-  const MONTHS = {january:0,february:1,march:2,april:3,may:4,june:5,july:6,august:7,september:8,october:9,november:10,december:11};
+  const MONTHS = {january:0,february:1,march:2,april:3,may:4,june:5,july:6,august:7,september:8,october:9,november:10,december:11,
+    jan:0,feb:1,mar:2,apr:3,jun:5,jul:6,aug:7,sep:8,sept:8,oct:9,nov:10,dec:11};
   const parseEntryDate = (dateStr) => {
     if (!dateStr) return null;
     const m = dateStr.trim().match(/^([A-Za-z]+)\s+(\d+),\s+(\d{4})$/);
@@ -17034,6 +17044,8 @@ function parseRotoWireInjuriesPaste() {
   });
   _ingestInjuryRecords(mergedRecords);
   injuriesLastFetched = Date.now();
+  try { localStorage.setItem("nba_rw_news_at", String(Date.now())); } catch (e) {}
+  if (typeof currentTab !== "undefined" && currentTab === "morning" && typeof renderMorning === "function") setTimeout(renderMorning, 0);
   // Persist to the same cache the ESPN fetch uses, so a pasted RotoWire report
   // survives a reload instead of living only in memory. Stored under the
   // current local day; a new day starts clean rather than resurfacing stale
@@ -24119,6 +24131,853 @@ function renderNbaModel() {
       ${log.length ? "" : `<div style="color:${_WM_SEC};font-size:13px;padding:30px 0;text-align:center;">No picks logged yet — load projections, pick a date, then hit Scan.</div>`}
       </div>
     </div>`;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MORNING TAB — PropShop ensemble for morning bets, kept in its own log.
+// Same idea as the NHL blender's PropShop ensemble: each projection set (STOK,
+// RG, SABER, RW) is pasted from PropShop individually, per market, and the
+// ENSEMBLE is everything 3-of-4 of those sets agree on at MORNING_QUAL_EV%+ of
+// PropShop's own EV, with the 4th (worst) never negative. Qualifying picks log
+// to the MORNING log (nba_morning_bets_v1), never to the main Tracker.
+// The day's RotoWire news (the RW injury paste on Projections, or the box on
+// this tab — same store) drives a news gate identical to the NBA Model's scan
+// gate, and nothing auto-logs until today's RW news is in.
+//
+// Clearance funnel: every pasted player/stat/side/line runs the same gates in
+// order and the funnel shows how many survive each one, per market, so it's
+// clear WHY a prop did or didn't make the morning card:
+//   1. Pasted          — any source has it
+//   2. Coverage        — all 4 sets have it (or 3-of-3 when the 4th set's paste
+//                        for that market has no row for this player at all)
+//   3. 3 at QUAL%+     — three sources at MORNING_QUAL_EV%+ EV
+//   4. Worst ≥ 0%      — no present source negative
+//   5. Projections     — every projection (and a missing source's uploaded CSV
+//                        projection, if loaded) sits on the bet's side of the line
+//   6. News (RW)       — same skips as the NBA Model scan: player on the injury
+//                        report / depth chart / not a clean starter on lineups →
+//                        out; named in a teammate's blurb as upside → no under,
+//                        as floor risk → no over; a same-position teammate GTD /
+//                        Q / P / DTD → no under
+//   7. Cleared         — not on the reject list → the morning card
+// ═══════════════════════════════════════════════════════════════════════════════
+const MORNING_SOURCES = [
+  { key: "stok",     label: "STOK",  color: "#f472b6" },
+  { key: "roto",     label: "RG",    color: "#34d399" },
+  { key: "saber",    label: "SABER", color: "#fb923c" },
+  { key: "rotowire", label: "RW",    color: "#93c5fd" },
+];
+const MORNING_SRC_KEYS = MORNING_SOURCES.map(s => s.key);
+// 3 of the 4 sources need at least this much of their own EV; the 4th only has to be ≥ 0%.
+const MORNING_QUAL_EV = 7;
+const MORNING_STATS = ["PTS", "REB", "AST", "3PM", "PRA", "PR", "PA", "RA"];
+const MORNING_STAT_LABEL = { PTS: "Points", REB: "Rebounds", AST: "Assists", "3PM": "Threes", PRA: "Pts+Reb+Ast", PR: "Pts+Reb", PA: "Pts+Ast", RA: "Reb+Ast" };
+// Market names PropShop prints in its market picker / board header → our stat key.
+// Longest first so "Points + Rebounds + Assists" isn't read as "Points".
+const MORNING_MARKET_PATTERNS = [
+  [/\b(pts\s*\+\s*reb\s*\+\s*ast|points\s*\+\s*rebounds\s*\+\s*assists|pra)\b/i, "PRA"],
+  [/\b(pts\s*\+\s*reb|points\s*\+\s*rebounds)\b/i, "PR"],
+  [/\b(pts\s*\+\s*ast|points\s*\+\s*assists)\b/i, "PA"],
+  [/\b(reb\s*\+\s*ast|rebounds\s*\+\s*assists)\b/i, "RA"],
+  [/\b(threes|3-?pointers?( made)?|3pm|three pointers made)\b/i, "3PM"],
+  [/\brebounds\b/i, "REB"],
+  [/\bassists\b/i, "AST"],
+  [/\bpoints\b/i, "PTS"],
+];
+const MORNING_REJECT_PLAYERS = [];   // names the morning ensemble never logs
+const MORNING_PS_KEY = "nba_morning_ps_v1";
+const MORNING_BETS_KEY = "nba_morning_bets_v1";
+
+function _mEsc(s) { return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
+function _mSrc(key) { return MORNING_SOURCES.find(s => s.key === key) || { key, label: key.toUpperCase(), color: "#d4dae3" }; }
+// Today's RotoWire news is in when the RW injury paste ran today (stamped by parseRotoWireInjuriesPaste).
+function morningNewsLoadedAt() {
+  try { const t = Number(localStorage.getItem("nba_rw_news_at")) || 0; return t && localYMD(new Date(t)) === localYMD(new Date()) ? t : 0; } catch (e) { return 0; }
+}
+// News gate — the NBA Model's injury gate plus the player's own lineup status.
+function _mNewsGate(player, team, ou) {
+  const g = (typeof _wmInjuryGate === "function") ? _wmInjuryGate(player, team) : { both: null, over: null, under: null };
+  if (g.both) return g.both;
+  try {
+    const ld = getLineupsData();
+    const me = ld && ld.players ? ld.players[norm(player)] : null;
+    const st = me ? String(me.status || "").toUpperCase() : "";
+    if (st && st !== "STARTING") return "lineups: " + st;
+  } catch (e) {}
+  return g[ou] || null;
+}
+function _mFmtOdds(o) { const n = parseInt(o, 10); return isNaN(n) ? "—" : (n > 0 ? "+" + n : String(n)); }
+function _mRejected(name) { const k = resolveNorm(name || ""); return MORNING_REJECT_PLAYERS.some(n => resolveNorm(n) === k); }
+
+// ── PropShop paste parser (same board structure as the NHL/NFL blenders) ─────
+const _mIsLine = s => /^-?\d+(\.\d+)?$/.test(String(s || ""));
+const _mIsOdds = s => /^[+-]\d{2,4}$/.test(String(s || ""));
+const _mIsEV   = s => /^[+-]?\d+(\.\d+)?%$/.test(String(s || ""));
+const _MORNING_PS_BOOKS = new Set([
+  "fanduel", "fd", "pinnacle", "draftkings", "dk", "betmgm", "espnbet", "caesars",
+  "novig", "prophetx", "kalshi", "propbuilder", "prop builder", "fliff", "betrivers",
+  "pointsbet", "circa", "betcris", "bookmaker", "bet365", "betjack", "superbook",
+  "williamhill", "bet105", "kambi", "onyx", "onyx odds", "betonline", "underdog", "sleeper",
+]);
+function _mSplitBlocks(raw) {
+  const lines = raw.split("\n").map(l => l.trim()).filter(Boolean);
+  const blocks = [];
+  let current = null;
+  const isPlayerName = s => {
+    if (!s || /[%\t]/.test(s)) return false;
+    if (/^\d/.test(s) || s.includes("@") || /^[+-]?\d/.test(s)) return false;
+    if (_MORNING_PS_BOOKS.has(s.toLowerCase())) return false;   // "Prop Builder" is not a player
+    if (MORNING_MARKET_PATTERNS.some(([re]) => re.test(s)) && s.split(/\s+/).length <= 5 && !/[a-z]{2,}\s+[A-Z][a-z]+$/.test(s.replace(/\b(points|rebounds|assists|threes)\b/gi, ""))) {
+      // Market labels ("Points", "Pts + Reb + Ast") are not players
+      if (/^(player\s+)?(points|rebounds|assists|threes|pts|reb|ast|pra|3pm|three pointers made|3-pointers made)([\s+&]+(points|rebounds|assists|pts|reb|ast))*$/i.test(s)) return false;
+    }
+    const words = s.split(/\s+/);
+    if (words.length < 2) return false;
+    if (s === s.toLowerCase()) return false;
+    return /[A-Z]/.test(s);
+  };
+  const isHeaderJunk = s => /^(logo of|prop shop|group by|search|market|projection|events|from|to|state|player_|consensus|best line)/i.test(s) || /^\d+:\d+ [AP]M \(\d+/i.test(s) || s === "ma" || s === "​" || s === "PropShop Sports Betting";
+  for (const line of lines) {
+    if (isHeaderJunk(line)) continue;
+    if (isPlayerName(line)) {
+      if (current) blocks.push(current);
+      current = { player: line, tokens: [] };
+    } else if (current) current.tokens.push(line);
+  }
+  if (current) blocks.push(current);
+  return blocks;
+}
+function _mExtractCells(tokens) {
+  let gameStr = "", gameTime = "";
+  const rest = [], preGameNums = [];
+  let sawGame = false;
+  for (const t of tokens) {
+    if (!sawGame && t.includes("@") && (t.includes("•") || t.includes("—"))) {
+      const sep = t.includes("•") ? "•" : "—";
+      const parts = t.split(sep);
+      gameStr = parts[0].trim(); gameTime = parts[1] ? parts[1].trim() : "";
+      sawGame = true; continue;
+    }
+    if (!sawGame && _mIsLine(t)) { preGameNums.push(parseFloat(t)); continue; }
+    if (!sawGame) continue;
+    rest.push(t);
+  }
+  const projection = preGameNums.length ? preGameNums[0] : null;
+  const parseSide = i => {
+    if (i >= rest.length) return { line: null, odds: null, consumed: 0 };
+    if (rest[i] === "—") return { line: "—", odds: "—", consumed: 1 };
+    if (i + 1 < rest.length && _mIsLine(rest[i]) && _mIsOdds(rest[i + 1])) return { line: parseFloat(rest[i]), odds: rest[i + 1], consumed: 2 };
+    return { line: null, odds: null, consumed: 0 };
+  };
+  const allCells = [];
+  let i = 0, cellIdx = 0;
+  while (i < rest.length && cellIdx < 15) {
+    const over = parseSide(i);
+    if (over.consumed === 0) { i++; continue; }
+    i += over.consumed;
+    const under = parseSide(i);
+    i += under.consumed;
+    let ev = null;
+    if (i < rest.length && _mIsEV(rest[i])) { ev = parseFloat(rest[i]); i++; }
+    let book = "";
+    if (i < rest.length && _MORNING_PS_BOOKS.has(rest[i].toLowerCase())) { book = rest[i]; i++; }
+    allCells.push({
+      over: { line: over.line === "—" ? null : over.line, odds: over.odds === "—" ? null : over.odds },
+      under: { line: under.line === "—" ? null : under.line, odds: under.odds === "—" ? null : under.odds },
+      ev, book,
+    });
+    cellIdx++;
+  }
+  return { gameStr, gameTime, allCells, projection };
+}
+// Market from the header region of the paste (before the first player block).
+function morningDetectMarket(raw) {
+  const head = raw.split("\n").slice(0, 60).join("\n");
+  for (const [re, stat] of MORNING_MARKET_PATTERNS) if (re.test(head)) return stat;
+  return null;
+}
+function parseMorningPropShop(raw) {
+  const year = new Date().getFullYear();
+  const results = [], errors = [];
+  for (const block of _mSplitBlocks(raw)) {
+    try {
+      const { gameStr, gameTime, allCells, projection } = _mExtractCells(block.tokens);
+      if (!gameStr || allCells.length < 2) continue;
+      if (projection === 0 || projection == null) continue;
+      const best = allCells[1];   // 0 = Consensus, 1 = Best Line
+      if (!best || best.ev === null) continue;
+      const o = best.over, u = best.under;
+      let play = null;
+      if (o.odds && u.odds) play = parseInt(o.odds) >= parseInt(u.odds) ? { ou: "over", line: o.line, odds: o.odds } : { ou: "under", line: u.line, odds: u.odds };
+      else if (o.odds) play = { ou: "over", line: o.line, odds: o.odds };
+      else if (u.odds) play = { ou: "under", line: u.line, odds: u.odds };
+      if (!play || play.line == null) continue;
+      let gameDateIso = localYMD(new Date());
+      const dm = gameTime.match(/([A-Za-z]+)-(\d+)/);
+      if (dm) {
+        const mo = { Jan: "01", Feb: "02", Mar: "03", Apr: "04", May: "05", Jun: "06", Jul: "07", Aug: "08", Sep: "09", Oct: "10", Nov: "11", Dec: "12" }[dm[1].slice(0, 3)];
+        // The season crosses New Year: an "Oct-28" pasted in January is last year's slate.
+        if (mo) { let y = year; if (Number(mo) >= 9 && new Date().getMonth() < 6) y = year - 1; gameDateIso = y + "-" + mo + "-" + String(dm[2]).padStart(2, "0"); }
+      }
+      results.push({ player: block.player, game: gameStr, gameDateIso, ou: play.ou, line: Number(play.line), odds: parseInt(play.odds, 10), book: best.book || "", ev: best.ev, proj: projection });
+    } catch (e) { errors.push((block.player || "?") + ": " + e.message); }
+  }
+  return { results, errors };
+}
+
+// ── Pasted-board store: { srcKey: [ {stat, player, ...} ] } ─────────────────
+let morningPs = { stok: [], roto: [], saber: [], rotowire: [] };
+let morningView = "ensemble";            // "ensemble" | source key
+let morningStatFilter = "ALL";
+function loadMorningPs() {
+  try {
+    const raw = localStorage.getItem(MORNING_PS_KEY);
+    if (raw) { const p = JSON.parse(raw); MORNING_SRC_KEYS.forEach(k => { morningPs[k] = Array.isArray(p[k]) ? p[k] : []; }); }
+  } catch (e) { /* start empty */ }
+  pruneMorningPs();
+}
+function saveMorningPs() { try { localStorage.setItem(MORNING_PS_KEY, JSON.stringify(morningPs)); } catch (e) { console.warn("[MORNING] save failed", e); } }
+// Pastes are only good for their own slate — drop rows from past dates.
+function pruneMorningPs() {
+  const today = localYMD(new Date());
+  let dropped = 0;
+  MORNING_SRC_KEYS.forEach(k => {
+    const keep = (morningPs[k] || []).filter(p => !p.gameDateIso || p.gameDateIso >= today);
+    dropped += (morningPs[k] || []).length - keep.length;
+    morningPs[k] = keep;
+  });
+  if (dropped) saveMorningPs();
+  return dropped;
+}
+
+// ── Morning bet log (separate from the main Tracker) ─────────────────────────
+let morningBets = [];
+function loadMorningBets() { try { const r = localStorage.getItem(MORNING_BETS_KEY); morningBets = r ? JSON.parse(r) : []; } catch (e) { morningBets = []; } }
+function saveMorningBets() { try { localStorage.setItem(MORNING_BETS_KEY, JSON.stringify(morningBets)); } catch (e) { showToast("Morning log could not be saved — storage full?"); } }
+
+// Team for a pasted player: whichever uploaded projection CSV has them.
+function _mTeamFor(name) {
+  const k = resolveNorm(name);
+  for (const s of (typeof slots !== "undefined" ? slots : [])) {
+    if (!s) continue;
+    const p = s.players.find(x => x.norm === k);
+    if (p && p.team) return normTeamAbbr(p.team) || p.team;
+  }
+  const t = (typeof NBA_TEMPLATE !== "undefined" ? NBA_TEMPLATE : []).find(p => resolveNorm(p.name) === k);
+  return t ? t.team : "";
+}
+// A source's uploaded-CSV projection for a stat (used for the 3-of-3 relief check).
+function _mCsvProj(srcKey, name, stat) {
+  const i = SOURCES.findIndex(s => s.key === srcKey);
+  const s = (typeof slots !== "undefined") ? slots[i] : null;
+  if (!s) return null;
+  const k = resolveNorm(name);
+  const hits = s.players.filter(x => x.norm === k);
+  if (hits.length !== 1) return null;
+  const p = hits[0], v = f => (p[f] != null && !isNaN(p[f]) ? Number(p[f]) : null);
+  const sum = (...xs) => xs.every(x => x != null) ? xs.reduce((a, b) => a + b, 0) : null;
+  switch (stat) {
+    case "PTS": return v("pts");
+    case "REB": return v("reb");
+    case "AST": return v("ast");
+    case "3PM": return v("threepm");
+    case "PRA": return v("pra") != null ? v("pra") : sum(v("pts"), v("reb"), v("ast"));
+    case "PR":  return sum(v("pts"), v("reb"));
+    case "PA":  return sum(v("pts"), v("ast"));
+    case "RA":  return sum(v("reb"), v("ast"));
+  }
+  return null;
+}
+function _mProjsAligned(ou, line, projs) {
+  const ps = projs.filter(v => v != null && !isNaN(v) && v > 0);
+  if (!ps.length) return true;
+  return ou === "under" ? ps.every(v => v <= line) : ps.every(v => v >= line);
+}
+// Fair win probability implied by one source's own (price, EV): EV = p·dec − 1.
+function _mFairProb(odds, ev) { const d = oddsToDecimal(odds); if (d == null || ev == null) return null; const p = (1 + Number(ev) / 100) / d; return p > 0 && p < 1 ? p : null; }
+
+// Runs every pasted prop through the gates. Returns { cleared, funnel, misses }.
+function computeMorningEnsemble() {
+  const byKey = {};
+  const coverage = {};      // src|stat -> Set(player)
+  const pastedStat = {};    // src|stat -> bool (that source's board for this market is in)
+  MORNING_SRC_KEYS.forEach(src => (morningPs[src] || []).forEach(p => {
+    const pk = resolveNorm(p.player);
+    (coverage[src + "|" + p.stat] = coverage[src + "|" + p.stat] || new Set()).add(pk);
+    pastedStat[src + "|" + p.stat] = true;
+    const key = pk + "|" + p.stat + "|" + p.ou + "|" + Number(p.line) + "|" + (p.gameDateIso || "");
+    if (!byKey[key]) byKey[key] = { player: p.player, team: p.team, stat: p.stat, ou: p.ou, line: Number(p.line), gameDateIso: p.gameDateIso, game: p.game, sources: [] };
+    if (!byKey[key].sources.some(x => x.src === src)) byKey[key].sources.push({ src, prop: p });
+  }));
+  const GATES = ["pasted", "coverage", "qual", "worst", "proj", "news", "cleared"];
+  const funnel = {};
+  const bump = (stat, gate) => { ["ALL", stat].forEach(s => { funnel[s] = funnel[s] || Object.fromEntries(GATES.map(g => [g, 0])); funnel[s][gate]++; }); };
+  const cleared = [], misses = [];
+  Object.values(byKey).forEach(entry => {
+    bump(entry.stat, "pasted");
+    const uniq = entry.sources.map(x => x.src);
+    const pk = resolveNorm(entry.player);
+    const missing = MORNING_SRC_KEYS.filter(s => !uniq.includes(s));
+    // 3-of-3 relief: the one missing source HAS pasted this market, but has no row
+    // for this player at all (any side/line). Not-pasted-yet is not a gap.
+    const gapOnly = missing.length === 1 && pastedStat[missing[0] + "|" + entry.stat] && !(coverage[missing[0] + "|" + entry.stat] || new Set()).has(pk);
+    const miss = (gate, why) => misses.push({ ...entry, gate, why, have: uniq });
+    if (uniq.length < 4 && !(uniq.length === 3 && gapOnly)) {
+      if (uniq.length >= 2) miss("coverage", missing.map(s => _mSrc(s).label).join("/") + (missing.some(s => (coverage[s + "|" + entry.stat] || new Set()).has(pk)) ? " on a different side/line" : " not pasted for " + entry.stat));
+      return;
+    }
+    bump(entry.stat, "coverage");
+    const requiredQual = uniq.length;
+    const evs = entry.sources.map(x => Number(x.prop.ev) || 0);
+    const qualCount = evs.filter(e => e >= MORNING_QUAL_EV).length;
+    const minEv = Math.min(...evs);
+    if (qualCount < 3) { miss("qual", `${qualCount} of ${requiredQual} at ${MORNING_QUAL_EV}%+`); return; }
+    bump(entry.stat, "qual");
+    if (minEv < 0) { miss("worst", `worst source ${minEv.toFixed(1)}%`); return; }
+    bump(entry.stat, "worst");
+    const projs = entry.sources.map(x => Number(x.prop.proj));
+    const missingSrc = requiredQual === 3 ? missing[0] : null;
+    const missingProj = missingSrc ? _mCsvProj(missingSrc, entry.player, entry.stat) : null;
+    if (!_mProjsAligned(entry.ou, entry.line, projs.concat([missingProj]))) {
+      miss("proj", "a projection sits on the other side of " + entry.line + (missingProj != null ? ` (${_mSrc(missingSrc).label} CSV ${missingProj})` : ""));
+      return;
+    }
+    bump(entry.stat, "proj");
+    const team = entry.team || _mTeamFor(entry.player);
+    const newsWhy = _mNewsGate(entry.player, team, entry.ou);
+    if (newsWhy) { miss("news", newsWhy); return; }
+    bump(entry.stat, "news");
+    if (_mRejected(entry.player)) { miss("cleared", "on the reject list"); return; }
+    bump(entry.stat, "cleared");
+    let best = null;
+    entry.sources.forEach(({ prop }) => { if (!best || parseInt(prop.odds) > parseInt(best.odds)) best = prop; });
+    const sorted = [...entry.sources].sort((a, b) => (a.prop.ev || 0) - (b.prop.ev || 0));
+    // FAIR anchors to the worst source's own price+EV; second-worst if the worst is under the bar.
+    const anchor = (sorted[0].prop.ev || 0) >= MORNING_QUAL_EV ? sorted[0] : (sorted[1] || sorted[0]);
+    const fairProb = _mFairProb(anchor.prop.odds, anchor.prop.ev);
+    const sourceProjs = {}, sourceEvs = {};
+    entry.sources.forEach(({ src, prop }) => { sourceProjs[src] = prop.proj; sourceEvs[src] = prop.ev; });
+    const pv = projs.filter(v => !isNaN(v));
+    cleared.push({
+      player: entry.player, team, stat: entry.stat, ou: entry.ou, line: entry.line,
+      gameDateIso: entry.gameDateIso, game: entry.game, sourcesAgreed: uniq, qualCount, requiredQual, missingSrc, missingProj,
+      odds: parseInt(best.odds, 10), book: best.book, ev: Number(best.ev), minEv, proj: pv.length ? pv.reduce((a, b) => a + b, 0) / pv.length : null,
+      anchorEv: Number(anchor.prop.ev), fairProb, fairOdds: fairProb != null ? probToAmerican(fairProb) : null, sourceProjs, sourceEvs,
+    });
+  });
+  cleared.sort((a, b) => b.sourcesAgreed.length - a.sourcesAgreed.length || b.qualCount - a.qualCount || (b.ev || 0) - (a.ev || 0));
+  const order = { cleared: 0, news: 1, proj: 2, worst: 3, qual: 4, coverage: 5 };
+  misses.sort((a, b) => order[a.gate] - order[b.gate]);
+  return { cleared, funnel, misses, gates: GATES };
+}
+
+function _mLoggedKey(r) { return resolveNorm(r.player) + "|" + r.stat + "|" + (r.gameDateIso || r.gameDate); }
+function _mAlreadyLogged(r) { const k = _mLoggedKey(r); return morningBets.some(b => _mLoggedKey(b) === k); }
+function _mLogRow(r) {
+  if (_mAlreadyLogged(r) || _mRejected(r.player)) return false;
+  const s = calcStake(r.odds) || { stake: 1, toWin: 1, type: "dog" };
+  const now = new Date();
+  morningBets.unshift({
+    id: Date.now() + Math.floor(Math.random() * 100000),
+    gameDate: r.gameDateIso, loggedAt: now.toISOString(),
+    player: r.player, team: r.team || "", game: r.game || "", stat: r.stat, ou: r.ou, line: r.line,
+    odds: r.odds, book: r.book || "PropShop", fairOdds: r.fairOdds, fairProb: r.fairProb, ev: r.ev, anchorEv: r.anchorEv, minEv: r.minEv,
+    proj: r.proj, sourceProjs: r.sourceProjs, sourceEvs: r.sourceEvs, sourcesAgreed: r.sourcesAgreed, qualCount: r.qualCount,
+    requiredQual: r.requiredQual, missingSrc: r.missingSrc, missingProj: r.missingProj,
+    stake: s.stake, toWin: s.toWin, result: "pending", actual: null,
+  });
+  return true;
+}
+function morningAutoLog() {
+  if (!morningNewsLoadedAt()) return 0;   // never auto-log blind — today's RW news has to be in
+  const { cleared } = computeMorningEnsemble();
+  let added = 0;
+  cleared.forEach(r => { if (_mLogRow(r)) added++; });
+  if (added) saveMorningBets();
+  return added;
+}
+
+// ── Actions ─────────────────────────────────────────────────────────────────
+function morningImport() {
+  const ta = document.getElementById("morning-paste");
+  const src = document.getElementById("morning-src").value;
+  let stat = document.getElementById("morning-stat").value;
+  const info = document.getElementById("morning-import-info");
+  const raw = ta ? ta.value : "";
+  if (!raw.trim()) { info.textContent = "Paste a PropShop board first."; return; }
+  if (stat === "AUTO") {
+    stat = morningDetectMarket(raw);
+    if (!stat) { info.textContent = "Couldn't tell which market this board is — pick it in the Market box."; return; }
+  }
+  const { results, errors } = parseMorningPropShop(raw);
+  if (!results.length) { info.textContent = "No props found in that paste." + (errors.length ? ` ${errors.length} parse error(s) — see console.` : ""); if (errors.length) console.warn("[MORNING]", errors); return; }
+  // A paste REPLACES this source's board for this market (re-paste = clean fix).
+  // Repeats of one player/side/line collapse to the best price.
+  const byKey = {};
+  results.forEach(r => {
+    const key = resolveNorm(r.player) + "|" + r.gameDateIso + "|" + r.ou + "|" + r.line;
+    const row = { _rid: Date.now() + Math.floor(Math.random() * 1e6), stat, team: _mTeamFor(r.player), ...r };
+    if (!byKey[key] || row.odds > byKey[key].odds) byKey[key] = row;
+  });
+  const prev = (morningPs[src] || []).filter(p => p.stat === stat).length;
+  morningPs[src] = (morningPs[src] || []).filter(p => p.stat !== stat).concat(Object.values(byKey));
+  saveMorningPs();
+  const n = Object.values(byKey).length;
+  const logged = morningAutoLog();
+  ta.value = "";
+  info.textContent = `${_mSrc(src).label} ${stat}: ${n} prop${n === 1 ? "" : "s"} (was ${prev})${results.length - n ? `, ${results.length - n} repeat(s) collapsed` : ""}${errors.length ? `, ${errors.length} parse error(s)` : ""}.` + (logged ? ` Logged ${logged} new morning pick${logged === 1 ? "" : "s"}.` : "") + (morningNewsLoadedAt() ? "" : " Auto-log held — paste today's RW news first.");
+  showToast(`${_mSrc(src).label} ${stat}: ${n} props${logged ? ` · ${logged} logged` : ""}`);
+  renderMorning();
+}
+function morningParseNews() {
+  const src = document.getElementById("morning-news-paste"), dst = document.getElementById("rw-injury-paste");
+  if (!src || !src.value.trim()) { showToast("Paste the RotoWire news page first"); return; }
+  if (!dst) { showToast("RotoWire injury loader not found"); return; }
+  dst.value = src.value;
+  parseRotoWireInjuriesPaste();
+  src.value = "";
+  morningAutoLog() && saveMorningBets();
+  renderMorning();
+}
+function morningSetView(v) { morningView = v; renderMorning(); }
+function morningSetStat(s) { morningStatFilter = s; renderMorning(); }
+function morningClearSource(src) {
+  const rows = (morningPs[src] || []).filter(p => morningStatFilter === "ALL" || p.stat === morningStatFilter);
+  if (!rows.length) { showToast("Nothing to clear"); return; }
+  const what = morningStatFilter === "ALL" ? "every market" : morningStatFilter;
+  if (!confirm(`Clear ${rows.length} pasted ${_mSrc(src).label} row(s) for ${what}? Logged morning bets stay put.`)) return;
+  morningPs[src] = (morningPs[src] || []).filter(p => !(morningStatFilter === "ALL" || p.stat === morningStatFilter));
+  saveMorningPs(); renderMorning();
+}
+function morningDeletePsRow(src, rid) { morningPs[src] = (morningPs[src] || []).filter(p => p._rid !== rid); saveMorningPs(); renderMorning(); }
+function morningTrackRow(i) {
+  const r = (window._morningCleared || [])[i]; if (!r) return;
+  if (!morningNewsLoadedAt() && !confirm("Today's RotoWire news isn't loaded, so the injury/news gate ran blind. Log anyway?")) return;
+  const ok = _mLogRow(r); if (ok) saveMorningBets();
+  showToast(ok ? `Logged ${r.player} ${r.stat}` : `${r.player} ${r.stat} already logged`);
+  renderMorning();
+}
+function morningLogAll() { if (!morningNewsLoadedAt()) { showToast("Paste today's RW news first — the news gate is blind without it"); return; } const n = morningAutoLog(); showToast(n ? `Logged ${n} morning pick${n === 1 ? "" : "s"}` : "Nothing new to log"); renderMorning(); }
+function morningDeleteBet(id) { if (!confirm("Delete this morning bet?")) return; morningBets = morningBets.filter(b => String(b.id) !== String(id)); saveMorningBets(); renderMorning(); }
+function morningSetResult(id, res) { const b = morningBets.find(x => String(x.id) === String(id)); if (!b) return; b.result = res; if (res === "pending") b.actual = null; saveMorningBets(); renderMorning(); }
+async function morningGradePending() {
+  const pending = morningBets.filter(b => b.result === "pending");
+  if (!pending.length) { showToast("Nothing pending to grade"); return; }
+  const btn = document.getElementById("morning-grade-btn");
+  if (btn) { btn.disabled = true; btn.textContent = "GRADING…"; }
+  let graded = 0, waiting = 0;
+  for (const b of pending) {
+    try { const r = await gradeBet(b); if (r.ok) { b.result = r.result; b.actual = r.total != null ? r.total : null; b.gradedAt = Date.now(); graded++; } else waiting++; }
+    catch (e) { waiting++; }
+  }
+  saveMorningBets();
+  if (btn) { btn.disabled = false; btn.textContent = "GRADE PENDING"; }
+  showToast(`Graded ${graded}${waiting ? ` · ${waiting} not final yet` : ""}`);
+  renderMorning();
+}
+function morningCopyCard() {
+  const today = localYMD(new Date());
+  const rows = morningBets.filter(b => b.gameDate === today);
+  if (!rows.length) { showToast("No morning picks logged for today"); return; }
+  const lines = rows.slice().reverse().map(b => `${displayPlayerName(b.player)} ${b.ou === "over" ? "o" : "u"}${b.line} ${b.stat} ${_mFmtOdds(b.odds)}${b.book ? " (" + b.book + ")" : ""} · ${b.sourcesAgreed.length}/${b.requiredQual}`);
+  const text = `NBA morning ensemble (${rows.length})\n` + lines.join("\n");
+  try { navigator.clipboard.writeText(text).then(() => showToast("Copied morning card"), () => prompt("Copy:", text)); } catch (e) { prompt("Copy:", text); }
+}
+function morningExportCsv() {
+  if (!morningBets.length) { showToast("Morning log is empty"); return; }
+  const cols = ["gameDate", "player", "team", "stat", "ou", "line", "odds", "book", "fairOdds", "ev", "minEv", "proj", "agree", "result", "actual", "stake", "toWin"];
+  const q = v => { const s = v == null ? "" : String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+  const body = morningBets.map(b => cols.map(c => q(c === "agree" ? `${b.sourcesAgreed.length}/${b.requiredQual}` : b[c])).join(",")).join("\n");
+  const blob = new Blob([cols.join(",") + "\n" + body], { type: "text/csv" });
+  const url = URL.createObjectURL(blob), a = document.createElement("a");
+  a.href = url; a.download = `NBAmorning${localYMD(new Date())}.csv`; a.style.display = "none";
+  document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 500);
+}
+
+// ── Render ──────────────────────────────────────────────────────────────────
+function _mSrcPills(projs, evs, missingSrc, missingProj) {
+  return MORNING_SRC_KEYS.map(k => {
+    const s = _mSrc(k);
+    if (projs[k] == null) {
+      if (k === missingSrc) return `<span title="${s.label} has no row for this player — 3-of-3${missingProj != null ? `; CSV proj ${missingProj}` : ""}" style="font-size:10px;padding:2px 6px;border-radius:4px;border:1px dashed #525a64;color:#8b93a0;white-space:nowrap;">${s.label} ${missingProj != null ? Number(missingProj).toFixed(1) : "—"}</span>`;
+      return "";
+    }
+    const ev = Number(evs[k]);
+    const evCol = ev >= MORNING_QUAL_EV ? "#4ade80" : ev >= 0 ? "#fbbf24" : "#f87171";
+    return `<span style="font-size:10px;padding:2px 6px;border-radius:4px;border:1px solid ${s.color}55;background:${s.color}14;color:${s.color};white-space:nowrap;font-family:'JetBrains Mono','Menlo',monospace;">${s.label} ${Number(projs[k]).toFixed(1)} <b style="color:${evCol};">${ev >= 0 ? "+" : ""}${isNaN(ev) ? "?" : ev.toFixed(1)}%</b></span>`;
+  }).join(" ");
+}
+function _mPlayerCell(name, team) {
+  const logo = team && typeof teamLogoUrl === "function" ? `<img src="${teamLogoUrl(team)}" alt="" style="width:14px;height:14px;object-fit:contain;" onerror="this.remove()"/>` : "";
+  return `<span style="display:inline-flex;align-items:center;gap:7px;">${tableHeadshotHtml(name, 26)}<span style="color:#fff;font-weight:700;">${_mEsc(displayPlayerName(name))}</span>${logo}${team ? `<span style="color:#7dd3fc;font-size:11px;font-weight:700;">${_mEsc(displayTeamAbbr(team))}</span>` : ""}</span>`;
+}
+function _mRecord(list) {
+  let w = 0, l = 0, p = 0, units = 0, risked = 0;
+  list.forEach(b => {
+    if (b.result === "hit") { w++; units += b.toWin; risked += b.stake; }
+    else if (b.result === "miss") { l++; units -= b.stake; risked += b.stake; }
+    else if (b.result === "void") p++;
+  });
+  return { w, l, p, units, roi: risked ? units / risked * 100 : null };
+}
+function renderMorning() {
+  const el = document.getElementById("morning-tab");
+  if (!el) return;
+  pruneMorningPs();
+  const { cleared, funnel, misses, gates } = computeMorningEnsemble();
+  const statOk = s => morningStatFilter === "ALL" || s === morningStatFilter;
+  const today = localYMD(new Date());
+  const card = "background:linear-gradient(135deg,#0c0d10 0%,#0a0d12 50%,#0c0d10 100%);border:1px solid #1a1d22;border-radius:10px;padding:14px;margin-bottom:16px;";
+  const th = h => `<th style="padding:7px 9px;font-size:10px;color:#a8b0bb;text-align:left;letter-spacing:.5px;white-space:nowrap;">${h}</th>`;
+  const td = (v, st) => `<td style="padding:6px 9px;font-size:12px;color:#d4dae3;white-space:nowrap;${st || ""}">${v}</td>`;
+  const btn = (label, onclick, on, color) => `<button onclick="${onclick}" style="background:${on ? (color || "#7dd3fc") + "22" : "transparent"};border:1px solid ${on ? (color || "#7dd3fc") : "#1a1d22"};color:${on ? (color || "#7dd3fc") : "#d4dae3"};border-radius:6px;padding:5px 11px;font-size:11px;font-weight:700;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;">${label}</button>`;
+
+  // Paste panel
+  const srcOpts = MORNING_SRC_KEYS.map(k => `<option value="${k}">${_mSrc(k).label}</option>`).join("");
+  const statOpts = `<option value="AUTO">Auto-detect</option>` + MORNING_STATS.map(s => `<option value="${s}">${s} · ${MORNING_STAT_LABEL[s]}</option>`).join("");
+  const loadedGrid = MORNING_SRC_KEYS.map(k => {
+    const by = {}; (morningPs[k] || []).forEach(p => { by[p.stat] = (by[p.stat] || 0) + 1; });
+    const chips = Object.keys(by).length ? Object.entries(by).map(([s, n]) => `<span style="color:#d4dae3;">${s} ${n}</span>`).join(" · ") : `<span style="color:#525a64;">nothing pasted</span>`;
+    return `<div style="font-size:11px;"><b style="color:${_mSrc(k).color};">${_mSrc(k).label}</b> ${chips}</div>`;
+  }).join("");
+  const pastePanel = `<div style="${card}">
+    <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;align-items:flex-start;">
+      <div>
+        <div style="font-size:13px;font-weight:800;color:#d4dae3;letter-spacing:1px;text-transform:uppercase;">Paste PropShop board</div>
+        <div style="font-size:10px;color:#a8b0bb;margin-top:2px;max-width:640px;line-height:1.5;">One projection set and one market per paste (select all on the PropShop board, copy, paste here). Re-pasting a source + market replaces it. Picks that clear the ensemble log to the <b style="color:#c4b5fd;">morning log</b> below — never the main Tracker.</div>
+      </div>
+      <div style="display:grid;gap:3px;">${loadedGrid}</div>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px;">
+      <label style="font-size:11px;color:#a8b0bb;">Source <select id="morning-src" style="background:#050507;border:1px solid #1a1d22;color:#e2e8f0;border-radius:5px;padding:4px 6px;">${srcOpts}</select></label>
+      <label style="font-size:11px;color:#a8b0bb;">Market <select id="morning-stat" style="background:#050507;border:1px solid #1a1d22;color:#e2e8f0;border-radius:5px;padding:4px 6px;">${statOpts}</select></label>
+      <button onclick="morningImport()" style="background:#7c3aed;border:none;color:#fff;border-radius:6px;padding:7px 16px;font-size:12px;font-weight:800;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;">IMPORT</button>
+      <span id="morning-import-info" style="font-size:11px;color:#a8b0bb;"></span>
+    </div>
+    <textarea id="morning-paste" placeholder="Paste the PropShop board here…" spellcheck="false" style="width:100%;min-height:70px;margin-top:8px;background:#050507;border:1px solid #1a1d22;border-radius:6px;padding:8px 10px;color:#e2e8f0;font-family:'JetBrains Mono','Menlo',monospace;font-size:11px;outline:none;resize:vertical;box-sizing:border-box;"></textarea>
+  </div>`;
+
+  // RotoWire daily news status — the news gate reads the same injury store the Projections tab uses
+  const newsAt = morningNewsLoadedAt();
+  const injN = (typeof injuriesCache !== "undefined" && injuriesCache) ? injuriesCache.size : 0;
+  const newsPanel = `<div style="${card}border-color:${newsAt ? "#22c55e55" : "#f8717155"};">
+    <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;align-items:center;">
+      <div>
+        <div style="font-size:13px;font-weight:800;color:#d4dae3;letter-spacing:1px;text-transform:uppercase;">RotoWire daily news <span style="font-size:11px;font-weight:800;color:${newsAt ? "#22c55e" : "#f87171"};letter-spacing:.5px;">${newsAt ? "✓ loaded " + new Date(newsAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "✗ not loaded today"}</span></div>
+        <div style="font-size:10px;color:#a8b0bb;margin-top:2px;max-width:640px;line-height:1.5;">Copy <span style="color:#7dd3fc;font-family:'JetBrains Mono','Menlo',monospace;">rotowire.com/basketball/news.php?view=injuries</span> → paste → PARSE. Same store as the Projections tab's RotoWire box (${injN} player${injN === 1 ? "" : "s"} on the report). ${newsAt ? "" : "<b style=\"color:#f87171;\">Morning picks don't auto-log until this is in.</b>"} Lineups and depth chart from the Upload/Projections tabs are used too when loaded.</div>
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;">
+        <button id="rw-api-sync-btn" onclick="rwApiSyncAll()" title="Pull NBAInjuries + NBALineups + NBANews from RotoWire through your Vercel proxy" style="background:#22c55e;border:none;color:#050507;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:800;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;">⚡ SYNC RW API</button>
+        <button onclick="rwApiTest()" title="Show what each RotoWire feed returns (no key shown)" style="background:transparent;border:1px solid #1a1d22;color:#d4dae3;border-radius:6px;padding:7px 10px;font-size:11px;font-weight:700;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;">TEST FEEDS</button>
+        <button onclick="promptRwApiUrl()" title="Set the RotoWire proxy URL (Vercel /api/rotowire)" style="background:transparent;border:1px solid #1a1d22;color:#d4dae3;border-radius:6px;padding:7px 10px;font-size:11px;font-weight:700;cursor:pointer;">⚙</button>
+        <button onclick="morningParseNews()" style="background:#93c5fd;border:none;color:#050507;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:800;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;">PARSE PASTE</button>
+      </div>
+    </div>
+    ${(() => { let sy = null; try { sy = JSON.parse(localStorage.getItem(RW_API_SYNC_KEY) || "null"); } catch (e) {} return `<div style="font-size:10px;color:#8b93a0;margin-top:6px;">RW API: <span style="color:#7dd3fc;font-family:'JetBrains Mono','Menlo',monospace;">${_mEsc(getRwApiUrl())}</span>${sy ? ` · last sync ${new Date(sy.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}: ${_mEsc(sy.done.join(" · ") || "nothing")}${sy.fail.length ? ` · <span style="color:#f87171;">${_mEsc(sy.fail.join(" | "))}</span>` : ""}` : " · never synced"}</div>`; })()}
+    <textarea id="morning-news-paste" placeholder="No API? Paste the full RotoWire NBA news / injury page here…" spellcheck="false" style="width:100%;min-height:40px;margin-top:8px;background:#050507;border:1px solid #1a1d22;border-radius:6px;padding:8px 10px;color:#e2e8f0;font-family:'JetBrains Mono','Menlo',monospace;font-size:11px;outline:none;resize:vertical;box-sizing:border-box;"></textarea>
+    ${(() => {
+      const feed = getRwNewsFeed();
+      if (!feed || !feed.items || !feed.items.length) return "";
+      // Today's card players first, then the latest league news
+      const onCard = new Set(cleared.concat(morningBets.filter(b => b.gameDate === today)).map(r => resolveNorm(r.player)));
+      const items = feed.items.slice().sort((a, b) => (onCard.has(resolveNorm(b.name)) ? 1 : 0) - (onCard.has(resolveNorm(a.name)) ? 1 : 0)).slice(0, 12);
+      return `<details style="margin-top:8px;"><summary style="cursor:pointer;font-size:11px;font-weight:800;color:#93c5fd;letter-spacing:.5px;">LATEST RW NEWS (${feed.items.length})</summary>
+        ${items.map(n => `<div style="padding:7px 0;border-top:1px solid #1a1d22;font-size:11px;line-height:1.45;"><b style="color:${onCard.has(resolveNorm(n.name)) ? "#c4b5fd" : "#fff"};">${_mEsc(n.name)}</b>${n.team ? ` <span style="color:#7dd3fc;">${_mEsc(n.team)}</span>` : ""} <span style="color:#525a64;">${_mEsc(n.at)}</span><div style="color:#d4dae3;">${_mEsc(n.headline)}</div>${n.analysis ? `<div style="color:#8b93a0;">${_mEsc(n.analysis)}</div>` : ""}</div>`).join("")}</details>`;
+    })()}
+  </div>`;
+
+  // Clearance funnel
+  const GATE_LABEL = { pasted: "Pasted", coverage: "Coverage (4/4 or 3/3 gap)", qual: `3 at ${MORNING_QUAL_EV}%+ EV`, worst: "4th source ≥ 0%", proj: "Projections on bet side", news: "RW news / injuries clear", cleared: "Cleared → morning card" };
+  const statsWithData = MORNING_STATS.filter(s => funnel[s]);
+  const fCols = ["ALL", ...statsWithData];
+  const fAll = funnel.ALL || Object.fromEntries(gates.map(g => [g, 0]));
+  const funnelRows = gates.map((g, gi) => {
+    const prevAll = gi ? fAll[gates[gi - 1]] : null;
+    const pct = fAll.pasted ? Math.round(fAll[g] / fAll.pasted * 100) : 0;
+    const dropTxt = gi && prevAll ? `<span style="color:#f87171;font-size:10px;margin-left:6px;">−${prevAll - fAll[g]}</span>` : "";
+    return `<tr style="border-top:1px solid #1a1d22;">
+      <td style="padding:6px 9px;font-size:12px;color:${g === "cleared" ? "#c4b5fd" : "#d4dae3"};font-weight:${g === "cleared" ? 800 : 600};white-space:nowrap;">${gi + 1}. ${GATE_LABEL[g]}</td>
+      <td style="padding:6px 9px;min-width:160px;"><div style="display:flex;align-items:center;gap:8px;"><div style="flex:1;height:8px;background:#12141a;border-radius:4px;overflow:hidden;"><div style="height:100%;width:${pct}%;background:${g === "cleared" ? "#a78bfa" : "#1e40af"};"></div></div><span style="font-size:12px;color:#fff;font-weight:800;font-family:'JetBrains Mono','Menlo',monospace;">${fAll[g]}</span>${dropTxt}</div></td>
+      ${fCols.slice(1).map(s => `<td style="padding:6px 9px;font-size:12px;color:${funnel[s][g] ? "#d4dae3" : "#525a64"};text-align:right;font-family:'JetBrains Mono','Menlo',monospace;">${funnel[s][g]}</td>`).join("")}
+    </tr>`;
+  }).join("");
+  const funnelPanel = `<div style="${card}">
+    <div style="font-size:13px;font-weight:800;color:#d4dae3;letter-spacing:1px;text-transform:uppercase;margin-bottom:8px;">Clearance funnel</div>
+    ${fAll.pasted ? `<div style="overflow-x:auto;"><table style="border-collapse:collapse;"><thead><tr>${th("GATE")}${th("ALL MARKETS")}${statsWithData.map(s => th(s)).join("")}</tr></thead><tbody>${funnelRows}</tbody></table></div>`
+      : `<div style="font-size:12px;color:#525a64;">Paste PropShop boards above to see how many props clear each gate.</div>`}
+  </div>`;
+
+  // View switcher
+  const counts = Object.fromEntries(MORNING_SRC_KEYS.map(k => [k, (morningPs[k] || []).filter(p => statOk(p.stat)).length]));
+  const viewBar = `<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:8px;">
+    ${btn(`ENSEMBLE (${cleared.filter(r => statOk(r.stat)).length})`, "morningSetView('ensemble')", morningView === "ensemble", "#c4b5fd")}
+    ${btn(`NEAR MISSES (${misses.filter(r => statOk(r.stat)).length})`, "morningSetView('misses')", morningView === "misses", "#fbbf24")}
+    ${MORNING_SRC_KEYS.map(k => btn(`${_mSrc(k).label} (${counts[k]})`, `morningSetView('${k}')`, morningView === k, _mSrc(k).color)).join("")}
+    <span style="flex:1;"></span>
+    ${["ALL", ...MORNING_STATS].map(s => btn(s, `morningSetStat('${s}')`, morningStatFilter === s)).join("")}
+  </div>`;
+
+  let viewBody = "";
+  if (morningView === "ensemble") {
+    const rows = cleared.filter(r => statOk(r.stat));
+    window._morningCleared = cleared;
+    viewBody = rows.length ? `<div style="display:flex;justify-content:flex-end;margin-bottom:6px;">${btn("LOG ALL TO MORNING", "morningLogAll()", true, "#c4b5fd")}</div>
+      <div style="overflow-x:auto;"><table style="border-collapse:collapse;width:100%;"><thead><tr>${["PLAYER", "STAT", "SIDE", "LINE", "AVG PROJ", "AGREE · SOURCES (PROJ · EV)", "BEST", "BOOK", "FAIR", "WORST EV", ""].map(th).join("")}</tr></thead><tbody>
+      ${rows.map(r => { const i = cleared.indexOf(r), logged = _mAlreadyLogged(r); return `<tr style="border-top:1px solid #1a1d22;${logged ? "opacity:.5;" : ""}">
+        ${td(_mPlayerCell(r.player, r.team))}${td(r.stat, "font-weight:800;color:#fff;")}${td(r.ou.toUpperCase(), `font-weight:800;color:${r.ou === "over" ? "#4ade80" : "#f87171"};`)}${td(r.line, "color:#fff;")}
+        ${td(r.proj != null ? r.proj.toFixed(1) : "—")}
+        ${td(`<span style="display:inline-flex;gap:5px;align-items:center;"><b style="color:#c4b5fd;">${r.sourcesAgreed.length}/${r.requiredQual}</b>${_mSrcPills(r.sourceProjs, r.sourceEvs, r.missingSrc, r.missingProj)}</span>`)}
+        ${td(_mFmtOdds(r.odds), "color:#fff;font-weight:700;")}${td(_mEsc(r.book || "—"))}${td(_mFmtOdds(r.fairOdds))}
+        ${td(`${r.minEv >= 0 ? "+" : ""}${r.minEv.toFixed(1)}%`)}
+        ${td(logged ? `<span style="font-size:11px;font-weight:800;color:#4ade80;">✓ LOGGED</span>` : btn("LOG", `morningTrackRow(${i})`, true, "#c4b5fd"))}
+      </tr>`; }).join("")}</tbody></table></div>`
+      : `<div style="font-size:12px;color:#525a64;padding:8px 0;">Nothing has cleared yet. An ensemble pick needs all 4 sources (or 3 when the 4th has no row for that player), 3 at ${MORNING_QUAL_EV}%+ EV, the 4th not negative, every projection on the bet's side of the line, and a clean RW news check. Check NEAR MISSES for what's close.</div>`;
+  } else if (morningView === "misses") {
+    const GATE_SHORT = { coverage: "COVERAGE", qual: "EV BAR", worst: "NEGATIVE", proj: "PROJ SIDE", news: "NEWS", cleared: "REJECTED" };
+    const rows = misses.filter(r => statOk(r.stat)).slice(0, 150);
+    viewBody = rows.length ? `<div style="font-size:11px;color:#a8b0bb;margin-bottom:6px;">Props with at least 2 sources that stopped at a gate — furthest along first.</div>
+      <div style="overflow-x:auto;"><table style="border-collapse:collapse;width:100%;"><thead><tr>${["PLAYER", "STAT", "SIDE", "LINE", "STOPPED AT", "WHY", "SOURCES (PROJ · EV)"].map(th).join("")}</tr></thead><tbody>
+      ${rows.map(r => { const pr = {}, ev = {}; r.sources.forEach(({ src, prop }) => { pr[src] = prop.proj; ev[src] = prop.ev; }); return `<tr style="border-top:1px solid #1a1d22;">
+        ${td(_mPlayerCell(r.player, r.team))}${td(r.stat, "font-weight:800;color:#fff;")}${td(r.ou.toUpperCase(), `color:${r.ou === "over" ? "#4ade80" : "#f87171"};font-weight:700;`)}${td(r.line)}
+        ${td(GATE_SHORT[r.gate] || r.gate, "color:#fbbf24;font-weight:800;font-size:11px;")}${td(_mEsc(r.why), "color:#a8b0bb;white-space:normal;max-width:280px;")}
+        ${td(`<span style="display:inline-flex;gap:5px;flex-wrap:wrap;">${_mSrcPills(pr, ev, null, null)}</span>`)}
+      </tr>`; }).join("")}</tbody></table></div>` : `<div style="font-size:12px;color:#525a64;padding:8px 0;">No near misses.</div>`;
+  } else {
+    const src = morningView;
+    const rows = (morningPs[src] || []).filter(p => statOk(p.stat)).sort((a, b) => (b.ev || 0) - (a.ev || 0));
+    viewBody = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;"><span style="font-size:11px;color:#a8b0bb;">${_mSrc(src).label} board${morningStatFilter === "ALL" ? "s" : " · " + morningStatFilter} — staging only, nothing here logs on its own.</span>${btn(`🗑 CLEAR ${_mSrc(src).label}${morningStatFilter === "ALL" ? "" : " " + morningStatFilter}`, `morningClearSource('${src}')`, true, "#f87171")}</div>` +
+      (rows.length ? `<div style="overflow-x:auto;"><table style="border-collapse:collapse;width:100%;"><thead><tr>${["PLAYER", "STAT", "SIDE", "LINE", "PROJ", "ODDS", "BOOK", "EV", ""].map(th).join("")}</tr></thead><tbody>
+      ${rows.map(p => `<tr style="border-top:1px solid #1a1d22;">${td(_mPlayerCell(p.player, p.team))}${td(p.stat, "font-weight:800;color:#fff;")}${td(p.ou.toUpperCase(), `color:${p.ou === "over" ? "#4ade80" : "#f87171"};`)}${td(p.line)}${td(p.proj != null ? Number(p.proj).toFixed(2) : "—")}${td(_mFmtOdds(p.odds))}${td(_mEsc(p.book || "—"))}${td(`${p.ev >= 0 ? "+" : ""}${p.ev}%`, `font-weight:700;color:${p.ev >= MORNING_QUAL_EV ? "#4ade80" : p.ev >= 0 ? "#fbbf24" : "#f87171"};`)}${td(`<button onclick="morningDeletePsRow('${src}',${p._rid})" style="background:transparent;border:none;color:#525a64;cursor:pointer;font-size:14px;" title="Delete row">✕</button>`)}</tr>`).join("")}
+      </tbody></table></div>` : `<div style="font-size:12px;color:#525a64;padding:8px 0;">Nothing pasted for ${_mSrc(src).label}${morningStatFilter === "ALL" ? "" : " " + morningStatFilter} yet.</div>`);
+  }
+  const boardPanel = `<div style="${card}">${viewBar}${viewBody}</div>`;
+
+  // Morning log + record
+  const settled = morningBets.filter(b => ["hit", "miss", "void"].includes(b.result));
+  const recAll = _mRecord(morningBets), recToday = _mRecord(morningBets.filter(b => b.gameDate === today));
+  const fmtRec = r => `${r.w}-${r.l}${r.p ? "-" + r.p : ""}`;
+  const fmtU = u => `${u >= 0 ? "+" : "−"}${Math.abs(u).toFixed(2)}u`;
+  const statCard = (label, val, sub, col) => `<div style="flex:1;min-width:120px;background:#070809;border:1px solid #1a1d22;border-radius:10px;padding:11px 13px;"><div style="font-size:9px;font-weight:800;letter-spacing:.8px;color:#c4b5fd;text-transform:uppercase;margin-bottom:6px;">${label}</div><div style="font-size:18px;font-weight:800;color:${col || "#fff"};font-family:'JetBrains Mono','Menlo',monospace;">${val}</div>${sub ? `<div style="font-size:10px;color:#a8b0bb;margin-top:3px;">${sub}</div>` : ""}</div>`;
+  const byStat = MORNING_STATS.map(s => [s, _mRecord(morningBets.filter(b => b.stat === s))]).filter(([, r]) => r.w + r.l + r.p);
+  const logRows = morningBets.filter(b => statOk(b.stat)).slice(0, 300);
+  const resColor = { hit: "#4ade80", miss: "#f87171", void: "#a8b0bb", pending: "#fbbf24" };
+  const logPanel = `<div style="${card}">
+    <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:10px;">
+      <div style="font-size:13px;font-weight:800;color:#d4dae3;letter-spacing:1px;text-transform:uppercase;">Morning log <span style="color:#a8b0bb;font-weight:600;font-size:11px;text-transform:none;letter-spacing:0;">· separate from the Tracker</span></div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;">
+        <button id="morning-grade-btn" onclick="morningGradePending()" style="background:#7dd3fc1a;border:1px solid #7dd3fc;color:#7dd3fc;border-radius:6px;padding:6px 12px;font-size:11px;font-weight:800;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;">GRADE PENDING</button>
+        ${btn("COPY TODAY", "morningCopyCard()", false)}${btn("EXPORT CSV", "morningExportCsv()", false)}
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;">
+      ${statCard("All-time", fmtRec(recAll), `${settled.length} settled · ${morningBets.length - settled.length} pending`)}
+      ${statCard("Units", fmtU(recAll.units), recAll.roi != null ? `ROI ${recAll.roi >= 0 ? "+" : ""}${recAll.roi.toFixed(1)}%` : "", recAll.units >= 0 ? "#4ade80" : "#f87171")}
+      ${statCard("Today", fmtRec(recToday), fmtU(recToday.units), recToday.units >= 0 ? "#4ade80" : "#f87171")}
+      ${byStat.length ? statCard("By market", byStat.map(([s, r]) => `${s} ${fmtRec(r)}`).join(" · "), byStat.map(([s, r]) => `${s} ${fmtU(r.units)}`).join(" · ")) : ""}
+    </div>
+    ${logRows.length ? `<div style="overflow-x:auto;"><table style="border-collapse:collapse;width:100%;"><thead><tr>${["DATE", "PLAYER", "STAT", "SIDE", "LINE", "ODDS", "BOOK", "FAIR", "EV", "AGREE", "RESULT", ""].map(th).join("")}</tr></thead><tbody>
+      ${logRows.map(b => `<tr style="border-top:1px solid #1a1d22;">
+        ${td(_mEsc((b.gameDate || "").slice(5)))}${td(_mPlayerCell(b.player, b.team))}${td(b.stat, "font-weight:800;color:#fff;")}${td(b.ou.toUpperCase(), `color:${b.ou === "over" ? "#4ade80" : "#f87171"};font-weight:700;`)}${td(b.line)}
+        ${td(_mFmtOdds(b.odds), "color:#fff;")}${td(_mEsc(b.book || "—"))}${td(_mFmtOdds(b.fairOdds))}${td(b.ev != null ? `+${Number(b.ev).toFixed(1)}%` : "—", "color:#4ade80;")}
+        ${td(`${(b.sourcesAgreed || []).length}/${b.requiredQual || 4}`, "color:#c4b5fd;font-weight:800;")}
+        ${td(`<select onchange="morningSetResult('${b.id}',this.value)" style="background:#050507;border:1px solid ${resColor[b.result] || "#1a1d22"}55;color:${resColor[b.result] || "#d4dae3"};border-radius:4px;padding:2px 4px;font-size:11px;font-weight:800;">${["pending", "hit", "miss", "void"].map(o => `<option value="${o}" ${b.result === o ? "selected" : ""}>${o === "hit" ? "WIN" : o === "miss" ? "LOSS" : o.toUpperCase()}</option>`).join("")}</select>${b.actual != null ? ` <span style="color:#a8b0bb;font-size:11px;">(${b.actual})</span>` : ""}`)}
+        ${td(`<button onclick="morningDeleteBet('${b.id}')" style="background:transparent;border:none;color:#525a64;cursor:pointer;font-size:14px;" title="Delete">✕</button>`)}
+      </tr>`).join("")}</tbody></table></div>` : `<div style="font-size:12px;color:#525a64;">No morning bets logged yet.</div>`}
+  </div>`;
+
+  // Keep whatever's in the paste box / selects across re-renders
+  const prevPaste = document.getElementById("morning-paste")?.value || "";
+  const prevSrc = document.getElementById("morning-src")?.value;
+  const prevStat = document.getElementById("morning-stat")?.value;
+  const prevInfo = document.getElementById("morning-import-info")?.textContent || "";
+  el.innerHTML = `<div style="font-family:'Plus Jakarta Sans',sans-serif;">
+    <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:12px;">
+      <div style="font-size:18px;font-weight:800;color:#fff;">MORNING</div>
+      <div style="font-size:11px;color:#a8b0bb;">PropShop ensemble · STOK / RG / SABER / RW · 3 of 4 at ${MORNING_QUAL_EV}%+ EV, 4th ≥ 0% · RW news gate · its own bet log</div>
+    </div>
+    ${newsPanel}${pastePanel}${funnelPanel}${boardPanel}${logPanel}</div>`;
+  if (prevPaste) document.getElementById("morning-paste").value = prevPaste;
+  if (prevSrc) document.getElementById("morning-src").value = prevSrc;
+  if (prevStat) document.getElementById("morning-stat").value = prevStat;
+  if (prevInfo) document.getElementById("morning-import-info").textContent = prevInfo;
+  try { const teams = [...new Set(cleared.concat(morningBets.slice(0, 60)).map(r => r.team).filter(Boolean))]; if (teams.length && typeof loadTableHeadshots === "function" && !window._morningHeadshotsLoading) { window._morningHeadshotsLoading = true; loadTableHeadshots(teams).then(() => { window._morningHeadshotsLoading = false; }).catch(() => { window._morningHeadshotsLoading = false; }); } } catch (e) {}
+}
+loadMorningPs();
+loadMorningBets();
+
+// ── ROTOWIRE API (via the Vercel proxy in vercel-rotowire/) ─────────────────
+// The key lives on Vercel (ROTOWIRE_FEED_URL); the page only knows the proxy
+// URL. NBAInjuries feeds the same injury store as the RW paste (so the news
+// gate, Projections pills and NBA Model all see it), NBALineups feeds the
+// lineups store, NBANews is kept for the Morning tab's news list.
+// Field names are read tolerantly (RotoWire feeds nest some fields, e.g.
+// Injury.Status, Team.Code) — TEST FEEDS shows the raw shape if a feed
+// doesn't map.
+const RW_API_STORAGE = "nba_rw_api_url";
+const RW_NEWS_FEED_KEY = "nba_rw_news_feed_v1";
+const RW_API_SYNC_KEY = "nba_rw_api_synced_at";
+function rwApiDefault() {
+  const b = (typeof getOOBackend === "function") ? getOOBackend() : "";
+  return /\/api\/odds$/i.test(b) ? b.replace(/\/api\/odds$/i, "/api/rotowire") : "https://nfl-props-tracker-1.vercel.app/api/rotowire";
+}
+function getRwApiUrl() { try { return localStorage.getItem(RW_API_STORAGE) || rwApiDefault(); } catch (e) { return rwApiDefault(); } }
+function promptRwApiUrl() {
+  const u = prompt("RotoWire proxy URL (your Vercel /api/rotowire — NOT the RotoWire key):", getRwApiUrl());
+  if (u == null) return;
+  if (/[?&](key|apikey|api_key|token)=/i.test(u)) { alert("That looks like the RotoWire URL with your key in it. Put that in Vercel's ROTOWIRE_FEED_URL instead — here, only the /api/rotowire proxy URL."); return; }
+  try { localStorage.setItem(RW_API_STORAGE, u.trim() || rwApiDefault()); } catch (e) {}
+  showToast("RotoWire proxy saved");
+  if (currentTab === "morning") renderMorning();
+}
+async function rwApiFetch(feed) {
+  const url = getRwApiUrl() + (getRwApiUrl().includes("?") ? "&" : "?") + "feed=" + encodeURIComponent(feed);
+  const r = await fetch(url, { cache: "no-store" });
+  const text = await r.text();
+  let data; try { data = JSON.parse(text); } catch (e) { throw new Error(`${feed}: not JSON (${r.status}) ${text.slice(0, 120)}`); }
+  if (!r.ok || (data && data.error && !Array.isArray(data))) throw new Error(`${feed}: ${r.status} ${data && data.error ? data.error : ""}`);
+  return data;
+}
+// First array of objects anywhere in the payload (feeds wrap rows differently).
+function _rwRows(data) {
+  if (Array.isArray(data)) {
+    if (data.length && typeof data[0] === "object" && !Array.isArray(data[0])) {
+      // An array of groups (e.g. teams/games each holding players) → flatten one level
+      const inner = data.map(d => Object.values(d).find(v => Array.isArray(v) && v.length && typeof v[0] === "object")).filter(Boolean);
+      const looksGrouped = inner.length === data.length && !_rwPick(data[0], ["Name", "PlayerName", "FirstName", "Player.Name", "Player.FirstName"]);
+      return looksGrouped ? data.flatMap((d, i) => inner[i].map(x => ({ __parent: d, ...x }))) : data;
+    }
+    return [];
+  }
+  if (data && typeof data === "object") {
+    for (const v of Object.values(data)) { const r = _rwRows(v); if (r.length) return r; }
+  }
+  return [];
+}
+// Case-insensitive dotted-path lookup: _rwPick(o, ["Injury.Status", "Status"])
+function _rwPick(o, paths) {
+  for (const p of paths) {
+    let cur = o;
+    for (const part of p.split(".")) {
+      if (cur == null || typeof cur !== "object") { cur = undefined; break; }
+      const k = Object.keys(cur).find(x => x.toLowerCase() === part.toLowerCase());
+      cur = k === undefined ? undefined : cur[k];
+    }
+    if (cur != null && cur !== "" && typeof cur !== "object") return cur;
+  }
+  return null;
+}
+function _rwName(o) {
+  const full = _rwPick(o, ["Name", "PlayerName", "FullName", "Player.Name", "Player.FullName", "Player"]);
+  if (full) return String(full).trim();
+  const f = _rwPick(o, ["FirstName", "Player.FirstName", "First"]), l = _rwPick(o, ["LastName", "Player.LastName", "Last"]);
+  return f && l ? `${f} ${l}`.trim() : null;
+}
+function _rwTeam(o) {
+  const t = _rwPick(o, ["Team.Code", "Team.Abbreviation", "Team.Abbr", "TeamCode", "TeamAbbr", "Team.Alias", "Team", "__parent.Team.Code", "__parent.TeamCode", "__parent.Team", "__parent.Code", "__parent.Abbreviation"]);
+  if (!t) return "";
+  const s = String(t).trim();
+  return s.length <= 4 ? (normTeamAbbr(s) || s.toUpperCase()) : (teamLineToAbbr(s) || s);
+}
+function _rwStatus(raw) {
+  const s = String(raw || "").trim().toLowerCase();
+  if (!s) return "Day-To-Day";
+  if (/out for (the )?season|^ofs$|season[- ]ending|^il$|injured reserve/.test(s)) return "Out";
+  if (/^out\b|^o$|suspend/.test(s)) return "Out";
+  if (/doubt/.test(s)) return "Doubtful";
+  if (/game[- ]?time|^gtd$|question|^q$/.test(s)) return "Questionable";
+  if (/probable|^p$/.test(s)) return "Probable";
+  if (/day[- ]to[- ]day|^dtd$/.test(s)) return "Day-To-Day";
+  return String(raw);
+}
+async function rwApiSyncInjuries() {
+  const rows = _rwRows(await rwApiFetch("NBAInjuries"));
+  const records = [];
+  rows.forEach(o => {
+    const name = _rwName(o); if (!name) return;
+    const team = _rwTeam(o);
+    const status = _rwStatus(_rwPick(o, ["Injury.Status", "InjuryStatus", "Status", "Injury.Designation", "Designation"]));
+    const type = _rwPick(o, ["Injury.Type", "Injury.Location", "InjuryType", "Injury.Body", "Body", "Injury.Part", "Injury"]) || "";
+    const headline = _rwPick(o, ["Injury.Notes", "Notes", "Headline", "Injury.Headline", "Comment", "News.Headline"]) || "";
+    const analysis = _rwPick(o, ["Injury.Details", "Details", "Analysis", "News.Analysis", "Impact", "Injury.Analysis"]) || "";
+    const date = _rwPick(o, ["Injury.Date", "Injury.Updated", "Date", "Updated", "LastUpdated", "DateTime"]) || "";
+    const ret = _rwPick(o, ["Injury.ReturnDate", "ReturnDate", "ExpectedReturn", "Injury.ExpectedReturn"]) || "";
+    records.push({ id: `rwapi-${name}`, athlete: { displayName: name, team: { abbreviation: team } }, status, details: { type: String(type), detail: "", returnDate: String(ret) }, shortComment: String(headline), longComment: String(analysis), date: String(date), _teamAbbr: team });
+  });
+  if (!records.length) throw new Error("NBAInjuries: no players read — run TEST FEEDS and send me the field names");
+  _ingestInjuryRecords(records);
+  injuriesLastFetched = Date.now();
+  try {
+    localStorage.setItem("nba_injuries_cache", JSON.stringify({ fetchedAt: Date.now(), day: localYMD(new Date()), source: "rotowire-api", records }));
+    localStorage.removeItem("nba_injuries_cleared");
+    localStorage.setItem("nba_rw_news_at", String(Date.now()));
+  } catch (e) {}
+  _injurySource = "rotowire";
+  if (typeof updateInjuryPanel === "function") updateInjuryPanel();
+  return records.length;
+}
+async function rwApiSyncLineups() {
+  const rows = _rwRows(await rwApiFetch("NBALineups"));
+  const players = {};
+  const games = new Set();
+  rows.forEach(o => {
+    const name = _rwName(o); if (!name) return;
+    const team = _rwTeam(o);
+    const inj = _rwPick(o, ["Injury.Status", "InjuryStatus", "Status.Injury"]);
+    const lstat = String(_rwPick(o, ["LineupStatus", "Status", "Lineup.Status", "Confirmed"]) || "");
+    const starterRaw = _rwPick(o, ["IsStarter", "Starter", "Starting", "Lineup.Starter", "Lineup.IsStarter"]);
+    const isStarter = starterRaw === true || /^(true|yes|1|y)$/i.test(String(starterRaw)) || /start|expected|confirmed/i.test(lstat);
+    let status = null;
+    const injS = _rwStatus(inj || (/out|question|doubt|probable|gtd|day/i.test(lstat) ? lstat : ""));
+    if (inj || /out|question|doubt|probable|gtd|day/i.test(lstat)) status = injS === "Out" ? "OUT" : injS === "Questionable" ? "GTD" : injS === "Doubtful" ? "GTD" : injS === "Probable" ? "PROBABLE" : "DTD";
+    else if (isStarter) status = "STARTING";
+    if (!status) return;   // healthy bench players carry no signal, same as the lineups paste
+    const g = _rwPick(o, ["GameID", "GameId", "Game.ID", "__parent.GameID", "__parent.ID"]); if (g) games.add(g);
+    players[norm(name)] = { name, displayedName: name, status, starter: status === "STARTING", position: _rwPick(o, ["Position", "Pos", "Player.Position"]) || "", team };
+  });
+  const n = Object.keys(players).length;
+  if (n < 10) throw new Error(`NBALineups: only ${n} players read — kept the existing lineups (run TEST FEEDS)`);
+  saveLineupsData({ fetchedAt: Date.now(), players, gameCount: games.size || null, source: "rotowire-api" });
+  return n;
+}
+async function rwApiSyncNews() {
+  const rows = _rwRows(await rwApiFetch("NBANews"));
+  const items = rows.map(o => ({
+    name: _rwName(o) || "", team: _rwTeam(o),
+    headline: String(_rwPick(o, ["Headline", "Title", "News.Headline", "Notes"]) || ""),
+    analysis: String(_rwPick(o, ["Analysis", "Impact", "News.Analysis", "Body", "Details"]) || ""),
+    at: String(_rwPick(o, ["DateTime", "Date", "Updated", "LastUpdated", "Published"]) || ""),
+  })).filter(x => x.headline || x.analysis).slice(0, 120);
+  try { localStorage.setItem(RW_NEWS_FEED_KEY, JSON.stringify({ fetchedAt: Date.now(), items })); } catch (e) {}
+  return items.length;
+}
+function getRwNewsFeed() { try { return JSON.parse(localStorage.getItem(RW_NEWS_FEED_KEY) || "null"); } catch (e) { return null; } }
+async function rwApiSyncAll(quiet) {
+  const btn = document.getElementById("rw-api-sync-btn");
+  if (btn) { btn.disabled = true; btn.textContent = "SYNCING…"; }
+  const done = [], fail = [];
+  for (const [label, fn] of [["injuries", rwApiSyncInjuries], ["lineups", rwApiSyncLineups], ["news", rwApiSyncNews]]) {
+    try { done.push(`${label} ${await fn()}`); } catch (e) { fail.push(e.message); console.warn("[RW API]", e); }
+  }
+  try { localStorage.setItem(RW_API_SYNC_KEY, JSON.stringify({ at: Date.now(), done, fail })); } catch (e) {}
+  if (btn) { btn.disabled = false; btn.textContent = "⚡ SYNC RW API"; }
+  if (!quiet || done.length) showToast(done.length ? `RotoWire: ${done.join(" · ")}${fail.length ? ` · ${fail.length} failed` : ""}` : `RotoWire sync failed — ${fail[0] || "no response"}`);
+  if (typeof morningAutoLog === "function" && morningAutoLog()) saveMorningBets();
+  if (currentTab === "morning") renderMorning();
+  if (currentTab === "results" && typeof renderTable === "function" && merged) renderTable();
+}
+async function rwApiTest() {
+  const out = [];
+  for (const feed of ["NBAInjuries", "NBALineups", "NBANews", "NBADepth", "NBADailyProj"]) {
+    try {
+      const data = await rwApiFetch(feed);
+      const rows = _rwRows(data);
+      const keys = rows.length ? Object.keys(rows[0]).filter(k => k !== "__parent").join(", ") : "(no rows)";
+      out.push(`${feed}: ${rows.length} rows · fields: ${keys}` + (rows.length ? ` · first name read: ${_rwName(rows[0]) || "?"} / team: ${_rwTeam(rows[0]) || "?"}` : ""));
+    } catch (e) { out.push(`${feed}: ERROR ${e.message}`); }
+  }
+  const text = out.join("\n");
+  console.log("[RW API TEST]\n" + text);
+  alert(text + "\n\n(No key in here — safe to copy/paste back to Claude.)");
 }
 </script>
 <!-- TRACK MODAL -->
