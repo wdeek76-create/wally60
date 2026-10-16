@@ -24669,11 +24669,11 @@ function renderMorning() {
       <div style="display:flex;gap:6px;flex-wrap:wrap;">
         <button id="rw-api-sync-btn" onclick="rwApiSyncAll()" title="Pull NBAInjuries + NBALineups + NBANews from RotoWire through your Vercel proxy" style="background:#22c55e;border:none;color:#050507;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:800;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;">⚡ SYNC RW API</button>
         <button onclick="rwApiTest()" title="Show what each RotoWire feed returns (no key shown)" style="background:transparent;border:1px solid #1a1d22;color:#d4dae3;border-radius:6px;padding:7px 10px;font-size:11px;font-weight:700;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;">TEST FEEDS</button>
-        <button onclick="promptRwApiUrl()" title="Paste your RotoWire link (with key) — saved only in this browser" style="background:transparent;border:1px solid #1a1d22;color:#d4dae3;border-radius:6px;padding:7px 10px;font-size:11px;font-weight:700;cursor:pointer;">⚙</button>
+        <button onclick="promptRwApiUrl()" title="Paste your RotoWire API key — saved only in this browser" style="background:transparent;border:1px solid #1a1d22;color:#d4dae3;border-radius:6px;padding:7px 10px;font-size:11px;font-weight:700;cursor:pointer;">⚙</button>
         <button onclick="morningParseNews()" style="background:#93c5fd;border:none;color:#050507;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:800;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;">PARSE PASTE</button>
       </div>
     </div>
-    ${(() => { let sy = null; try { sy = JSON.parse(localStorage.getItem(RW_API_SYNC_KEY) || "null"); } catch (e) {} return `<div style="font-size:10px;color:#8b93a0;margin-top:6px;">RW API${_rwIsDirect(getRwApiUrl()) ? " (direct, saved in this browser)" : ""}: <span style="color:#7dd3fc;font-family:'JetBrains Mono','Menlo',monospace;">${_mEsc(_rwMask(getRwApiUrl()))}</span>${sy ? ` · last sync ${new Date(sy.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}: ${_mEsc(sy.done.join(" · ") || "nothing")}${sy.fail.length ? ` · <span style="color:#f87171;">${_mEsc(sy.fail.join(" | "))}</span>` : ""}` : " · never synced"}</div>`; })()}
+    ${(() => { let sy = null; try { sy = JSON.parse(localStorage.getItem(RW_API_SYNC_KEY) || "null"); } catch (e) {} return `<div style="font-size:10px;color:#8b93a0;margin-top:6px;">RW API: <span style="color:#7dd3fc;font-family:'JetBrains Mono','Menlo',monospace;">${_mEsc(_rwModeLabel())}</span>${sy ? ` · last sync ${new Date(sy.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}: ${_mEsc(sy.done.join(" · ") || "nothing")}${sy.fail.length ? ` · <span style="color:#f87171;">${_mEsc(sy.fail.join(" | "))}</span>` : ""}` : " · never synced"}</div>`; })()}
     <textarea id="morning-news-paste" placeholder="No API? Paste the full RotoWire NBA news / injury page here…" spellcheck="false" style="width:100%;min-height:40px;margin-top:8px;background:#050507;border:1px solid #1a1d22;border-radius:6px;padding:8px 10px;color:#e2e8f0;font-family:'JetBrains Mono','Menlo',monospace;font-size:11px;outline:none;resize:vertical;box-sizing:border-box;"></textarea>
     ${(() => {
       const feed = getRwNewsFeed();
@@ -24822,38 +24822,74 @@ function rwApiDefault() {
 }
 function getRwApiUrl() { try { return localStorage.getItem(RW_API_STORAGE) || rwApiDefault(); } catch (e) { return rwApiDefault(); } }
 // Two ways in:
-//  • DIRECT — paste the RotoWire link itself (key included). It is saved only in
-//    this browser's storage: never in the HTML, GitHub, or the backup file.
-//  • PROXY  — a Vercel /api/rotowire URL (vercel-rotowire/), key kept on Vercel.
-// Direct only works if RotoWire lets browsers call it (CORS); if it doesn't,
-// the sync says so and the proxy is the fallback.
-function _rwIsDirect(u) { return /rotowire\.com/i.test(u || "") && !/\/api\/rotowire\b/i.test(u || ""); }
+//  • KEY   — paste just your RotoWire API key (or any RotoWire API link with
+//    key= in it — the key is pulled out). Saved only in this browser's
+//    storage: never in the HTML, GitHub, or the backup file. Calls go to
+//    https://api.rotowire.com/Basketball/NBA/<Feed>.php?key=…&format=json
+//  • PROXY — a Vercel /api/rotowire URL (vercel-rotowire/), key kept on Vercel.
+// The key route only works if RotoWire lets browsers call it (CORS); if it
+// doesn't, the sync says so and the proxy is the fallback.
+const RW_KEY_STORAGE = "nba_rw_api_key";
+const RW_NBA_BASE = "https://api.rotowire.com/Basketball/NBA";
+// Logical feed → RotoWire NBA endpoints, tried in order (plans differ in what they include).
+const RW_NBA_PATHS = {
+  NBAInjuries:  ["Injuries.php"],
+  NBANews:      ["News.php?hours=48", "News/Injuries.php?hours=48"],
+  NBALineups:   ["Lineups.php", "ExpectedLineups.php", "DailyLineups.php"],
+  NBADailyProj: ["DailyProjections.php"],
+  NBADepth:     ["DepthCharts.php", "DepthChart.php"],
+};
+function getRwKey() { try { return localStorage.getItem(RW_KEY_STORAGE) || ""; } catch (e) { return ""; } }
+function _rwMaskKey(k) { return k ? "••••" + String(k).slice(-3) : ""; }
 function _rwMask(u) { return String(u || "").replace(/([?&](?:key|apikey|api_key|token|k)=)[^&]+/ig, "$1••••••"); }
 function promptRwApiUrl() {
-  const cur = getRwApiUrl();
-  const u = prompt("Paste your RotoWire link (the one with your key in it — the feed= part doesn't matter, it gets swapped per feed).\n\nIt's saved only in this browser, never on GitHub.\n\nCurrently: " + _rwMask(cur), "");
+  const u = prompt("Paste your RotoWire API key.\n\n(A RotoWire API link with key= in it works too — the key gets pulled out. A Vercel /api/rotowire address switches to the proxy instead.)\n\nSaved only in this browser, never on GitHub." + (getRwKey() ? "\n\nCurrent key: " + _rwMaskKey(getRwKey()) : ""), "");
   if (u == null || !u.trim()) return;
-  try { localStorage.setItem(RW_API_STORAGE, u.trim()); } catch (e) {}
-  showToast(_rwIsDirect(u) ? "RotoWire link saved in this browser — hit SYNC" : "RotoWire proxy saved");
+  const v = u.trim();
+  try {
+    if (/\/api\/rotowire\b/i.test(v)) { localStorage.setItem(RW_API_STORAGE, v); localStorage.removeItem(RW_KEY_STORAGE); showToast("RotoWire proxy saved"); }
+    else {
+      const m = v.match(/[?&]key=([^&#\s]+)/i);
+      const key = m ? decodeURIComponent(m[1]) : v;
+      if (!/^[A-Za-z0-9_\-]{6,}$/.test(key)) { alert("That doesn't look like an API key. Paste just the key (letters and numbers)."); return; }
+      localStorage.setItem(RW_KEY_STORAGE, key);
+      localStorage.removeItem(RW_API_STORAGE);
+      showToast("RotoWire key saved in this browser — hit SYNC");
+    }
+  } catch (e) {}
   if (currentTab === "morning") renderMorning();
 }
-function _rwFeedUrl(feed) {
-  const base = getRwApiUrl();
-  try {
-    const url = new URL(base);
-    url.searchParams.set("feed", feed);
-    if (_rwIsDirect(base) && !url.searchParams.has("format")) url.searchParams.set("format", "json");
-    return url.toString();
-  } catch (e) { return base + (base.includes("?") ? "&" : "?") + "feed=" + encodeURIComponent(feed); }
+function _rwModeLabel() {
+  const k = getRwKey();
+  return k ? `key ${_rwMaskKey(k)} (saved in this browser) → api.rotowire.com/Basketball/NBA` : `proxy ${_rwMask(getRwApiUrl())}`;
 }
-async function rwApiFetch(feed) {
-  const url = _rwFeedUrl(feed);
+async function _rwGetJson(url, label) {
   let r;
   try { r = await fetch(url, { cache: "no-store" }); }
-  catch (e) {
-    if (_rwIsDirect(url)) throw new Error(`${feed}: RotoWire blocked the browser from calling it directly — this needs the Vercel route (vercel-rotowire/README.md)`);
-    throw new Error(`${feed}: couldn't reach ${_rwMask(getRwApiUrl())} — not set up yet? Click ⚙ and paste your RotoWire link`);
+  catch (e) { throw Object.assign(new Error(`${label}: RotoWire blocked the browser from calling it directly — this needs the Vercel route (vercel-rotowire/README.md)`), { blocked: true }); }
+  const text = await r.text();
+  let data; try { data = JSON.parse(text); } catch (e) { throw new Error(`${label}: not JSON (${r.status}) ${_rwMask(text.slice(0, 120))}`); }
+  if (!r.ok || (data && !Array.isArray(data) && (data.error || data.Error) && Object.keys(data).length <= 3)) throw new Error(`${label}: ${r.status} ${_rwMask(String(data.error || data.Error || ""))}`);
+  return data;
+}
+async function rwApiFetch(feed) {
+  const key = getRwKey();
+  if (key) {
+    const paths = RW_NBA_PATHS[feed] || [];
+    let lastErr = null;
+    for (const path of paths) {
+      const url = `${RW_NBA_BASE}/${path}${path.includes("?") ? "&" : "?"}format=json&key=${encodeURIComponent(key)}`;
+      try { return await _rwGetJson(url, `${feed} (${path.split("?")[0]})`); }
+      catch (e) { if (e.blocked) throw e; lastErr = e; }
+    }
+    throw lastErr || new Error(`${feed}: no RotoWire endpoint for this feed`);
   }
+  const base = getRwApiUrl();
+  if (/rotowire\.com/i.test(base) && !/\/api\/rotowire\b/i.test(base)) throw new Error(`${feed}: click ⚙ and paste your RotoWire API key`);
+  const url = base + (base.includes("?") ? "&" : "?") + "feed=" + encodeURIComponent(feed);
+  let r;
+  try { r = await fetch(url, { cache: "no-store" }); }
+  catch (e) { throw new Error(`${feed}: couldn't reach the RotoWire proxy — click ⚙ and paste your RotoWire API key`); }
   const text = await r.text();
   let data; try { data = JSON.parse(text); } catch (e) { throw new Error(`${feed}: not JSON (${r.status}) ${text.slice(0, 120)}`); }
   if (!r.ok || (data && data.error && !Array.isArray(data))) throw new Error(`${feed}: ${r.status} ${data && data.error ? data.error : ""}`);
@@ -24994,7 +25030,7 @@ async function rwApiTest() {
       const data = await rwApiFetch(feed);
       const rows = _rwRows(data);
       const keys = rows.length ? Object.keys(rows[0]).filter(k => k !== "__parent").join(", ") : "(no rows)";
-      out.push(`${feed}: ${rows.length} rows · fields: ${keys}` + (rows.length ? ` · first name read: ${_rwName(rows[0]) || "?"} / team: ${_rwTeam(rows[0]) || "?"}` : ""));
+      out.push(`${feed}: ${rows.length} rows · fields: ${keys}` + (rows.length ? ` · first name read: ${_rwName(rows[0]) || "?"} / team: ${_rwTeam(rows[0]) || "?"}` : "") + (rows.length ? "" : ` · top-level: ${Object.keys(data || {}).slice(0, 8).join(", ")}`));
     } catch (e) { out.push(`${feed}: ERROR ${e.message}`); }
   }
   const text = out.join("\n");
