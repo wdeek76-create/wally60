@@ -1,16 +1,18 @@
-// RotoWire feed proxy for the NBA blender (Vercel serverless function).
+// RotoWire proxy for the NBA blender (Vercel serverless function).
 //
-// The RotoWire API key never reaches the browser or this repo: it lives in the
-// Vercel project's environment variable ROTOWIRE_FEED_URL, set to the exact
-// RotoWire URL you already use, key included, but WITHOUT the &feed=... part.
-// (The blender calls  /api/rotowire?feed=NBAInjuries  and this adds the feed.)
-//
-// Only NBA feeds are passed through, so the endpoint can't be used to pull
-// anything else on your subscription.
-const ALLOWED = new Set([
-  "NBAInjuries", "NBANews", "NBALineups", "NBADepth", "NBADailyProj",
-  "NBAPlayers", "NBACeilFloor", "nba-DFS-dk", "nba-DFS-fd",
-]);
+// RotoWire doesn't let browsers call api.rotowire.com directly (CORS), so the
+// blender calls this instead:  /api/rotowire?feed=NBAInjuries
+// The API key lives ONLY in this Vercel project's environment variable
+// ROTOWIRE_API_KEY — never in the page, the browser, or the repo.
+const BASE = "https://api.rotowire.com/Basketball/NBA";
+// Blender feed name → RotoWire NBA endpoints, tried in order (plans differ).
+const PATHS = {
+  NBAInjuries:  ["Injuries.php"],
+  NBANews:      ["News.php?hours=48", "News/Injuries.php?hours=48"],
+  NBALineups:   ["Lineups.php", "ExpectedLineups.php", "DailyLineups.php"],
+  NBADailyProj: ["DailyProjections.php"],
+  NBADepth:     ["DepthCharts.php", "DepthChart.php"],
+};
 
 module.exports = async (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -18,26 +20,29 @@ module.exports = async (req, res) => {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   if (req.method === "OPTIONS") { res.status(204).end(); return; }
 
-  const base = process.env.ROTOWIRE_FEED_URL;
-  if (!base) { res.status(500).json({ error: "ROTOWIRE_FEED_URL is not set on this Vercel project" }); return; }
+  const key = (process.env.ROTOWIRE_API_KEY || "").trim();
+  if (!key) { res.status(500).json({ error: "ROTOWIRE_API_KEY is not set on this Vercel project (Settings → Environment Variables), then redeploy" }); return; }
   const feed = String((req.query && req.query.feed) || "");
-  if (!ALLOWED.has(feed)) { res.status(400).json({ error: "feed not allowed", allowed: [...ALLOWED] }); return; }
+  const paths = PATHS[feed];
+  if (!paths) { res.status(400).json({ error: "unknown feed", feeds: Object.keys(PATHS) }); return; }
 
-  let url;
-  try {
-    url = new URL(base);
-    url.searchParams.set("feed", feed);
-    if (!url.searchParams.has("format")) url.searchParams.set("format", "json");
-  } catch (e) { res.status(500).json({ error: "ROTOWIRE_FEED_URL is not a valid URL" }); return; }
-
-  try {
-    const r = await fetch(url.toString(), { headers: { Accept: "application/json" } });
-    const text = await r.text();
-    // Never echo the upstream URL back — it carries the key.
-    res.setHeader("Cache-Control", "s-maxage=120, stale-while-revalidate=300");
-    res.setHeader("Content-Type", r.headers.get("content-type") || "application/json");
-    res.status(r.status).send(text);
-  } catch (e) {
-    res.status(502).json({ error: "RotoWire request failed", detail: String(e && e.message || e) });
+  let last = null;
+  for (const path of paths) {
+    const url = `${BASE}/${path}${path.includes("?") ? "&" : "?"}format=json&key=${encodeURIComponent(key)}`;
+    try {
+      const r = await fetch(url, { headers: { Accept: "application/json" } });
+      const text = await r.text();
+      if (r.ok) {
+        res.setHeader("Cache-Control", "s-maxage=120, stale-while-revalidate=300");
+        res.setHeader("Content-Type", "application/json");
+        res.status(200).send(text);
+        return;
+      }
+      last = { status: r.status, endpoint: path.split("?")[0], body: text.slice(0, 300).split(key).join("•••") };
+    } catch (e) {
+      last = { status: 502, endpoint: path.split("?")[0], body: String(e && e.message || e) };
+    }
   }
+  // Never echo the key back.
+  res.status(last ? last.status : 502).json({ error: "RotoWire request failed", ...last });
 };
