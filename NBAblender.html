@@ -24170,7 +24170,8 @@ const MORNING_SOURCES = [
 const MORNING_SRC_KEYS = MORNING_SOURCES.map(s => s.key);
 // 3 of the 4 sources need at least this much of their own EV; the 4th only has to be ≥ 0%.
 const MORNING_QUAL_EV = 7;
-const MORNING_STATS = ["PTS", "REB", "AST", "3PM", "PRA", "PR", "PA", "RA"];
+// Morning markets: points, threes, rebounds, assists, PRA only.
+const MORNING_STATS = ["PTS", "3PM", "REB", "AST", "PRA"];
 const MORNING_STAT_LABEL = { PTS: "Points", REB: "Rebounds", AST: "Assists", "3PM": "Threes", PRA: "Pts+Reb+Ast", PR: "Pts+Reb", PA: "Pts+Ast", RA: "Reb+Ast" };
 // Market names PropShop prints in its market picker / board header → our stat key.
 // Longest first so "Points + Rebounds + Assists" isn't read as "Points".
@@ -24293,7 +24294,7 @@ function _mExtractCells(tokens) {
 // Market from the header region of the paste (before the first player block).
 function morningDetectMarket(raw) {
   const head = raw.split("\n").slice(0, 60).join("\n");
-  for (const [re, stat] of MORNING_MARKET_PATTERNS) if (re.test(head)) return stat;
+  for (const [re, stat] of MORNING_MARKET_PATTERNS) if (re.test(head)) return MORNING_STATS.includes(stat) ? stat : "UNSUPPORTED:" + stat;
   return null;
 }
 function parseMorningPropShop(raw) {
@@ -24409,7 +24410,14 @@ function computeMorningEnsemble() {
     if (!byKey[key]) byKey[key] = { player: p.player, team: p.team, stat: p.stat, ou: p.ou, line: Number(p.line), gameDateIso: p.gameDateIso, game: p.game, sources: [] };
     if (!byKey[key].sources.some(x => x.src === src)) byKey[key].sources.push({ src, prop: p });
   }));
-  const GATES = ["pasted", "coverage", "qual", "worst", "proj", "news", "cleared"];
+  const GATES = ["pasted", "oppo", "coverage", "qual", "worst", "proj", "news", "cleared"];
+  // Every pasted row, negatives included, indexed by player/stat/date/line/side, so a source
+  // that has the OTHER side of the line blocks the pick instead of being ignored.
+  const sideIdx = {};
+  MORNING_SRC_KEYS.forEach(src => (morningPs[src] || []).forEach(p => {
+    const k = resolveNorm(p.player) + "|" + p.stat + "|" + (p.gameDateIso || "") + "|" + Number(p.line);
+    ((sideIdx[k] = sideIdx[k] || { over: [], under: [] })[p.ou] || []).push({ src, ev: p.ev });
+  }));
   const funnel = {};
   const bump = (stat, gate) => { ["ALL", stat].forEach(s => { funnel[s] = funnel[s] || Object.fromEntries(GATES.map(g => [g, 0])); funnel[s][gate]++; }); };
   const cleared = [], misses = [];
@@ -24422,6 +24430,10 @@ function computeMorningEnsemble() {
     // for this player at all (any side/line). Not-pasted-yet is not a gap.
     const gapOnly = missing.length === 1 && pastedStat[missing[0] + "|" + entry.stat] && !(coverage[missing[0] + "|" + entry.stat] || new Set()).has(pk);
     const miss = (gate, why) => misses.push({ ...entry, gate, why, have: uniq });
+    const oppSide = entry.ou === "over" ? "under" : "over";
+    const opp = (sideIdx[pk + "|" + entry.stat + "|" + (entry.gameDateIso || "") + "|" + entry.line] || {})[oppSide] || [];
+    if (opp.length) { miss("oppo", opp.map(o => `${_mSrc(o.src).label} has the ${oppSide.toUpperCase()} ${entry.line} (${Number(o.ev) >= 0 ? "+" : ""}${Number(o.ev).toFixed(1)}%)`).join(", ")); return; }
+    bump(entry.stat, "oppo");
     if (uniq.length < 4 && !(uniq.length === 3 && gapOnly)) {
       if (uniq.length >= 2) miss("coverage", missing.map(s => _mSrc(s).label).join("/") + (missing.some(s => (coverage[s + "|" + entry.stat] || new Set()).has(pk)) ? " on a different side/line" : " not pasted for " + entry.stat));
       return;
@@ -24466,7 +24478,7 @@ function computeMorningEnsemble() {
     });
   });
   cleared.sort((a, b) => b.sourcesAgreed.length - a.sourcesAgreed.length || b.qualCount - a.qualCount || (b.ev || 0) - (a.ev || 0));
-  const order = { cleared: 0, news: 1, proj: 2, worst: 3, qual: 4, coverage: 5 };
+  const order = { cleared: 0, news: 1, proj: 2, worst: 3, qual: 4, coverage: 5, oppo: 6 };
   misses.sort((a, b) => order[a.gate] - order[b.gate]);
   return { cleared, funnel, misses, gates: GATES };
 }
@@ -24508,6 +24520,7 @@ function morningImport() {
   if (stat === "AUTO") {
     stat = morningDetectMarket(raw);
     if (!stat) { info.textContent = "Couldn't tell which market this board is — pick it in the Market box."; return; }
+    if (stat.startsWith("UNSUPPORTED:")) { info.textContent = `That looks like a ${stat.slice(12)} board — Morning only does PTS, 3PM, REB, AST and PRA. Nothing imported.`; return; }
   }
   const { results, errors } = parseMorningPropShop(raw);
   if (!results.length) { info.textContent = "No props found in that paste." + (errors.length ? ` ${errors.length} parse error(s) — see console.` : ""); if (errors.length) console.warn("[MORNING]", errors); return; }
@@ -24522,6 +24535,7 @@ function morningImport() {
   const prev = (morningPs[src] || []).filter(p => p.stat === stat).length;
   morningPs[src] = (morningPs[src] || []).filter(p => p.stat !== stat).concat(Object.values(byKey));
   saveMorningPs();
+  try { morningSoloCapture(src, stat, results); } catch (e) { console.warn("[MORNING solo] capture failed", e); }
   const n = Object.values(byKey).length;
   const logged = morningAutoLog();
   ta.value = "";
@@ -24562,7 +24576,7 @@ function morningDeleteBet(id) { if (!confirm("Delete this morning bet?")) return
 function morningSetResult(id, res) { const b = morningBets.find(x => String(x.id) === String(id)); if (!b) return; b.result = res; if (res === "pending") b.actual = null; saveMorningBets(); renderMorning(); }
 async function morningGradePending() {
   const pending = morningBets.filter(b => b.result === "pending");
-  if (!pending.length) { showToast("Nothing pending to grade"); return; }
+  if (!pending.length && !morningSolo.some(x => x.result === "pending")) { showToast("Nothing pending to grade"); return; }
   const btn = document.getElementById("morning-grade-btn");
   if (btn) { btn.disabled = true; btn.textContent = "GRADING…"; }
   let graded = 0, waiting = 0;
@@ -24571,8 +24585,10 @@ async function morningGradePending() {
     catch (e) { waiting++; }
   }
   saveMorningBets();
+  let soloGraded = 0;
+  try { soloGraded = await morningGradeSolo(); } catch (e) { console.warn("[MORNING solo] grade failed", e); }
   if (btn) { btn.disabled = false; btn.textContent = "GRADE PENDING"; }
-  showToast(`Graded ${graded}${waiting ? ` · ${waiting} not final yet` : ""}`);
+  showToast(`Graded ${graded}${soloGraded ? ` + ${soloGraded} solo` : ""}${waiting ? ` · ${waiting} not final yet` : ""}`);
   renderMorning();
 }
 function morningCopyCard() {
@@ -24687,7 +24703,7 @@ function renderMorning() {
   </div>`;
 
   // Clearance funnel
-  const GATE_LABEL = { pasted: "Pasted", coverage: "Coverage (4/4 or 3/3 gap)", qual: `3 at ${MORNING_QUAL_EV}%+ EV`, worst: "4th source ≥ 0%", proj: "Projections on bet side", news: "RW news / injuries clear", cleared: "Cleared → morning card" };
+  const GATE_LABEL = { pasted: "Pasted", oppo: "No source on the other side", coverage: "Coverage (4/4 or 3/3 gap)", qual: `3 at ${MORNING_QUAL_EV}%+ EV`, worst: "4th source ≥ 0%", proj: "Projections on bet side", news: "RW news / injuries clear", cleared: "Cleared → morning card" };
   const statsWithData = MORNING_STATS.filter(s => funnel[s]);
   const fCols = ["ALL", ...statsWithData];
   const fAll = funnel.ALL || Object.fromEntries(gates.map(g => [g, 0]));
@@ -24712,6 +24728,7 @@ function renderMorning() {
   const viewBar = `<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:8px;">
     ${btn(`ENSEMBLE (${cleared.filter(r => statOk(r.stat)).length})`, "morningSetView('ensemble')", morningView === "ensemble", "#c4b5fd")}
     ${btn(`NEAR MISSES (${misses.filter(r => statOk(r.stat)).length})`, "morningSetView('misses')", morningView === "misses", "#fbbf24")}
+    ${btn(`SOLO (${morningSolo.filter(x => statOk(x.stat)).length})`, "morningSetView('solo')", morningView === "solo", "#38bdf8")}
     ${MORNING_SRC_KEYS.map(k => btn(`${_mSrc(k).label} (${counts[k]})`, `morningSetView('${k}')`, morningView === k, _mSrc(k).color)).join("")}
     <span style="flex:1;"></span>
     ${["ALL", ...MORNING_STATS].map(s => btn(s, `morningSetStat('${s}')`, morningStatFilter === s)).join("")}
@@ -24721,7 +24738,7 @@ function renderMorning() {
   if (morningView === "ensemble") {
     const rows = cleared.filter(r => statOk(r.stat));
     window._morningCleared = cleared;
-    viewBody = rows.length ? `<div style="display:flex;justify-content:flex-end;margin-bottom:6px;">${btn("LOG ALL TO MORNING", "morningLogAll()", true, "#c4b5fd")}</div>
+    viewBody = rows.length ? `<div style="display:flex;justify-content:flex-end;margin-bottom:6px;">${btn("⧉ SEND TO NICK", "morningSendCard('nick')", false, "#00aaff")}${btn("🖼 SEND TO DISCORD", "morningSendCard('discord')", false, "#cc66ff")}${btn("LOG ALL TO MORNING", "morningLogAll()", true, "#c4b5fd")}</div>
       <div style="overflow-x:auto;"><table style="border-collapse:collapse;width:100%;"><thead><tr>${["PLAYER", "STAT", "SIDE", "LINE", "AVG PROJ", "AGREE · SOURCES (PROJ · EV)", "BEST", "BOOK", "FAIR", "WORST EV", ""].map(th).join("")}</tr></thead><tbody>
       ${rows.map(r => { const i = cleared.indexOf(r), logged = _mAlreadyLogged(r); return `<tr style="border-top:1px solid #1a1d22;${logged ? "opacity:.5;" : ""}">
         ${td(_mPlayerCell(r.player, r.team))}${td(r.stat, "font-weight:800;color:#fff;")}${td(r.ou.toUpperCase(), `font-weight:800;color:${r.ou === "over" ? "#4ade80" : "#f87171"};`)}${td(r.line, "color:#fff;")}
@@ -24733,7 +24750,7 @@ function renderMorning() {
       </tr>`; }).join("")}</tbody></table></div>`
       : `<div style="font-size:12px;color:#525a64;padding:8px 0;">Nothing has cleared yet. An ensemble pick needs all 4 sources (or 3 when the 4th has no row for that player), 3 at ${MORNING_QUAL_EV}%+ EV, the 4th not negative, every projection on the bet's side of the line, and a clean RW news check. Check NEAR MISSES for what's close.</div>`;
   } else if (morningView === "misses") {
-    const GATE_SHORT = { coverage: "COVERAGE", qual: "EV BAR", worst: "NEGATIVE", proj: "PROJ SIDE", news: "NEWS", cleared: "REJECTED" };
+    const GATE_SHORT = { oppo: "OPPOSITE SIDE", coverage: "COVERAGE", qual: "EV BAR", worst: "NEGATIVE", proj: "PROJ SIDE", news: "NEWS", cleared: "REJECTED" };
     const rows = misses.filter(r => statOk(r.stat)).slice(0, 150);
     viewBody = rows.length ? `<div style="font-size:11px;color:#a8b0bb;margin-bottom:6px;">Props with at least 2 sources that stopped at a gate — furthest along first.</div>
       <div style="overflow-x:auto;"><table style="border-collapse:collapse;width:100%;"><thead><tr>${["PLAYER", "STAT", "SIDE", "LINE", "STOPPED AT", "WHY", "SOURCES (PROJ · EV)"].map(th).join("")}</tr></thead><tbody>
@@ -24742,6 +24759,8 @@ function renderMorning() {
         ${td(GATE_SHORT[r.gate] || r.gate, "color:#fbbf24;font-weight:800;font-size:11px;")}${td(_mEsc(r.why), "color:#a8b0bb;white-space:normal;max-width:280px;")}
         ${td(`<span style="display:inline-flex;gap:5px;flex-wrap:wrap;">${_mSrcPills(pr, ev, null, null)}</span>`)}
       </tr>`; }).join("")}</tbody></table></div>` : `<div style="font-size:12px;color:#525a64;padding:8px 0;">No near misses.</div>`;
+  } else if (morningView === "solo") {
+    viewBody = morningSoloHtml(statOk);
   } else {
     const src = morningView;
     const rows = (morningPs[src] || []).filter(p => statOk(p.stat)).sort((a, b) => (b.ev || 0) - (a.ev || 0));
@@ -24766,13 +24785,14 @@ function renderMorning() {
       <div style="font-size:13px;font-weight:800;color:#d4dae3;letter-spacing:1px;text-transform:uppercase;">Morning log <span style="color:#a8b0bb;font-weight:600;font-size:11px;text-transform:none;letter-spacing:0;">· separate from the Tracker</span></div>
       <div style="display:flex;gap:6px;flex-wrap:wrap;">
         <button id="morning-grade-btn" onclick="morningGradePending()" style="background:#7dd3fc1a;border:1px solid #7dd3fc;color:#7dd3fc;border-radius:6px;padding:6px 12px;font-size:11px;font-weight:800;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;">GRADE PENDING</button>
-        ${btn("COPY TODAY", "morningCopyCard()", false)}${btn("EXPORT CSV", "morningExportCsv()", false)}
+        ${btn("⧉ NICK", "morningSendCard('nick')", false, "#00aaff")}${btn("🖼 DISCORD", "morningSendCard('discord')", false, "#cc66ff")}${btn("COPY TODAY", "morningCopyCard()", false)}${btn("EXPORT CSV", "morningExportCsv()", false)}
       </div>
     </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;">
       ${statCard("All-time", fmtRec(recAll), `${settled.length} settled · ${morningBets.length - settled.length} pending`)}
       ${statCard("Units", fmtU(recAll.units), recAll.roi != null ? `ROI ${recAll.roi >= 0 ? "+" : ""}${recAll.roi.toFixed(1)}%` : "", recAll.units >= 0 ? "#4ade80" : "#f87171")}
       ${statCard("Today", fmtRec(recToday), fmtU(recToday.units), recToday.units >= 0 ? "#4ade80" : "#f87171")}
+      ${(() => { const d = _mRecord(morningBets.filter(b => b.discordSent)); return d.w + d.l + d.p || morningBets.some(b => b.discordSent) ? statCard("Sent to Discord", fmtRec(d), `${fmtU(d.units)}${d.roi != null ? " · ROI " + (d.roi >= 0 ? "+" : "") + d.roi.toFixed(1) + "%" : ""}`, d.units >= 0 ? "#4ade80" : "#f87171") : ""; })()}
       ${byStat.length ? statCard("By market", byStat.map(([s, r]) => `${s} ${fmtRec(r)}`).join(" · "), byStat.map(([s, r]) => `${s} ${fmtU(r.units)}`).join(" · ")) : ""}
     </div>
     ${logRows.length ? `<div style="overflow-x:auto;"><table style="border-collapse:collapse;width:100%;"><thead><tr>${["DATE", "PLAYER", "STAT", "SIDE", "LINE", "ODDS", "BOOK", "FAIR", "EV", "AGREE", "RESULT", ""].map(th).join("")}</tr></thead><tbody>
@@ -24804,6 +24824,166 @@ function renderMorning() {
 }
 loadMorningPs();
 loadMorningBets();
+
+// ── SOLO SOURCES ────────────────────────────────────────────────────────────
+// Every line a single source posts at MORNING_SOLO_MIN_EV%+ on its PropShop paste is logged
+// here — flat 1u at the pasted price — whether or not the ensemble takes it. Own storage, apart
+// from the morning bets. A re-paste before the game updates price/edge; later pastes never
+// remove rows. Graded off the same ESPN box scores.
+const MORNING_SOLO_KEY = "nba_morning_solo_v1";
+const MORNING_SOLO_MIN_EV = 1;
+const MORNING_SOLO_BUCKETS = [["1-3%", 1, 3], ["3-5%", 3, 5], ["5-10%", 5, 10], ["10%+", 10, Infinity]];
+let morningSolo = [];
+try { morningSolo = JSON.parse(localStorage.getItem(MORNING_SOLO_KEY) || "[]") || []; } catch (e) { morningSolo = []; }
+function morningSoloSave() { try { localStorage.setItem(MORNING_SOLO_KEY, JSON.stringify(morningSolo)); } catch (e) { console.warn("[MORNING solo] save failed", e); } }
+function morningSoloCapture(src, stat, results) {
+  (results || []).forEach(r => {
+    if (!(Number(r.ev) >= MORNING_SOLO_MIN_EV) || !r.gameDateIso || _mRejected(r.player)) return;
+    const odds = parseInt(r.odds, 10); if (isNaN(odds)) return;
+    const key = [src, resolveNorm(r.player), stat, r.gameDateIso, r.ou, Number(r.line)].join("|");
+    const cur = morningSolo.find(x => x.key === key);
+    if (cur) { if (cur.result === "pending") Object.assign(cur, { odds, book: r.book, ev: Number(r.ev), proj: r.proj }); return; }
+    morningSolo.push({ key, src, player: r.player, game: r.game || "", team: _mTeamFor(r.player), gameDate: r.gameDateIso, stat, ou: r.ou, line: Number(r.line), odds, book: r.book, ev: Number(r.ev), proj: r.proj, at: new Date().toISOString(), result: "pending", actual: null });
+  });
+  morningSoloSave();
+}
+async function morningGradeSolo() {
+  const today = localYMD(new Date());
+  let graded = 0;
+  for (const x of morningSolo.filter(y => y.result === "pending" && y.gameDate <= today)) {
+    try { const r = await gradeBet(x); if (r.ok) { x.result = r.result; x.actual = r.total != null ? r.total : null; graded++; } } catch (e) { /* try again next time */ }
+  }
+  if (graded) morningSoloSave();
+  return graded;
+}
+function _mSoloWin(x) { return x.odds > 0 ? x.odds / 100 : 100 / Math.abs(x.odds); }
+function morningSoloHtml(statOk) {
+  const zero = () => ({ w: 0, l: 0, pl: 0 });
+  const add = (v, x) => { if (x.result === "hit") { v.w++; v.pl += _mSoloWin(x); } else if (x.result === "miss") { v.l++; v.pl -= 1; } };
+  const cell = v => {
+    const n = v.w + v.l;
+    if (!n) return `<td style="padding:5px 9px;text-align:center;color:#525a64;">—</td><td style="padding:5px 9px;text-align:center;color:#525a64;">—</td>`;
+    const c = v.pl >= 0 ? "#4ade80" : "#f87171";
+    return `<td style="padding:5px 9px;text-align:center;white-space:nowrap;color:#fff;">${v.w}-${v.l} <span style="color:#a8b0bb;">${(v.w / n * 100).toFixed(0)}%</span></td><td style="padding:5px 9px;text-align:center;white-space:nowrap;color:${c};">${v.pl >= 0 ? "+" : ""}${v.pl.toFixed(2)}u <span style="opacity:.8;">${(v.pl / n * 100).toFixed(1)}%</span></td>`;
+  };
+  const th = (t, span) => `<th${span ? ` colspan="${span}"` : ""} style="padding:6px 9px;font-size:10px;letter-spacing:.5px;text-transform:uppercase;text-align:center;color:#a8b0bb;white-space:nowrap;">${t}</th>`;
+  const log = morningSolo.filter(x => statOk(x.stat));
+  if (!log.length) return `<div style="font-size:12px;color:#525a64;padding:8px 0;">Nothing logged yet. Every ${MORNING_SOLO_MIN_EV}%+ line a source posts on a PropShop paste lands here (1u flat), whether or not the ensemble takes it.</div>`;
+  return `<div style="font-size:11px;color:#a8b0bb;margin-bottom:8px;">Every ${MORNING_SOLO_MIN_EV}%+ line each source posts, 1u flat at the pasted price. Separate from the morning log. Pushes and DNPs don't count. Hit <b>GRADE PENDING</b> below to settle.</div>` +
+    MORNING_SRC_KEYS.map(src => {
+      const rows = log.filter(x => x.src === src), open = rows.filter(x => x.result === "pending").length;
+      const lines = MORNING_SOLO_BUCKETS.map(([label, lo, hi]) => ({ label, set: rows.filter(x => x.ev >= lo && x.ev < hi) })).concat([{ label: "All", set: rows, total: true }]);
+      const body = lines.map(({ label, set, total }) => {
+        const a = zero(), o = zero(), u = zero();
+        set.forEach(x => { add(a, x); add(x.ou === "over" ? o : u, x); });
+        return `<tr style="border-top:1px solid #1a1d22;${total ? "background:#0a0d12;font-weight:800;" : ""}"><td style="padding:5px 10px;font-weight:800;color:#fff;white-space:nowrap;">${label}</td>${cell(a)}${cell(o)}${cell(u)}</tr>`;
+      }).join("");
+      return `<div style="margin-bottom:14px;"><div style="font-size:13px;font-weight:800;color:${_mSrc(src).color};margin-bottom:5px;">${_mSrc(src).label} <span style="font-size:11px;color:#a8b0bb;font-weight:600;">${rows.length} lines · ${open} open</span></div>
+        <div style="overflow-x:auto;"><table style="border-collapse:collapse;min-width:620px;font-size:12px;"><thead><tr>${th("Edge")}${th("All", 2)}${th('<span style="color:#fb923c;">Over</span>', 2)}${th('<span style="color:#38bdf8;">Under</span>', 2)}</tr></thead><tbody>${body}</tbody></table></div></div>`;
+    }).join("");
+}
+
+// ── SEND TO NICK / SEND TO DISCORD ─────────────────────────────────────────
+// Rendered image cards of today's pending morning picks. NICK = internal "why this pick":
+// agree count, every source's projection + EV, worst EV, play-to. DISCORD = the clean public
+// card: player, prop, side, price + book, play-to — no model info. Prices are the pasted
+// PropShop price/book (what the sources' edge is actually on).
+function morningCardPicks() {
+  const today = localYMD(new Date());
+  const open = morningBets.filter(b => b.result === "pending");
+  const t = open.filter(b => b.gameDate === today);
+  return (t.length ? t : open).slice().reverse();
+}
+function morningPlayTo(b) {
+  if (b.fairProb == null) return null;
+  const am = decimalToAmerican((1 + MORNING_QUAL_EV / 100) / b.fairProb);
+  return am == null ? null : (am > 0 ? "+" + am : "−" + Math.abs(am));
+}
+async function _morningCardHtml(picks, mode) {
+  const nick = mode === "nick";
+  const esc = _mEsc;
+  const teams = [...new Set(picks.map(b => b.team).filter(Boolean))];
+  const logos = {};
+  await Promise.all(teams.map(async t => { try { const u = await _teamLogoAsDataUri(t); if (u) logos[t] = u; } catch (e) {} }));
+  let heads = {};
+  try { heads = await buildHeadshotMap(picks.map(b => ({ player: b.player, team: b.team }))); } catch (e) {}
+  const face = (name, sz) => {
+    const u = heads[resolveNorm(name || "")];
+    const ring = "border-radius:50%;background:#0d0f13;border:1px solid #000;box-shadow:0 0 10px rgba(125,211,252,0.30),0 2px 5px rgba(0,0,0,0.45);";
+    if (u) return `<span style="width:${sz}px;height:${sz}px;${ring}display:inline-block;overflow:hidden;position:relative;flex:0 0 auto;"><img src="${u}" alt="" style="position:absolute;top:0;left:50%;width:${Math.round(sz * 1.62)}px;height:auto;transform:translateX(-50%);display:block;"/></span>`;
+    const ini = String(name || "").split(/\s+/).filter(Boolean).slice(0, 2).map(w => w[0]).join("").toUpperCase();
+    return `<span style="width:${sz}px;height:${sz}px;${ring}display:inline-flex;align-items:center;justify-content:center;color:#7dd3fc;font:800 ${Math.round(sz * 0.38)}px 'Plus Jakarta Sans';flex:0 0 auto;">${esc(ini)}</span>`;
+  };
+  const logo = (t, sz) => logos[t] ? `<img src="${logos[t]}" alt="" style="width:${sz}px;height:${sz}px;object-fit:contain;vertical-align:middle;"/>` : "";
+  const bookLogo = (book, sz) => { const d = (typeof logoFor === "function") ? logoFor(book) : null; return d ? `<img src="${d}" alt="" style="width:${sz}px;height:${sz}px;border-radius:3px;object-fit:cover;vertical-align:middle;"/>` : `<span style="display:inline-flex;width:${sz}px;height:${sz}px;border-radius:3px;background:#1a1d22;color:#fff;font:700 ${Math.round(sz * 0.5)}px sans-serif;align-items:center;justify-content:center;">${esc(String(book || "?").slice(0, 2).toUpperCase())}</span>`; };
+  const odds = o => o > 0 ? `+${o}` : `−${Math.abs(o)}`;
+  const th = (t, a) => `<th style="text-align:${a || "left"};padding:13px 14px;font:800 12px 'Plus Jakarta Sans';color:#fff;letter-spacing:.08em;text-transform:uppercase;border-bottom:2px solid #1a1d22;background:#0b0f19;">${t}</th>`;
+  const td = (h, a, x) => `<td style="text-align:${a || "left"};padding:12px 14px;border-bottom:1px solid #1a1d22;vertical-align:middle;${x || ""}">${h}</td>`;
+  // group by game
+  const groups = new Map();
+  picks.forEach(b => { const k = b.game || b.team || "—"; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(b); });
+  const cols = nick ? 8 : 4;
+  let body = "";
+  groups.forEach((list, game) => {
+    body += `<tr><td colspan="${cols}" style="padding:13px 16px 9px;background:#0f1115;border-bottom:2px solid #1a1d22;"><div style="display:flex;align-items:center;gap:8px;font:800 15px 'Plus Jakarta Sans';color:#fff;letter-spacing:.04em;text-transform:uppercase;">${esc(game)}<span style="margin-left:auto;font-size:11px;font-weight:700;color:#7dd3fc;">${list.length} ${list.length === 1 ? "PROP" : "PROPS"}</span></div></td></tr>`;
+    list.forEach(b => {
+      const stat = (typeof STAT_FULL_NAME !== "undefined" && STAT_FULL_NAME[b.stat]) ? STAT_FULL_NAME[b.stat] : b.stat;
+      const side = b.ou.toUpperCase(), sc = b.ou === "over" ? "#fb923c" : "#38bdf8", pt = morningPlayTo(b);
+      const player = `<div style="display:flex;align-items:center;gap:10px;">${face(b.player, 40)}<div><div style="font:800 15px 'Plus Jakarta Sans';color:#fff;">${esc(displayPlayerName(b.player))}</div><div style="font:700 11px 'Plus Jakarta Sans';color:#a8b0bb;">${logo(b.team, 13)} ${esc(displayTeamAbbr(b.team || ""))}</div></div></div>`;
+      const prop = `<div style="font:700 14px 'Plus Jakarta Sans';color:#fff;">${esc(String(stat).toUpperCase())} <span style="font-family:'JetBrains Mono',monospace;color:#7dd3fc;">${b.line}</span></div>`;
+      const sidec = `<span style="font:800 15px 'Plus Jakarta Sans';color:${sc};letter-spacing:.05em;">${side}</span>${pt ? `<div style="font:700 12px 'JetBrains Mono',monospace;color:#fff;margin-top:4px;">play to ${pt}</div>` : ""}`;
+      const best = `<div style="display:inline-flex;align-items:center;gap:6px;">${bookLogo(b.book, 18)}<span style="font:800 17px 'JetBrains Mono',monospace;color:#fff;">${odds(b.odds)}</span></div>`;
+      if (!nick) { body += `<tr>${td(player)}${td(prop)}${td(sidec)}${td(best, "center", "white-space:nowrap;")}</tr>`; return; }
+      const pills = MORNING_SRC_KEYS.map(k => {
+        if (b.sourceProjs == null || b.sourceProjs[k] == null) return k === b.missingSrc ? `<span style="font:700 11px 'JetBrains Mono',monospace;color:#8b93a0;border:1px dashed #525a64;border-radius:4px;padding:2px 6px;margin:2px 4px 2px 0;display:inline-block;">${_mSrc(k).label} ${b.missingProj != null ? Number(b.missingProj).toFixed(1) : "—"}</span>` : "";
+        const ev = Number(b.sourceEvs[k]);
+        return `<span style="font:700 11px 'JetBrains Mono',monospace;color:${_mSrc(k).color};border:1px solid ${_mSrc(k).color}66;border-radius:4px;padding:2px 6px;margin:2px 4px 2px 0;display:inline-block;">${_mSrc(k).label} ${Number(b.sourceProjs[k]).toFixed(1)} <b style="color:${ev >= MORNING_QUAL_EV ? "#4ade80" : ev >= 0 ? "#fbbf24" : "#f87171"};">${ev >= 0 ? "+" : ""}${ev.toFixed(1)}%</b></span>`;
+      }).join("");
+      const ev = b.ev != null ? `<div style="font:800 13px 'JetBrains Mono',monospace;color:#4ade80;">+${Number(b.ev).toFixed(1)}%</div>` : "";
+      const worst = b.minEv != null ? `<div style="font:700 11px 'JetBrains Mono',monospace;color:#a8b0bb;margin-top:2px;">worst ${b.minEv >= 0 ? "+" : ""}${Number(b.minEv).toFixed(1)}%</div>` : "";
+      body += `<tr>${td(player)}${td(prop)}${td(sidec)}${td(best, "center", "white-space:nowrap;")}${td(`<span style="font:800 15px 'JetBrains Mono',monospace;color:#c4b5fd;">${(b.sourcesAgreed || []).length}/${b.requiredQual || 4}</span>`, "center")}${td(pills)}${td(ev + worst, "center")}${td(b.proj != null ? `<span style="font:700 13px 'JetBrains Mono',monospace;color:#fff;">${Number(b.proj).toFixed(1)}</span>` : "", "center")}</tr>`;
+    });
+  });
+  const d = new Date(), days = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"], mo = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
+  const date = `${days[d.getDay()]} ${mo[d.getMonth()]} ${d.getDate()}`;
+  const over = picks.filter(b => b.ou === "over").length;
+  const head = nick ? [th("Player"), th("Prop"), th("Side"), th("Price", "center"), th("Agree", "center"), th("Sources · proj · EV"), th("Edge", "center"), th("Avg proj", "center")].join("") : [th("Player"), th("Prop"), th("Side"), th("Best Price", "center")].join("");
+  return `<style>.mcard, .mcard * { text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000; }</style><div class="mcard" style="font-family:'Plus Jakarta Sans','Helvetica Neue',sans-serif;background:${nick ? "#060b14" : "linear-gradient(135deg,#0c0d10 0%,#0a0d12 50%,#0c0d10 100%)"};border:1px solid #1a1d22;border-radius:18px;padding:24px;width:${nick ? 1180 : 760}px;color:#fff;">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;gap:12px;"><div style="font-size:20px;font-weight:800;">NBA ${nick ? "Morning · Nick" : "Props"} · ${date}</div><div style="font-size:12px;font-weight:700;letter-spacing:.04em;">${picks.length} PROP${picks.length === 1 ? "" : "S"} &nbsp;·&nbsp; ${over} OVER &nbsp;·&nbsp; ${picks.length - over} UNDER</div></div>
+    <table style="width:100%;border-collapse:collapse;"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+}
+async function morningSendCard(mode) {
+  const picks = morningCardPicks();
+  if (!picks.length) { showToast("No pending morning picks to send"); return; }
+  showToast(`Building ${mode === "nick" ? "Nick" : "Discord"} card…`);
+  let blob;
+  try {
+    const html = await _morningCardHtml(picks, mode);
+    try { if (document.fonts && document.fonts.load) { await document.fonts.load("800 16px 'Plus Jakarta Sans'"); await document.fonts.load("700 16px 'JetBrains Mono'"); } } catch (e) {}
+    const h2c = await _ensureHtml2Canvas();
+    const box = document.createElement("div");
+    box.style.cssText = "position:fixed;left:-9999px;top:0;z-index:-1;";
+    box.innerHTML = html;
+    document.body.appendChild(box);
+    try {
+      const canvas = await h2c(box.querySelector(".mcard"), { backgroundColor: "#0c0d10", scale: 3, logging: false, useCORS: true });
+      blob = await new Promise(r => canvas.toBlob(r, "image/png"));
+    } finally { document.body.removeChild(box); }
+  } catch (e) { console.error("[MORNING card]", e); showToast("Card failed — " + (e && e.message || "see console")); return; }
+  if (!blob) { showToast("Card failed"); return; }
+  const file = new File([blob], `nba-morning-${mode}-${localYMD(new Date())}.png`, { type: "image/png" });
+  let done = false;
+  try { if (navigator.clipboard && window.ClipboardItem) { await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]); done = true; showToast("Card copied — paste it into " + (mode === "nick" ? "Nick's DM" : "Discord")); } } catch (e) {}
+  if (!done) {
+    if (navigator.canShare && navigator.canShare({ files: [file] })) { try { await navigator.share({ files: [file] }); done = true; } catch (e) { if (e && e.name === "AbortError") return; } }
+    if (!done) { const url = URL.createObjectURL(file), a = document.createElement("a"); a.href = url; a.download = file.name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000); showToast("Card saved"); }
+  }
+  if (mode === "discord" && confirm(`Mark these ${picks.length} pick${picks.length === 1 ? "" : "s"} as sent to Discord? (Tracks your Discord record on the Morning log.)`)) {
+    const at = new Date().toISOString();
+    picks.forEach(b => { const m = morningBets.find(x => x.id === b.id); if (m && !m.discordSent) Object.assign(m, { discordSent: true, discordOdds: m.odds, discordBook: m.book, discordAt: at }); });
+    saveMorningBets(); renderMorning();
+  }
+}
 
 // ── ROTOWIRE API (via the Vercel proxy in vercel-rotowire/) ─────────────────
 // The key lives on Vercel (ROTOWIRE_FEED_URL); the page only knows the proxy
