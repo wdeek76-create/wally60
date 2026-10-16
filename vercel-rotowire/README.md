@@ -1,22 +1,31 @@
-# RotoWire feed proxy (NBA blender)
+# RotoWire proxy for the NBA blender
 
-Keeps the RotoWire API key on Vercel so it never sits in the public `wally60`
-repo or in the page.
+Keeps your RotoWire API key on Vercel. The key is never in this repo or in the page.
 
-## Setup (one time)
+## Deploy (new Vercel project)
 
-1. Copy `api/rotowire.js` into the `api/` folder of the Vercel project that
-   already serves the OpticOdds backend (`nfl-props-tracker-1`), next to
-   `api/odds`. Commit + push so Vercel redeploys.
-2. In Vercel → that project → **Settings → Environment Variables**, add:
+1. vercel.com → **Add New… → Project** → import the **wally60** repo.
+2. **Root Directory** → click *Edit* → choose **`vercel-rotowire`**.
+   Framework Preset: **Other**. Leave the build settings empty.
+3. Open **Environment Variables** (on the same screen, before deploying) and add:
    - **Name:** `ROTOWIRE_FEED_URL`
-   - **Value:** the RotoWire feed URL you already use, key included, *without*
-     the `feed=` parameter. If your URL normally ends `&feed=NBAInjuries`,
-     drop that part.
-3. Redeploy (Vercel → Deployments → Redeploy) so the variable takes effect.
-4. Check it: open `https://nfl-props-tracker-1.vercel.app/api/rotowire?feed=NBAInjuries`.
-   You should see JSON, not an error.
+   - **Value:** your RotoWire feed URL with your key in it, **without** the
+     `&feed=...` part. The proxy adds `feed=NBAInjuries` / `NBALineups` /
+     `NBANews` itself.
+4. Click **Deploy**.
+5. Open `https://<your-project>.vercel.app/api/rotowire?feed=NBAInjuries`.
+   You should see injury data.
 
-In the blender's **MORNING** tab, **⚡ SYNC RW API** then pulls NBAInjuries,
-NBANews and NBALineups. It defaults to the same Vercel host as the OpticOdds
-backend, and **⚙** changes it. **TEST FEEDS** shows what each feed returns.
+## Point the blender at it
+
+NBA blender → **MORNING** tab → **⚙** next to *SYNC RW API* → paste
+`https://<your-project>.vercel.app/api/rotowire` → OK → **⚡ SYNC RW API**.
+
+(Paste the proxy URL only, never the RotoWire URL with the key. The blender refuses
+anything that looks like it has a key in it.)
+
+## Alternative: add it to the existing OpticOdds project
+
+Copy `api/rotowire.js` into `nfl-props-tracker-1`'s `api/` folder, add the
+same `ROTOWIRE_FEED_URL` variable there, and redeploy. The blender already
+points at `https://nfl-props-tracker-1.vercel.app/api/rotowire`, so you can skip the ⚙ step.
