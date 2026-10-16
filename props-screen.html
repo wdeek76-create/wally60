@@ -763,7 +763,9 @@ const SPORTS = {
           ['tt60','Team Total (Reg.)', tt60Match],
         ]},
   mlb:  { label:'MLB',  sport:'baseball',   league:'mlb',  days:1, markets:MLB_MKTS },
-  ufc:  { label:'UFC',  sport:'mma',        league:'ufc',  ml:true, markets:[['ml','Moneyline', m=>MMA_ML.has(m)]] },
+  ufc:  { label:'UFC',  sport:'mma',        league:'ufc',  ml:true, cards:2, markets:[['ml','Moneyline', m=>MMA_ML.has(m)]] },
+  // Every tour/tournament (no league filter), singles only, next 48h -- one entity per player.
+  tennis:{ label:'Tennis', sport:'tennis', league:null, ml:true, days:2, singlesOnly:true, markets:[['ml','Moneyline', m=>MMA_ML.has(m)||m==='match winner'||m==='to win match']] },
 };
 // NBA/WNBA share NBA_MKTS by reference -- append game markets to it once, after SPORTS exists, so
 // both sports get them without duplicating the array.
@@ -1282,27 +1284,52 @@ function purgeStaleSportCaches(){
     });
   }catch(e){}
 }
+// Every page of a sport's fixtures. Uses total_pages when the feed gives it to pull the rest in
+// parallel batches (tennis across every tour runs to dozens of pages), else walks has_more.
+async function fetchFixturesRaw(S, say){
+  const base={sport:S.sport}; if(S.league) base.league=S.league;
+  const raw=[];
+  const r1=await oo('/fixtures',{...base, page:1}); (r1?.data||[]).forEach(f=>raw.push(f));
+  const total=Math.min(Number(r1?.total_pages)||0, 60);
+  if(total>1){
+    const pages=[]; for(let pg=2; pg<=total; pg++) pages.push(pg);
+    for(let i=0;i<pages.length;i+=8){
+      if(say) say(`${S.label} · loading fixtures ${Math.min(i+9,total)}/${total}…`);
+      const rs=await Promise.all(pages.slice(i,i+8).map(pg=>oo('/fixtures',{...base, page:pg}).catch(()=>null)));
+      rs.forEach(r=>(r?.data||[]).forEach(f=>raw.push(f)));
+    }
+  } else if(r1?.has_more){
+    for(let pg=2; pg<=60; pg++){ const r=await oo('/fixtures',{...base, page:pg}); (r?.data||[]).forEach(f=>raw.push(f)); if(!r?.has_more) break; }
+  }
+  return raw;
+}
+// The sport's window: team sports the next `days` days, UFC every upcoming fight trimmed to the
+// next `cards` cards, tennis the next 48h of singles across every tournament.
+const fxCardOf = (S,f) => S.league ? ((f.tournament?.name)||etDateKey(f.start_date)) : (f.league?.name||f.tournament?.name||S.label);
+function filterFixtures(S, raw){
+  const now=Date.now();
+  const upper = (S.ml && !S.days) ? Infinity : now+(S.days||1)*24*3600e3;
+  let fx=raw.filter(f=>{ const t=new Date(f.start_date).getTime(); return t>=now-4*3600e3 && t<=upper && f.status!=='completed' && f.status!=='cancelled'; });
+  if(S.singlesOnly) fx=fx.filter(f=>{ const a=f.away_competitors?.[0]?.name||'', h=f.home_competitors?.[0]?.name||''; return a && h && !a.includes('/') && !h.includes('/'); });
+  if(S.cards){ const order=[]; fx.forEach(f=>{ const c=fxCardOf(S,f); if(!order.includes(c)) order.push(c); }); const keep=new Set(order.slice(0,S.cards)); fx=fx.filter(f=>keep.has(fxCardOf(S,f))); }
+  return fx;
+}
+// Runs async jobs with at most n in flight.
+async function runPool(jobs, n){ let i=0; await Promise.all(Array.from({length:Math.min(n,jobs.length)},async()=>{ while(i<jobs.length){ const j=jobs[i++]; await j(); } })); }
 // Everything a sport needs (fixtures in its window, main + prop lines from every book, the indexed
 // players/teams/games) fetched WITHOUT touching the on-screen globals -- so the parlay tool can load
 // any sport in the background, and loadSport just assigns the result for the sport on screen.
 async function fetchSportData(sk, status){
   const S=SPORTS[sk]; const say=t=>{ if(status) status(t); };
   say(`${S.label} · loading fixtures…`);
-  const raw=[]; let page=1;
-  for(let i=0;i<30;i++){ const r=await oo('/fixtures',{sport:S.sport,league:S.league,page}); (r?.data||[]).forEach(f=>raw.push(f)); if(!r?.has_more) break; page++; }
-  const now=Date.now();
-  // Team sports: next `days` days (NFL = the whole week). UFC: every upcoming fight, then the next 2 cards.
-  const upper = S.ml ? Infinity : now+(S.days||1)*24*3600e3;
-  let fx = raw.filter(f=>{ const t=new Date(f.start_date).getTime(); return t>=now-4*3600e3 && t<=upper && f.status!=='completed' && f.status!=='cancelled'; })
-    .map(f=>({ id:f.id, start:f.start_date, status:f.status, live:!!f.is_live, card:(f.tournament?.name)||etDateKey(f.start_date),
+  const raw=await fetchFixturesRaw(S, say);
+  let fx = filterFixtures(S, raw)
+    .map(f=>({ id:f.id, start:f.start_date, status:f.status, live:!!f.is_live, card:fxCardOf(S,f),
       home:{id:f.home_competitors?.[0]?.id, name:f.home_competitors?.[0]?.name||f.home_team_display||'', ab:f.home_competitors?.[0]?.abbreviation||'', logo:f.home_competitors?.[0]?.logo||''},
       away:{id:f.away_competitors?.[0]?.id, name:f.away_competitors?.[0]?.name||f.away_team_display||'', ab:f.away_competitors?.[0]?.abbreviation||'', logo:f.away_competitors?.[0]?.logo||''} }))
     .sort((a,b)=>new Date(a.start)-new Date(b.start));
-  if(S.ml){
-    const order=[]; fx.forEach(f=>{ if(!order.includes(f.card)) order.push(f.card); });
-    const keep=new Set(order.slice(0,2));
-    fx=fx.filter(f=>keep.has(f.card));
-  }
+  // Many tournaments at once (tennis): group each event's matches together, earliest event first.
+  if(!S.league){ const first={}; fx.forEach(f=>{ if(!(f.card in first)) first[f.card]=new Date(f.start).getTime(); }); fx.sort((a,b)=>first[a.card]-first[b.card] || new Date(a.start)-new Date(b.start)); }
   console.log(`[props] ${S.label} fixtures: ${raw.length} fetched, ${fx.length} in window`);
   if(!fx.length) return { fixtures:[], mainRows:[], players:[], injuries:null, at:Date.now() };
   // injuries (best-effort; schema read defensively)
@@ -1310,11 +1337,12 @@ async function fetchSportData(sk, status){
   if(!S.ml){ try{ say(`${S.label} · loading injuries…`); inj=await fetchInjuriesList(S); }catch(e){ console.warn('[props] injuries failed',e.message); } }
   // main lines, 5 fixtures × 5 books per call
   const rows=[]; let done=0; const fxChunks=chunk(fx,5), bkChunks=chunk(bookReqFor(sk),5); const total=fxChunks.length*bkChunks.length;
-  for(const fc of fxChunks) for(const bk of bkChunks){
-    say(`${S.label} · loading lines ${++done}/${total}…`);
+  const jobs=[]; for(const fc of fxChunks) for(const bk of bkChunks) jobs.push(async()=>{
     try{ const r=await oo('/fixtures/odds',{fixture_id:fc.map(f=>f.id),sportsbook:bk,is_main:true}); (r?.data||[]).forEach(d=>(d.odds||[]).forEach(o=>{ o._fx=d.id; if(mainBookRow(sk,o)) rows.push(o); })); }
     catch(e){ console.warn('[props] chunk failed',e.message); }
-  }
+    say(`${S.label} · loading lines ${++done}/${total}…`);
+  });
+  await runPool(jobs, 4);
   // index players from prop rows (player_id set) or fighters from moneyline selections (UFC)
   // — team totals are the one entity here that's never a player: no player_id, selection is a
   // TEAM name, so they're indexed separately, keyed and labeled off the fixture's own home/away
@@ -1392,7 +1420,8 @@ async function loadSport(force){
     console.log('[props] deep links present:', mainRows.some(o=>o.deep_link && (o.deep_link.ios||o.deep_link.desktop)));
     const seenMk=[...new Set(mainRows.map(o=>o.market))]; console.log('[props] markets seen:',seenMk);
     if(S.ml) console.log('[props] moneyline-ish markets seen:', seenMk.filter(m=>/moneyline|winner|win /i.test(m)), '| kept:', seenMk.filter(m=>MMA_ML.has(String(m).toLowerCase()))); console.log('[props] books seen:',[...new Set(mainRows.map(o=>o.sportsbook))]);
-    stat.textContent= S.ml ? `UFC · ${[...new Set(fixtures.map(f=>f.card))].join(' + ')} · ${players.length} fighters`
+    const evs=[...new Set(fixtures.map(f=>f.card))];
+    stat.textContent= S.ml ? `${S.label} · ${evs.length>2?evs.length+' events':evs.join(' + ')} · ${fixtures.length} matches`
                            : `${S.label} · ${fixtures.length} games · ${[...new Set(fixtures.map(f=>etDateKey(f.start)))].length}d · ${players.length} players`;
     if(current){ const again=players.find(p=>p.key===current.key); if(again) openPlayer(again, curMktIdx); }
     saveSportCache(sk);
@@ -3790,7 +3819,7 @@ function renderSlateCards(){
   if(S.ml){
     let h=''; let lastCard=null;
     fixtures.filter(f=>!f.live).forEach(f=>{
-      if(f.card!==lastCard){ lastCard=f.card; h+=`<div class="sh"><span class="t">${esc(f.card)} · ${etDay(f.start)}</span></div>`; }
+      if(f.card!==lastCard){ lastCard=f.card; const n=fixtures.filter(x=>x.card===f.card).length; h+=`<div class="sh"><span class="t">${esc(f.card)} · ${etDay(f.start)}<span class="daycount">${n} ${SPORTS[sportKey].sport==='mma'?(n===1?'fight':'fights'):(n===1?'match':'matches')}</span></span></div>`; }
       const a=players.find(p=>p.key===normName(f.away.name)), b=players.find(p=>p.key===normName(f.home.name));
       const mlA=a?bestML(rowsFor(a,'ml',mainRows)):'—', mlB=b?bestML(rowsFor(b,'ml',mainRows)):'—';
       const initA=f.away.name.split(' ').map(w=>w[0]).slice(0,2).join('').toUpperCase();
@@ -4223,16 +4252,7 @@ async function loadSportGameCounts(){
   const todayKey=etDateKey(new Date());
   await Promise.all(Object.entries(SPORTS).map(async ([k,S])=>{
     try{
-      const raw=[]; let page=1;
-      for(let i=0;i<30;i++){ const r=await oo('/fixtures',{sport:S.sport,league:S.league,page}); (r?.data||[]).forEach(f=>raw.push(f)); if(!r?.has_more) break; page++; }
-      const upper = S.ml ? Infinity : now+(S.days||1)*24*3600e3;
-      let fx = raw.filter(f=>{ const t=new Date(f.start_date).getTime(); return t>=now-4*3600e3 && t<=upper && f.status!=='completed' && f.status!=='cancelled'; });
-      if(S.ml){
-        const cardOf=f=>(f.tournament?.name)||etDateKey(f.start_date);
-        const order=[]; fx.forEach(f=>{ const c=cardOf(f); if(!order.includes(c)) order.push(c); });
-        const keep=new Set(order.slice(0,2));
-        fx=fx.filter(f=>keep.has(cardOf(f)));
-      }
+      const fx=filterFixtures(S, await fetchFixturesRaw(S));
       sportGameCounts[k]=fx.length;
       sportGameCountsToday[k]=fx.filter(f=>etDateKey(f.start_date)===todayKey).length;
     }catch(e){ console.warn('[props] game count failed for',k,e.message); }
