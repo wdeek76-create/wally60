@@ -25012,6 +25012,56 @@ async function rwApiSyncLineups() {
   saveLineupsData({ fetchedAt: Date.now(), players, gameCount: games.size || null, source: "rotowire-api" });
   return n;
 }
+
+// ── RotoWire projections → the RW source slot (auto-updating) ───────────────
+// NBADailyProj feeds the RW projection source directly, so the RW CSV upload
+// isn't needed. Fields are matched by name anywhere in each row (RotoWire nests
+// stats differently by feed) — TEST FEEDS shows what was read. A hand-uploaded
+// RW CSV is never overwritten; only an empty slot or a previous API load is.
+function _rwFlat(o, pre, out) {
+  out = out || {}; pre = pre || "";
+  Object.keys(o || {}).forEach(k => {
+    if (k === "__parent") return;
+    const v = o[k], key = (pre ? pre + "." : "") + k;
+    if (v && typeof v === "object" && !Array.isArray(v)) _rwFlat(v, key, out);
+    else if (!Array.isArray(v)) out[key.toLowerCase()] = v;
+  });
+  return out;
+}
+function _rwNum(flat, names) {
+  for (const n of names) {
+    for (const k of Object.keys(flat)) {
+      const last = k.split(".").pop();
+      if (last === n) { const v = parseFloat(flat[k]); if (!isNaN(v)) return v; }
+    }
+  }
+  return null;
+}
+function _rwProjRow(o) {
+  const name = _rwName(o); if (!name) return null;
+  const f = _rwFlat(o);
+  const pts = _rwNum(f, ["points", "pts", "projpoints", "projectedpoints", "proj_pts", "ppg"]);
+  const reb = _rwNum(f, ["rebounds", "reb", "rebs", "totalrebounds", "projrebounds", "projectedrebounds", "rpg", "trb"]);
+  const ast = _rwNum(f, ["assists", "ast", "asts", "projassists", "projectedassists", "apg"]);
+  const tpm = _rwNum(f, ["threepointersmade", "threepointfieldgoalsmade", "threepointmade", "threepointfgmade", "threes", "fg3m", "3pm", "fg3", "threepm", "three_pointers_made", "3p"]);
+  const min = _rwNum(f, ["minutes", "min", "mins", "projminutes", "projectedminutes", "mpg"]);
+  if (pts == null && reb == null && ast == null) return null;
+  const pra = pts != null && reb != null && ast != null ? pts + reb + ast : null;
+  return { rawName: name, norm: resolveNorm(name), team: _rwTeam(o), pos: String(_rwPick(o, ["Position", "Pos", "Player.Position"]) || ""), pts, reb, ast, threepm: tpm, pra, min };
+}
+async function rwApiSyncProjections() {
+  const rows = _rwRows(await rwApiFetch("NBADailyProj"));
+  const players = rows.map(_rwProjRow).filter(p => p && p.norm.length >= 3 && (p.pts || 0) > 0);
+  const idx = SOURCES.findIndex(x => x.key === "rotowire");
+  if (idx < 0) throw new Error("NBADailyProj: no RW source slot");
+  if (players.length < 20) throw new Error(`NBADailyProj: only ${players.length} players with points read — RW slot left alone (nothing posted yet, or run TEST FEEDS)`);
+  const cur = slots[idx];
+  if (cur && !/^RotoWire API/.test(cur.label || "")) return `${players.length} read, kept your uploaded RW file`;
+  slots[idx] = { label: "RotoWire API " + new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }), players };
+  buildSlots(); updateBadges();
+  try { runMerge(); } catch (e) { console.warn("[RW API] blend failed", e); }
+  return players.length;
+}
 async function rwApiSyncNews() {
   const rows = _rwRows(await rwApiFetch("NBANews"));
   const items = rows.map(o => ({
@@ -25023,17 +25073,23 @@ async function rwApiSyncNews() {
   try { localStorage.setItem(RW_NEWS_FEED_KEY, JSON.stringify({ fetchedAt: Date.now(), items })); } catch (e) {}
   return items.length;
 }
+(function rwAutoRefresh() {
+  const configured = () => _rwHosted() || !!getRwKey();
+  const stale = () => { try { const sy = JSON.parse(localStorage.getItem(RW_API_SYNC_KEY) || "null"); return !sy || Date.now() - sy.at > 20 * 60 * 1000; } catch (e) { return true; } };
+  setTimeout(() => { if (configured() && stale()) rwApiSyncAll(true); }, 3000);
+  setInterval(() => { if (configured() && !document.hidden) rwApiSyncAll(true); }, 20 * 60 * 1000);
+})();
 function getRwNewsFeed() { try { return JSON.parse(localStorage.getItem(RW_NEWS_FEED_KEY) || "null"); } catch (e) { return null; } }
 async function rwApiSyncAll(quiet) {
   const btn = document.getElementById("rw-api-sync-btn");
   if (btn) { btn.disabled = true; btn.textContent = "SYNCING…"; }
   const done = [], fail = [];
-  for (const [label, fn] of [["injuries", rwApiSyncInjuries], ["lineups", rwApiSyncLineups], ["news", rwApiSyncNews]]) {
+  for (const [label, fn] of [["injuries", rwApiSyncInjuries], ["lineups", rwApiSyncLineups], ["news", rwApiSyncNews], ["projections", rwApiSyncProjections]]) {
     try { done.push(`${label} ${await fn()}`); } catch (e) { fail.push(e.message); console.warn("[RW API]", e); }
   }
   try { localStorage.setItem(RW_API_SYNC_KEY, JSON.stringify({ at: Date.now(), done, fail })); } catch (e) {}
   if (btn) { btn.disabled = false; btn.textContent = "⚡ SYNC RW API"; }
-  if (!quiet || done.length) showToast(done.length ? `RotoWire: ${done.join(" · ")}${fail.length ? ` · ${fail.length} failed` : ""}` : `RotoWire sync failed — ${fail[0] || "no response"}`);
+  if (!quiet) showToast(done.length ? `RotoWire: ${done.join(" · ")}${fail.length ? ` · ${fail.length} failed` : ""}` : `RotoWire sync failed — ${fail[0] || "no response"}`);
   if (typeof morningAutoLog === "function" && morningAutoLog()) saveMorningBets();
   if (currentTab === "morning") renderMorning();
   if (currentTab === "results" && typeof renderTable === "function" && merged) renderTable();
@@ -25045,7 +25101,9 @@ async function rwApiTest() {
       const data = await rwApiFetch(feed);
       const rows = _rwRows(data);
       const keys = rows.length ? Object.keys(rows[0]).filter(k => k !== "__parent").join(", ") : "(no rows)";
-      out.push(`${feed}: ${rows.length} rows · fields: ${keys}` + (rows.length ? ` · first name read: ${_rwName(rows[0]) || "?"} / team: ${_rwTeam(rows[0]) || "?"}` : "") + (rows.length ? "" : ` · top-level: ${Object.keys(data || {}).slice(0, 8).join(", ")}`));
+      let mapped = "";
+      if (feed === "NBADailyProj" && rows.length) { const m = _rwProjRow(rows[0]); mapped = m ? ` · read as ${m.rawName}: PTS ${m.pts} REB ${m.reb} AST ${m.ast} 3PM ${m.threepm} MIN ${m.min}` : " · COULDN'T read points/rebounds/assists from row 1"; }
+      out.push(`${feed}: ${rows.length} rows · fields: ${keys}${mapped}` + (rows.length ? ` · first name read: ${_rwName(rows[0]) || "?"} / team: ${_rwTeam(rows[0]) || "?"}` : "") + (rows.length ? "" : ` · top-level: ${Object.keys(data || {}).slice(0, 8).join(", ")}`));
     } catch (e) { out.push(`${feed}: ERROR ${e.message}`); }
   }
   const text = out.join("\n");
