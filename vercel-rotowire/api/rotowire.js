@@ -12,6 +12,8 @@ const PATHS = {
   NBALineups:   ["Lineups.php", "ExpectedLineups.php", "DailyLineups.php"],
   NBADailyProj: ["DailyProjections.php"],
   NBADepth:     ["DepthCharts.php", "DepthChart.php"],
+  NBAPlayers:   ["Players.php", "PlayerList.php"],
+  NBACeilFloor: ["CeilFloor.php", "CeilingFloor.php", "DailyProjectionsCeilFloor.php"],
 };
 
 module.exports = async (req, res) => {
