@@ -1761,6 +1761,7 @@ document.addEventListener("DOMContentLoaded", () => {
   _nhlRestoreCsvs();
   renderNhlPsPanel();
   initDB().then(() => loadBets()).then(() => {
+    setTimeout(() => { _nhlCarryModelPicks().catch(e => console.warn("[NHL ensemble] carry", e && e.message)); }, 1500);
     if (currentTab === "tracker") renderTracker();
     _nhlStartAutoGradePolling();
   });
@@ -2449,6 +2450,7 @@ async function runNhlModel(opts) {
     _nhlModelSave();
     const newCount = nhlModelLog.length - logBefore;
     const tracked = await _nhlModelLogToTracker(rows);
+    try { await _nhlCarryModelPicks(); } catch (e) {}
     if (!opts.silent || newCount || tracked.logged) showNhlToast(`Ensemble: ${rows.length} pick${rows.length === 1 ? "" : "s"}${tracked.logged ? ` · ${tracked.logged} logged to tracker` : ""}${tracked.waiting ? ` · waiting on ${tracked.waiting} (load all 4 sources)` : ""}`);
   } catch (e) { console.error("[NHL model] run failed", e); showNhlToast("Model run failed: " + (e && e.message)); }
   finally { _nhlModelBusy = false; renderNhlModelTab(); }
@@ -2510,6 +2512,35 @@ async function _nhlModelLogToTracker(rows) {
   }
   if (logged) { saveBets(); if (currentTab === "tracker") renderTracker(); }
   return { logged, waiting: 0 };
+}
+// Open model picks from before the ensemble switched over (or from any run that didn't log) go into the
+// tracker as ensemble bets at the price the model logged them at, so every card and the Discord flow see them.
+async function _nhlCarryModelPicks() {
+  const today = _ymdLocal(new Date());
+  const open = nhlModelLog.filter(x => x.result === "pending" && x.gameDateIso >= today && !x.carried);
+  let n = 0;
+  for (const x of open) {
+    const have = Object.keys(x.projs || {}); if (have.length < 3) continue;
+    const evs = x.evs || {};
+    const sorted = have.slice().sort((a, b) => (evs[a] || 0) - (evs[b] || 0));
+    const anchor = (evs[sorted[0]] || 0) >= NHL_PS_QUAL_EV ? sorted[0] : sorted[1];
+    const fp = _nhlPoissonHit(x.ou, x.line, x.projs[anchor]);
+    const gm = String(x.game || "").split("@").map(t => t.trim());
+    let team = "";
+    for (const src of PS_SOURCE_KEYS_NHL) { const v = Object.values(srcs[src] || {}).find(e => e && nn(e.name) === nn(x.player) && e.team); if (v) { team = _nhlTeamCanon(v.team); break; } }
+    const r = { player: x.player, team, game: x.game, gameDateIso: x.gameDateIso, ou: x.ou, line: x.line, odds: x.odds, book: x.book,
+      proj: have.reduce((a, k) => a + x.projs[k], 0) / have.length, sourcesAgreed: have, requiredQual: have.length,
+      missingSrc: have.length === 3 ? PS_SOURCE_KEYS_NHL.find(k => !have.includes(k)) : null, missingProj: null,
+      sourceProjs: x.projs, sourceEvs: evs, qualCount: have.filter(k => (evs[k] || 0) >= NHL_PS_QUAL_EV).length, minEv: Math.min(...have.map(k => evs[k] || 0)),
+      anchorFairProb: fp, anchorFairOdds: p2american(fp), anchorEv: evs[anchor] };
+    try {
+      if (await _nhlPsLogRow(r)) { const b = bets[0]; if (b && b.player === x.player) b._modelFed = true; n++; }
+      x.carried = true; // logged now, or the player already has a bet today
+    } catch (e) { console.warn("[NHL ensemble] carry failed", x.player, e && e.message); }
+  }
+  if (open.length) _nhlModelSave();
+  if (n) { saveBets(); if (currentTab === "tracker") renderTracker(); showNhlToast(`Moved ${n} open model pick${n === 1 ? "" : "s"} into the tracker`); }
+  return n;
 }
 // Today's PropShop-ensemble picks (current Ensemble tab + anything already logged today).
 function _nhlModelPsKeys() {
@@ -3162,9 +3193,7 @@ function _nhlBookLabel(raw) {
 }
 const _ooChunk = (a, n) => { const o = []; for (let i = 0; i < a.length; i += n) o.push(a.slice(i, i + n)); return o; };
 const NHL_BOOK_PRIORITY = ["Pinnacle", "Prop Builder", "FanDuel", "Bet105"];
-// Exchanges you actually bet on — they count as a playable "best price" (card range check, live edges,
-// model, recheck) alongside the four books above.
-const NHL_BETTABLE_EXCH = ["Novig", "ProphetX"];
+
 function nhlIsExch(book) {
   // Compare on the normalized key (letters/digits only), not a raw
   // lowercase match — OO_EXCHANGES has "prophet x" (a space) but the
@@ -3456,7 +3485,7 @@ async function _nhlLiveBookFor(player, line, side, dateIso, teamHints) {
     const lv = side === "over" ? r.overLevels : r.underLevels;
     if (entry.isExch && lv && lv.length) entry.levels = lv;
     allBooks.push(entry);
-    if (nhlBookRank(r.book) < 500 || NHL_BETTABLE_EXCH.includes(r.book)) anchorCandidates.push(entry); // "other" books never set the playable price
+    if (nhlBookRank(r.book) < 500) anchorCandidates.push(entry); // best price = Pinnacle / Prop Builder / FanDuel / Bet105 only; everything else is an alt book
   });
   if (!allBooks.length) return null;
   // Best price = highest American odds number, full stop — that's true
