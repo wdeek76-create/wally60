@@ -267,6 +267,39 @@ function liqDepth(o) {
   const wdec = levels.reduce((sum, l) => sum + toDec(l.price) * l.size, 0) / total;
   return { total, avg: toAm(wdec) };
 }
+// OddsJam-style exchange liquidity for a pick: the money you can bet into on your side is the
+// resting orders on the OPPOSITE side's book (an "Over -120 $3.7k" order is someone backing the
+// Under at +120). Every level from every exchange (Kalshi, Novig, Prophet X) is merged into one
+// ladder and counted at FULL size when its price for your side sits within EXCH_LADDER_CENTS of
+// the target book's price; levels further out don't count. Also returns the size-weighted
+// average price (opposite side's terms, like the exchange shows it) and each exchange's share.
+const EXCH_LADDER_CENTS = 20;
+function exchLevels(o) {
+  const ob = Array.isArray(o.order_book) ? o.order_book.filter(l => Array.isArray(l) && l.length >= 2) : [];
+  const top = Number(o.price);
+  if (!ob.length) return o.limits?.max != null ? [{ price: top, size: Number(o.limits.max) }] : [];
+  let dA = 0, dB = 0; ob.forEach(l => { dA += Math.abs(Number(l[0]) - top) || 0; dB += Math.abs(Number(l[1]) - top) || 0; });
+  const pf = dA <= dB;
+  return ob.map(l => ({ price: Number(pf ? l[0] : l[1]), size: Number(pf ? l[1] : l[0]) }))
+    .filter(l => !isNaN(l.price) && Math.abs(l.price) >= 100 && !isNaN(l.size) && l.size > 0);
+}
+function exchLadder(oppQuotes, targetPrice) {
+  const levels = {}, byBook = {};
+  (oppQuotes || []).forEach(o => {
+    const bk = String(o.sportsbook || '');
+    exchLevels(o).forEach(l => {
+      if (targetPrice != null && centsDiff(-l.price, targetPrice) > EXCH_LADDER_CENTS) return;
+      const lv = levels[l.price] || (levels[l.price] = { price: l.price, size: 0, books: [] });
+      lv.size += l.size; if (!lv.books.includes(bk)) lv.books.push(bk);
+      byBook[bk] = (byBook[bk] || 0) + l.size;
+    });
+  });
+  const rows = Object.values(levels).sort((a, b) => b.price - a.price);
+  const total = rows.reduce((s, l) => s + l.size, 0);
+  const avg = total ? toAm(rows.reduce((s, l) => s + toDec(l.price) * l.size, 0) / total) : null;
+  return { rows, total, avg, byBook };
+}
+const ladderBooksTxt = L => Object.entries(L.byBook).sort((a, b) => b[1] - a[1]).map(([b, s]) => `${b} ${usd(s)}`).join(' · ');
 function liqOf(o) {
   if (o.limits?.max != null) return Number(o.limits.max);
   const d = liqDepth(o);
@@ -297,7 +330,8 @@ const KALSHI_BOOK = 'Kalshi';
 const KALSHI_TARGET_BOOKS = [TARGET_BOOK, 'DraftKings', 'Fliff', 'Props Builder'];
 const MIN_KALSHI_LIQ = 300;
 const MIN_KALSHI_LIQ_ATD = 10000; // Anytime TD needs a much deeper book than a yardage line — same bar live-now-opticodds.html uses
-const ALL_BOOKS = [TARGET_BOOK, ...CONSENSUS_BOOKS, KALSHI_BOOK, 'Props Builder'];
+const LADDER_EXCHANGES = [KALSHI_BOOK, 'Novig', 'Prophet X'];
+const ALL_BOOKS = [...new Set([TARGET_BOOK, ...CONSENSUS_BOOKS, ...LADDER_EXCHANGES, 'Props Builder'])];
 // Alt lines ("5+ Receptions" etc.) are single-sided — there's no opposite side to arb against,
 // and we're betting ON FD here, not hedging against another book, so FD's own price is never
 // required to match consensus. This margin instead gates whether the 3 CONSENSUS books agree
@@ -705,19 +739,22 @@ function computeKalshiRows(fxs, byFx) {
     Object.entries(pairs).forEach(([bucketKey, P]) => {
       [['over', 'under'], ['yes', 'no']].forEach(([side, oppSide]) => {
         const books = P.sides[side] || {}, oppBooks = P.sides[oppSide] || {};
-        const kalshiOpp = oppBooks[KALSHI_BOOK]; if (!kalshiOpp) return;
-        const depth = liqDepth(kalshiOpp);
-        const liq = depth ? depth.total : liqOf(kalshiOpp);
+        // Opposite-side quotes from every exchange; Kalshi's stays the price reference when it
+        // posts one (the backtested signal), otherwise the best-priced other exchange.
+        const oppQuotes = LADDER_EXCHANGES.map(b => oppBooks[b]).filter(Boolean);
+        const kalshiOpp = oppBooks[KALSHI_BOOK] || oppQuotes.slice().sort((a, b) => Number(b.price) - Number(a.price))[0]; if (!kalshiOpp) return;
         // Anytime TD markets run thinner and swing harder on Kalshi than a yardage line, so it
         // needs the same higher liquidity bar live-now-opticodds.html's KALSHI_PROP_MARKETS uses
         // for 'td' (10000) rather than the general $300 floor.
         const minLiq = P.mkey === 'atd' ? MIN_KALSHI_LIQ_ATD : MIN_KALSHI_LIQ;
-        if (liq == null || liq < minLiq) return;
         const mirrorPrice = -Number(kalshiOpp.price);
         const fairProb = imp(mirrorPrice);
         KALSHI_TARGET_BOOKS.forEach(bk => {
           const bo = books[bk]; if (!bo) return;
           const pr = Number(bo.price);
+          // Liquidity is measured around THIS target book's price, so it's per book.
+          const L = exchLadder(oppQuotes, pr), liq = L.total;
+          if (!liq || liq < minLiq) return;
           // Genuine arb against Kalshi's own raw opposite-side quote is the sole gate here —
           // same as live-now-opticodds.html's kalshiRows(), which never qualifies a pick on the
           // mirrored fair (evPct) alone. evPct still rides along as informational context.
@@ -727,7 +764,7 @@ function computeKalshiRows(fxs, byFx) {
           out.push({
             key: `${bucketKey}|${side}|kalshi|${bk}`, fid: f.id, f, mkey: P.mkey, marketNames: [P.marketName],
             player: P.player, line: P.line, side, book: bk, price: pr, link: deepLink(bo),
-            kalshiPrice: Number(kalshiOpp.price), kalshiLiq: liq, mirrorPrice, fairProb, evPct, arbPct,
+            kalshiPrice: Number(kalshiOpp.price), kalshiLiq: liq, liqAvg: L.avg, liqBooks: ladderBooksTxt(L), refExch: kalshiOpp.sportsbook, mirrorPrice, fairProb, evPct, arbPct,
           });
         });
       });
@@ -829,7 +866,7 @@ function autoTrackKalshi(kalshiRows) {
       key: r.key, fid: r.fid, game: `${r.f.away.ab} @ ${r.f.home.ab}`, awayAb: r.f.away.ab, homeAb: r.f.home.ab,
       awayLogo: r.f.away.logo || '', homeLogo: r.f.home.logo || '',
       market: marketLabel(r.mkey), mkey: r.mkey, marketNames: r.marketNames, player: r.player, playerKey: normName(r.player),
-      side: r.side, line: r.line, book: r.book, fdPrice: r.price, fdLink: r.link, kalshiPrice: r.kalshiPrice, kalshiLiq: r.kalshiLiq,
+      side: r.side, line: r.line, book: r.book, fdPrice: r.price, fdLink: r.link, kalshiPrice: r.kalshiPrice, kalshiLiq: r.kalshiLiq, liqAvg: r.liqAvg, liqBooks: r.liqBooks, refExch: r.refExch,
       mirrorPrice: r.mirrorPrice, fairProb: r.fairProb, evPct: r.evPct, arbPct: r.arbPct,
       betPeriod: periodOf(r.fid), wasHot: isHotSitu(r.fid, r.mkey, r.player, r.line, r.side),
       stakeUnits: 1, betAt: Date.now(), status: 'pending',
@@ -1525,7 +1562,7 @@ function renderTracker() {
     return `<div class="tk glass"><div class="h"><span>${gameHeaderHtml(e)} <span style="color:var(--sub);font-size:10px">NFL KALSHI</span></span><span>${t(e.betAt)}</span></div>
     <div style="font-weight:800;font-size:14px;margin-top:3px">${esc(e.market)} · ${esc(e.player)} ${esc(sideLabelNow)} <span class="kindtag arb">DIRECT ARB</span></div>
     <div class="rawmkt">source: "${esc((e.marketNames||[])[0] || '')}"</div>
-    <div class="m">${bookName(e.book)} <b>${fmtAm(e.fdPrice)}</b> · ${edgeLine} · Kalshi opp side ${fmtAm(e.kalshiPrice)} (${usd(e.kalshiLiq)} liq) · 1u${betLinkHtml(e)}</div>
+    <div class="m">${bookName(e.book)} <b>${fmtAm(e.fdPrice)}</b> · ${edgeLine} · ${e.refExch && e.refExch !== KALSHI_BOOK ? e.refExch : 'Kalshi'} opp side ${fmtAm(e.kalshiPrice)} · ${usd(e.kalshiLiq)} exch liq${e.liqAvg != null ? ` @ ${fmtAm(e.liqAvg)} avg` : ''}${e.liqBooks ? ` (${e.liqBooks})` : ''} · 1u${betLinkHtml(e)}</div>
     ${resultLine}
     <div class="acts" style="margin-top:8px">${resultBtns}<button data-kdel="${esc(e.key)}">✕</button></div></div>`;
   };

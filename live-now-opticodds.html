@@ -204,6 +204,10 @@ header{padding:14px 16px 10px;padding-top:calc(14px + env(safe-area-inset-top))}
 .bookrow .bk{width:20px;flex-shrink:0;font-size:8.5px;font-weight:800;letter-spacing:.2px;color:var(--sub);text-align:center}
 .bookrow .bkname{flex:1;min-width:0;font-size:11px;font-weight:800;color:var(--sub);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .bookrow .bkprice{font-size:15px;font-weight:900;color:var(--text);font-variant-numeric:tabular-nums;flex-shrink:0}
+.bookrow.ladrow{padding:4px 11px;background:rgba(39,192,113,.06)}
+.bookrow.ladrow img{width:15px;height:15px;border-radius:4px;vertical-align:middle;margin-right:2px}
+.bookrow.ladrow .bkname{color:var(--text)}
+.bookrow.ladrow .bkprice{font-size:12px;color:var(--green)}
 .bookrow .bkmeta{font-size:10px;font-weight:800;color:var(--sub);margin-left:8px;flex-shrink:0;font-variant-numeric:tabular-nums;white-space:nowrap}
 .bookrow.best{background:rgba(255,255,255,.05);border-color:rgba(39,192,113,.5);box-shadow:0 0 14px rgba(39,192,113,.28),inset 0 1px 0 rgba(255,255,255,.1)}
 .bookrow.best .bkname{color:var(--text)}
@@ -845,7 +849,7 @@ async function loadKalshiProps() {
   const fbFx = fixtures.filter(f => f.lk === 'nfl' || f.lk === 'cfb');
   if (!fbFx.length) { kalshiCandidates = {}; return; }
   const extra = [...extraBooks].map(k => EXTRA_BOOKS.find(b => b.key === k && !b.props)?.name).filter(Boolean);
-  const bookList = [...new Set(['Kalshi', REF_BOOK, ...extra])];
+  const bookList = [...new Set(['Kalshi', 'Novig', 'Prophet X', REF_BOOK, ...extra])];
   const out = {};
   for (const fxBatch of chunk(fbFx, 5)) {
     for (const bkBatch of chunk(bookList, 5)) {
@@ -877,8 +881,9 @@ function kalshiRows() {
       const M = KALSHI_PROP_MARKETS.find(m => m.test(o.market)); if (!M) return;
       const pts = o.points == null ? null : Number(o.points);
       const gk = M.key + '|' + pts;
-      const g = (groups[gk] = groups[gk] || { M, points:pts, kalshi:{}, pin:{}, books:{} });
+      const g = (groups[gk] = groups[gk] || { M, points:pts, kalshi:{}, exch:{}, pin:{}, books:{} });
       const bk = String(o.sportsbook || '').toLowerCase();
+      if (EXCH.has(bk)) { const xs = (g.exch[side] = g.exch[side] || {}); if (!xs[bk] || Number(o.price) > Number(xs[bk].price)) xs[bk] = o; }
       if (bk === 'kalshi') { if (!g.kalshi[side] || Number(o.price) > Number(g.kalshi[side].price)) g.kalshi[side] = o; }
       else if (bk === 'pinnacle') { if (!g.pin[side] || Number(o.price) > Number(g.pin[side].price)) g.pin[side] = o; }
       // Every exchange is a sharp reference only, never something you bet on directly — Novig,
@@ -897,31 +902,36 @@ function kalshiRows() {
       // are built from.
       ['over','under'].forEach(side => {
         const oppSide = side === 'over' ? 'under' : 'over';
-        const oppQuote = g.kalshi[oppSide]; if (!oppQuote) return;
-        const oppDepth = liqDepth(oppQuote);
-        const liq = oppDepth ? oppDepth.total : liqOf(oppQuote);
-        if (liq == null || liq < g.M.minLiq) return;
+        // Every exchange's opposite-side quote feeds the liquidity ladder; Kalshi's stays the price
+        // reference when it posts one, otherwise the best-priced other exchange.
+        const oppQuotes = Object.values(g.exch[oppSide] || {});
+        const oppQuote = g.kalshi[oppSide] || oppQuotes.slice().sort((a, b) => Number(b.price) - Number(a.price))[0]; if (!oppQuote) return;
+        const refName = oppQuote.sportsbook || 'Kalshi';
         const mirrorPrice = -Number(oppQuote.price);
         const fp = imp(mirrorPrice);
         const sameSideQuote = g.kalshi[side];
         const pinSide = g.pin[side];
-        const kalshiBacksPin = !!(pinSide && centsDiff(mirrorPrice, pinSide.price) <= ALIGN_CENTS && liq >= 10000);
         Object.entries(g.books).forEach(([bookName, sides]) => {
           const bo = sides[side]; if (!bo) return;
           const pr = Number(bo.price); if (pr < Number($('#pMin').value) || pr > Number($('#pMax').value)) return;
+          // Liquidity is measured around THIS book's price: full-size opposite-side orders within
+          // EXCH_LADDER_CENTS, merged across exchanges.
+          const L = exchLadder(oppQuotes, pr), liq = L.total;
+          if (!liq || liq < g.M.minLiq) return;
+          const kalshiBacksPin = !!(pinSide && centsDiff(mirrorPrice, pinSide.price) <= ALIGN_CENTS && liq >= 10000);
           const ev = fp * toDec(pr) - 1;
           const arb = 1 - (imp(pr) + imp(oppQuote.price));
           if (arb <= 0) return; // locked-arb-only, same as everywhere else in this app
           if (ev * 100 < (Number($('#minEv').value) || 0)) return;
           const properName = EXTRA_BOOKS.find(b => b.name.toLowerCase() === bookName)?.name || bo.sportsbook;
-          const agreeNote = kalshiBacksPin ? `✓ KALSHI &amp; PIN AGREE <b>Kalshi ${fmtAm(mirrorPrice)}</b> · <b>PIN ${fmtAm(pinSide.price)}</b> · ${usd(liq)} on the other side` : '';
+          const agreeNote = kalshiBacksPin ? `✓ ${esc(refName.toUpperCase())} &amp; PIN AGREE <b>${esc(refName)} ${fmtAm(mirrorPrice)}</b> · <b>PIN ${fmtAm(pinSide.price)}</b> · ${usd(liq)} on the other side @ ${fmtAm(L.avg)} avg` : '';
           out.push({
             key: `kx|${c.player}|${c.f.id}|${g.M.key}|${g.points}|${side}`, f: c.f,
             mk: { key:'prop', label: g.M.label }, player: c.player, playerActual: currentStatFor(c.f.id, c.player, g.M.label),
             sideLabel: `${c.player} ${side === 'over' ? 'Over' : 'Under'} ${g.points}`,
             ttSide:null, pickSide:null, pickPoints:g.points, overUnder:side,
-            fair:fp, aligned:kalshiBacksPin, agreeNote, refLabel:'Kalshi', refBook:'Kalshi', refBookShort:'Kalshi', fdPrice: kalshiBacksPin ? pinSide.price : null,
-            pin:{ mine: sameSideQuote ? sameSideQuote.price : mirrorPrice, other:oppQuote.price, lim:null, depth:{ total:liq, avg:oppQuote.price } },
+            fair:fp, aligned:kalshiBacksPin, agreeNote, refLabel:refName, refBook:refName, refBookShort:refName, ladder:L, fdPrice: kalshiBacksPin ? pinSide.price : null,
+            pin:{ mine: sameSideQuote ? sameSideQuote.price : mirrorPrice, other:oppQuote.price, lim:null, depth:{ total:liq, avg:L.avg, books:ladderBooksTxt(L) } },
             books:[{ book:properName, price:pr, ev, arb, exch:false, liq:null, depth:null, o:bo }],
             best:null, sharpForBooks:[], sharpAgainstBooks:[],
           });
@@ -1298,6 +1308,39 @@ function centsDiff(a, b) { a = Number(a); b = Number(b); if ((a < 0) === (b < 0)
 // by comparing each level's first value against the quoted top price) so the Pin-limit filter
 // isn't silently starved to 0 for exchange-referenced rows. Returns null, not 0, when neither
 // shape is present — unknown liquidity should never be treated as "no liquidity."
+// OddsJam-style exchange liquidity for a pick: the money you can bet into on your side is the
+// resting orders on the OPPOSITE side's book (an "Over -120 $3.7k" order is someone backing the
+// Under at +120). Every level from every exchange (Kalshi, Novig, Prophet X) is merged into one
+// ladder and counted at FULL size when its price for your side sits within EXCH_LADDER_CENTS of
+// the target book's price; levels further out don't count. Also returns the size-weighted
+// average price (opposite side's terms, like the exchange shows it) and each exchange's share.
+const EXCH_LADDER_CENTS = 20;
+function exchLevels(o) {
+  const ob = Array.isArray(o.order_book) ? o.order_book.filter(l => Array.isArray(l) && l.length >= 2) : [];
+  const top = Number(o.price);
+  if (!ob.length) return o.limits?.max != null ? [{ price: top, size: Number(o.limits.max) }] : [];
+  let dA = 0, dB = 0; ob.forEach(l => { dA += Math.abs(Number(l[0]) - top) || 0; dB += Math.abs(Number(l[1]) - top) || 0; });
+  const pf = dA <= dB;
+  return ob.map(l => ({ price: Number(pf ? l[0] : l[1]), size: Number(pf ? l[1] : l[0]) }))
+    .filter(l => !isNaN(l.price) && Math.abs(l.price) >= 100 && !isNaN(l.size) && l.size > 0);
+}
+function exchLadder(oppQuotes, targetPrice) {
+  const levels = {}, byBook = {};
+  (oppQuotes || []).forEach(o => {
+    const bk = String(o.sportsbook || '');
+    exchLevels(o).forEach(l => {
+      if (targetPrice != null && centsDiff(-l.price, targetPrice) > EXCH_LADDER_CENTS) return;
+      const lv = levels[l.price] || (levels[l.price] = { price: l.price, size: 0, books: [] });
+      lv.size += l.size; if (!lv.books.includes(bk)) lv.books.push(bk);
+      byBook[bk] = (byBook[bk] || 0) + l.size;
+    });
+  });
+  const rows = Object.values(levels).sort((a, b) => b.price - a.price);
+  const total = rows.reduce((s, l) => s + l.size, 0);
+  const avg = total ? toAm(rows.reduce((s, l) => s + toDec(l.price) * l.size, 0) / total) : null;
+  return { rows, total, avg, byBook };
+}
+const ladderBooksTxt = L => Object.entries(L.byBook).sort((a, b) => b[1] - a[1]).map(([b, s]) => `${b} ${usd(s)}`).join(' · ');
 function liqOf(o) {
   if (o.limits?.max != null) return Number(o.limits.max);
   const d = liqDepth(o);
@@ -2040,9 +2083,13 @@ function render() {
     // Exchange liquidity (Kalshi, or whichever exchange is serving as refBook — e.g. UFC's
     // Kalshi-as-reference) always rides along here too, not just Kalshi specifically, and not
     // just in the mainline grid's own columns.
-    const refLiqTxt = r.pin.depth && r.pin.depth.total != null ? ` · ${usd(r.pin.depth.total)}` : '';
-    const refRow = refBook === 'Kalshi' && r.overUnder && r.pin.other != null
-      ? `<div class="bookrow ref">${pinLg ? `<img src="${esc(pinLg)}" alt="Kalshi" title="Kalshi">` : `<span class="bk">KAL</span>`}<span class="bkname">Kalshi ${esc(r.overUnder === 'over' ? 'Under' : 'Over')} ${r.pickPoints} ${fmtAm(r.pin.other)}</span><span class="bkmeta">→ ${esc(r.overUnder === 'over' ? 'Over' : 'Under')} fair ${fmtAm(probToAm(r.fair))}${refLiqTxt}</span></div>`
+    const refLiqTxt = r.ladder ? ` · ${usd(r.ladder.total)} liq${r.ladder.avg != null ? ` @ ${fmtAm(r.ladder.avg)} avg` : ''}`
+      : r.pin.depth && r.pin.depth.total != null ? ` · ${usd(r.pin.depth.total)}` : '';
+    // Exchange-prop rows: the merged opposite-side ladder (every exchange, full size within
+    // EXCH_LADDER_CENTS of the bet price) -- the same view OddsJam gives under a pick.
+    const ladderRows = r.ladder && r.ladder.rows.length ? r.ladder.rows.map(l => `<div class="bookrow ladrow"><span class="bkname">${l.books.map(b => { const lg = logoOf(b); return lg ? `<img src="${esc(lg)}" alt="${esc(b)}" title="${esc(b)}">` : `<span class="bk">${esc(b.slice(0,3))}</span>`; }).join('')} ${esc(r.overUnder === 'over' ? 'Under' : 'Over')} ${fmtAm(l.price)}</span><span class="bkprice">${usd(l.size)}</span></div>`).join('') : '';
+    const refRow = (r.ladder || refBook === 'Kalshi') && r.overUnder && r.pin.other != null
+      ? `<div class="bookrow ref">${pinLg ? `<img src="${esc(pinLg)}" alt="${esc(refBook)}" title="${esc(refBook)}">` : `<span class="bk">${esc(refBook.slice(0,3).toUpperCase())}</span>`}<span class="bkname">${esc(refBook)} ${esc(r.overUnder === 'over' ? 'Under' : 'Over')} ${r.pickPoints} ${fmtAm(r.pin.other)}</span><span class="bkmeta">→ ${esc(r.overUnder === 'over' ? 'Over' : 'Under')} fair ${fmtAm(probToAm(r.fair))}${refLiqTxt}</span></div>${ladderRows}`
       : `<div class="bookrow ref">${pinLg ? `<img src="${esc(pinLg)}" alt="${esc(refBook)}" title="${esc(refBook)}">` : `<span class="bk">${esc(refShort)}</span>`}<span class="bkname">${esc(refBook)}</span><span class="bkprice">${fmtAm(r.pin.mine)}</span><span class="bkmeta">Fair ${fmtAm(probToAm(r.fair))}${refLiqTxt}</span></div>`;
     // Book-logos-as-columns / this-side-vs-other-side-as-rows comparison grid — only buildable
     // for rows that carry oppBooks (mainline computeRows rows; props/exchange-arb rows don't have
