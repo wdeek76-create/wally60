@@ -23140,6 +23140,32 @@ function _wmMissingSources(prow, rawKey) {
 //       Overs are never blocked by a teammate's status.
 // Returns { both: reason|null, over: reason|null, under: reason|null }.
 const _WM_RETURN_RE = /\b(season debut|expected to (play|return|suit up|be active)|will (play|return|suit up)|making (her|his|their) (season )?(return|debut)|returns? (to|from)|back (in the lineup|from)|cut(s|ting)? into the (playing time|minutes))\b/i;
+// How much a teammate's absence matters, from usage (BBRef Advanced paste), PER, minutes per game, and today's RW
+// projected minutes (the auto-loaded RW projections). HIGH = real load (starter / high usage), MID = rotation piece,
+// LOW = fringe/bench (his status shouldn't move anyone's line), UNKNOWN = no data at all (treated cautiously).
+function _wmImportance(name, team) {
+  let adv = null, projMin = null;
+  try { adv = (typeof getBBRefAdvForPlayer === "function") ? getBBRefAdvForPlayer(name) : null; } catch (e) {}
+  try {
+    const k = resolveNorm(name);
+    for (const sl of (typeof slots !== "undefined" ? slots : [])) { if (!sl) continue; const p = sl.players.find(x => x.norm === k); if (p && p.min != null && !isNaN(p.min)) { projMin = Math.max(projMin || 0, Number(p.min)); } }
+  } catch (e) {}
+  const usg = adv && adv.usg != null ? adv.usg : null, per = adv && adv.per != null ? adv.per : null;
+  const mpg = adv && adv.mp && adv.g >= 5 ? adv.mp / adv.g : null;
+  const seasonOk = adv && (adv.g || 0) >= 5;
+  const hasData = (seasonOk && (usg != null || per != null || mpg != null)) || projMin != null;
+  let tier = "UNKNOWN";
+  if (hasData) {
+    if ((seasonOk && (usg >= 22 || per >= 18)) || (mpg != null && mpg >= 28) || (projMin != null && projMin >= 28)) tier = "HIGH";
+    else if ((seasonOk && (usg >= 17 || per >= 13)) || (mpg != null && mpg >= 20) || (projMin != null && projMin >= 20)) tier = "MID";
+    else tier = "LOW";
+  }
+  const bits = [];
+  if (usg != null && seasonOk) bits.push(Math.round(usg) + "% usg");
+  if (mpg != null) bits.push(mpg.toFixed(0) + " mpg");
+  if (projMin != null) bits.push("proj " + Math.round(projMin) + " min");
+  return { tier, usg, per, mpg, projMin, note: tier + (bits.length ? " · " + bits.join(", ") : "") };
+}
 function _wmInjuryGate(playerRaw, team) {
   const out = { both: null, over: null, under: null };
   try {
@@ -23154,8 +23180,11 @@ function _wmInjuryGate(playerRaw, team) {
     // favourable for OVERS, FLOOR is favourable for UNDERS. So upside never blocks an over; it
     // only rules out the under against her. A floor-risk mention does the reverse.
     if (ben) {
-      if (/floor risk/i.test(ben.reason || "")) out.over = "floor risk from " + ben.causedBy + "'s injury note";
-      else out.under = "upside from " + ben.causedBy + "'s injury note";
+      const bi = _wmImportance(ben.causedBy, team);
+      if (bi.tier !== "LOW") {   // a fringe player's note shouldn't move anyone's line
+        if (/floor risk/i.test(ben.reason || "")) out.over = "floor risk from " + ben.causedBy + "'s injury note (" + bi.note + ")";
+        else out.under = "upside from " + ben.causedBy + "'s injury note (" + bi.note + ")";
+      }
     }
     // teammates
     const mates = [];
@@ -23181,7 +23210,10 @@ function _wmInjuryGate(playerRaw, team) {
       if (!(ov >= 1)) return; // different position, or position unknown
       // Any uncertain teammate at her position (GTD, Questionable, Probable, Day-to-Day) blocks
       // the UNDER only. Overs are always allowed — an uncertain teammate is no reason to pass one.
-      if (!out.under && ["GTD", "Q", "P", "DTD", "PROBABLE", "QUESTIONABLE"].includes(String(m.label || "").toUpperCase())) out.under = m.name + " is " + m.label + " at his position";
+      if (!out.under && ["GTD", "Q", "P", "DTD", "PROBABLE", "QUESTIONABLE"].includes(String(m.label || "").toUpperCase())) {
+        const mi = _wmImportance(m.name, team);
+        if (mi.tier !== "LOW") out.under = m.name + " is " + m.label + " at his position (" + mi.note + ")";   // bench/fringe teammates are ignored; unknown stays cautious
+      }
     });
   } catch (e) { console.warn("[NBA MODEL] injury gate failed for", playerRaw, e && e.message); }
   return out;
