@@ -392,6 +392,7 @@ table colgroup col.avg-col{width:16%;}
 
 <div id="main">
   <div id="upload-tab" style="font-family:'Plus Jakarta Sans',sans-serif;">
+    <div id="rw-auto-strip" style="margin-bottom:12px;"></div>
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px;">
       <span style="font-size:11px;color:#a8b0bb;letter-spacing:0.8px;text-transform:uppercase;font-weight:700;">Projection Sources</span>
       <button onclick="toggleSourceSettings()" id="source-settings-btn" title="Enable/disable sources" style="background:transparent;border:1px solid #1a1d22;color:#7dd3fc;border-radius:4px;padding:4px 10px;font-size:11px;font-weight:700;letter-spacing:0.3px;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;">⚙ SOURCES</button>
@@ -6375,7 +6376,7 @@ function handleDepthChartParseUpload() {
 }
 
 function clearDepthChartData() {
-  try { localStorage.removeItem(DEPTH_CHART_STORAGE_KEY); } catch(e) {}
+  try { localStorage.removeItem(DEPTH_CHART_STORAGE_KEY); localStorage.setItem("nba_depth_cleared", String(Date.now())); } catch(e) {}
   renderDepthChartStatus();
   const ta = document.getElementById("depth-chart-paste"); if (ta) ta.value = "";
   try { if (typeof merged !== "undefined" && merged && typeof renderTable === "function") renderTable(); } catch (e) {}
@@ -25568,8 +25569,10 @@ let _rwDepthIdx = null;
 try { _rwDepthIdx = JSON.parse(localStorage.getItem("nba_rw_depth_v1") || "null"); } catch (e) { _rwDepthIdx = null; }
 // Projection rows have no team. NBADepth lists every team's players (with RotoWire ids), so build
 // id → team and name → team from it; anything still missing falls back to the roster/CSV lookup.
+let _rwDepthMemo = null;
 async function _rwDepthTeams() {
-  const byId = {}, byName = {};
+  if (_rwDepthMemo && Date.now() - _rwDepthMemo.at < 60000) return _rwDepthMemo.v;   // projections + depth step share one fetch per sync
+  const byId = {}, byName = {}, statuses = {};
   try {
     const teams = _rwRows(await rwApiFetch("NBADepth"));
     teams.forEach(t => {
@@ -25579,13 +25582,31 @@ async function _rwDepthTeams() {
         if (Array.isArray(n)) { n.forEach(walk); return; }
         if (!n || typeof n !== "object") return;
         const id = _rwPick(n, ["Id", "PlayerId", "Player.Id"]), nm = _rwName(n);
-        if (nm) { byName[norm(nm)] = c; if (id != null) byId[String(id)] = c; }
+        if (nm) {
+          byName[norm(nm)] = c; if (id != null) byId[String(id)] = c;
+          const rawSt = _rwPick(n, ["Injury.Status", "InjuryStatus", "NBAInjuryStatus", "Status"]);
+          if (rawSt) { const st = String(rawSt).toLowerCase(); const tag = /season|ofs/.test(st) ? "OFS" : /^out|\bout\b/.test(st) ? "OUT" : /gtd|game[- ]?time|question|doubt|day/.test(st) ? "GTD" : null; if (tag) statuses[norm(nm)] = { name: nm, status: tag, team: c, position: String(_rwPick(n, ["Position", "Pos"]) || "").trim(), rank: null }; }
+        }
         Object.values(n).forEach(v => { if (v && typeof v === "object") walk(v); });
       })(t.Players || t.players || []);
     });
     try { if (Object.keys(byName).length > 100) { _rwDepthIdx = byName; localStorage.setItem("nba_rw_depth_v1", JSON.stringify(byName)); } } catch (e) {}
   } catch (e) { console.warn("[RW API] depth teams unavailable", e && e.message); }
-  return { byId, byName };
+  _rwDepthMemo = { at: Date.now(), v: { byId, byName, statuses } };
+  return _rwDepthMemo.v;
+}
+async function rwApiSyncDepth() {
+  const cleared = !!localStorage.getItem("nba_depth_cleared");
+  if (window._rwAuto && cleared) return "skipped (cleared)";
+  if (!window._rwAuto && cleared) localStorage.removeItem("nba_depth_cleared");
+  const dt = await _rwDepthTeams();
+  const n = Object.keys(dt.byName).length;
+  if (n < 100) throw new Error("NBADepth: only " + n + " players read");
+  const cur = getDepthChartData();
+  if (cur && cur.source !== "rotowire-api" && Object.keys(cur.players || {}).length) return `${n} on rosters (kept your pasted depth chart)`;   // anything not written by this sync is a hand paste — never overwrite it
+  saveDepthChartData({ fetchedAt: Date.now(), players: dt.statuses, teamCount: new Set(Object.values(dt.byName)).size, source: "rotowire-api" });
+  try { if (typeof renderDepthChartStatus === "function") renderDepthChartStatus(); } catch (e) {}
+  return `${n} on rosters · ${Object.keys(dt.statuses).length} tagged`;
 }
 async function rwApiSyncProjections() {
   if (window._rwAuto && localStorage.getItem("nba_rw_slot_cleared")) return "skipped — you cleared RW; hit ⚡ SYNC to bring it back";
@@ -25619,6 +25640,20 @@ async function rwApiSyncNews() {
 // Keeps RotoWire data fresh with no clicking: shortly after load, every 10 minutes while the page is open, when you
 // come back to the page, and when you open Projections / Morning with data older than 10 minutes.
 const RW_STALE_MS = 10 * 60 * 1000;
+// Upload-tab strip: shows the RotoWire auto-load is working (or why not), so "No file loaded" on the RW source isn't alarming.
+function renderRwAutoStrip() {
+  const el = document.getElementById("rw-auto-strip"); if (!el) return;
+  let sy = null; try { sy = JSON.parse(localStorage.getItem(RW_API_SYNC_KEY) || "null"); } catch (e) {}
+  const configured = _rwHosted() || !!getRwKey();
+  const when = sy ? new Date(sy.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : null;
+  const okChip = t => `<span style="color:#4ade80;">✓ ${_mEsc(t)}</span>`;
+  const body = !configured ? `<span style="color:#fbbf24;">Not connected — open the MORNING tab and click ⚙ to add your RotoWire key.</span>`
+    : !sy ? `<span style="color:#a8b0bb;">Loading RotoWire…</span>`
+    : (sy.done.map(okChip).join(" &nbsp;") + (sy.fail.length ? ` &nbsp;<span style="color:#fbbf24;" title="${_mEsc(sy.fail.join("\n"))}">⚠ ${sy.fail.length} waiting (${_mEsc(sy.fail.map(f => f.split(":")[0].replace(/^NBA/, "").toLowerCase()).join(", "))})</span>` : ""));
+  el.innerHTML = `<div style="background:#0c0d10;border:1px solid ${configured && sy && sy.done.length ? "#22c55e55" : "#1a1d22"};border-radius:8px;padding:9px 12px;display:flex;gap:10px;flex-wrap:wrap;align-items:center;font-size:11px;font-weight:600;">
+    <b style="color:#93c5fd;letter-spacing:.6px;">ROTOWIRE AUTO-LOAD</b>${body}
+    <span style="margin-left:auto;color:#6b7280;">${when ? "last sync " + when + " · refreshes every 10 min" : ""} <a href="#" onclick="rwApiSyncAll();return false;" style="color:#7dd3fc;margin-left:8px;">sync now</a></span></div>`;
+}
 function rwAutoIfStale(force) {
   try {
     if (!(_rwHosted() || getRwKey())) return;
@@ -25627,6 +25662,7 @@ function rwAutoIfStale(force) {
   } catch (e) {}
 }
 (function rwAutoRefresh() {
+  setTimeout(renderRwAutoStrip, 300);
   setTimeout(() => rwAutoIfStale(), 3000);
   setInterval(() => { if (!document.hidden) rwAutoIfStale(true); }, RW_STALE_MS);
   document.addEventListener("visibilitychange", () => { if (!document.hidden) rwAutoIfStale(); });
@@ -25637,10 +25673,11 @@ async function rwApiSyncAll(quiet) {
   const btn = document.getElementById("rw-api-sync-btn");
   if (btn) { btn.disabled = true; btn.textContent = "SYNCING…"; }
   const done = [], fail = [];
-  for (const [label, fn] of [["injuries", rwApiSyncInjuries], ["OpticOdds injuries", ooSyncInjuries], ["lineups", rwApiSyncLineups], ["news", rwApiSyncNews], ["projections", rwApiSyncProjections]]) {
-    try { done.push(`${label} ${await fn()}`); } catch (e) { fail.push(e.message); console.warn("[RW API]", e); }
+  for (const [label, fn] of [["injuries", rwApiSyncInjuries], ["OpticOdds injuries", ooSyncInjuries], ["depth", rwApiSyncDepth], ["lineups", rwApiSyncLineups], ["news", rwApiSyncNews], ["projections", rwApiSyncProjections]]) {
+    try { done.push(`${label} ${await fn()}`); } catch (e) { const m = String(e && e.message || e); fail.push(/^(NBA|nba-)/.test(m) ? m : label + ": " + m); console.warn("[RW API]", e); }
   }
   try { localStorage.setItem(RW_API_SYNC_KEY, JSON.stringify({ at: Date.now(), done, fail })); } catch (e) {}
+  try { renderRwAutoStrip(); } catch (e) {}
   if (btn) { btn.disabled = false; btn.textContent = "⚡ SYNC RW API"; }
   if (!quiet) showToast(done.length ? `RotoWire: ${done.join(" · ")}${fail.length ? ` · ${fail.length} failed` : ""}` : `RotoWire sync failed — ${fail[0] || "no response"}`);
   if (typeof morningAutoLog === "function" && morningAutoLog()) saveMorningBets();
