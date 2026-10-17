@@ -2866,7 +2866,11 @@ function parlayFairSummary(){
 const SHARP_MOVE_BOOKS = ['Pinnacle','BetOnline','BookMaker','Circa'];
 
 const SHARP_MOVE_MIN_CENTS = 1;
-let autoSharpMin = Number(LS.get('props_autosharpmin','1'))||0;
+// Off (0) / Prefer (-1: mains with sharp moves ranked first, nothing required) / require 1+, 2+, 3+.
+let autoSharpMin = (()=>{ const v=LS.get('props_autosharp2','prefer'); return v==='prefer'?-1:(Number(v)||0); })();
+const sharpN = c => c.sharp ? sharpBySrc(c.sharp).length : 0;
+// Prefer: more sharp books moving your way first, then best edge.
+const autoRank = (a,b) => (autoSharpMin<0 ? sharpN(b)-sharpN(a) : 0) || b.edgePct-a.edgePct;
 const sharpHist = {}; // fixtureId -> {at, rows, pending}
 async function ensureSharpHist(fid){
   const c=sharpHist[fid]; if(c && (c.pending || Date.now()-c.at<600000)) return c.pending||c.rows;
@@ -3230,15 +3234,15 @@ function buildAutoCandidates(){
         // Mains only: require this many sharp books (Pin/BOL/BKM/Circa) moving toward the side after
         // a limit raise, when the Sharp move filter is on.
         let sharp=null;
-        if(isMain && !S.golf && autoSharpMin>0 && autoScope!=='props'){
+        if(isMain && !S.golf && autoSharpMin!==0 && autoScope!=='props'){
           sharp=sharpCandMoves({ p, mkey, side, line, refRow });
-          if(sharpBySrc(sharp).length<autoSharpMin){ why('sharp'); return; }
+          if(autoSharpMin>0 && sharpBySrc(sharp).length<autoSharpMin){ why('sharp'); return; }
         }
         out.push({ p, mkey, side, line, refRow, fairP, edgePct, isMain, sharp });
       });
     });
   });
-  out.sort((a,b)=>b.edgePct-a.edgePct);
+  out.sort(autoRank);
   return out;
 }
 // League left on "Any" (autoLeague==='any'): scans every sport that has data right now -- the
@@ -3259,7 +3263,7 @@ function buildAutoCandidatesAllLeagues(){
   } finally {
     sportKey=savedSK; fixtures=savedFx; mainRows=savedRows; players=savedPl;
   }
-  out.sort((a,b)=>b.edgePct-a.edgePct);
+  out.sort(autoRank);
   return out;
 }
 // Loads whatever leagues the build needs in the background first (no need to have opened their
@@ -3271,7 +3275,7 @@ async function runAutoBuild(){
   if(btn){ btn.disabled=true; btn.textContent=`Loading ${targets.map(k=>SPORTS[k].label).join(', ')} lines…`; }
   try{
     await Promise.all(targets.map(sk=>ensureSportData(sk)));
-    if(autoSharpMin>0 && autoScope!=='props'){
+    if(autoSharpMin!==0 && autoScope!=='props'){
       // Sharp-book history for every upcoming game in play (or just the picked game).
       const fids=[];
       targets.forEach(sk=>{ const d = sk===sportKey ? {fixtures} : loadSportCache(sk); (d?.fixtures||[]).filter(f=>!f.live && (!autoFixture || f.id===autoFixture)).sort((a,b)=>new Date(a.start)-new Date(b.start)).slice(0,40).forEach(f=>fids.push(f.id)); });
@@ -3405,8 +3409,8 @@ function autoBuildHtml(){
         <button class="qarbchip${autoEdge===''?' on':''}" data-autoedgechip="">Any</button>
         ${[0,1,2,5,10].map(v=>`<button class="qarbchip${autoEdge===v?' on':''}" data-autoedgechip="${v}">${v}%</button>`).join('')}
       </div></div>
-      <div class="autorow" style="align-items:flex-start"><label style="margin-top:4px">Sharp move · mains<span class="ablbl2">Pin · BOL · BKM · Circa moved your way after a limit raise</span></label><div class="qarbrow qarbpresets" style="border-bottom:none;padding-bottom:0">
-        ${[[0,'Off'],[1,'1+'],[2,'2+'],[3,'3+']].map(([v,t])=>`<button class="qarbchip${autoSharpMin===v?' on':''}" data-autosharp="${v}">${t}</button>`).join('')}
+      <div class="autorow" style="align-items:flex-start"><label style="margin-top:4px">Sharp move · mains<span class="ablbl2">Pin · BOL · BKM · Circa moved your way after a limit raise. Prefer ranks those first; 1+/2+/3+ require it.</span></label><div class="qarbrow qarbpresets" style="border-bottom:none;padding-bottom:0">
+        ${[[0,'Off'],[-1,'Prefer'],[1,'1+'],[2,'2+'],[3,'3+']].map(([v,t])=>`<button class="qarbchip${autoSharpMin===v?' on':''}" data-autosharp="${v}">${t}</button>`).join('')}
       </div></div>
       <button class="big" id="autoGenerate" style="width:100%;margin-top:10px">Generate parlay</button>
       ${autoLastMsg?`<div class="abwhy">${autoLastMsg}</div>`:''}
@@ -3447,7 +3451,7 @@ function bindAutoBuild(view){
     autoEdge = b.dataset.autoedgechip==='' ? '' : Number(b.dataset.autoedgechip);
     LS.set('props_autoedge', autoEdge===''?'':String(autoEdge)); renderParlay();
   }));
-  view.querySelectorAll('[data-autosharp]').forEach(b=>b.addEventListener('click',()=>{ autoSharpMin=Number(b.dataset.autosharp)||0; LS.set('props_autosharpmin',String(autoSharpMin)); renderParlay(); }));
+  view.querySelectorAll('[data-autosharp]').forEach(b=>b.addEventListener('click',()=>{ autoSharpMin=Number(b.dataset.autosharp)||0; LS.set('props_autosharp2',autoSharpMin<0?'prefer':String(autoSharpMin)); renderParlay(); }));
   $('#autoGenerate')?.addEventListener('click',runAutoBuild);
 }
 let parlayRenderPending=false;
