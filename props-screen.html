@@ -2864,16 +2864,13 @@ function parlayFairSummary(){
 // took action on this side)? Books whose feed never reports limits fall back to movement since
 // their opening price. One history fetch per fixture covers all four books, cached 10 min.
 const SHARP_MOVE_BOOKS = ['Pinnacle','BetOnline','BookMaker','Circa'];
-const SHARP_EXCH_BOOKS = ['Novig','Prophet X','Kalshi'];
-// Which books count toward the Sharp move filter: the sharp sportsbooks, the exchanges, or both.
-let autoSharpSrc = LS.get('props_autosharpsrc','sharps'); // 'sharps' | 'exch' | 'both'
-const sharpSrcBooks = () => autoSharpSrc==='exch' ? SHARP_EXCH_BOOKS : autoSharpSrc==='both' ? [...SHARP_MOVE_BOOKS, ...SHARP_EXCH_BOOKS] : SHARP_MOVE_BOOKS;
+
 const SHARP_MOVE_MIN_CENTS = 1;
 let autoSharpMin = Number(LS.get('props_autosharpmin','1'))||0;
 const sharpHist = {}; // fixtureId -> {at, rows, pending}
 async function ensureSharpHist(fid){
   const c=sharpHist[fid]; if(c && (c.pending || Date.now()-c.at<600000)) return c.pending||c.rows;
-  const job=(async()=>{ let rows=[]; try{ let rows2=[]; for(const bk of chunk([...SHARP_MOVE_BOOKS, ...SHARP_EXCH_BOOKS],5)){ const r=await oo('/fixtures/odds/historical',{fixture_id:fid, sportsbook:bk, is_main:true}); (r?.data?.[0]?.odds||[]).forEach(o=>rows2.push(o)); } rows=rows2; }catch(e){ console.warn('[props] sharp history failed',e.message); } sharpHist[fid]={at:Date.now(), rows}; return rows; })();
+  const job=(async()=>{ let rows=[]; try{ const r=await oo('/fixtures/odds/historical',{fixture_id:fid, sportsbook:SHARP_MOVE_BOOKS, is_main:true}); rows=r?.data?.[0]?.odds||[]; }catch(e){ console.warn('[props] sharp history failed',e.message); } sharpHist[fid]={at:Date.now(), rows}; return rows; })();
   sharpHist[fid]={at:0, rows:[], pending:job};
   return job;
 }
@@ -2887,22 +2884,9 @@ function sharpRowMatches(sk, o, key, mkey, side, line){
 function seriesOf(o){ return (Array.isArray(o.entries)?o.entries:[]).map(e=>({at:Date.parse(e.timestamp||e.time||''), price:Number(e.price), max:e.limits?.max!=null?Number(e.limits.max):null})).filter(e=>!isNaN(e.price)).sort((a,b)=>(a.at||0)-(b.at||0)); }
 function sharpMovesFrom(rows, sk, key, mkey, side, line){
   const out=[];
-  [...SHARP_MOVE_BOOKS, ...SHARP_EXCH_BOOKS].forEach(B=>{
-    const bk=canonBook(B), ex=EXCH.has(bk);
+  SHARP_MOVE_BOOKS.forEach(B=>{
+    const bk=canonBook(B);
     const mine=(rows||[]).filter(x=>canonBook(x.sportsbook)===bk);
-    if(ex){
-      // Exchange: your side's real price is the mirror of the OTHER side's orders, so read the
-      // movement off that side (its price drifting longer = your side getting shorter = toward
-      // you). No limits on an exchange, so it's measured from its opening price.
-      let opp=null;
-      if(side==='over'||side==='under') opp=mine.find(x=>sharpRowMatches(sk,x,key,mkey,side==='over'?'under':'over',line));
-      else { const others=[...new Set(mine.filter(x=>marketKeyFor(sk,x.market)===mkey).map(x=>normName(cleanSel(x.selection||x.name))))].filter(n=>n!==key);
-        if(others.length===1) opp=mine.find(x=>marketKeyFor(sk,x.market)===mkey && normName(cleanSel(x.selection||x.name))===others[0]); }
-      if(opp){ const ser=seriesOf(opp); const now=Number(opp.price ?? ser[ser.length-1]?.price), op=Number(opp.olv?.price ?? ser[0]?.price);
-        if(isNaN(now)||isNaN(op)) return; const d=cents(now)-cents(op);
-        if(d>=SHARP_MOVE_MIN_CENTS) out.push({ book:bk, from:-op, now:-now, d, kind:'open', ex:true }); return; }
-      // No other side posted (3-way soccer etc): fall back to this side's own price.
-    }
     const o=mine.find(x=>sharpRowMatches(sk,x,key,mkey,side,line)); if(!o) return;
     const series=seriesOf(o);
     const now = Number(o.price ?? series[series.length-1]?.price); if(isNaN(now)) return;
@@ -2913,12 +2897,14 @@ function sharpMovesFrom(rows, sk, key, mkey, side, line){
     else if(!sawLimit){ const op=o.olv?.price ?? series[0]?.price; if(op!=null){ from=Number(op); kind='open'; } }
     if(from==null) return;
     const d=cents(from)-cents(now);
-    if(d>=SHARP_MOVE_MIN_CENTS) out.push({ book:bk, from, now, d, kind, ex, limFrom:up?.from??null, limTo:up?.max??null });
+    if(d>=SHARP_MOVE_MIN_CENTS) out.push({ book:bk, from, now, d, kind, limFrom:up?.from??null, limTo:up?.max??null });
   });
   return out;
 }
-// Only the moves from the books the Source setting counts.
-const sharpBySrc = m => { const ok=new Set(sharpSrcBooks().map(canonBook)); return (m||[]).filter(x=>ok.has(x.book)); };
+// Only the sharp sportsbooks count -- exchange movement isn't part of this signal (legs saved
+// while exchanges were briefly counted get those moves dropped here).
+const SHARP_KEYS = new Set(SHARP_MOVE_BOOKS.map(canonBook));
+const sharpBySrc = m => (m||[]).filter(x=>SHARP_KEYS.has(x.book));
 function sharpCandMoves(c){
   const sk=c._league||sportKey; const line = c.side==='single' ? (c.mkey==='spread'?c.refRow?.points:null) : c.line;
   return sharpMovesFrom(sharpHist[c.p.fixtureId]?.rows, sk, c.p.key, c.mkey, c.side, line);
@@ -2937,7 +2923,7 @@ function ensureLegSharp(leg){
 function sharpMovesHtml(leg){
   if(!MAIN_MKS.has(leg.mkey) || !Array.isArray(leg.sharpMoves)) return '';
   const m=sharpBySrc(leg.sharpMoves);
-  if(!m.length) return `<div class="plsharp none">No ${autoSharpSrc==='exch'?'exchange (Novig, PX, Kalshi) moving toward this since open':autoSharpSrc==='both'?'sharp book or exchange moving toward this':'sharp book (Pin, BOL, BKM, Circa) moving toward this after a limit raise'}</div>`;
+  if(!m.length) return `<div class="plsharp none">No sharp book (Pin, BOL, BKM, Circa) moving toward this after a limit raise</div>`;
   return `<div class="plsharp">${m.map(x=>`<span class="plsm">${esc(bookShort(x.book))} <b>▲${x.d}¢</b> ${fmtAm(x.from)}→${fmtAm(x.now)}${x.kind==='limit'?` <i>after limit ↑${x.limFrom!=null?' '+usd(x.limFrom)+'→'+usd(x.limTo):''}</i>`:' <i>since open</i>'}</span>`).join('')}</div>`;
 }
 const legPinPending={};
@@ -3348,7 +3334,7 @@ function runAutoBuildNow(){
       if(W.liqMains) parts.push(`${W.liqMains} under ${usd(autoMinLiqMains)} exch liq (mains)`);
       if(W.liqProps) parts.push(`${W.liqProps} under ${usd(autoMinLiqProps)} exch liq (props)`);
       if(W.edge) parts.push(`${W.edge} below ${autoEdge}% edge`);
-      if(W.sharp) parts.push(`${W.sharp} without ${autoSharpMin}+ ${autoSharpSrc==='exch'?'exchange':autoSharpSrc==='both'?'sharp/exchange':'sharp'} move${autoSharpMin>1?'s':''}`);
+      if(W.sharp) parts.push(`${W.sharp} without ${autoSharpMin}+ sharp move${autoSharpMin>1?'s':''}`);
       if(W.nofair) parts.push(`${W.nofair} with no other side to devig`);
       autoLastMsg = !W.checked ? `Nothing to check${fx?` in ${esc(fxLabel(fx))}`:''} for this league/scope -- no lines loaded${autoScope!=='both'?` for ${autoScope==='props'?'props':'mains'}`:''}.`
         : `Checked ${W.checked} pick${W.checked===1?'':'s'}${fx?` in ${esc(fxLabel(fx))}`:''} -- none made it: ${parts.join(' · ')}.`;
@@ -3419,12 +3405,9 @@ function autoBuildHtml(){
         <button class="qarbchip${autoEdge===''?' on':''}" data-autoedgechip="">Any</button>
         ${[0,1,2,5,10].map(v=>`<button class="qarbchip${autoEdge===v?' on':''}" data-autoedgechip="${v}">${v}%</button>`).join('')}
       </div></div>
-      <div class="autorow" style="align-items:flex-start"><label style="margin-top:4px">Sharp move · mains<span class="ablbl2">${autoSharpSrc==='exch'?'Novig · PX · Kalshi moved your way since open':autoSharpSrc==='both'?'Sharp books (after a limit raise) or exchanges (since open) moved your way':'Pin · BOL · BKM · Circa moved your way after a limit raise'}</span></label><div class="qarbrow qarbpresets" style="border-bottom:none;padding-bottom:0">
+      <div class="autorow" style="align-items:flex-start"><label style="margin-top:4px">Sharp move · mains<span class="ablbl2">Pin · BOL · BKM · Circa moved your way after a limit raise</span></label><div class="qarbrow qarbpresets" style="border-bottom:none;padding-bottom:0">
         ${[[0,'Off'],[1,'1+'],[2,'2+'],[3,'3+']].map(([v,t])=>`<button class="qarbchip${autoSharpMin===v?' on':''}" data-autosharp="${v}">${t}</button>`).join('')}
       </div></div>
-      ${autoSharpMin>0?`<div class="autorow"><label>Sharp move · source</label><div style="display:flex;gap:6px">
-        ${[['sharps','Sharps'],['exch','Exchanges'],['both','Both']].map(([v,t])=>`<button class="abbtn${autoSharpSrc===v?' on':''}" data-sharpsrc="${v}">${t}</button>`).join('')}
-      </div></div>`:''}
       <button class="big" id="autoGenerate" style="width:100%;margin-top:10px">Generate parlay</button>
       ${autoLastMsg?`<div class="abwhy">${autoLastMsg}</div>`:''}
     </div>
@@ -3464,7 +3447,6 @@ function bindAutoBuild(view){
     autoEdge = b.dataset.autoedgechip==='' ? '' : Number(b.dataset.autoedgechip);
     LS.set('props_autoedge', autoEdge===''?'':String(autoEdge)); renderParlay();
   }));
-  view.querySelectorAll('[data-sharpsrc]').forEach(b=>b.addEventListener('click',()=>{ autoSharpSrc=b.dataset.sharpsrc; LS.set('props_autosharpsrc',autoSharpSrc); renderParlay(); }));
   view.querySelectorAll('[data-autosharp]').forEach(b=>b.addEventListener('click',()=>{ autoSharpMin=Number(b.dataset.autosharp)||0; LS.set('props_autosharpmin',String(autoSharpMin)); renderParlay(); }));
   $('#autoGenerate')?.addEventListener('click',runAutoBuild);
 }
