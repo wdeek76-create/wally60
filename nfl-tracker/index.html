@@ -834,6 +834,7 @@ function markMarketPasted(src, marketKey) {
   if (!all[wk]) all[wk] = {};
   if (!all[wk][src]) all[wk][src] = {};
   all[wk][src][marketKey] = true;
+  all[wk][src]._last = marketKey; // so the dropdown advances from here, in order
   // Prune weeks older than 3 to keep it small
   const weeks = Object.keys(all).sort();
   while (weeks.length > 3) { delete all[weeks.shift()]; }
@@ -866,7 +867,23 @@ const MARKET_ALIASES = {
 
 // Detect which market a PropShop-style paste is for by scanning for market names.
 // Returns { key, label, hits } for the most-mentioned market, or null.
+// PropShop puts the market key on its own line near the top: "player_rushing_yards".
+// That line is the market — no guessing. Returns { key, label, header } / { unknown:true, header } / null.
+function marketFromPasteHeader(raw) {
+  const m = String(raw || '').match(/^\s*(player_[a-z0-9_]+)\s*$/im);
+  if (!m) return null;
+  const header = m[1].toLowerCase();
+  const words = header.replace(/^player_/, '').replace(/_/g, ' ').trim();
+  const key = MARKET_ALIASES[words] || MARKET_ALIASES[words.replace(/\btds?\b/, 'touchdowns')] || (MARKET_MAP[words.replace(/ /g, '_')] ? words.replace(/ /g, '_') : null);
+  if (!key || !MARKET_MAP[key]) return { unknown: true, header };
+  return { key, label: PROPSHOP_MARKET_LABELS[key] || MARKET_MAP[key].label, header, hits: 'header' };
+}
 function detectMarketFromPaste(raw) {
+  // 1) the player_xxx header line wins outright (PropShop pastes include the whole market
+  //    list too, so counting market words there was close to a coin flip)
+  const hdr = marketFromPasteHeader(raw);
+  if (hdr) return hdr;
+  // 2) fallback for pastes without that line: count market words
   // "player_receiving_yards" / "player-rush-attempts" -> "receiving yards" / "rush attempts"
   const t = String(raw || '').toLowerCase().replace(/[_\-]+/g, ' ').replace(/\bplayer\b/g, ' ');
   if (!t.trim()) return null;
@@ -902,9 +919,12 @@ function updatePasteMarketHint() {
   const raw = document.getElementById('pasteArea')?.value || '';
   const det = detectMarketFromPaste(raw);
   if (!raw.trim()) { hint.textContent = ''; return; }
-  if (!det) { hint.textContent = 'Market not found in paste — will use the dropdown: ' + (PROPSHOP_MARKET_LABELS[mSel.value] || mSel.value); hint.style.color = 'var(--text2)'; return; }
-  if (det.key === mSel.value) { hint.textContent = '✓ Paste is ' + det.label; hint.style.color = 'var(--teal)'; }
-  else { hint.textContent = '⚠ Paste looks like ' + det.label + ' but dropdown is ' + (PROPSHOP_MARKET_LABELS[mSel.value] || mSel.value) + ' — Import will use ' + det.label; hint.style.color = 'var(--amber, #fbbf24)'; }
+  hint.style.fontSize = '13px'; hint.style.fontWeight = '700';
+  if (det && det.unknown) { hint.textContent = '✗ Paste says "' + det.header + '" — not a market this tool tracks. Import is blocked.'; hint.style.color = 'var(--red, #f87171)'; return; }
+  if (!det) { hint.textContent = '⚠ No market in paste — will import as the dropdown: ' + (PROPSHOP_MARKET_LABELS[mSel.value] || mSel.value); hint.style.color = 'var(--amber, #fbbf24)'; return; }
+  const from = det.header ? ' (from "' + det.header + '")' : ' (guessed from market words — no player_ line in paste)';
+  if (det.key === mSel.value) { hint.textContent = '✓ Market: ' + det.label + from; hint.style.color = 'var(--teal)'; }
+  else { hint.textContent = '⚠ Market: ' + det.label + from + ' — dropdown says ' + (PROPSHOP_MARKET_LABELS[mSel.value] || mSel.value) + ', importing as ' + det.label; hint.style.color = 'var(--amber, #fbbf24)'; }
 }
 
 // ===== HELPERS =====
@@ -1655,8 +1675,13 @@ function refreshMarketDropdown() {
     return `<option value="${k}">${done ? '✓ ' : '○ '}${PROPSHOP_MARKET_LABELS[k]}</option>`;
   }).join('');
   mSel.innerHTML = opts;
-  const next = PROPSHOP_MARKET_ORDER.find(k => !isMarketPasted(src, k));
-  mSel.value = next || PROPSHOP_MARKET_ORDER[0];
+  // Next market = the one AFTER the last one pasted/skipped, in PropShop order — first not-done
+  // one from there, or simply the next one when all are done (2nd run of the week).
+  const wkAll = _loadPasted()[_currentWeekKey()] || {};
+  const lastIdx = PROPSHOP_MARKET_ORDER.indexOf((wkAll[src] || {})._last);
+  const N = PROPSHOP_MARKET_ORDER.length;
+  const ordered = PROPSHOP_MARKET_ORDER.map((_, i) => PROPSHOP_MARKET_ORDER[(lastIdx + 1 + i) % N]);
+  mSel.value = ordered.find(k => !isMarketPasted(src, k)) || ordered[0];
   mSel.onchange = updatePasteMarketHint;
   const lbl = document.getElementById('pasteSourceLabel');
   if (lbl) lbl.textContent = 'Source: ' + SOURCE_LABELS[src] + `  ·  ${pastedCountFor(src)}/${PROPSHOP_MARKET_ORDER.length} markets done this week`;
@@ -1951,6 +1976,9 @@ const _PROPSHOP_BOOKS = new Set([
   'circa','betcris','bookmaker','bet365','betjack','superbook','williamhill','kalshi'
 ]);
 
+// Prop Builder isn't a book we can bet — never take it as the play's book/price.
+const _isPropBuilder = b => /^(pb|prop\s*builder)$/i.test(String(b || '').trim());
+
 // Split a PropShop paste into player blocks. Everything between one player-name
 // line and the next is that player's cells.
 function _splitPropShopBlocks(raw) {
@@ -2108,10 +2136,11 @@ function _extractCellsV2(tokens) {
   for (let j = 3; j < sides.length; ) {
     const a = sides[j], b = sides[j + 1];
     if (b && b.line === a.line) { cells.push({ ...a, side: 'O' }, { ...b, side: 'U' }); j += 2; }
-    else { cells.push({ ...a, side: null }); j++; }
+    // one-sided column: side unknown — unless it carries the EV%, which only ever sits on the edge side
+    else { cells.push({ ...a, side: a.ev !== null ? 'EDGE' : null }); j++; }
   }
   // Best Line side: a column side with the same line+odds+EV, else majority of EV-carrying sides, else projection
-  const same = c => c.side && c.ev !== null && c.line === best.line && c.odds === best.odds;
+  const same = c => (c.side === 'O' || c.side === 'U') && c.ev !== null && c.line === best.line && c.odds === best.odds;
   let hit = cells.find(c => same(c) && c.ev === best.ev) || cells.find(same);
   let side = hit ? hit.side : null;
   if (!side) {
@@ -2120,7 +2149,11 @@ function _extractCellsV2(tokens) {
   }
   if (!side && projection !== null) side = projection >= best.line ? 'O' : 'U';
   if (!side) return { gameStr, gameTime, projection, best: null, cells: [] };
-  return { gameStr, gameTime, projection, best: { side, line: best.line, odds: best.odds, ev: best.ev, book: best.book }, cells: cells.filter(c => c.side) };
+  // Downstream (worst odds, alt lines, Prop Builder replacement) only needs bet-side prices, and the
+  // EV% only ever sits on the edge side — so every book price carrying an EV% IS a bet-side price.
+  // (Pairing is only trusted for working out the side above: one-sided columns can shift it.)
+  const betCells = sides.slice(3).filter(c => c.ev !== null).map(c => ({ ...c, side }));
+  return { gameStr, gameTime, projection, best: { side, line: best.line, odds: best.odds, ev: best.ev, book: best.book }, cells: betCells };
 }
 
 // PropShop v2 footer: "My top bets" list spells the side out —
@@ -2197,6 +2230,20 @@ function parsePropShop(raw, minEdge, marketKey) {
       if (!bestPlay) continue;
       bestPlay.ev = bestLineCell.ev;
       bestPlay.book = bestLineCell.book || '';
+
+      // Best Line is Prop Builder -> drop it and take the best-edge REAL book on the same side
+      // (any line). Prop Builder's own column is the cell with the exact same line/odds/edge —
+      // remove that one so it can't come back in as the replacement, the worst odds or an alt.
+      if (_isPropBuilder(bestPlay.book)) {
+        const pbIdx = cells.findIndex(c => c.side === bestPlay.side && c.line === bestPlay.line && c.odds === bestPlay.odds && c.ev === bestPlay.ev);
+        if (pbIdx >= 0) cells.splice(pbIdx, 1);
+        // same line first, else the nearest line (keeps it on the line the other sources agree on), then best edge
+        const alt = cells.filter(c => c.side === bestPlay.side && c.odds && c.line != null && c.ev != null && c.ev >= effMinEdge)
+                         .sort((a, b) => Math.abs(a.line - bestPlay.line) - Math.abs(b.line - bestPlay.line) || b.ev - a.ev || parseInt(b.odds) - parseInt(a.odds))[0];
+        if (!alt) { console.log('[parse] skipped (only Prop Builder clears the edge):', block.player, bestPlay.side + bestPlay.line, bestPlay.odds); continue; }
+        console.log('[parse] Prop Builder rejected for', block.player, '→', bestPlay.side + alt.line, alt.odds, alt.ev + '%');
+        bestPlay = { side: bestPlay.side, line: alt.line, odds: alt.odds, ev: alt.ev, book: alt.book && !_isPropBuilder(alt.book) ? alt.book : '' };
+      }
 
       // Worst odds among book cells with same side + same line + EV still >= 5%
       let worstOdds = bestPlay.odds;
@@ -2341,6 +2388,7 @@ function parseRTS(raw, minEdge) {
     if (isNaN(lineVal) && sideRaw !== 'yes' && sideRaw !== 'no') continue;
     if (isNaN(ev) || ev < minEdge) continue;
     if (!/^[+-]\d+$/.test(price)) continue;
+    if (_isPropBuilder(book)) continue; // Prop Builder price isn't bettable
 
     const marketKey = RTS_MKT_ALIASES[marketRaw];
     if (!marketKey) continue; // silent skip for exotics
@@ -2586,6 +2634,7 @@ async function parseRtsCsv(raw) {
     const rtsProj = idx.proj >= 0 ? parseFloat(cols[idx.proj]) : NaN;
     if (!player) continue;
     if (!/^[+-]\d+$/.test(price)) continue;
+    if (_isPropBuilder(book)) continue; // Prop Builder price isn't bettable
     const marketKey = RTS_CSV_MKT_ALIASES[marketRaw] || marketRaw.replace(/\s+/g,'_');
     // RTS didn't publish a real projection for this row — same "0 = junk" rule
     // as the PropShop-paste RTS path (parsePropShop's isRTS branch). Anytime TD
@@ -2720,6 +2769,7 @@ function parseDimers(raw, minEdge) {
         if (!/^[+-]\d+$/.test(odds)) odds = ''; // sanity
       }
       if (!odds) { errors.push('No odds for '+player); continue; }
+      if (_isPropBuilder(book)) continue; // Prop Builder price isn't bettable
 
       // Date parsing "Sep 9, 8:20 PM ET"
       let normDate = getTodayStr();
@@ -2773,6 +2823,7 @@ async function parsePaste() {
   } else if (PROPSHOP_SOURCES.includes(currentSource)) {
     let marketKey = document.getElementById('pasteMarket').value;
     const det = detectMarketFromPaste(raw);
+    if (det && det.unknown) { info.textContent = `Paste says "${det.header}" — not a market this tool tracks. Nothing imported.`; info.className='parse-info err'; return; }
     if (det && det.key !== marketKey) {
       // The paste says what it is — trust it, sync the dropdown, and say so
       marketKey = det.key;
@@ -2781,7 +2832,7 @@ async function parsePaste() {
     }
     if (!marketKey) { info.textContent = 'Pick a market first.'; info.className='parse-info warn'; return; }
     parseResult = parsePropShop(raw, minEdge, marketKey);
-    parseResult._marketNote = det ? `Market: ${det.label} (found in paste)` : `Market: ${PROPSHOP_MARKET_LABELS[marketKey] || marketKey} (not found in paste — used dropdown)`;
+    parseResult._marketNote = det ? `Market: ${det.label} (${det.header ? 'from ' + det.header : 'guessed from paste'})` : `Market: ${PROPSHOP_MARKET_LABELS[marketKey] || marketKey} (not found in paste — used dropdown)`;
   } else {
     info.textContent = 'Unsupported source.'; info.className='parse-info err'; return;
   }
