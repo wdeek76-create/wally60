@@ -9407,8 +9407,9 @@ function _advRoleSummary(adv, playerName) {
   else if (per >= 17) eff = "above-avg efficiency";
   else if (per >= 12) eff = "average efficiency";
   else if (per > 0) eff = "below-avg efficiency";
-  const mpgNote = mpg ? ` (${mpg} mpg)` : "";
-  return `${role}${eff ? ` – ${eff}` : ""}${mpgNote}${startNote}`;
+  const mpgNote = mpg ? ` (${mpg} mpg last season)` : "";
+  let fr = ""; try { const f = _wmFringeReason(playerName, null); if (f) fr = ` · now: ${f}`; } catch (e) {}
+  return `${role}${eff ? ` – ${eff}` : ""}${mpgNote}${startNote}${fr}`;
 }
 
 
@@ -23208,6 +23209,29 @@ const _WM_RETURN_RE = /\b(season debut|expected to (play|return|suit up|be activ
 // How much a teammate's absence matters, from usage (BBRef Advanced paste), PER, minutes per game, and today's RW
 // projected minutes (the auto-loaded RW projections). HIGH = real load (starter / high usage), MID = rotation piece,
 // LOW = fringe/bench (his status shouldn't move anyone's line), UNKNOWN = no data at all (treated cautiously).
+// Text/roster reasons a teammate is NOT a real rotation factor, regardless of last season's numbers:
+// RotoWire's own news calls him two-way / camp / G League / waived / far from a role, or he isn't on his team's depth chart.
+const _WM_FRINGE_RE = /\b(two[- ]way|exhibit[- ]10|training[- ]camp (deal|contract)|g[- ]league|waived|released by|cut by|assigned to|has a way to go|meaningful role|end of the bench|deep bench|fringe|unlikely to (see|play|crack|make|earn))\b/i;
+function _wmFringeReason(name, team) {
+  try {
+    const k = norm(name || "");
+    let text = "";
+    const rec = (typeof injuriesCache !== "undefined" && injuriesCache) ? injuriesCache.get(k) : null;
+    if (rec) text += " " + (rec.comment || "") + " " + (rec.longComment || "");
+    const feed = (typeof getRwNewsFeed === "function") ? getRwNewsFeed() : null;
+    if (feed && feed.items) feed.items.forEach(n => { if (n.name && norm(n.name) === k) text += " " + (n.headline || "") + " " + (n.notes || "") + " " + (n.analysis || ""); });
+    const m = text.match(_WM_FRINGE_RE);
+    if (m) return `RW news: "${m[0].toLowerCase()}"`;
+    const tm = team || (rec && rec.team) || "";
+    if (_rwDepthIdx && tm) {
+      const onDepth = _rwDepthIdx[k];
+      const want = normTeamAbbr(tm) || tm;
+      if (!onDepth) return `not on a depth chart`;
+      if ((normTeamAbbr(onDepth) || onDepth) !== want) return `not on ${want} depth chart (listed with ${onDepth})`;
+    }
+  } catch (e) {}
+  return null;
+}
 function _wmImportance(name, team) {
   let adv = null, projMin = null;
   try { adv = (typeof getBBRefAdvForPlayer === "function") ? getBBRefAdvForPlayer(name) : null; } catch (e) {}
@@ -23223,6 +23247,11 @@ function _wmImportance(name, team) {
   // gate it. Today's RW projected minutes are the freshest read and decide first; without them, last season's minutes
   // per game + usage/PER decide.
   let tier = "UNKNOWN";
+  const fringe = _wmFringeReason(name, team);
+  if (fringe && !(projMin != null && projMin >= 18)) {
+    // Two-way / camp / not on the roster: his old numbers don't describe his role. Only tonight's RW projected minutes (18+) override.
+    return { tier: "LOW", usg, per, mpg, projMin, fringe, note: "LOW · " + fringe };
+  }
   if (hasData) {
     if (projMin != null) {
       tier = projMin >= 28 ? "HIGH" : projMin >= 18 ? "MID" : "LOW";
@@ -25528,6 +25557,9 @@ async function _rwFetchDailyProj() {
   }
   return { rows: [], date: null, data: null };
 }
+// normalized name → team code, from RotoWire's depth charts. Answers "is he actually on this team's roster?".
+let _rwDepthIdx = null;
+try { _rwDepthIdx = JSON.parse(localStorage.getItem("nba_rw_depth_v1") || "null"); } catch (e) { _rwDepthIdx = null; }
 // Projection rows have no team. NBADepth lists every team's players (with RotoWire ids), so build
 // id → team and name → team from it; anything still missing falls back to the roster/CSV lookup.
 async function _rwDepthTeams() {
@@ -25545,6 +25577,7 @@ async function _rwDepthTeams() {
         Object.values(n).forEach(v => { if (v && typeof v === "object") walk(v); });
       })(t.Players || t.players || []);
     });
+    try { if (Object.keys(byName).length > 100) { _rwDepthIdx = byName; localStorage.setItem("nba_rw_depth_v1", JSON.stringify(byName)); } } catch (e) {}
   } catch (e) { console.warn("[RW API] depth teams unavailable", e && e.message); }
   return { byId, byName };
 }
