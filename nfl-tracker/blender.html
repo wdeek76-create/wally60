@@ -18091,5 +18091,314 @@ or one per line — book shorthand + odds (+ optional line + ev%)" spellcheck="f
   </div>
 </div>
 
+<script>
+// ══ RotoWire API → ROTOWIRE source (auto-pull) ══════════════════════════════
+// Fills the RW slot from RotoWire's NFL WeeklyProjections feed so the weekly RW
+// CSVs don't have to be uploaded. Same setup as the NHL/NBA blenders:
+//  • the key lives in Vercel (ROTOWIRE_API_KEY); the page calls /api/rotowire
+//  • rows come back grouped or flat — every player list is dug out at any depth
+//  • numbers rounded to 2 decimals to match the CSV / PropShop
+//  • TEST shows what the feed returns; VERIFY compares the pull to a RW CSV
+// A hand-uploaded RW MASTER wins: auto-pull only fills an empty slot or replaces
+// an earlier API load. ⚡ PULL always pulls.
+const RWN_URL_KEY = "nfl_rw_api_url";        // optional saved helper address
+const RWN_WEEK_KEY = "nfl_rw_week_override"; // optional manual week
+const RWN_SYNC_KEY = "nfl_rw_api_synced_at";
+const RWN_MIN_PLAYERS = 150;
+const RWN_EVERY_MS = 25 * 60 * 1000;
+window._rwnLast = null; // { rows, mapped, fields, week, at, via }
+
+function _rwnHosted() { try { return /^https?:$/.test(location.protocol) && !/^(localhost|127\.)/.test(location.hostname); } catch (e) { return false; } }
+function _rwnCandidates() {
+  const out = [];
+  const add = u => { if (u && !out.includes(u)) out.push(u); };
+  try { add(localStorage.getItem(RWN_URL_KEY)); } catch (e) {}
+  if (_rwnHosted()) add(location.origin + "/api/rotowire");
+  try { // the tracker's OpticOdds backend lives on the same Vercel project
+    const b = localStorage.getItem("opticodds_backend_url") || "";
+    if (/^https?:\/\/.+\/api\/odds$/i.test(b)) add(b.replace(/\/api\/odds$/i, "/api/rotowire"));
+  } catch (e) {}
+  add("https://nfl-props-tracker-1.vercel.app/api/rotowire");
+  return out;
+}
+
+// NFL week: manual override from ⚙, else ESPN's current week (regular season), else let RotoWire default
+async function _rwnWeek() {
+  try { const w = parseInt(localStorage.getItem(RWN_WEEK_KEY)); if (w >= 1 && w <= 22) return { week: w, src: "manual (⚙)" }; } catch (e) {}
+  try {
+    const r = await fetch("https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard", { cache: "no-store" });
+    const d = await r.json();
+    const w = d && d.week && d.week.number, st = d && d.season && d.season.type;
+    if (w && (st === 2 || st == null)) return { week: w, src: "ESPN current week" };
+  } catch (e) {}
+  return { week: null, src: "RotoWire default" };
+}
+
+async function _rwnFetch(week) {
+  let lastErr = null;
+  for (const base of _rwnCandidates()) {
+    const url = base + (base.includes("?") ? "&" : "?") + "feed=NFLWeeklyProj" + (week ? "&week=" + week : "");
+    try {
+      const r = await fetch(url, { cache: "no-store" });
+      const text = await r.text();
+      let data; try { data = JSON.parse(text); } catch (e) { throw new Error(`not JSON (${r.status}) ${text.slice(0, 120)}`); }
+      if (!r.ok || (data && data.error && !Array.isArray(data))) throw new Error(`${r.status} ${data.error || ""}${data.endpoint ? " · " + data.endpoint : ""}${data.body ? " · " + String(data.body).slice(0, 160) : ""}`);
+      return { data, via: base.replace(/\?.*$/, "") };
+    } catch (e) { lastErr = new Error(`${base.replace(/^https?:\/\//, "")}: ${e.message}`); }
+  }
+  throw lastErr || new Error("no RotoWire helper reachable");
+}
+
+// ---- reading the payload ----
+function _rwnPick(o, paths) {
+  for (const p of paths) {
+    let cur = o;
+    for (const part of p.split(".")) {
+      if (cur == null || typeof cur !== "object") { cur = undefined; break; }
+      const k = Object.keys(cur).find(x => x.toLowerCase() === part.toLowerCase());
+      cur = k === undefined ? undefined : cur[k];
+    }
+    if (cur != null && cur !== "" && typeof cur !== "object") return cur;
+  }
+  return null;
+}
+function _rwnName(o) {
+  const full = _rwnPick(o, ["Name", "PlayerName", "FullName", "Player.Name", "Player.FullName", "Player"]);
+  if (full) return String(full).trim();
+  const f = _rwnPick(o, ["FirstName", "Player.FirstName", "First"]), l = _rwnPick(o, ["LastName", "Player.LastName", "Last"]);
+  return f && l ? `${f} ${l}`.trim() : null;
+}
+const _rwnTeamPaths = ["Team.Code", "Team.Abbreviation", "Team.Abbr", "Team.Alias", "TeamCode", "TeamAbbr", "TeamAbbreviation", "Team", "Code", "Abbreviation"];
+function _rwnTeam(o, parent) {
+  const t = _rwnPick(o, _rwnTeamPaths.filter(p => p !== "Code" && p !== "Abbreviation")) || (parent ? _rwnPick(parent, _rwnTeamPaths) : null);
+  return t ? String(t).trim().toUpperCase() : "";
+}
+function _rwnIsPlayer(o) { return o && typeof o === "object" && !Array.isArray(o) && !!_rwnName(o); }
+// Every list of player objects at any depth; each row remembers the object that held its list (team row)
+function _rwnPlayerRows(data) {
+  const out = [];
+  const walk = (node, parent) => {
+    if (Array.isArray(node)) {
+      if (node.length && node.some(_rwnIsPlayer) && node.every(x => !x || typeof x !== "object" || !Object.values(x).some(v => Array.isArray(v) && v.some(_rwnIsPlayer)))) {
+        node.forEach(x => { if (_rwnIsPlayer(x)) out.push({ o: x, parent }); });
+      } else node.forEach(x => walk(x, parent));
+    } else if (node && typeof node === "object") {
+      Object.values(node).forEach(v => { if (v && typeof v === "object") walk(v, node); });
+    }
+  };
+  walk(data, null);
+  return out;
+}
+function _rwnFlat(o, pre, out) {
+  out = out || {}; pre = pre || "";
+  Object.keys(o || {}).forEach(k => {
+    const v = o[k], key = (pre ? pre + "." : "") + k;
+    if (v && typeof v === "object" && !Array.isArray(v)) _rwnFlat(v, key, out);
+    else if (!Array.isArray(v)) out[key] = v;
+  });
+  return out;
+}
+// Stat lookup keys on GROUP + STAT, never the bare stat ("Yards"/"TD" repeat across sections).
+const _RWN_G = { pass: ["passing", "pass"], rush: ["rushing", "rush"], rec: ["receiving", "rec"], fan: ["fantasy"] };
+const _RWN_STATS = {
+  pass_att: [_RWN_G.pass, ["attempts", "att", "atts"]],
+  pass_cmp: [_RWN_G.pass, ["completions", "comp", "comps", "cmp"]],
+  pass_yds: [_RWN_G.pass, ["yards", "yds", "yd"]],
+  pass_td:  [_RWN_G.pass, ["touchdowns", "td", "tds"]],
+  rush_att: [_RWN_G.rush, ["attempts", "att", "atts", "carries"]],
+  rush_yds: [_RWN_G.rush, ["yards", "yds", "yd"]],
+  rush_td:  [_RWN_G.rush, ["touchdowns", "td", "tds"]],
+  rec:      [_RWN_G.rec,  ["receptions", "rec", "recs", "catches"], ["receptions"]],
+  rec_yds:  [_RWN_G.rec,  ["yards", "yds", "yd"]],
+  rec_td:   [_RWN_G.rec,  ["touchdowns", "td", "tds"]],
+  targets:  [_RWN_G.rec,  ["targets", "tgt", "tgts"], ["targets"]],
+  fpts:     [_RWN_G.fan,  ["points", "pts"], ["fantasypoints", "fpts", "pprpoints", "ppr"]],
+};
+const _rwnSeg = s => String(s).toLowerCase().replace(/[^a-z]/g, "");
+function _rwnFindField(flat, stat) {
+  const [groups, names, bare] = _RWN_STATS[stat];
+  const keys = Object.keys(flat).filter(k => flat[k] !== null && flat[k] !== "" && !isNaN(parseFloat(flat[k])));
+  for (const k of keys) { // "Passing.Yards" style: group segment somewhere before the stat segment
+    const segs = k.split(".").map(_rwnSeg), last = segs[segs.length - 1], prev = segs.slice(0, -1);
+    if (names.includes(last) && prev.some(p => groups.includes(p))) return k;
+  }
+  for (const k of keys) { // "PassingYards" / "pass_yds" style: one segment = group + stat
+    const last = _rwnSeg(k.split(".").pop());
+    if (groups.some(g => names.some(n => last === g + n))) return k;
+  }
+  if (bare) for (const k of keys) { if (bare.includes(_rwnSeg(k.split(".").pop()))) return k; }
+  return null;
+}
+const _rwn2 = v => { const n = parseFloat(v); return isNaN(n) ? null : Math.round(n * 100) / 100; };
+function _rwnMapRow(o, parent, fieldsUsed) {
+  const name = _rwnName(o); if (!name) return null;
+  const flat = _rwnFlat(o);
+  const row = { rawName: name, norm: norm(name), team: _rwnTeam(o, parent),
+    pos: String(_rwnPick(o, ["Position", "Pos", "Player.Position", "PositionCode", "Position.Code", "Position.Abbreviation"]) || "").toUpperCase() };
+  let any = false;
+  Object.keys(_RWN_STATS).forEach(stat => {
+    const f = _rwnFindField(flat, stat);
+    row[stat] = f ? _rwn2(flat[f]) : null;
+    if (f) { any = any || stat !== "fpts"; if (fieldsUsed) fieldsUsed[stat] = fieldsUsed[stat] || f; }
+  });
+  if (!any) return null;
+  if (!row.pos) { if ((row.pass_att || 0) > 5 || (row.pass_yds || 0) > 50) row.pos = "QB"; else if ((row.rush_att || 0) > (row.rec || 0)) row.pos = "RB"; }
+  row.td = (row.rush_td != null || row.rec_td != null) ? (row.rush_td || 0) + (row.rec_td || 0) : null;
+  return row;
+}
+
+// ---- pull into the RW slot ----
+function _rwnStatus(msg, color) {
+  const el = document.getElementById("rwn-status"); if (el) { el.textContent = msg; el.style.color = color || "#a8b0bb"; }
+}
+async function rwnPull(force) {
+  const idx = SOURCES.findIndex(s => s.key === "rw");
+  if (idx < 0 || disabledSources.has("rw")) { _rwnStatus("ROTOWIRE source is turned off (⚙ SOURCES)"); return; }
+  const cur = slots[idx];
+  const handLoaded = cur && cur.parts && cur.parts.master && !/^RotoWire API/.test(cur.label || "");
+  if (!force && handLoaded) { _rwnStatus("RW MASTER uploaded by hand — auto-pull left it alone (⚡ PULL to replace)"); return; }
+  const btn = document.getElementById("rwn-pull-btn"); if (btn) { btn.disabled = true; btn.textContent = "PULLING…"; }
+  try {
+    const wk = await _rwnWeek();
+    const { data, via } = await _rwnFetch(wk.week);
+    const rowsRaw = _rwnPlayerRows(data);
+    const fields = {};
+    const mapped = rowsRaw.map(x => _rwnMapRow(x.o, x.parent, fields)).filter(Boolean);
+    window._rwnLast = { data, rowsRaw, mapped, fields, week: wk, at: Date.now(), via };
+    if (mapped.length < RWN_MIN_PLAYERS) throw new Error(`only ${mapped.length} players with stats read (need ${RWN_MIN_PLAYERS}) — RW slot left alone. RotoWire may not have posted week ${wk.week || "?"} yet; run TEST`);
+    const parts = Object.assign({}, (cur && cur.parts) || {});
+    parts.master = mapped;
+    const label = "RotoWire API " + new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) + (wk.week ? " · wk " + wk.week : "");
+    _rebuildPartSlot("rw", parts, label);
+    buildSlots(); updateBadges();
+    try { runMerge(); } catch (e) { console.warn("[RW API] blend failed", e); }
+    try { localStorage.setItem(RWN_SYNC_KEY, JSON.stringify({ at: Date.now(), n: mapped.length, week: wk.week })); } catch (e) {}
+    _rwnStatus(`✓ ${mapped.length} players · week ${wk.week || "default"} (${wk.src}) · ${new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`, "#22c55e");
+    if (force && typeof showToast === "function") showToast(`RotoWire API: ${mapped.length} players loaded`);
+  } catch (e) {
+    console.warn("[RW API]", e);
+    _rwnStatus("✗ " + e.message, "#f87171");
+    if (force && typeof showToast === "function") showToast("RotoWire pull failed — " + e.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = "⚡ PULL RW"; }
+  }
+}
+function rwnSettings() {
+  let curW = ""; try { curW = localStorage.getItem(RWN_WEEK_KEY) || ""; } catch (e) {}
+  const w = prompt("NFL week for the RotoWire pull.\nLeave blank to use the current week automatically (from ESPN).", curW);
+  if (w === null) return;
+  try { if (/^\d{1,2}$/.test(w.trim())) localStorage.setItem(RWN_WEEK_KEY, w.trim()); else localStorage.removeItem(RWN_WEEK_KEY); } catch (e) {}
+  rwnPull(true);
+}
+
+// ---- TEST / VERIFY (change nothing) ----
+function _rwnShow(title, text) {
+  let ov = document.getElementById("rwn-overlay");
+  if (!ov) {
+    ov = document.createElement("div"); ov.id = "rwn-overlay";
+    ov.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:99999;display:flex;align-items:flex-start;justify-content:center;padding:30px 12px;overflow:auto";
+    ov.onclick = e => { if (e.target === ov) ov.remove(); };
+    document.body.appendChild(ov);
+  }
+  ov.innerHTML = `<div style="background:#0c0d10;border:1px solid #1a1d22;border-radius:8px;max-width:980px;width:100%;padding:16px;color:#e2e8f0;font-family:'JetBrains Mono',Menlo,monospace;font-size:12px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;gap:8px"><b style="font-family:Inter,sans-serif;font-size:13px">${title}</b>
+    <span><button id="rwn-copy" style="background:#1e40af;border:none;color:#fff;border-radius:5px;padding:5px 10px;font-weight:700;cursor:pointer">COPY</button>
+    <button onclick="document.getElementById('rwn-overlay').remove()" style="background:#1a1d22;border:none;color:#fff;border-radius:5px;padding:5px 10px;font-weight:700;cursor:pointer;margin-left:6px">✕</button></span></div>
+    <pre id="rwn-pre" style="white-space:pre-wrap;margin:0;line-height:1.5"></pre></div>`;
+  document.getElementById("rwn-pre").textContent = text;
+  document.getElementById("rwn-copy").onclick = () => { try { navigator.clipboard.writeText(text); } catch (e) {} };
+}
+async function rwnTest() {
+  const out = [];
+  try {
+    const wk = await _rwnWeek();
+    out.push(`Week: ${wk.week || "(none sent — RotoWire default)"} · ${wk.src}`);
+    const { data, via } = await _rwnFetch(wk.week);
+    out.push(`Helper: ${via}`);
+    out.push(`Top level: ${Array.isArray(data) ? "array of " + data.length : "object · keys: " + Object.keys(data || {}).slice(0, 12).join(", ")}`);
+    const rowsRaw = _rwnPlayerRows(data);
+    const fields = {};
+    const mapped = rowsRaw.map(x => _rwnMapRow(x.o, x.parent, fields)).filter(Boolean);
+    out.push(`Player rows found: ${rowsRaw.length} · with stats read: ${mapped.length} (pull needs ${RWN_MIN_PLAYERS})`);
+    if (rowsRaw.length) {
+      const f = rowsRaw[0];
+      out.push(`\nRow 1 fields: ${Object.keys(f.o).join(", ")}`);
+      if (f.parent) out.push(`Row 1 parent (team row) fields: ${Object.keys(f.parent).filter(k => !Array.isArray(f.parent[k])).join(", ")}`);
+      out.push(`\nRow 1 flattened:`);
+      Object.entries(_rwnFlat(f.o)).forEach(([k, v]) => out.push(`  ${k} = ${v}`));
+      out.push(`\nStat → field it was read from:`);
+      Object.keys(_RWN_STATS).forEach(s => out.push(`  ${s.padEnd(9)} ← ${fields[s] || "(NOT FOUND)"}`));
+      const qb = mapped.find(p => p.pos === "QB" && p.pass_att), rb = mapped.find(p => p.pos === "RB"), wr = mapped.find(p => p.pos === "WR");
+      out.push(`\nRead as:`);
+      [qb, rb, wr].filter(Boolean).forEach(p => out.push(`  ${p.rawName} (${p.team} ${p.pos}) · pass ${p.pass_cmp}/${p.pass_att} ${p.pass_yds}y ${p.pass_td}td · rush ${p.rush_att}-${p.rush_yds} ${p.rush_td}td · rec ${p.rec}/${p.targets}tgt ${p.rec_yds}y ${p.rec_td}td · fpts ${p.fpts}`));
+    } else {
+      out.push(`\nNo player rows found. Raw start:\n${JSON.stringify(data).slice(0, 1500)}`);
+    }
+  } catch (e) { out.push(`ERROR: ${e.message}`); }
+  out.push(`\n(No API key in here — safe to copy/paste back to Claude.)`);
+  console.log("[RW API TEST]\n" + out.join("\n"));
+  _rwnShow("RotoWire API — TEST", out.join("\n"));
+}
+const _RWN_CMP = ["pass_cmp", "pass_att", "pass_yds", "pass_td", "rush_att", "rush_yds", "rush_td", "rec", "rec_yds", "rec_td", "targets", "fpts"];
+function rwnVerifyPick() { const i = document.getElementById("rwn-verify-file"); if (i) { i.value = ""; i.click(); } }
+async function rwnVerify(input) {
+  const file = input.files && input.files[0]; if (!file) return;
+  const text = await file.text();
+  const csv = parseRW(text);
+  if (!csv.length) { _rwnShow("VERIFY vs CSV", "Couldn't read any players from that file — is it a RotoWire weekly projections CSV?"); return; }
+  if (!window._rwnLast || !window._rwnLast.mapped || !window._rwnLast.mapped.length) await rwnPull(false);
+  const api = (window._rwnLast && window._rwnLast.mapped) || [];
+  if (!api.length) { _rwnShow("VERIFY vs CSV", "No API pull to compare against — run TEST to see why."); return; }
+  const T = s => String(s || "").toUpperCase(), P = s => String(s || "").toUpperCase().replace(/\d+$/, "");
+  const byName = {}; api.forEach(p => (byName[p.norm] = byName[p.norm] || []).push(p));
+  const used = new Set();
+  const match = c => { // name, then narrow by team, then position
+    let c1 = (byName[c.norm] || []).filter(p => !used.has(p));
+    if (c1.length > 1) { const t = c1.filter(p => T(p.team) === T(c.team)); if (t.length) c1 = t; }
+    if (c1.length > 1) { const q = c1.filter(p => P(p.pos) === P(c.pos)); if (q.length) c1 = q; }
+    return c1[0] || null;
+  };
+  let same = 0; const diffs = [], onlyCsv = [];
+  csv.forEach(c => {
+    const a = match(c); if (!a) { onlyCsv.push(`${c.rawName} (${c.team} ${c.pos})`); return; }
+    used.add(a);
+    const d = _RWN_CMP.filter(k => c[k] != null && Math.abs((a[k] ?? NaN) - Math.round(c[k] * 100) / 100) > 0.011 || (c[k] != null && a[k] == null))
+      .map(k => `${k} csv ${c[k]} / api ${a[k] == null ? "—" : a[k]}`);
+    if (d.length) diffs.push(`${c.rawName} (${c.team} ${c.pos}): ${d.join(" · ")}`); else same++;
+  });
+  const onlyApi = api.filter(p => !used.has(p)).map(p => `${p.rawName} (${p.team} ${p.pos})`);
+  const lines = [
+    `CSV: ${file.name} · ${csv.length} players   API: ${api.length} players · week ${window._rwnLast.week && window._rwnLast.week.week || "default"}`,
+    ``, `IDENTICAL: ${same}/${csv.length}   DIFFERENT: ${diffs.length}   ONLY IN CSV: ${onlyCsv.length}   ONLY IN API: ${onlyApi.length}`,
+    ``, `── Different (both numbers) ──`, ...(diffs.length ? diffs : ["(none)"]),
+    ``, `── Only in CSV ──`, ...(onlyCsv.length ? onlyCsv : ["(none)"]),
+    ``, `── Only in API ──`, ...(onlyApi.length ? onlyApi.slice(0, 200) : ["(none)"]), onlyApi.length > 200 ? `…and ${onlyApi.length - 200} more` : "",
+    ``, `(Nothing was changed.)`];
+  _rwnShow("RotoWire API — VERIFY vs CSV", lines.join("\n"));
+}
+
+// ---- UI bar above the upload slots + auto-pull (on open, then every 25 min) ----
+(function rwnInit() {
+  const sc = document.getElementById("slots-container");
+  if (sc && !document.getElementById("rwn-bar")) {
+    const bar = document.createElement("div");
+    bar.id = "rwn-bar";
+    bar.style.cssText = "display:flex;align-items:center;gap:8px;flex-wrap:wrap;background:#050507;border:1px solid #1e40af55;border-radius:8px;padding:10px 12px;margin-bottom:10px";
+    const b = "border-radius:6px;padding:6px 12px;font-size:11px;font-weight:800;cursor:pointer;font-family:Inter,sans-serif;letter-spacing:.3px";
+    bar.innerHTML = `<span style="font-size:11px;font-weight:800;color:#93c5fd;letter-spacing:1px">ROTOWIRE API</span>
+      <button id="rwn-pull-btn" onclick="rwnPull(true)" title="Pull RotoWire weekly projections into the ROTOWIRE source" style="${b};background:#22c55e;border:none;color:#050507">⚡ PULL RW</button>
+      <button onclick="rwnTest()" title="Show what the feed returns and which field each stat is read from (no key shown)" style="${b};background:transparent;border:1px solid #1a1d22;color:#d4dae3">TEST</button>
+      <button onclick="rwnVerifyPick()" title="Compare the API pull to a RotoWire CSV for the same week — changes nothing" style="${b};background:transparent;border:1px solid #1a1d22;color:#d4dae3">VERIFY vs CSV</button>
+      <button onclick="rwnSettings()" title="Set the NFL week by hand (blank = automatic)" style="${b};background:transparent;border:1px solid #1a1d22;color:#d4dae3">⚙ WEEK</button>
+      <input type="file" id="rwn-verify-file" accept=".csv" style="display:none" onchange="rwnVerify(this)">
+      <span id="rwn-status" style="font-size:11px;color:#a8b0bb;font-family:'JetBrains Mono',Menlo,monospace"></span>`;
+    sc.parentNode.insertBefore(bar, sc);
+  }
+  try { const sy = JSON.parse(localStorage.getItem(RWN_SYNC_KEY) || "null"); if (sy) _rwnStatus(`last pull: ${sy.n} players · week ${sy.week || "default"} · ${new Date(sy.at).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" })} — pulling…`); } catch (e) {}
+  setTimeout(() => rwnPull(false), 2500);
+  setInterval(() => { if (!document.hidden) rwnPull(false); }, RWN_EVERY_MS);
+})();
+</script>
+
 </body>
 </html>

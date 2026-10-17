@@ -1070,6 +1070,25 @@ function loadState() {
     const saved = localStorage.getItem(storageKey('ensemble'));
     propsBySource.ensemble = saved ? JSON.parse(saved) : [];
   } catch(e) { propsBySource.ensemble = []; }
+  // Picks saved with no real player name (e.g. "Rec Yds") can't be bet or graded — clear them.
+  // Removed rows are kept in nfl_noname_removed_backup in case anything needs restoring.
+  try {
+    const removed = [];
+    [...SOURCES, 'ensemble'].forEach(src => {
+      const arr = propsBySource[src] || [];
+      const keep = arr.filter(p => _validPlayerName(p && p.player));
+      if (keep.length !== arr.length) {
+        arr.filter(p => !_validPlayerName(p && p.player)).forEach(p => removed.push({ src, ...p }));
+        propsBySource[src] = keep;
+        localStorage.setItem(storageKey(src), JSON.stringify(keep));
+      }
+    });
+    if (removed.length) {
+      const bk = JSON.parse(localStorage.getItem('nfl_noname_removed_backup') || '[]');
+      localStorage.setItem('nfl_noname_removed_backup', JSON.stringify(bk.concat(removed).slice(-500)));
+      console.warn('[nfl-tracker] removed', removed.length, 'picks with no player name:', removed.map(p => p.src + ': ' + p.player + ' ' + p.market + ' ' + p.side + p.line));
+    }
+  } catch(e) { console.warn('No-name cleanup failed:', e); }
   // One-time: a bad deploy earlier tonight let a dormant Stok source flood the
   // Ensemble store with ~165 picks that never should have formed, inflating 133
   // confirmed-correct picks into 298+. This restores the Ensemble store to EXACTLY
@@ -1691,12 +1710,28 @@ function refreshMarketDropdown() {
   const lbl = document.getElementById('pasteSourceLabel');
   if (lbl) lbl.textContent = 'Source: ' + SOURCE_LABELS[src] + `  ·  ${pastedCountFor(src)}/${PROPSHOP_MARKET_ORDER.length} markets done this week`;
 }
+// Paste Props pressed on Ensemble: pick the source, then the normal paste box opens for it
+function _pickPasteSource() {
+  const old = document.getElementById('pickSrcOv'); if (old) old.remove();
+  const ov = document.createElement('div');
+  ov.id = 'pickSrcOv';
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px';
+  ov.onclick = e => { if (e.target === ov) ov.remove(); };
+  const btn = src => `<button class="btn" style="margin:4px" onclick="document.getElementById('pickSrcOv').remove();setSource('${src}');openPasteModal()">${escHtml(SOURCE_LABELS[src] || src)}</button>`;
+  ov.innerHTML = `<div style="background:var(--bg2,#1c1c1c);border:1px solid var(--border,#333);border-radius:10px;padding:18px;max-width:520px;width:100%">
+    <div style="font-weight:700;margin-bottom:4px">Paste to which source?</div>
+    <div style="font-size:12px;color:var(--text2);margin-bottom:12px">Ensemble picks build themselves from the sources — paste the PropShop board into the source it's for.</div>
+    <div>${PROPSHOP_SOURCES.map(btn).join('')}</div>
+    <div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border,#333)">${SOURCES.filter(x => !PROPSHOP_SOURCES.includes(x)).map(btn).join('')}</div>
+  </div>`;
+  document.body.appendChild(ov);
+}
 function _syncSkipBtn() { const b = document.getElementById('skipMarketBtn'); if (b) b.style.display = PROPSHOP_SOURCES.includes(currentSource) ? '' : 'none'; }
 function openPasteModal() {
   _syncSkipBtn();
   const _h = document.getElementById('pasteMarketHint'); if (_h) _h.textContent = '';
   if (currentSource === 'ensemble') {
-    alert('Ensemble props are auto-generated from the 4 PropShop sources. Paste to those sources instead.');
+    _pickPasteSource(); // Ensemble is built from the sources — ask which one this paste is for
     return;
   }
   const info = document.getElementById('parseInfo');
@@ -1980,6 +2015,24 @@ const _PROPSHOP_BOOKS = new Set([
   'novig','prophetx','propbuilder','prop builder','fliff','betrivers','pointsbet',
   'circa','betcris','bookmaker','bet365','betjack','superbook','williamhill','kalshi'
 ]);
+
+// ---- Player-name sanity: a market label ("Rec Yds") or junk in the player slot means a parser
+// lost the real name. Such rows are never imported (and old ones are cleared on load).
+const _MKT_WORDS = new Set(('pass passing rush rushing rec recs receiving receptions reception yds yd yards att atts attempts ' +
+  'td tds touchdown touchdowns comp comps completions completion cmp interceptions interception ints int anytime longest long ' +
+  'kicking kick kicker points pts field goals goal fg fgs made fantasy total carries catches targets tgt over under o u player props prop').split(' '));
+function _isMarketLike(s) {
+  const words = String(s || '').toLowerCase().replace(/[^a-z\s]/g, ' ').split(/\s+/).filter(Boolean);
+  return words.length > 0 && words.every(w => _MKT_WORDS.has(w));
+}
+function _validPlayerName(s) {
+  const n = String(s || '').trim();
+  if (n.length < 4 || !/[a-z]/i.test(n)) return false;
+  if (/[\d%@$]|\bvs\.?\b/i.test(n)) return false;          // digits, odds, matchups
+  if (n.split(/\s+/).length < 2) return false;              // need first + last
+  if (_isMarketLike(n)) return false;
+  return true;
+}
 
 // Prop Builder isn't a book we can bet — never take it as the play's book/price.
 const _isPropBuilder = b => /^(pb|props?\s*builders?)$/i.test(String(b || '').trim());
@@ -2727,7 +2780,10 @@ function parseDimers(raw, minEdge) {
       const matchup = block[2] || '';           // "Patriots vs. Seahawks"
       const dateStr = block[4] || '';           // "Sep 9, 8:20 PM ET"
       const team = block[5] || '';
-      const betLine = block[6] || '';           // "TreVeyon Henderson Over 5.5 Rushing Attempts"
+      // Bet line found by its shape ("… Over 5.5 …" / "… Score a Touchdown"), not a fixed position —
+      // an extra line above it used to shift everything and lose the player.
+      const _betI = block.findIndex((l, k) => k >= 3 && (/\s(Over|Under)\s+-?\d/i.test(l) || /score (a|\d+\+?) touchdowns?$/i.test(l)));
+      const betLine = _betI >= 0 ? block[_betI] : (block[6] || ''); // "TreVeyon Henderson Over 5.5 Rushing Attempts"
 
       // Parse bet line. Two shapes:
       //   "Player Name Over/Under X Market Name" (with a numeric line)
@@ -2748,6 +2804,19 @@ function parseDimers(raw, minEdge) {
         continue; // silently skip exotic "Score N+ Touchdowns" markets
       } else {
         errors.push('Bad bet line: '+betLine); continue;
+      }
+      // Name slot holds a market label ("Rec Yds Under 30.5 Receiving Yards") -> the real name is on
+      // another line of this pick: take the closest line before the bet line that is a real name
+      // and isn't one of the two teams.
+      if (!_validPlayerName(player)) {
+        const betIdx = block.indexOf(betLine);
+        const teamWords = (matchup + ' ' + team).toLowerCase();
+        const LABEL = /^(nfl|edge|projection|best odds|odds|probability|win probability|implied probability|bet now|fair odds|our pick|trend)$/i;
+        const ok = l => _validPlayerName(l) && !LABEL.test(l) && !teamWords.includes(l.toLowerCase()) && !/ vs\. /.test(l);
+        const before = block.slice(3, betIdx < 0 ? block.length : betIdx).filter(ok);
+        const recovered = before.length ? before[before.length - 1] : (block.slice((betIdx < 0 ? 0 : betIdx) + 1).find(ok) || null);
+        if (recovered) { console.log('[dimers] name recovered:', JSON.stringify(player), '→', recovered); player = recovered; }
+        else { errors.push('No player name in Dimers pick: ' + betLine); console.warn('[dimers] no player name found in block:', block); continue; }
       }
       const marketKey = DIMERS_MKT_ALIASES[marketRaw];
       if (!marketKey) { errors.push('Unknown Dimers market: '+marketRaw); continue; }
@@ -2843,8 +2912,14 @@ async function parsePaste() {
     info.textContent = 'Unsupported source.'; info.className='parse-info err'; return;
   }
 
-  const { results: parsed, errors } = parseResult;
-  const marketNote = parseResult._marketNote ? parseResult._marketNote + ' · ' : '';
+  let { results: parsed, errors } = parseResult;
+  // Never import a row whose "player" isn't a real name (a market label means the parser lost the name)
+  const _noName = parsed.filter(p => !_validPlayerName(p.player));
+  if (_noName.length) {
+    console.warn('[parse] held back — no real player name (send this paste to Claude):', _noName.map(p => `${p.player} | ${p.market} ${p.side}${p.line} ${p.odds} | ${p.game}`));
+    parsed = parsed.filter(p => _validPlayerName(p.player));
+  }
+  const marketNote = (_noName.length ? `⚠ ${_noName.length} held back: no player name (see console) · ` : '') + (parseResult._marketNote ? parseResult._marketNote + ' · ' : '');
 
   if (parsed.length === 0) {
     let msg = marketNote + `No props found above ${minEdge}% edge.` + (PROPSHOP_SOURCES.includes(currentSource) ? ' Use "Skip market" to move on.' : '');
@@ -4288,6 +4363,17 @@ function renderEnsembleTiered(arr, tableFn, compact) {
   if (!html) html = tableFn(arr, compact);
   return html;
 }
+// "PIT · Steelers @ Buccaneers · Sun Oct 18 · 1:00 PM" — date on every pick, empty parts skipped
+function _pickDateLabel(d) {
+  const m = String(d || '').match(/^(\d{4})-(\d{2})-(\d{2})/); if (!m) return '';
+  const dt = new Date(+m[1], +m[2] - 1, +m[3]);
+  return ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][dt.getDay()] + ' ' + ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][dt.getMonth()] + ' ' + dt.getDate();
+}
+function _pickSubline(p) {
+  const dl = _pickDateLabel(p.date);
+  return [p.team ? escHtml(p.team) : '', p.game ? escHtml(p.game) : '', dl ? `<span style="color:var(--text);font-weight:600">${dl}</span>` : '', p.gameTime ? escHtml(p.gameTime) : '']
+    .filter(Boolean).join(' · ');
+}
 function renderPendingTable(arr) {
   const rows = arr.map(p => {
     const sideCls = p.side === 'O' ? 'side-o' : 'side-u';
@@ -4300,7 +4386,7 @@ function renderPendingTable(arr) {
       <td>
         <div class="player-cell">
           <span class="player-name">${escHtml(p.player)}${agreeBadges(p)}</span>
-          <span class="player-sub">${escHtml(p.team||'')} · ${escHtml(p.game||'')}${p.gameTime?' · '+escHtml(p.gameTime):''}</span>
+          <span class="player-sub">${_pickSubline(p)}</span>
         </div>
       </td>
       <td><span class="mkt-tag ${(mInfo.pos||'').toLowerCase()}">${mInfo.label}</span></td>
@@ -4410,7 +4496,7 @@ function renderPropTable(arr, compact) {
       <td>
         <div class="player-cell">
           <span class="player-name">${escHtml(p.player)}${agreeBadges(p)}</span>
-          <span class="player-sub">${escHtml(p.team||'')} · ${escHtml(p.game||'')}${p.gameTime?' · '+escHtml(p.gameTime):''}</span>
+          <span class="player-sub">${_pickSubline(p)}</span>
         </div>
       </td>
       <td><span class="mkt-tag ${(mInfo.pos||'').toLowerCase()}">${mInfo.label}</span></td>
