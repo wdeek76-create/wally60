@@ -805,7 +805,9 @@ const MARKET_MAP = {
 
 const _YARDAGE_MARKETS = new Set(['rec_yds', 'rush_yds', 'pass_yds']);
 // PropShop's market dropdown order — this is the exact list & order the paste modal shows.
-const PROPSHOP_MARKET_ORDER = ['pass_att', 'pass_cmp', 'pass_td', 'pass_yds', 'rec_yds', 'rec', 'rush_att', 'rush_yds', 'anytime_td'];
+// Anytime TD is no longer tracked (any source) — Pass TD still is.
+const NOT_TRACKED_MARKETS = new Set(['anytime_td']);
+const PROPSHOP_MARKET_ORDER = ['pass_att', 'pass_cmp', 'pass_td', 'pass_yds', 'rec_yds', 'rec', 'rush_att', 'rush_yds'];
 const PROPSHOP_MARKET_LABELS = {
   pass_att: 'Pass Attempts',
   pass_cmp: 'Completions',
@@ -1070,6 +1072,25 @@ function loadState() {
     const saved = localStorage.getItem(storageKey('ensemble'));
     propsBySource.ensemble = saved ? JSON.parse(saved) : [];
   } catch(e) { propsBySource.ensemble = []; }
+  // Anytime TD isn't tracked anymore: clear saved anytime TD picks from every source + Ensemble.
+  // Removed rows are kept in nfl_anytime_td_removed_backup in case anything needs restoring.
+  try {
+    const gone = [];
+    [...SOURCES, 'ensemble'].forEach(src => {
+      const arr = propsBySource[src] || [];
+      const keep = arr.filter(p => !(p && NOT_TRACKED_MARKETS.has(p.market)));
+      if (keep.length !== arr.length) {
+        arr.filter(p => p && NOT_TRACKED_MARKETS.has(p.market)).forEach(p => gone.push({ src, ...p }));
+        propsBySource[src] = keep;
+        localStorage.setItem(storageKey(src), JSON.stringify(keep));
+      }
+    });
+    if (gone.length) {
+      const bk = JSON.parse(localStorage.getItem('nfl_anytime_td_removed_backup') || '[]');
+      localStorage.setItem('nfl_anytime_td_removed_backup', JSON.stringify(bk.concat(gone).slice(-2000)));
+      console.warn('[nfl-tracker] removed', gone.length, 'anytime TD picks (backed up in nfl_anytime_td_removed_backup)');
+    }
+  } catch(e) { console.warn('Anytime TD cleanup failed:', e); }
   // Picks saved with no real player name (e.g. "Rec Yds") can't be bet or graded — clear them.
   // Removed rows are kept in nfl_noname_removed_backup in case anything needs restoring.
   try {
@@ -1792,7 +1813,7 @@ function closeManageModal() { document.getElementById('manageModal').classList.r
 function openManualAddModal() {
   const mSel = document.getElementById('maMarket');
   if (mSel && !mSel.options.length) {
-    mSel.innerHTML = Object.keys(MARKET_MAP).map(k => `<option value="${k}">${MARKET_MAP[k].label}</option>`).join('');
+    mSel.innerHTML = Object.keys(MARKET_MAP).filter(k => !NOT_TRACKED_MARKETS.has(k)).map(k => `<option value="${k}">${MARKET_MAP[k].label}</option>`).join('');
   }
   const dEl = document.getElementById('maDate');
   if (dEl && !dEl.value) dEl.value = getTodayStr();
@@ -2908,6 +2929,7 @@ async function parsePaste() {
     let marketKey = document.getElementById('pasteMarket').value;
     const det = detectMarketFromPaste(raw);
     if (det && det.unknown) { info.textContent = `Paste says "${det.header}" — not a market this tool tracks. Nothing imported.`; info.className='parse-info err'; return; }
+    if (det && NOT_TRACKED_MARKETS.has(det.key)) { info.textContent = `This is the ${det.label} board — anytime TDs aren't tracked anymore. Nothing imported.`; info.className='parse-info warn'; return; }
     if (det && det.key !== marketKey) {
       // The paste says what it is — trust it, sync the dropdown, and say so
       marketKey = det.key;
@@ -2922,13 +2944,15 @@ async function parsePaste() {
   }
 
   let { results: parsed, errors } = parseResult;
+  const _notTracked = parsed.filter(p => NOT_TRACKED_MARKETS.has(p.market)).length;
+  if (_notTracked) parsed = parsed.filter(p => !NOT_TRACKED_MARKETS.has(p.market));
   // Never import a row whose "player" isn't a real name (a market label means the parser lost the name)
   const _noName = parsed.filter(p => !_validPlayerName(p.player));
   if (_noName.length) {
     console.warn('[parse] held back — no real player name (send this paste to Claude):', _noName.map(p => `${p.player} | ${p.market} ${p.side}${p.line} ${p.odds} | ${p.game}`));
     parsed = parsed.filter(p => _validPlayerName(p.player));
   }
-  const marketNote = (_noName.length ? `⚠ ${_noName.length} held back: no player name (see console) · ` : '') + (parseResult._marketNote ? parseResult._marketNote + ' · ' : '');
+  const marketNote = (_noName.length ? `⚠ ${_noName.length} held back: no player name (see console) · ` : '') + (_notTracked ? `${_notTracked} anytime TD skipped · ` : '') + (parseResult._marketNote ? parseResult._marketNote + ' · ' : '');
 
   if (parsed.length === 0) {
     let msg = marketNote + `No props found above ${minEdge}% edge.` + (PROPSHOP_SOURCES.includes(currentSource) ? ' Use "Skip market" to move on.' : '');
@@ -3957,7 +3981,9 @@ function kpiStrip(arr, label) {
 // ===== DASHBOARD (MLB-style tables + FTN-style edge buckets) =====
 function renderDashboard() {
   const wrap = document.getElementById('wrap');
-  const markets = [...new Set(props.map(p => p.market))].sort();
+  // Every panel lists most profitable → least profitable (P&L, both sides combined where split O/U)
+  const _pnlOf = arr => calcStats(arr).pnl;
+  const markets = [...new Set(props.map(p => p.market))].sort((a, b) => _pnlOf(props.filter(p => p.market === b)) - _pnlOf(props.filter(p => p.market === a)) || String(a).localeCompare(b));
   // By market, split Over vs Under (same shape as the Edge Buckets O/U table below)
   const mktSideRows = markets.map(m => {
     const mp = props.filter(p => p.market === m);
@@ -4007,6 +4033,8 @@ function renderDashboard() {
     { label: '15-20%',  min: 15, max: 20 },
     { label: '20%+',    min: 20, max: 9999 },
   ];
+  const _inBucket = b => props.filter(p => (p.ev||0) >= b.min && (p.ev||0) < b.max);
+  buckets.sort((a, b) => _pnlOf(_inBucket(b)) - _pnlOf(_inBucket(a)));
   const bucketRows = buckets.map(b => {
     const bp = props.filter(p => (p.ev||0) >= b.min && (p.ev||0) < b.max);
     if (bp.length === 0) return '';
@@ -4068,7 +4096,7 @@ function renderDashboard() {
       <div class="panel-body compact">
         <table class="tbl">
           <thead><tr><th>Tier</th><th class="c">W-L</th><th class="c">W%</th><th class="r">P&L</th><th class="r">ROI</th><th class="c">Bets</th></tr></thead>
-          <tbody>${row('10%+ (all sources)', strong, 'strong')}${row('5–10%', value, 'value')}</tbody>
+          <tbody>${[['10%+ (all sources)', strong, 'strong'], ['5–10%', value, 'value']].sort((a, b) => _pnlOf(b[1]) - _pnlOf(a[1])).map(x => row(x[0], x[1], x[2])).join('')}</tbody>
         </table>
       </div>
     </div>`;
@@ -4110,8 +4138,7 @@ function renderDashboard() {
           <table class="tbl">
             <thead><tr><th>Side</th><th class="c">W-L</th><th class="c">W%</th><th class="r">P&L</th><th class="r">ROI</th><th class="c">Bets</th></tr></thead>
             <tbody>
-              ${oStats.total ? dirRow('Over', oStats, 'var(--teal)') : ''}
-              ${uStats.total ? dirRow('Under', uStats, 'var(--red)') : ''}
+              ${[['Over', oStats, 'var(--teal)'], ['Under', uStats, 'var(--red)']].filter(x => x[1].total).sort((a, b) => b[1].pnl - a[1].pnl).map(x => dirRow(x[0], x[1], x[2])).join('')}
               ${!oStats.total && !uStats.total ? '<tr><td colspan="6" class="c dim" style="padding:20px">No bets yet</td></tr>' : ''}
             </tbody>
           </table>
@@ -4155,7 +4182,7 @@ function renderDashboard() {
 }
 
 // ===== DASHBOARD BREAKDOWNS: source combos (ensemble), players, lines per market =====
-window._dashBD = window._dashBD || { mkt: 'rec', sort: 'bets', showAll: false };
+window._dashBD = window._dashBD || { mkt: 'rec', sort: 'best', showAll: false };
 function _bdCells(st) {
   const pnlC = st.pnl > 0 ? 'pos' : st.pnl < 0 ? 'neg' : 'muted';
   const roiC = st.roi !== null && st.roi >= 0 ? 'pos' : st.roi !== null ? 'neg' : 'muted';
@@ -4170,7 +4197,9 @@ const _bdPanel = (title, sub, body) => `<div class="panel"><div class="panel-hea
 function _bdSrcName(src) { return SOURCE_LABELS[src] || src; }
 function _dashBreakdowns(arr) {
   const out = [];
+  const _pnlOf = a => calcStats(a).pnl;
   const bySettled = (a, b) => b.st.settled - a.st.settled || b.st.total - a.st.total;
+  const byPnl = (a, b) => b.st.pnl - a.st.pnl || bySettled(a, b);
 
   // 1) Ensemble: exact source combos + each source's record when it was in the pick
   if (currentSource === 'ensemble') {
@@ -4182,9 +4211,9 @@ function _dashBreakdowns(arr) {
       (combos[k] = combos[k] || { srcs, picks: [] }).picks.push(p);
       srcs.forEach(x => (perSrc[x] = perSrc[x] || []).push(p));
     });
-    const comboRows = Object.values(combos).map(c => ({ ...c, st: calcStats(c.picks) })).sort(bySettled)
+    const comboRows = Object.values(combos).map(c => ({ ...c, st: calcStats(c.picks) })).sort(byPnl)
       .map(c => `<tr><td><span class="mono dim" style="margin-right:6px">${c.srcs.length}×</span>${c.srcs.map(x => escHtml(_bdSrcName(x))).join(' + ')}</td>${_bdCells(c.st)}</tr>`).join('');
-    const srcRows = Object.entries(perSrc).map(([src, picks]) => ({ src, st: calcStats(picks) })).sort(bySettled)
+    const srcRows = Object.entries(perSrc).map(([src, picks]) => ({ src, st: calcStats(picks) })).sort(byPnl)
       .map(r => `<tr><td>${escHtml(_bdSrcName(r.src))}</td>${_bdCells(r.st)}</tr>`).join('');
     out.push(_bdPanel('Source Combos', 'exact set of sources that agreed on the pick',
       `<table class="tbl">${_bdHead('Sources')}<tbody>${comboRows || '<tr><td colspan="6" class="c dim" style="padding:20px">No ensemble picks yet</td></tr>'}</tbody></table>`));
@@ -4197,7 +4226,7 @@ function _dashBreakdowns(arr) {
   arr.forEach(p => { if (!p.player) return; const k = normName(p.player); (byPl[k] = byPl[k] || { name: p.player, team: '', picks: [] }).picks.push(p); if (p.team) byPl[k].team = p.team; });
   const S = window._dashBD;
   const plList = Object.values(byPl).map(x => ({ ...x, st: calcStats(x.picks) }));
-  plList.sort(S.sort === 'best' ? (a, b) => b.st.pnl - a.st.pnl || bySettled(a, b) : S.sort === 'worst' ? (a, b) => a.st.pnl - b.st.pnl || bySettled(a, b) : bySettled);
+  plList.sort(S.sort === 'bets' ? bySettled : S.sort === 'worst' ? (a, b) => a.st.pnl - b.st.pnl || bySettled(a, b) : byPnl);
   const LIMIT = 30;
   const plRows = plList.map((x, i) => {
     const mk = [...new Set(x.picks.map(p => (MARKET_MAP[p.market] || { label: p.market }).label))].join(', ');
@@ -4205,10 +4234,10 @@ function _dashBreakdowns(arr) {
       <td><strong>${escHtml(x.name)}</strong> <span class="dim" style="font-size:10px">${escHtml(x.team || '')}</span><div class="dim" style="font-size:10px">${escHtml(mk)}</div></td>${_bdCells(x.st)}</tr>`;
   }).join('');
   const sortBtn = (k, lbl) => `<button class="btn ghost" style="padding:3px 8px;font-size:11px;${S.sort === k ? 'border-color:var(--teal);color:var(--teal)' : ''}" onclick="_dashBD.sort='${k}';render()">${lbl}</button>`;
-  out.push(_bdPanel('Players', `${plList.length} players`,
+  out.push(_bdPanel('Players', `${plList.length} players · ${S.sort === 'bets' ? 'most bets first' : S.sort === 'worst' ? 'worst P&L first' : 'most profitable first'}`,
     `<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
        <input class="mini-in" placeholder="Search player or team…" oninput="_bdFilterPlayers(this.value)" style="width:200px">
-       ${sortBtn('bets', 'Most bets')}${sortBtn('best', 'Best P&L')}${sortBtn('worst', 'Worst P&L')}
+       ${sortBtn('best', 'Best P&L')}${sortBtn('worst', 'Worst P&L')}${sortBtn('bets', 'Most bets')}
        ${plList.length > LIMIT ? `<button class="btn ghost" style="padding:3px 8px;font-size:11px" onclick="_dashBD.showAll=!_dashBD.showAll;render()">${S.showAll ? 'Show top ' + LIMIT : 'Show all ' + plList.length}</button>` : ''}
      </div>
      <table class="tbl" id="bdPlayers">${_bdHead('Player')}<tbody>${plRows || '<tr><td colspan="6" class="c dim" style="padding:20px">No picks yet</td></tr>'}</tbody></table>`));
@@ -4218,7 +4247,8 @@ function _dashBreakdowns(arr) {
     .sort((a, b) => PROPSHOP_MARKET_ORDER.indexOf(a) - PROPSHOP_MARKET_ORDER.indexOf(b) || String(a).localeCompare(b));
   if (mkts.length && !mkts.includes(S.mkt)) S.mkt = mkts.includes('rec') ? 'rec' : mkts[0];
   const mp = arr.filter(p => p.market === S.mkt && p.line != null && !isNaN(Number(p.line)));
-  const lines = [...new Set(mp.map(p => Number(p.line)))].sort((a, b) => a - b);
+  const _atLine = ln => mp.filter(p => Number(p.line) === ln);
+  const lines = [...new Set(mp.map(p => Number(p.line)))].sort((a, b) => _pnlOf(_atLine(b)) - _pnlOf(_atLine(a)) || a - b);
   const sideCells = st => st.total ? _bdCells(st) : '<td colspan="5" class="c dim">—</td>';
   const lineRows = lines.map(ln => {
     const at = mp.filter(p => Number(p.line) === ln);
@@ -4226,7 +4256,7 @@ function _dashBreakdowns(arr) {
   }).join('');
   const mSel = `<select class="sel" onchange="_dashBD.mkt=this.value;render()">${mkts.map(m => `<option value="${m}" ${m === S.mkt ? 'selected' : ''}>${escHtml((MARKET_MAP[m] || { label: m }).label)}</option>`).join('')}</select>`;
   const subHead = `<th class="c" style="font-size:9px">W-L</th><th class="c" style="font-size:9px">W%</th><th class="r" style="font-size:9px">P&L</th><th class="r" style="font-size:9px">ROI</th><th class="c" style="font-size:9px">Bets</th>`;
-  out.push(_bdPanel('Lines', 'record at each line, Over vs Under',
+  out.push(_bdPanel('Lines', 'record at each line, Over vs Under · most profitable first',
     `<div style="margin-bottom:8px">${mSel}</div>
      <table class="tbl"><thead><tr><th rowspan="2" style="vertical-align:bottom">Line</th><th class="c" colspan="5" style="border-right:1px solid var(--border2)"><span class="side-o">OVER</span></th><th class="c" colspan="5"><span class="side-u">UNDER</span></th></tr><tr>${subHead}${subHead}</tr></thead>
      <tbody>${lineRows || '<tr><td colspan="11" class="c dim" style="padding:20px">No picks in this market</td></tr>'}</tbody></table>`));

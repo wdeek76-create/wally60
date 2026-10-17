@@ -9142,7 +9142,7 @@ function renderPlayerAnalytics() {
   const statRows = Object.entries(byStat)
     .map(([k, s]) => finalize(s, k))
     .filter(s => s.total >= 3)
-    .sort((a, b) => a.pl - b.pl);
+    .sort((a, b) => b.pl - a.pl); // most profitable first
 
   // ── Render ──
   const playerCount = Object.keys(byPlayer).length;
@@ -9513,18 +9513,21 @@ function renderSrcAnalytics() {
   // ── Build all tables ──
 
   // SOURCES — solo rows + combos rows + fades rows in three small tables
-  const soloRows = SRC_KEYS.map(k => row(SRC_LABELS[k], solo[k])).join("");
+  // Every table lists most profitable → least profitable
+  const _byPl = (get) => (a, b) => (get(b) || 0) - (get(a) || 0);
+  const soloRows = SRC_KEYS.slice().sort(_byPl(k => solo[k].pl)).map(k => row(SRC_LABELS[k], solo[k])).join("");
   const sortedCombos = Object.entries(combos).sort((a, b) => b[1].stats.pl - a[1].stats.pl);
   const comboRows = sortedCombos.map(([k, v]) => row(comboLabel(v.sources), v.stats, { featured: v.sources.length === 3 })).join("");
-  const fadeRows = SRC_KEYS.map(k => row(`Fade ${SRC_LABELS[k]}`, fade[k], { dim: true })).join("");
+  const fadeRows = SRC_KEYS.slice().sort(_byPl(k => fade[k].pl)).map(k => row(`Fade ${SRC_LABELS[k]}`, fade[k], { dim: true })).join("");
 
   // BY MARKET — one row per stat × source × all/overs/unders
-  const STATS_ORDER = STATS.map(k => STAT_LABEL[k]);
+  const _statPl = st => SRC_KEYS.reduce((a, k) => a + ((byStat[st] && byStat[st][k] && byStat[st][k].pl) || 0), 0);
+  const STATS_ORDER = STATS.map(k => STAT_LABEL[k]).sort((a, b) => _statPl(b) - _statPl(a));
   const byMarketRows = STATS_ORDER
     .filter(st => byStat[st])
     .map(st => {
       const statRows = [];
-      SRC_KEYS.forEach(k => {
+      SRC_KEYS.slice().sort(_byPl(k => byStat[st][k] && byStat[st][k].pl)).forEach(k => {
         const all = byStat[st][k];
         if (all.total === 0) return;
         statRows.push(row(`${st} · ${SRC_LABELS[k]}`, all));
@@ -9552,7 +9555,8 @@ function renderSrcAnalytics() {
     }).filter(Boolean).join("");
 
   // EDGE MAGNITUDE — one row per source per bucket
-  const edgeRows = SRC_KEYS.map(k => {
+  const _edgePl = k => { const b = edgeBuckets[k]; return (b.low.pl || 0) + (b.med.pl || 0) + (b.high.pl || 0); };
+  const edgeRows = SRC_KEYS.slice().sort(_byPl(_edgePl)).map(k => {
     const b = edgeBuckets[k];
     const r = [];
     if (b.low.total) r.push(row(`<span style="color:#7dd3fc;font-weight:600;">${SRC_LABELS[k]}</span> <span style="color:#525a64;">·</span> 0–5% edge`, b.low));
@@ -9562,28 +9566,26 @@ function renderSrcAnalytics() {
   }).join("");
 
   // BY DIRECTION — over vs under per source
-  const bySideRows = ["over", "under"].map(side => {
-    const r = SRC_KEYS.map(k => {
+  const bySideRows = ["over", "under"].flatMap(side => SRC_KEYS.map(k => ({ side, k, st: bySide[side][k] })))
+    .sort((a, b) => (b.st.pl || 0) - (a.st.pl || 0))
+    .map(({ side, k, st }) => {
       const arrow = side === "over" ? "↑" : "↓";
       const dirColor = side === "over" ? "#4ade80" : "#f87171";
-      return row(`<span style="color:${dirColor};font-weight:700;">${arrow}</span> ${SRC_LABELS[k]} <span style="color:#525a64;font-size:10px;">${side}s</span>`, bySide[side][k]);
+      return row(`<span style="color:${dirColor};font-weight:700;">${arrow}</span> ${SRC_LABELS[k]} <span style="color:#525a64;font-size:10px;">${side}s</span>`, st);
     }).join("");
-    return r;
-  }).join("");
 
   // SIGNALS — trends + injury context together
   const signalRows = [
-    trendBuckets.matched.total ? row(`<span style="color:#a78bfa;">●</span> Trend matched`, trendBuckets.matched) : "",
-    trendBuckets.strong60.total ? row(`<span style="color:#a78bfa;">●●</span> ≥60% trend`, trendBuckets.strong60) : "",
-    trendBuckets.strong70.total ? row(`<span style="color:#a78bfa;">●●●</span> ≥70% trend`, trendBuckets.strong70) : "",
-    trendBuckets.strong80.total ? row(`<span style="color:#a78bfa;">●●●●</span> ≥80% trend`, trendBuckets.strong80, { featured: true }) : "",
-    trendBuckets.unmatched.total ? row(`<span style="color:#525a64;">○</span> No trend`, trendBuckets.unmatched, { dim: true }) : "",
-    injCtx.ceilingOver.total ? row(`<span style="color:#22c55e;">↑</span> Ceiling · overs`, injCtx.ceilingOver) : "",
-    injCtx.ceilingUnder.total ? row(`<span style="color:#22c55e;">↑</span> Ceiling · unders`, injCtx.ceilingUnder) : "",
-    injCtx.floorOver.total ? row(`<span style="color:#f87171;">↓</span> Floor · overs`, injCtx.floorOver) : "",
-    injCtx.floorUnder.total ? row(`<span style="color:#f87171;">↓</span> Floor · unders`, injCtx.floorUnder) : "",
-  ].join("");
-
+    [trendBuckets.matched, () => row(`<span style="color:#a78bfa;">●</span> Trend matched`, trendBuckets.matched)],
+    [trendBuckets.strong60, () => row(`<span style="color:#a78bfa;">●●</span> ≥60% trend`, trendBuckets.strong60)],
+    [trendBuckets.strong70, () => row(`<span style="color:#a78bfa;">●●●</span> ≥70% trend`, trendBuckets.strong70)],
+    [trendBuckets.strong80, () => row(`<span style="color:#a78bfa;">●●●●</span> ≥80% trend`, trendBuckets.strong80, { featured: true })],
+    [trendBuckets.unmatched, () => row(`<span style="color:#525a64;">○</span> No trend`, trendBuckets.unmatched, { dim: true })],
+    [injCtx.ceilingOver, () => row(`<span style="color:#22c55e;">↑</span> Ceiling · overs`, injCtx.ceilingOver)],
+    [injCtx.ceilingUnder, () => row(`<span style="color:#22c55e;">↑</span> Ceiling · unders`, injCtx.ceilingUnder)],
+    [injCtx.floorOver, () => row(`<span style="color:#f87171;">↓</span> Floor · overs`, injCtx.floorOver)],
+    [injCtx.floorUnder, () => row(`<span style="color:#f87171;">↓</span> Floor · unders`, injCtx.floorUnder)],
+  ].filter(([st]) => st && st.total).sort((a, b) => (b[0].pl || 0) - (a[0].pl || 0)).map(([, f]) => f()).join("");
   // ── SPLITS + DISAGREEMENT ──
   // Bucket settled bets by their saved splitsSnap (L10 hit rate, volatility CV,
   // line margin in σ) and by whether trends + splits agreed with the pick.
@@ -18445,7 +18447,7 @@ async function rwnVerify(input) {
 // Kept in sync: re-runs on load, whenever the tracker saves, and when this tab comes back into view.
 // Tracker's grade wins; a grade set here is kept while the tracker still has the pick pending.
 const _ENS_SRC = { ftn: "ftn", rotowire: "rw", "4for4": "ff4", stok: "stok", dimers: "dimers", rts: "rts", fantasy_points: "fpts" };
-const _ENS_STAT = { pass_att: "PASS ATT", pass_cmp: "PASS CMP", pass_td: "PASS TD", pass_yds: "PASS YDS", rec_yds: "REC YDS", rec: "REC", rush_att: "RUSH ATT", rush_yds: "RUSH YDS", anytime_td: "TD" };
+const _ENS_STAT = { pass_att: "PASS ATT", pass_cmp: "PASS CMP", pass_td: "PASS TD", pass_yds: "PASS YDS", rec_yds: "REC YDS", rec: "REC", rush_att: "RUSH ATT", rush_yds: "RUSH YDS" }; // anytime TD isn't tracked
 const _ENS_RES = { win: "hit", loss: "miss", push: "void", skip: "void" };
 function _ensId(p) { // numeric (the tracker's own id), clear of the blender's Date.now() ids
   const n = Number(p.id);
@@ -18521,6 +18523,22 @@ function syncEnsembleBets(quiet) {
   }
   return added + updated + removed;
 }
+// Anytime TD isn't tracked anymore: clear blender bets on the TD stat (anytime TD — PASS TD stays) so
+// they drop out of the Tracker totals and every source's Source / Player Analytics record.
+// Removed bets are kept in nfl_blender_td_removed_backup in case anything needs restoring.
+(function removeAnytimeTdBets() {
+  try {
+    const isTd = b => b && String(b.stat || "").toUpperCase().trim() === "TD";
+    const gone = bets.filter(isTd);
+    if (!gone.length) return;
+    const bk = JSON.parse(localStorage.getItem("nfl_blender_td_removed_backup") || "[]");
+    localStorage.setItem("nfl_blender_td_removed_backup", JSON.stringify(bk.concat(gone).slice(-2000)));
+    for (let i = bets.length - 1; i >= 0; i--) if (isTd(bets[i])) bets.splice(i, 1);
+    saveBets();
+    console.warn("[blender] removed", gone.length, "anytime TD bets (backed up in nfl_blender_td_removed_backup)");
+    try { if (currentTab === "tracker") renderTracker(); } catch (e) {}
+  } catch (e) { console.warn("[blender] TD cleanup failed", e); }
+})();
 (function ensSyncInit() {
   try { syncEnsembleBets(true); } catch (e) { console.warn("[ensemble sync]", e); }
   window.addEventListener("storage", e => { if (e.key === "nfl_props_ensemble" || e.key === "nfl_ens_dash_settings") { try { syncEnsembleBets(false); } catch (err) {} } });
