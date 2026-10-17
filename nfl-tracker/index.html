@@ -4136,12 +4136,100 @@ function renderDashboard() {
         </table>
       </div>
     </div>
+    ${_dashBreakdowns(props)}
   `;
 
   if (window.innerWidth < 780) {
     const bottom = document.getElementById('dash-bottom-row');
     if (bottom) bottom.style.gridTemplateColumns = '1fr';
   }
+}
+
+// ===== DASHBOARD BREAKDOWNS: source combos (ensemble), players, lines per market =====
+window._dashBD = window._dashBD || { mkt: 'rec', sort: 'bets', showAll: false };
+function _bdCells(st) {
+  const pnlC = st.pnl > 0 ? 'pos' : st.pnl < 0 ? 'neg' : 'muted';
+  const roiC = st.roi !== null && st.roi >= 0 ? 'pos' : st.roi !== null ? 'neg' : 'muted';
+  return `<td class="c mono">${st.settled ? st.w + '-' + st.l + (st.pu ? '-' + st.pu : '') : '—'}</td>
+    <td class="c mono">${st.wr !== null ? st.wr.toFixed(1) + '%' : '—'}</td>
+    <td class="r mono ${pnlC}">${st.settled ? fmtU(st.pnl) : '—'}</td>
+    <td class="r mono ${roiC}">${st.roi !== null ? (st.roi >= 0 ? '+' : '') + st.roi.toFixed(1) + '%' : '—'}</td>
+    <td class="c mono dim">${st.total}${st.pending ? ' <span class="dim">(' + st.pending + 'p)</span>' : ''}</td>`;
+}
+const _bdHead = first => `<thead><tr><th>${first}</th><th class="c">W-L</th><th class="c">W%</th><th class="r">P&L</th><th class="r">ROI</th><th class="c">Bets</th></tr></thead>`;
+const _bdPanel = (title, sub, body) => `<div class="panel"><div class="panel-head"><span class="panel-title">${title}</span>${sub ? `<span class="muted" style="font-size:11px">${sub}</span>` : ''}</div><div class="panel-body compact">${body}</div></div>`;
+function _bdSrcName(src) { return SOURCE_LABELS[src] || src; }
+function _dashBreakdowns(arr) {
+  const out = [];
+  const bySettled = (a, b) => b.st.settled - a.st.settled || b.st.total - a.st.total;
+
+  // 1) Ensemble: exact source combos + each source's record when it was in the pick
+  if (currentSource === 'ensemble') {
+    const combos = {}, perSrc = {};
+    arr.forEach(p => {
+      const srcs = [...new Set((p.ensembleSources || []).map(x => x.src))].sort((a, b) => _bdSrcName(a).localeCompare(_bdSrcName(b)));
+      if (!srcs.length) return;
+      const k = srcs.join('|');
+      (combos[k] = combos[k] || { srcs, picks: [] }).picks.push(p);
+      srcs.forEach(x => (perSrc[x] = perSrc[x] || []).push(p));
+    });
+    const comboRows = Object.values(combos).map(c => ({ ...c, st: calcStats(c.picks) })).sort(bySettled)
+      .map(c => `<tr><td><span class="mono dim" style="margin-right:6px">${c.srcs.length}×</span>${c.srcs.map(x => escHtml(_bdSrcName(x))).join(' + ')}</td>${_bdCells(c.st)}</tr>`).join('');
+    const srcRows = Object.entries(perSrc).map(([src, picks]) => ({ src, st: calcStats(picks) })).sort(bySettled)
+      .map(r => `<tr><td>${escHtml(_bdSrcName(r.src))}</td>${_bdCells(r.st)}</tr>`).join('');
+    out.push(_bdPanel('Source Combos', 'exact set of sources that agreed on the pick',
+      `<table class="tbl">${_bdHead('Sources')}<tbody>${comboRows || '<tr><td colspan="6" class="c dim" style="padding:20px">No ensemble picks yet</td></tr>'}</tbody></table>`));
+    out.push(_bdPanel('Source In Pick', "each source's record whenever it was one of the agreeing sources",
+      `<table class="tbl">${_bdHead('Source')}<tbody>${srcRows || '<tr><td colspan="6" class="c dim" style="padding:20px">No ensemble picks yet</td></tr>'}</tbody></table>`));
+  }
+
+  // 2) Players
+  const byPl = {};
+  arr.forEach(p => { if (!p.player) return; const k = normName(p.player); (byPl[k] = byPl[k] || { name: p.player, team: '', picks: [] }).picks.push(p); if (p.team) byPl[k].team = p.team; });
+  const S = window._dashBD;
+  const plList = Object.values(byPl).map(x => ({ ...x, st: calcStats(x.picks) }));
+  plList.sort(S.sort === 'best' ? (a, b) => b.st.pnl - a.st.pnl || bySettled(a, b) : S.sort === 'worst' ? (a, b) => a.st.pnl - b.st.pnl || bySettled(a, b) : bySettled);
+  const LIMIT = 30;
+  const plRows = plList.map((x, i) => {
+    const mk = [...new Set(x.picks.map(p => (MARKET_MAP[p.market] || { label: p.market }).label))].join(', ');
+    return `<tr class="bd-pl" data-name="${escHtml(String(x.name).toLowerCase() + ' ' + String(x.team).toLowerCase())}" ${!S.showAll && i >= LIMIT ? 'style="display:none" data-extra="1"' : ''}>
+      <td><strong>${escHtml(x.name)}</strong> <span class="dim" style="font-size:10px">${escHtml(x.team || '')}</span><div class="dim" style="font-size:10px">${escHtml(mk)}</div></td>${_bdCells(x.st)}</tr>`;
+  }).join('');
+  const sortBtn = (k, lbl) => `<button class="btn ghost" style="padding:3px 8px;font-size:11px;${S.sort === k ? 'border-color:var(--teal);color:var(--teal)' : ''}" onclick="_dashBD.sort='${k}';render()">${lbl}</button>`;
+  out.push(_bdPanel('Players', `${plList.length} players`,
+    `<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+       <input class="mini-in" placeholder="Search player or team…" oninput="_bdFilterPlayers(this.value)" style="width:200px">
+       ${sortBtn('bets', 'Most bets')}${sortBtn('best', 'Best P&L')}${sortBtn('worst', 'Worst P&L')}
+       ${plList.length > LIMIT ? `<button class="btn ghost" style="padding:3px 8px;font-size:11px" onclick="_dashBD.showAll=!_dashBD.showAll;render()">${S.showAll ? 'Show top ' + LIMIT : 'Show all ' + plList.length}</button>` : ''}
+     </div>
+     <table class="tbl" id="bdPlayers">${_bdHead('Player')}<tbody>${plRows || '<tr><td colspan="6" class="c dim" style="padding:20px">No picks yet</td></tr>'}</tbody></table>`));
+
+  // 3) Lines for one market, Over vs Under
+  const mkts = [...new Set(arr.map(p => p.market))].filter(Boolean)
+    .sort((a, b) => PROPSHOP_MARKET_ORDER.indexOf(a) - PROPSHOP_MARKET_ORDER.indexOf(b) || String(a).localeCompare(b));
+  if (mkts.length && !mkts.includes(S.mkt)) S.mkt = mkts.includes('rec') ? 'rec' : mkts[0];
+  const mp = arr.filter(p => p.market === S.mkt && p.line != null && !isNaN(Number(p.line)));
+  const lines = [...new Set(mp.map(p => Number(p.line)))].sort((a, b) => a - b);
+  const sideCells = st => st.total ? _bdCells(st) : '<td colspan="5" class="c dim">—</td>';
+  const lineRows = lines.map(ln => {
+    const at = mp.filter(p => Number(p.line) === ln);
+    return `<tr><td class="mono strong">${ln}</td>${sideCells(calcStats(at.filter(p => p.side === 'O')))}${sideCells(calcStats(at.filter(p => p.side === 'U')))}</tr>`;
+  }).join('');
+  const mSel = `<select class="sel" onchange="_dashBD.mkt=this.value;render()">${mkts.map(m => `<option value="${m}" ${m === S.mkt ? 'selected' : ''}>${escHtml((MARKET_MAP[m] || { label: m }).label)}</option>`).join('')}</select>`;
+  const subHead = `<th class="c" style="font-size:9px">W-L</th><th class="c" style="font-size:9px">W%</th><th class="r" style="font-size:9px">P&L</th><th class="r" style="font-size:9px">ROI</th><th class="c" style="font-size:9px">Bets</th>`;
+  out.push(_bdPanel('Lines', 'record at each line, Over vs Under',
+    `<div style="margin-bottom:8px">${mSel}</div>
+     <table class="tbl"><thead><tr><th rowspan="2" style="vertical-align:bottom">Line</th><th class="c" colspan="5" style="border-right:1px solid var(--border2)"><span class="side-o">OVER</span></th><th class="c" colspan="5"><span class="side-u">UNDER</span></th></tr><tr>${subHead}${subHead}</tr></thead>
+     <tbody>${lineRows || '<tr><td colspan="11" class="c dim" style="padding:20px">No picks in this market</td></tr>'}</tbody></table>`));
+  return out.join('');
+}
+// Player search filters rows in place (no re-render, so the box keeps focus)
+function _bdFilterPlayers(q) {
+  q = String(q || '').toLowerCase().trim();
+  document.querySelectorAll('#bdPlayers tr.bd-pl').forEach(tr => {
+    const hit = !q || tr.dataset.name.includes(q);
+    tr.style.display = hit && (q || !tr.dataset.extra || _dashBD.showAll) ? '' : 'none';
+  });
 }
 
 // ===== WEEKLY VIEW =====
