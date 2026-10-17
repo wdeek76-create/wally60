@@ -3682,7 +3682,55 @@ function _extractCellsNhl(tokens) {
   }
   return { gameStr, gameTime, cells, allCells, projection };
 }
+// PropShop's newer board layout (Oct 2026): per player — name, "AWY @ HOM 7:00 PM", projection, a dash,
+// the market's over/under pair, then the best cell (line, price, EV%, book code like FD/PIN, optional $limit)
+// and every book's line/price (EV% where positive). It no longer says over or under, so the side is worked
+// out from the EV itself: Poisson on the projection reproduces PropShop's % on exactly one side.
+const _PS2_GAME_RE = /^([A-Z]{2,3})\s*@\s*([A-Z]{2,3})\s+\d{1,2}:\d{2}\s*[AP]M$/i;
+const _PS2_BOOKS = { FD: "FanDuel", PIN: "Pinnacle", PB: "Prop Builder", DK: "DraftKings", NV: "Novig", NOV: "Novig", PX: "ProphetX", MGM: "BetMGM", CZR: "Caesars", FL: "Fliff", FLF: "Fliff", BOL: "BetOnline", BM: "Bookmaker", B105: "Bet105", KAL: "Kalshi", ONYX: "Onyx" };
+function _nhlIsPs2Format(raw) { return String(raw || "").split("\n").some(l => _PS2_GAME_RE.test(l.trim())); }
+function _parsePropShopNhlV2(raw, minEdge) {
+  const lines = String(raw).split("\n").map(l => l.trim()).filter(Boolean);
+  const results = [], errors = [];
+  const dateLine = lines.find(l => /^\d{4}-\d{2}-\d{2}$/.test(l));
+  const dateIso = dateLine || _ymdLocal(new Date());
+  const isNum = t => /^[+-]?\d+(\.\d+)?$/.test(t), isPrice = t => /^[+-]\d{3,4}$/.test(t), isEv = t => /^[+-]?\d+(\.\d+)?%$/.test(t);
+  const starts = [];
+  for (let i = 1; i < lines.length; i++) if (_PS2_GAME_RE.test(lines[i])) starts.push(i - 1);
+  starts.forEach((st, bi) => {
+    const player = lines[st];
+    try {
+      const end = bi + 1 < starts.length ? starts[bi + 1] : lines.length;
+      const gm = lines[st + 1].match(_PS2_GAME_RE);
+      const projTok = lines[st + 2];
+      if (!isNum(projTok)) return; // "−" = no projection
+      const proj = parseFloat(projTok);
+      if (!(proj > 0)) return;
+      const body = lines.slice(st + 3, end).filter(t => t !== "PropShop Sports Betting");
+      // Every (line, price, EV%) triple on the row, with the book code right after it when there is one.
+      const triples = [];
+      for (let j = 0; j + 2 < body.length; j++) {
+        if (isNum(body[j]) && !isPrice(body[j]) && /\.5$/.test(body[j]) && isPrice(body[j + 1]) && isEv(body[j + 2])) {
+          const code = body[j + 3] && /^[A-Z0-9]{2,5}$/.test(body[j + 3]) ? body[j + 3] : null;
+          triples.push({ line: parseFloat(body[j]), odds: parseInt(body[j + 1], 10), ev: parseFloat(body[j + 2]), code });
+        }
+      }
+      if (!triples.length) return;
+      // Best = the cell PropShop tagged with a book, else the highest-EV cell on the row.
+      const best = triples.find(t => t.code) || triples.slice().sort((a, b) => b.ev - a.ev)[0];
+      const d = oddsToDecimal(best.odds);
+      const evO = (_nhlPoissonHit("over", best.line, proj) * d - 1) * 100, evU = (_nhlPoissonHit("under", best.line, proj) * d - 1) * 100;
+      const ou = Math.abs(evO - best.ev) <= Math.abs(evU - best.ev) ? "over" : "under";
+      if (Math.min(Math.abs(evO - best.ev), Math.abs(evU - best.ev)) > 1.5) errors.push(`Side check off for ${player}: posted ${best.ev}% vs over ${evO.toFixed(1)}% / under ${evU.toFixed(1)}%`);
+      if (best.ev < (minEdge || 0)) return;
+      results.push({ player, game: `${gm[1].toUpperCase()} @ ${gm[2].toUpperCase()}`, gameDateIso: dateIso, ou, line: best.line, odds: best.odds,
+        book: best.code ? (_PS2_BOOKS[best.code] || best.code) : "", ev: best.ev, proj });
+    } catch (e) { errors.push("Parse error (" + player + "): " + e.message); }
+  });
+  return { results, errors };
+}
 function parsePropShopNhl(raw, minEdge) {
+  if (_nhlIsPs2Format(raw)) return _parsePropShopNhlV2(raw, minEdge);
   const currentYear = new Date().getFullYear();
   const blocks = _splitPropShopBlocksNhl(raw);
   const results = [];
