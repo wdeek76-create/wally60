@@ -2293,6 +2293,21 @@ function _nhlSoloCapture(src, results) {
   if (currentTab === "solo") renderNhlSoloTab();
   return added;
 }
+// Solo log from a model run: one row per source/player/date/side/line. Price/edge refresh while pending.
+function _nhlSoloFromModel(hits) {
+  let added = 0;
+  (hits || []).forEach(h => {
+    const key = h.src + "|" + nn(h.player) + "|" + h.gameDateIso + "|" + h.ou + "|" + Number(h.line);
+    const cur = nhlSoloLog.find(x => x.key === key);
+    if (cur) { if (cur.result === "pending") Object.assign(cur, { odds: h.odds, book: h.book, ev: h.ev, proj: h.proj, via: "model" }); return; }
+    nhlSoloLog.push({ key, src: h.src, player: h.player, game: h.game, team: "", gameDateIso: h.gameDateIso, ou: h.ou, line: Number(h.line), stat: "SOG",
+      odds: h.odds, book: h.book, ev: h.ev, proj: h.proj, via: "model", at: new Date().toISOString(), result: "pending", actual: null });
+    added++;
+  });
+  _nhlSoloSave();
+  if (currentTab === "solo") renderNhlSoloTab();
+  return added;
+}
 async function gradeNhlSoloLog(manual) {
   if (_nhlSoloGrading) return 0;
   _nhlSoloGrading = true;
@@ -2365,10 +2380,10 @@ function renderNhlSoloTab() {
         <tbody>${body}</tbody></table></div></div>`;
   }).join("");
   el.innerHTML = `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:6px;">
-      <span style="font-size:15px;font-weight:800;color:#fff;">Solo sources — every ${NHL_SOLO_MIN_EV}%+ line each source posts, 1u flat</span>
+      <span style="font-size:15px;font-weight:800;color:#fff;">Solo sources — every ${NHL_SOLO_MIN_EV}%+ line for each source, 1u flat</span>
       <button onclick="gradeNhlSoloLog(true)" style="background:#0066cc;border:none;color:#fff;border-radius:5px;padding:4px 10px;font-size:12px;font-weight:700;cursor:pointer;">Grade now</button>
     </div>
-    <div style="font-size:12px;color:#9fb8d6;margin-bottom:14px;">Logged from each PropShop paste, bet or not. Separate from the tracker. Units/ROI at the pasted price; pushes and DNPs don't count.</div>
+    <div style="font-size:12px;color:#9fb8d6;margin-bottom:14px;">Logged on every model run: each source's projection on every line and side, at the best Pinnacle / Prop Builder / FanDuel / Bet105 price then (earlier rows came from PropShop pastes). Bet or not, separate from the tracker; pushes and DNPs don't count.</div>
     ${nhlSoloLog.length ? tables : `<div style="color:#9fb8d6;font-size:13px;">Nothing logged yet — paste a source on the Results tab and its ${NHL_SOLO_MIN_EV}%+ lines start showing up here.</div>`}`;
 }
 // ── MODEL ─────────────────────────────────────────────────────────────────
@@ -2406,11 +2421,22 @@ async function runNhlModel(opts) {
     const iso = _ymdLocal(new Date());
     delete _nhlLiveLineCache[iso]; // fresh prices
     const byPL = await _nhlGetLiveLinesForDate(iso);
-    const rows = [];
+    const rows = [], soloHits = [];
+    // Each player's main line only = the line the most books quote (alt rows don't count; ties go to the
+    // line Pinnacle has, then the lower line). Alt / ladder lines are skipped for the model and solo sources.
+    const mainLine = {};
+    Object.keys(byPL).forEach(key => {
+      const ents = (byPL[key] || []).filter(e => !e.alt); if (!ents.length) return;
+      const pk = nn(ents[0].player), ln = Number(ents[0].line);
+      const books = new Set(ents.map(e => e.book)).size, pin = ents.some(e => e.book === "Pinnacle");
+      const cur = mainLine[pk];
+      if (!cur || books > cur.books || (books === cur.books && pin && !cur.pin) || (books === cur.books && pin === cur.pin && ln < cur.line)) mainLine[pk] = { line: ln, books, pin };
+    });
     for (const key of Object.keys(byPL)) {
       const ents = byPL[key]; if (!ents || !ents.length) continue;
       const player = ents[0].player, line = Number(ents[0].line), home = ents[0].home, away = ents[0].away;
       if (!isFinite(line) || Number.isInteger(line) || _nhlPsRejected(player)) continue;
+      if (!mainLine[nn(player)] || mainLine[nn(player)].line !== line) continue; // main line only
       const projs = {};
       PS_SOURCE_KEYS_NHL.forEach(src => {
         let v = _nhlModelCsvProj(src, player, home, away);
@@ -2418,6 +2444,18 @@ async function runNhlModel(opts) {
         if (v != null) projs[src] = v;
       });
       const have = Object.keys(projs);
+      if (!have.length) continue;
+      // Solo sources: each source on its own, every line and side, at the best Pinnacle / Prop Builder /
+      // FanDuel / Bet105 price now — logged when it's 1%+ (flat 1u, graded on the SOLO SOURCES tab).
+      for (const ou of ["over", "under"]) {
+        const four = await _nhlLiveBookFor(player, line, ou, iso, [home, away]);
+        const d4 = four ? oddsToDecimal(four.price) : null;
+        if (d4 == null) continue;
+        have.forEach(src => {
+          const ev = Math.round((_nhlPoissonHit(ou, line, projs[src]) * d4 - 1) * 1000) / 10;
+          if (ev >= NHL_SOLO_MIN_EV) soloHits.push({ src, player, game: away + " @ " + home, gameDateIso: iso, ou, line, odds: four.price, book: four.book, ev, proj: projs[src] });
+        });
+      }
       if (have.length < 3) continue;
       for (const ou of ["over", "under"]) {
         const live = await _nhlLiveBookFor(player, line, ou, iso, [home, away], { exch500: true });
@@ -2438,6 +2476,7 @@ async function runNhlModel(opts) {
     }
     rows.sort((a, b) => b.anchorEv - a.anchorEv);
     _nhlModelRows = rows; _nhlModelRunAt = new Date();
+    _nhlSoloFromModel(soloHits);
     // Log today's picks (first run's price sticks, like a real bet).
     const logBefore = nhlModelLog.length;
     rows.forEach(r => {
@@ -3987,7 +4026,7 @@ async function importPropShopNhl() {
   });
   nhlPsBySource[psSource] = Object.values(byKey);
   saveNhlPsBySource();
-  try { _nhlSoloCapture(psSource, parsePropShopNhl(raw, NHL_SOLO_MIN_EV).results); } catch (e) { console.warn("[NHL solo] capture failed", e); }
+  // Solo-source lines now come from the model run (every line, live price) — not from pastes.
   const newCount = nhlPsBySource[psSource].length;
   const collapsed = results.length - newCount;
   if (currentTab === 'res') renderNhlPsPanel();
