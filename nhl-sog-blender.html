@@ -239,7 +239,7 @@ tr:hover td{background:#0a1628;}
         <div class="ss" id="ss-saber">No file loaded</div>
       </div>
     </div>
-    <button class="run" id="run-btn" onclick="runBlend();_nhlModelAuto();_nhlAutoExportPS()" disabled>RUN SOG BLEND</button>
+    <button class="run" id="run-btn" onclick="runBlend();_nhlModelAuto()" disabled>RUN SOG BLEND</button>
     <div style="display:flex;gap:8px;margin-top:10px;">
       <button class="fb" onclick="resetNhlBlendSources()" style="color:#4a6fa5;" title="Clear the 4 uploaded CSVs and the blended table — doesn't touch your tracker">↺ Reset blend</button>
       <button class="fb" onclick="clearNhlAllCache()" style="color:#f87171;border-color:#f8717155;" title="Wipe every tracked bet + PropShop staging list saved on this device">🗑 Clear cache / start fresh</button>
@@ -371,6 +371,7 @@ function loadFile(src,inp){
       const d=parse(src,e.target.result);
       const n=Object.keys(d).length;
       if(n===0) throw new Error('0 players found — check file format');
+      if (srcs[src]) _nhlNoteCsvMoves(src, srcs[src], d);
       srcs[src]=d;
       _nhlSaveCsvs();
       if(src==='saber'){ try{ const nt=nhltIngestSaber(e.target.result,_ymdLocal(new Date())); if(nt) console.log('[NHL totals] Saber team totals saved for today:',nt,'teams'); }catch(err){ console.warn('[NHL totals] saber ingest',err&&err.message); } }
@@ -479,6 +480,36 @@ function parse(src,text){
   return d;
 }
 
+// Projection moves: when a source's CSV is re-uploaded, every player whose number changed (0.05+) is noted
+// against the earlier upload (kept for the day) and listed on the Model tab.
+function _nhlNoteCsvMoves(src, oldD, newD) {
+  const today = _ymdLocal(new Date());
+  let store = {}; try { store = JSON.parse(localStorage.getItem("nhl_csv_moves") || "{}"); } catch (e) {}
+  if (store.date !== today) store = { date: today, moves: {} };
+  const oldBy = {}; Object.values(oldD || {}).forEach(v => { if (v && v.name && !v.manual) oldBy[nn(v.name)] = v; });
+  const at = new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  Object.values(newD || {}).forEach(v => {
+    if (!v || !v.name) return;
+    const o = oldBy[nn(v.name)]; if (!o) return;
+    const d = Math.round((Number(v.sog) - Number(o.sog)) * 100) / 100;
+    if (Math.abs(d) < 0.05) return;
+    const k = src + "|" + nn(v.name), prev = store.moves[k];
+    store.moves[k] = { src, name: v.name, from: prev ? prev.from : Number(o.sog), to: Number(v.sog), at };
+  });
+  try { localStorage.setItem("nhl_csv_moves", JSON.stringify(store)); } catch (e) {}
+}
+function _nhlCsvMovesHtml() {
+  let store = {}; try { store = JSON.parse(localStorage.getItem("nhl_csv_moves") || "{}"); } catch (e) {}
+  if (store.date !== _ymdLocal(new Date()) || !store.moves || !Object.keys(store.moves).length) return "";
+  const bySrc = {};
+  Object.values(store.moves).forEach(m => { if (Math.abs(m.to - m.from) >= 0.05) (bySrc[m.src] = bySrc[m.src] || []).push(m); });
+  const rows = PS_SOURCE_KEYS_NHL.filter(k => bySrc[k]).map(k => {
+    const list = bySrc[k].sort((a, b) => Math.abs(b.to - b.from) - Math.abs(a.to - a.from));
+    return `<div style="margin:3px 0;"><b style="color:#7dd3fc;">${_NHL_SRC_TAG[k]}</b> <span style="color:#9fb8d6;">${list.length} moved:</span> ${list.map(m => { const d = m.to - m.from; return `${escapeHtmlBasic(m.name)} ${m.from.toFixed(2)}→${m.to.toFixed(2)} <span style="color:${d > 0 ? "#fb923c" : "#38bdf8"};font-weight:800;">${d > 0 ? "▲" : "▼"}${Math.abs(d).toFixed(2)}</span>`; }).join(", ")}</div>`;
+  }).join("");
+  return rows ? `<div style="background:#0a1628;border:1px solid #0d2035;border-radius:8px;padding:10px 14px;margin-bottom:16px;font-size:13px;color:#fff;">
+    <div style="font-size:11px;letter-spacing:.06em;color:#9fb8d6;font-weight:800;text-transform:uppercase;margin-bottom:6px;">Projection moves today (re-uploaded CSVs vs the first upload)</div>${rows}</div>` : "";
+}
 // Uploaded CSVs are kept for the day (localStorage), so a page reload doesn't lose them — the Model tab,
 // the ensemble's missing-source check and Recheck all read them.
 function _nhlSaveCsvs() {
@@ -2896,7 +2927,7 @@ function renderNhlModelTab() {
     return { src, same, diff, missing, offs };
   }).filter(Boolean);
   const matchHtml = matchRows.length ? `<div style="background:#0a1628;border:1px solid #0d2035;border-radius:8px;padding:10px 14px;margin-bottom:16px;font-size:13px;color:#fff;">
-      <div style="font-size:11px;letter-spacing:.06em;color:#9fb8d6;font-weight:800;text-transform:uppercase;margin-bottom:6px;">CSV vs PropShop projections (players in both)</div>
+      <div style="font-size:11px;letter-spacing:.06em;color:#9fb8d6;font-weight:800;text-transform:uppercase;margin-bottom:6px;">Projections now vs your PropShop paste (players in both — differences = moves since the paste)</div>
       ${matchRows.map(m => { const n = m.same + m.diff; return `<div style="margin:3px 0;"><b style="color:#7dd3fc;">${_NHL_SRC_TAG[m.src]}</b> ${n ? `<span style="color:${m.diff ? "#eab308" : "#00cc66"};font-weight:800;">${m.same}/${n} identical</span>` : "no overlap"}${m.missing ? ` <span style="color:#9fb8d6;">· ${m.missing} pasted players not in the CSV</span>` : ""}${m.offs.length ? ` <span style="color:#9fb8d6;">· e.g. ${escapeHtmlBasic(m.offs.join(", "))} (PropShop vs CSV)</span>` : ""}</div>`; }).join("")}
     </div>` : "";
   el.innerHTML = `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:6px;">
@@ -2910,7 +2941,7 @@ function renderNhlModelTab() {
       ${_nhlModelRows && _nhlModelRows.length ? `<button id="model-card-btn" onclick="shareNhlModelCard()" style="background:#0a1628;border:1px solid #0d2035;color:#00cc66;${btn}">🖼 Model card</button>` : ""}
     </div>
     <div style="font-size:12px;color:#9fb8d6;margin-bottom:14px;">CSVs loaded: ${loaded.length ? loaded.join(", ") : "none — upload them on the Upload tab"}. Poisson on each projection → EV at the best Pinnacle / Prop Builder / FanDuel / Bet105 price — or Novig / ProphetX / Kalshi when $${NHL_MODEL_EXCH_MIN}+ is available there. Rule: all 4 sources must project the player, 3 at ${NHL_PS_QUAL_EV}%+, none negative. Open picks go straight into the tracker at this price and book. The record below is the same picks at 1u flat.</div>
-    ${matchHtml}${records}${_nhlModelOpenHtml()}${today}${_nhlModelHistoryHtml()}`;
+    ${_nhlCsvMovesHtml()}${matchHtml}${records}${_nhlModelOpenHtml()}${today}${_nhlModelHistoryHtml()}`;
 }
 // opts.silent — used by the auto-trigger poll below so it doesn't fight with
 // the Auto Grade tab's own log/UI when nobody's looking at it; a toast is
