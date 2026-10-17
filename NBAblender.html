@@ -1747,6 +1747,8 @@ function renderTable() {
             if (inj) return "";
             const ben = getBeneficiaryForPlayer(r.rawName);
             if (!ben) return "";
+            const benImp = _wmImportance(ben.causedBy, r.team);
+            if (benImp.tier === "LOW") return "";      // a fringe player's absence isn't an upside signal
             // Look up cause record directly from cache (bypass today-filter)
             // so the analysis tooltip has data even if Rupert's team isn't
             // playing today's slate.
@@ -1756,7 +1758,7 @@ function renderTable() {
             // minutes, role increase already baked in). Green strong CEILING for
             // acute today causes (sudden Q/OUT today — clear short-term uplift).
             const isOngoingCause = causedByInj && typeof _injuryIsOngoing === "function" && _injuryIsOngoing(causedByInj);
-            const ceilingColor = isOngoingCause ? "#fb923c" : "#22c55e";  // orange vs green
+            const ceilingColor = benImp.tier === "MID" ? "#a78bfa" : (isOngoingCause ? "#fb923c" : "#22c55e");  // purple = moderate, orange = ongoing, green = acute
             // Positional weight: a big going down means more for another big.
             // 2 = same slot, 1 = partial overlap, 0 = different position.
             let posTag = "";
@@ -1765,7 +1767,7 @@ function renderTable() {
                      : ben.posOverlap === 1 ? " \u00b7 POS OVERLAP"
                      : ben.posOverlap === 0 ? " \u00b7 DIFF POS" : "";
             } catch (e) {}
-            const ceilingLabel = (isOngoingCause ? "CEILING \u2191 MODERATE" : "CEILING \u2191") + posTag;
+            const ceilingLabel = (benImp.tier === "MID" || isOngoingCause ? "CEILING \u2191 MODERATE" : "CEILING \u2191") + posTag + (benImp.note ? " \u00b7 " + benImp.note : "");
             const tipData = {
               kind: "upside",
               player: r.rawName,
@@ -1874,6 +1876,19 @@ function renderTable() {
                 }
               }
             } catch(e) {}
+            // IMPORTANCE (usage / PER / minutes / today's RW projected minutes): a fringe teammate being GTD or out
+            // isn't a conditional at all, so he is dropped; if only MODERATE ones remain the ⚠ turns purple; a big
+            // one (or one with no data at all) keeps the warning colours.
+            let hazardTier = "HIGH";
+            try {
+              for (let ii = gtdTeammates.length - 1; ii >= 0; ii--) {
+                const imp = _wmImportance(gtdTeammates[ii].name, r.team);
+                if (imp.tier === "LOW") { gtdTeammates.splice(ii, 1); continue; }
+                gtdTeammates[ii].tier = imp.tier;
+                gtdTeammates[ii].detail = [gtdTeammates[ii].detail, imp.note].filter(Boolean).join(" · ");
+              }
+              hazardTier = gtdTeammates.some(t => t.tier === "HIGH" || t.tier === "UNKNOWN") ? "HIGH" : "MID";
+            } catch (e) {}
             if (gtdTeammates.length === 0) {
               // CLEAR — small green dot, no text
               return `<span title="No GTD or Q teammates" style="display:inline-block;width:9px;height:9px;border-radius:50%;background:#22c55e;box-shadow:0 0 3px rgba(34,197,94,1), 0 0 8px rgba(34,197,94,0.7), 0 0 14px rgba(34,197,94,0.35);vertical-align:middle;"></span>`;
@@ -1895,8 +1910,10 @@ function renderTable() {
               selfPos,
             };
             const hasOut = gtdTeammates.some(t => (t.status || "").toUpperCase() === "OUT");
-            const hazardColor = hasOut ? "#f87171" : "#fbbf24";
-            const hazardGlow = hasOut
+            const hazardColor = hazardTier === "MID" ? "#a78bfa" : (hasOut ? "#f87171" : "#fbbf24");
+            const hazardGlow = hazardTier === "MID"
+              ? "drop-shadow(0 0 4px rgba(167,139,250,0.9)) drop-shadow(0 0 8px rgba(167,139,250,0.5))"
+              : hasOut
               ? "drop-shadow(0 0 4px rgba(248,113,113,0.9)) drop-shadow(0 0 8px rgba(248,113,113,0.5))"
               : "drop-shadow(0 0 4px rgba(251,191,36,0.9)) drop-shadow(0 0 8px rgba(251,191,36,0.5))";
             const hazardAttr = encodeURIComponent(JSON.stringify(hazardTip));
@@ -1966,11 +1983,13 @@ function doExport() {
   const conLookup = {};
   merged.forEach(r => { if (r.found>0) conLookup[norm(r.rawName)] = r.con; });
   const header = "id,name,first_name,last_name,position,team,three_pointers_made,assists,blocks,double_double,points,rebounds,steals,triple_double,turnovers,fd_points,dk_points";
+  const teamNow = {};
+  merged.forEach(m => { if (m.team) teamNow[norm(m.rawName)] = m.team; });
   const dataRows = NBA_TEMPLATE.map(r => {
     const con = conLookup[norm(r.name)] || {};
     const num = (v) => (v != null && !isNaN(v)) ? Number(v).toFixed(2) : "0.00";
     return [
-      r.id, r.name, r.first_name, r.last_name, r.position, r.team,
+      r.id, r.name, r.first_name, r.last_name, r.position, teamNow[norm(r.name)] || r.team,
       num(con.threepm),
       num(con.ast),
       "0.00", "0.00",
@@ -4589,8 +4608,8 @@ async function fetchOpticOddsProps(force, playerName) {
   if (!active.length) throw new Error("no upcoming/live NBA fixtures on OpticOdds");
   // player -> team via template -> fixture
   const norm = resolveNorm(playerName || "");
-  const tpl = (typeof NBA_TEMPLATE !== "undefined" ? NBA_TEMPLATE : []).find(p => resolveNorm(p.name) === norm);
-  const team = tpl ? _matchupKey(tpl.team) : null;
+  const curTeam = (typeof teamForPlayer === "function") ? teamForPlayer(playerName) : "";   // current team, not last season's roster
+  const team = curTeam ? _matchupKey(curTeam) : null;
   let targets = team ? active.filter(f => f.home === team || f.away === team) : [];
   if (!targets.length) targets = active;
   const cacheKey = targets.map(f => f.id).sort().join(",");
@@ -24397,17 +24416,24 @@ let morningBets = [];
 function loadMorningBets() { try { const r = localStorage.getItem(MORNING_BETS_KEY); morningBets = r ? JSON.parse(r) : []; } catch (e) { morningBets = []; } }
 function saveMorningBets() { try { localStorage.setItem(MORNING_BETS_KEY, JSON.stringify(morningBets)); } catch (e) { showToast("Morning log could not be saved — storage full?"); } }
 
-// Team for a pasted player: whichever uploaded projection CSV has them.
-function _mTeamFor(name) {
-  const k = resolveNorm(name);
-  for (const s of (typeof slots !== "undefined" ? slots : [])) {
-    if (!s) continue;
-    const p = s.players.find(x => x.norm === k);
-    if (p && p.team) return normTeamAbbr(p.team) || p.team;
+// A player's CURRENT team: the blended row (built from the loaded sources — RW API / CSVs), then any source that
+// lists him, and only then the built-in roster, which is last season's (trades make it wrong).
+function teamForPlayer(name) {
+  const k = resolveNorm(name || "");
+  if (!k) return "";
+  try { if (typeof merged !== "undefined" && merged) { const r = merged.find(x => resolveNorm(x.rawName) === k); if (r && r.team) return r.team; } } catch (e) {}
+  const votes = {};
+  for (const sl of (typeof slots !== "undefined" ? slots : [])) {
+    if (!sl) continue;
+    const p = sl.players.find(x => x.norm === k);
+    if (p && p.team) { const t = normTeamAbbr(p.team) || String(p.team).toUpperCase(); votes[t] = (votes[t] || 0) + 1; }
   }
+  const best = Object.entries(votes).sort((a, b) => b[1] - a[1])[0];
+  if (best) return best[0];
   const t = (typeof NBA_TEMPLATE !== "undefined" ? NBA_TEMPLATE : []).find(p => resolveNorm(p.name) === k);
   return t ? t.team : "";
 }
+function _mTeamFor(name) { return teamForPlayer(name); }
 // A source's uploaded-CSV projection for a stat (used for the 3-of-3 relief check).
 function _mCsvProj(srcKey, name, stat) {
   const i = SOURCES.findIndex(s => s.key === srcKey);
