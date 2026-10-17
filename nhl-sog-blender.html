@@ -2464,7 +2464,9 @@ async function runNhlModel(opts) {
           if (ev >= NHL_SOLO_MIN_EV) soloHits.push({ src, player, game: away + " @ " + home, gameDateIso: iso, ou, line, odds: four.price, book: four.book, ev, proj: projs[src] });
         });
       }
-      if (have.length < 3) continue;
+      // All 4 sources have to project him — a missing source (scratch, or a name that didn't match like
+      // "Benjamin" vs "Ben") means no pick, never a 3-of-3.
+      if (have.length < PS_SOURCE_KEYS_NHL.length) continue;
       for (const ou of ["over", "under"]) {
         const live = await _nhlLiveBookFor(player, line, ou, iso, [home, away], { exch500: true });
         if (!live) continue;
@@ -2588,7 +2590,7 @@ async function _nhlCarryModelPicks() {
     && !bets.some(b => nn(b.player) === nn(x.player) && _ymdLocal(new Date(b.date)) === x.gameDateIso));
   let n = 0;
   for (const x of open) {
-    const have = Object.keys(x.projs || {}); if (have.length < 3) continue;
+    const have = Object.keys(x.projs || {}); if (have.length < PS_SOURCE_KEYS_NHL.length) continue; // all 4 sources or it doesn't go in
     const evs = x.evs || {};
     const sorted = have.slice().sort((a, b) => (evs[a] || 0) - (evs[b] || 0));
     const anchor = (evs[sorted[0]] || 0) >= NHL_PS_QUAL_EV ? sorted[0] : sorted[1];
@@ -2742,7 +2744,7 @@ function renderNhlModelTab() {
       <button onclick="_nhlModelClearOpen()" style="background:transparent;border:1px solid #f8717155;color:#f87171;${btn}">Clear open picks</button>
       ${_nhlModelRows && _nhlModelRows.length ? `<button id="model-card-btn" onclick="shareNhlModelCard()" style="background:#0a1628;border:1px solid #0d2035;color:#00cc66;${btn}">🖼 Model card</button>` : ""}
     </div>
-    <div style="font-size:12px;color:#9fb8d6;margin-bottom:14px;">CSVs loaded: ${loaded.length ? loaded.join(", ") : "none — upload them on the Upload tab"}. Poisson on each projection → EV at the best Pinnacle / Prop Builder / FanDuel / Bet105 price — or Novig / ProphetX / Kalshi when $${NHL_MODEL_EXCH_MIN}+ is available there. Same gate as the ensemble (3 at ${NHL_PS_QUAL_EV}%+, none negative). Once all 4 sources are loaded, picks go to the tracker priced like the ensemble (best of the four books only, exchanges as alts) and only if they still pass there. The record below is the same picks at 1u flat.</div>
+    <div style="font-size:12px;color:#9fb8d6;margin-bottom:14px;">CSVs loaded: ${loaded.length ? loaded.join(", ") : "none — upload them on the Upload tab"}. Poisson on each projection → EV at the best Pinnacle / Prop Builder / FanDuel / Bet105 price — or Novig / ProphetX / Kalshi when $${NHL_MODEL_EXCH_MIN}+ is available there. Rule: all 4 sources must project the player, 3 at ${NHL_PS_QUAL_EV}%+, none negative. Open picks go straight into the tracker at this price and book. The record below is the same picks at 1u flat.</div>
     ${matchHtml}${records}${_nhlModelOpenHtml()}${today}${_nhlModelHistoryHtml()}`;
 }
 // opts.silent — used by the auto-trigger poll below so it doesn't fight with
@@ -5077,10 +5079,11 @@ function _nhlLiveGate(b) {
     const pr = b.sourceProjs[src] != null ? Number(b.sourceProjs[src]) : (b.psMissingSrc === src && b.psMissingProj != null ? Number(b.psMissingProj) : null);
     if (pr != null && pr > 0) evs[src] = Math.round((_nhlPoissonHit(b.ou, b.line, pr) * d - 1) * 1000) / 10;
   });
-  const keys = Object.keys(evs); if (keys.length < 3) return null;
+  const keys = Object.keys(evs); if (!keys.length) return null;
+  const missing = PS_SOURCE_KEYS_NHL.filter(k => evs[k] == null);
   const qual = keys.filter(k => evs[k] >= NHL_PS_QUAL_EV).length, neg = keys.filter(k => evs[k] < 0);
-  const ok = qual >= 3 && !neg.length;
-  const why = ok ? "" : neg.length ? neg.map(k => `${_NHL_SRC_TAG[k]} ${evs[k]}%`).join(", ") : `only ${qual} source${qual === 1 ? "" : "s"} at ${NHL_PS_QUAL_EV}%+`;
+  const ok = !missing.length && qual >= 3 && !neg.length; // all 4 sources, 3 at 3%+, none negative
+  const why = ok ? "" : missing.length ? `no ${missing.map(k => _NHL_SRC_TAG[k]).join("/")} projection` : neg.length ? neg.map(k => `${_NHL_SRC_TAG[k]} ${evs[k]}%`).join(", ") : `only ${qual} source${qual === 1 ? "" : "s"} at ${NHL_PS_QUAL_EV}%+`;
   return { ok, evs, why };
 }
 function _nhlStillInRange(b) {
@@ -5252,7 +5255,7 @@ async function _nhlRecheckCandidates(iso) {
     if (_nhlPsRejected(c.player) || _nhlPsAlreadyLogged(c)) continue;
     const gm = String(c.game || "").split("@").map(x => x.trim());
     PS_SOURCE_KEYS_NHL.forEach(src => { if (c.projs[src] == null) { const v = _nhlModelCsvProj(src, c.player, gm[0], gm[1]); if (v != null) c.projs[src] = v; } });
-    const have = Object.keys(c.projs); if (have.length < 3) continue;
+    const have = Object.keys(c.projs); if (have.length < PS_SOURCE_KEYS_NHL.length) continue; // all 4 sources
     const live = await _nhlLiveBookFor(c.player, c.line, c.ou, iso, c.team ? [c.team] : gm);
     if (!live) continue;
     const d = oddsToDecimal(live.price), evs = {};
