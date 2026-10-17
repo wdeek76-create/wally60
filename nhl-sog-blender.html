@@ -2411,7 +2411,11 @@ async function runNhlModel(opts) {
       const player = ents[0].player, line = Number(ents[0].line), home = ents[0].home, away = ents[0].away;
       if (!isFinite(line) || Number.isInteger(line) || _nhlPsRejected(player)) continue;
       const projs = {};
-      PS_SOURCE_KEYS_NHL.forEach(src => { const v = _nhlModelCsvProj(src, player, home, away); if (v != null) projs[src] = v; });
+      PS_SOURCE_KEYS_NHL.forEach(src => {
+        let v = _nhlModelCsvProj(src, player, home, away);
+        if (v == null) { const pr = (nhlPsBySource[src] || []).find(x => nn(x.player) === nn(player) && x.proj != null && (!x.gameDateIso || x.gameDateIso === iso)); if (pr) v = Number(pr.proj); } // pasted = same number as the CSV
+        if (v != null) projs[src] = v;
+      });
       const have = Object.keys(projs);
       if (have.length < 3) continue;
       for (const ou of ["over", "under"]) {
@@ -2428,7 +2432,7 @@ async function runNhlModel(opts) {
         const anchor = evs[sorted[0]] >= NHL_PS_QUAL_EV ? sorted[0] : sorted[1];
         const fairProb = _nhlPoissonHit(ou, line, projs[anchor]);
         rows.push({ player, line, ou, home, away, gameDateIso: iso, game: away + " @ " + home, odds: live.price, book: live.book, allBooks: live.allBooks,
-          projs, evs, agree: qual, of: have.length, anchorEv: evs[anchor], playTo: _nhlPlayToFromProb(fairProb, NHL_PS_QUAL_EV) });
+          projs, evs, agree: qual, of: have.length, anchorEv: evs[anchor], fairProb, minEv, playTo: _nhlPlayToFromProb(fairProb, NHL_PS_QUAL_EV) });
       }
     }
     rows.sort((a, b) => b.anchorEv - a.anchorEv);
@@ -2444,7 +2448,8 @@ async function runNhlModel(opts) {
     });
     _nhlModelSave();
     const newCount = nhlModelLog.length - logBefore;
-    if (!opts.silent || newCount) showNhlToast(`Model: ${rows.length} pick${rows.length === 1 ? "" : "s"}${newCount ? ` (${newCount} new)` : ""} — see MODEL tab`);
+    const tracked = await _nhlModelLogToTracker(rows);
+    if (!opts.silent || newCount || tracked.logged) showNhlToast(`Ensemble: ${rows.length} pick${rows.length === 1 ? "" : "s"}${tracked.logged ? ` · ${tracked.logged} logged to tracker` : ""}${tracked.waiting ? ` · waiting on ${tracked.waiting} (load all 4 sources)` : ""}`);
   } catch (e) { console.error("[NHL model] run failed", e); showNhlToast("Model run failed: " + (e && e.message)); }
   finally { _nhlModelBusy = false; renderNhlModelTab(); }
 }
@@ -2486,11 +2491,31 @@ async function shareNhlModelCard() {
     if (btn) { btn.textContent = orig; btn.disabled = false; }
   } finally { document.body.removeChild(holder); }
 }
+// The ensemble now feeds from the model: every model pick goes to the tracker as an ensemble bet at the live
+// price it qualified at (one per player per day, like before). Only once all 4 sources have projections
+// loaded (CSV or paste) — a source that's simply not loaded yet would otherwise turn 3-of-4 into 3-of-3.
+async function _nhlModelLogToTracker(rows) {
+  const ready = PS_SOURCE_KEYS_NHL.every(src => (srcs[src] && Object.keys(srcs[src]).length) || (nhlPsBySource[src] || []).length);
+  if (!ready) return { logged: 0, waiting: rows.length };
+  const teamOf = r => { for (const src of PS_SOURCE_KEYS_NHL) { const v = Object.values(srcs[src] || {}).find(x => x && nn(x.name) === nn(r.player) && x.team && (_nhlTeamCanon(x.team) === _nhlTeamCanon(r.home) || _nhlTeamCanon(x.team) === _nhlTeamCanon(r.away))); if (v) return _nhlTeamCanon(v.team); } return ""; };
+  let logged = 0;
+  for (const m of rows) {
+    const have = Object.keys(m.projs);
+    const r = { player: m.player, team: teamOf(m), game: m.game, gameDateIso: m.gameDateIso, ou: m.ou, line: m.line, odds: m.odds, book: m.book,
+      proj: have.reduce((a, k) => a + m.projs[k], 0) / have.length, sourcesAgreed: have, requiredQual: have.length,
+      missingSrc: have.length === 3 ? PS_SOURCE_KEYS_NHL.find(k => !have.includes(k)) : null, missingProj: null,
+      sourceProjs: m.projs, sourceEvs: m.evs, qualCount: m.agree, minEv: m.minEv,
+      anchorFairProb: m.fairProb, anchorFairOdds: p2american(m.fairProb), anchorEv: m.anchorEv };
+    try { if (await _nhlPsLogRow(r)) { const b = bets[0]; if (b && b.player === m.player) b._modelFed = true; logged++; } } catch (e) { console.warn("[NHL ensemble] log failed", m.player, e && e.message); }
+  }
+  if (logged) { saveBets(); if (currentTab === "tracker") renderTracker(); }
+  return { logged, waiting: 0 };
+}
 // Today's PropShop-ensemble picks (current Ensemble tab + anything already logged today).
 function _nhlModelPsKeys() {
   const iso = _ymdLocal(new Date()), keys = new Set();
   try { computeNhlPsEnsemble().filter(r => r.gameDateIso === iso).forEach(r => keys.add(nn(r.player) + "|" + r.ou + "|" + Number(r.line))); } catch (e) {}
-  bets.filter(b => b._psEnsemble && _ymdLocal(new Date(b.date)) === iso).forEach(b => keys.add(nn(b.player) + "|" + b.ou + "|" + Number(b.line)));
+  bets.filter(b => b._psEnsemble && !b._modelFed && _ymdLocal(new Date(b.date)) === iso).forEach(b => keys.add(nn(b.player) + "|" + b.ou + "|" + Number(b.line)));
   return keys;
 }
 async function gradeNhlModelLog(manual) {
@@ -2563,12 +2588,12 @@ function renderNhlModelTab() {
       ${matchRows.map(m => { const n = m.same + m.diff; return `<div style="margin:3px 0;"><b style="color:#7dd3fc;">${_NHL_SRC_TAG[m.src]}</b> ${n ? `<span style="color:${m.diff ? "#eab308" : "#00cc66"};font-weight:800;">${m.same}/${n} identical</span>` : "no overlap"}${m.missing ? ` <span style="color:#9fb8d6;">· ${m.missing} pasted players not in the CSV</span>` : ""}${m.offs.length ? ` <span style="color:#9fb8d6;">· e.g. ${escapeHtmlBasic(m.offs.join(", "))} (PropShop vs CSV)</span>` : ""}</div>`; }).join("")}
     </div>` : "";
   el.innerHTML = `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:6px;">
-      <span style="font-size:15px;font-weight:800;color:#fff;">Model — our own ensemble off the uploaded CSVs and live prices</span>
+      <span style="font-size:15px;font-weight:800;color:#fff;">Ensemble model — uploaded CSVs + live prices</span>
       <button onclick="runNhlModel()" ${_nhlModelBusy ? "disabled" : ""} style="background:#0066cc;border:none;color:#fff;${btn}">${_nhlModelBusy ? "Running…" : "Run model"}</button>
       <button onclick="gradeNhlModelLog(true)" style="background:transparent;border:1px solid #0d2035;color:#fff;${btn}">Grade now</button>
       ${_nhlModelRows && _nhlModelRows.length ? `<button id="model-card-btn" onclick="shareNhlModelCard()" style="background:#0a1628;border:1px solid #0d2035;color:#00cc66;${btn}">🖼 Model card</button>` : ""}
     </div>
-    <div style="font-size:12px;color:#9fb8d6;margin-bottom:14px;">CSVs loaded: ${loaded.length ? loaded.join(", ") : "none — upload them on the Upload tab"}. Poisson on each projection → EV at the best Pinnacle / Prop Builder / FanDuel / Bet105 price. Same gate as the ensemble (3 at ${NHL_PS_QUAL_EV}%+, none negative). Picks are logged at 1u flat and graded on their own; nothing goes to the tracker.</div>
+    <div style="font-size:12px;color:#9fb8d6;margin-bottom:14px;">CSVs loaded: ${loaded.length ? loaded.join(", ") : "none — upload them on the Upload tab"}. Poisson on each projection → EV at the best Pinnacle / Prop Builder / FanDuel / Bet105 price. Same gate as the ensemble (3 at ${NHL_PS_QUAL_EV}%+, none negative). This is now the ensemble: once all 4 sources are loaded, every pick here is logged to the tracker at the live price it qualified at. The record below is the same picks at 1u flat.</div>
     ${matchHtml}${records}${today}`;
 }
 // opts.silent — used by the auto-trigger poll below so it doesn't fight with
@@ -3872,7 +3897,7 @@ async function importPropShopNhl() {
   // tracker without a manual click, graded against the LIVE OpticOdds book
   // (same tiering as the auto-scan) rather than the PropShop paste's own
   // static book/price.
-  const loggedCount = await _nhlAutoLogPsEnsemble();
+  const loggedCount = 0; // ensemble picks now come from the model run that follows every paste (see runNhlModel)
   if (currentTab === 'res') renderNhlPsPanel();
   if (currentTab === 'tracker' && loggedCount) renderTracker();
   infoEl.textContent = `${_psSourceLabelNhl[psSource]}: reset to ${newCount} pick${newCount === 1 ? '' : 's'} (was ${prevCount})${collapsed ? `, collapsed ${collapsed} repeat(s)` : ''}${errors.length ? `, ${errors.length} parse error(s)` : ''}.` + (loggedCount ? ` Auto-logged ${loggedCount} 3+/4 pick${loggedCount === 1 ? '' : 's'} to the tracker.` : '');
