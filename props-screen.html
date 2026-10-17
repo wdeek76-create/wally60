@@ -441,6 +441,7 @@ a.p{color:var(--text);text-decoration:none;border-color:rgba(34,197,94,.55)!impo
 .abfxi:last-child{border-bottom:none}
 .abfxi.on{background:rgba(34,197,94,.14)}
 .abfxt{font-family:var(--mono);font-size:10.5px;font-weight:600}
+.abwhy{margin-top:10px;padding:10px 12px;border-radius:12px;border:1px solid rgba(245,165,36,.45);background:rgba(245,165,36,.1);font-size:12.5px;font-weight:600;line-height:1.45}
 .ablbl2{display:block;font-size:10px;font-weight:600;margin-top:2px;max-width:150px;line-height:1.3}
 .plsharpchip{display:flex;flex-wrap:wrap;gap:5px;margin-top:6px}
 .plsharpchip span{font-family:var(--mono);font-size:10.5px;font-weight:800;padding:2px 8px;border-radius:999px;background:rgba(34,197,94,.16);color:var(--green)}
@@ -3149,6 +3150,9 @@ function exchDepth(o){
 // Reads off whatever sport's data is CURRENTLY loaded in the globals (sportKey/fixtures/
 // mainRows/players) -- runAutoBuild temporarily swaps those to another league's same-day cache
 // when autoLeague differs from the active tab, so this never needs to know about that itself.
+// Why Auto Build came back empty: how many picks each filter knocked out on the last run.
+let autoWhy = null, autoLastMsg = '';
+const why = k => { if(autoWhy) autoWhy[k]=(autoWhy[k]||0)+1; };
 function buildAutoCandidates(){
   const S=SPORTS[sportKey];
   const out=[];
@@ -3179,7 +3183,8 @@ function buildAutoCandidates(){
         const oppRows = side==='single'
           ? allMarketRows.filter(o=>normName(cleanSel(o.selection||o.name))!==p.key)
           : rows.filter(o=>sideOf(o)===(side==='over'?'under':'over') && (line==null||Number(o.points)===Number(line)));
-        const fairP = fairPFromRows(myRows, oppRows, false, S.places?.[mkey]); if(fairP==null) return;
+        why('checked');
+        const fairP = fairPFromRows(myRows, oppRows, false, S.places?.[mkey]); if(fairP==null){ why('nofair'); return; }
         let refRow;
         if(autoTargetBook){
           // Only this one shop's own price counts -- skip the pick entirely if it doesn't post it,
@@ -3191,7 +3196,7 @@ function buildAutoCandidates(){
           refRow = autoBasis==='pin' ? pinRow : autoBasis==='exch' ? exchRow
             : [pinRow,exchRow].filter(Boolean).sort((a,b)=>toDec(b.price)-toDec(a.price))[0] || null;
         }
-        if(!refRow) return;
+        if(!refRow){ why('notarget'); return; }
         // Liquidity floor always measures REAL EXCHANGE depth for this pick (Novig/Prophet X/
         // Kalshi) -- never refRow, which is whichever book ended up as the actual reference/
         // target price. A flat sportsbook (FanDuel, DraftKings, etc) never carries real
@@ -3206,16 +3211,16 @@ function buildAutoCandidates(){
         const minLiq = isMain ? autoMinLiqMains : autoMinLiqProps;
         if(minLiq>0){
           const tot = legLadder(myRows, refRow.price).total;
-          if(tot<minLiq) return;
+          if(tot<minLiq){ why(isMain?'liqMains':'liqProps'); return; }
         }
         const edgePct = (fairP - toImplied(Number(refRow.price)))*100;
-        if(autoEdge!=='' && edgePct < autoEdge) return;
+        if(autoEdge!=='' && edgePct < autoEdge){ why('edge'); return; }
         // Mains only: require this many sharp books (Pin/BOL/BKM/Circa) moving toward the side after
         // a limit raise, when the Sharp move filter is on.
         let sharp=null;
         if(isMain && !S.golf && autoSharpMin>0 && autoScope!=='props'){
           sharp=sharpCandMoves({ p, mkey, side, line, refRow });
-          if(sharp.length<autoSharpMin) return;
+          if(sharp.length<autoSharpMin){ why('sharp'); return; }
         }
         out.push({ p, mkey, side, line, refRow, fairP, edgePct, isMain, sharp });
       });
@@ -3282,11 +3287,16 @@ function runAutoBuildNow(){
     // apply at all across leagues (there's no single fixture to default to), so SGP is ignored
     // when League is "Any".
     if(autoSGP && !crossLeague && !autoFixture){
-      const first=fixtures.filter(f=>!f.live).sort((a,b)=>new Date(a.start)-new Date(b.start))[0];
-      if(!first){ toast('No upcoming games to build a same-game parlay from'); return; }
+      // Soonest game the Target shop actually prices (any shop when no Target is set) -- not just
+      // the earliest kickoff, which in an every-league sport is often a game nobody you use lists.
+      const priced=new Set(mainRows.filter(o=>!autoTargetBook || canonBook(o.sportsbook)===autoTargetBook).map(o=>o._fx));
+      const first=fixtures.filter(f=>!f.live && priced.has(f.id)).sort((a,b)=>new Date(a.start)-new Date(b.start))[0];
+      if(!first){ autoLastMsg=`No upcoming ${SPORTS[sportKey].label} game ${autoTargetBook?esc(bookLabel(autoTargetBook))+' prices':'has lines'} right now.`; toast('No game to build from'); return; }
       autoFixture=first.id;
     }
+    autoWhy={}; autoLastMsg='';
     const candidates = crossLeague ? buildAutoCandidatesAllLeagues() : buildAutoCandidates();
+    const W=autoWhy; autoWhy=null;
     const used=new Set(parlay.map(l=>l.playerKey+'|'+(SPORTS[l.sportKey]?.golf?'golf':l.mkey)));
     // Moneyline/regulation-ML/spread are opposite sides of the SAME bet -- one team's own entity
     // and the other team's own entity on that market are mutually exclusive outcomes, never two
@@ -3304,7 +3314,20 @@ function runAutoBuildNow(){
       used.add(k); picks.push(c);
       if(picks.length>=autoLegs) break;
     }
-    if(!picks.length){ toast(autoSharpMin>0&&autoScope==='mains'?`No mains with ${autoSharpMin}+ sharp book${autoSharpMin>1?'s':''} moving their way after a limit raise`:autoEdge===''?'No picks available for that game/scope':'No picks cleared that edge threshold'); return; }
+    if(!picks.length){
+      // Spell out exactly which filters emptied it, so it's clear what to loosen.
+      const fx = autoFixture ? fixtures.find(f=>f.id===autoFixture) : null;
+      const parts=[];
+      if(W.notarget) parts.push(`${W.notarget} not posted by ${esc(autoTargetBook?bookLabel(autoTargetBook):autoBasis==='pin'?'Pinnacle':autoBasis==='exch'?'an exchange':'Pinnacle or an exchange')}`);
+      if(W.liqMains) parts.push(`${W.liqMains} under ${usd(autoMinLiqMains)} exch liq (mains)`);
+      if(W.liqProps) parts.push(`${W.liqProps} under ${usd(autoMinLiqProps)} exch liq (props)`);
+      if(W.edge) parts.push(`${W.edge} below ${autoEdge}% edge`);
+      if(W.sharp) parts.push(`${W.sharp} without ${autoSharpMin}+ sharp move${autoSharpMin>1?'s':''}`);
+      if(W.nofair) parts.push(`${W.nofair} with no other side to devig`);
+      autoLastMsg = !W.checked ? `Nothing to check${fx?` in ${esc(fxLabel(fx))}`:''} for this league/scope -- no lines loaded${autoScope!=='both'?` for ${autoScope==='props'?'props':'mains'}`:''}.`
+        : `Checked ${W.checked} pick${W.checked===1?'':'s'}${fx?` in ${esc(fxLabel(fx))}`:''} -- none made it: ${parts.join(' · ')}.`;
+      toast('No picks -- see why below'); renderParlay(); return;
+    }
     if(crossLeague){
       // Each pick swaps the globals to its OWN league just long enough to add it, since
       // addToParlay reads sportKey/fixtures directly off them.
@@ -3374,6 +3397,7 @@ function autoBuildHtml(){
         ${[[0,'Off'],[1,'1+'],[2,'2+'],[3,'3+']].map(([v,t])=>`<button class="qarbchip${autoSharpMin===v?' on':''}" data-autosharp="${v}">${t}</button>`).join('')}
       </div></div>
       <button class="big" id="autoGenerate" style="width:100%;margin-top:10px">Generate parlay</button>
+      ${autoLastMsg?`<div class="abwhy">${autoLastMsg}</div>`:''}
     </div>
   </div>`;
 }
