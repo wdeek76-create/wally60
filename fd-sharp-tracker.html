@@ -270,8 +270,8 @@ function liqDepth(o) {
 // OddsJam-style exchange liquidity for a pick: the money you can bet into on your side is the
 // resting orders on the OPPOSITE side's book (an "Over -120 $3.7k" order is someone backing the
 // Under at +120). Every level from every exchange (Kalshi, Novig, Prophet X) is merged into one
-// ladder and counted at FULL size when its price for your side sits within EXCH_LADDER_CENTS of
-// the target book's price; levels further out don't count. Also returns the size-weighted
+// ladder and counted at FULL size when its price for your side is within EXCH_LADDER_CENTS of the
+// target book's price AND no better than it (backing your side at or past the price you get). Also returns the size-weighted
 // average price (opposite side's terms, like the exchange shows it) and each exchange's share.
 const EXCH_LADDER_CENTS = 20;
 function exchLevels(o) {
@@ -289,14 +289,18 @@ function exchLadder(oppQuotes, targetPrice) {
     const bk = String(o.sportsbook || '');
     exchLevels(o).forEach(l => {
       if (targetPrice != null && centsDiff(-l.price, targetPrice) > EXCH_LADDER_CENTS) return;
-      const lv = levels[l.price] || (levels[l.price] = { price: l.price, size: 0, books: [] });
+      // OddsJam rule: only levels backing your side at a price as bad or worse than the target
+      // book's count; ones only backing you at a better price are listed but not counted.
+      const counted = targetPrice == null || toDec(-l.price) <= toDec(targetPrice) + 1e-9;
+      const lv = levels[l.price] || (levels[l.price] = { price: l.price, size: 0, books: [], counted });
       lv.size += l.size; if (!lv.books.includes(bk)) lv.books.push(bk);
-      byBook[bk] = (byBook[bk] || 0) + l.size;
+      if (counted) byBook[bk] = (byBook[bk] || 0) + l.size;
     });
   });
   const rows = Object.values(levels).sort((a, b) => b.price - a.price);
-  const total = rows.reduce((s, l) => s + l.size, 0);
-  const avg = total ? toAm(rows.reduce((s, l) => s + toDec(l.price) * l.size, 0) / total) : null;
+  const cnt = rows.filter(l => l.counted);
+  const total = cnt.reduce((s, l) => s + l.size, 0);
+  const avg = total ? toAm(cnt.reduce((s, l) => s + toDec(l.price) * l.size, 0) / total) : null;
   return { rows, total, avg, byBook };
 }
 const ladderBooksTxt = L => Object.entries(L.byBook).sort((a, b) => b[1] - a[1]).map(([b, s]) => `${b} ${usd(s)}`).join(' · ');
