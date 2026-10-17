@@ -25029,6 +25029,27 @@ const RW_NBA_PATHS = {
 // Hosted on a web address (Vercel) → always go through that site's own /api/rotowire helper;
 // a key typed into ⚙ is for the saved-file version only and would be blocked by RotoWire here.
 function _rwHosted() { try { return /^https?:$/.test(location.protocol) && !/^(localhost|127\.)/.test(location.hostname); } catch (e) { return false; } }
+// RotoWire's proxy answers in XML for some feeds (DFS salaries, schedule-style feeds). Turn it into the same
+// nested objects the JSON feeds give, so every reader below works on either.
+function _rwXmlToObj(text) {
+  const doc = new DOMParser().parseFromString(text, "application/xml");
+  if (doc.querySelector("parsererror")) throw new Error("not valid XML");
+  const conv = el => {
+    const o = {};
+    for (const a of el.attributes) o[a.name] = a.value;
+    const kids = [...el.children];
+    if (!kids.length) { const t = (el.textContent || "").trim(); if (!Object.keys(o).length) return t === "" ? null : (isNaN(Number(t)) || /^0\d/.test(t) ? t : Number(t)); if (t) o["#text"] = t; return o; }
+    kids.forEach(k => { const v = conv(k); if (k.tagName in o) { if (!Array.isArray(o[k.tagName])) o[k.tagName] = [o[k.tagName]]; o[k.tagName].push(v); } else o[k.tagName] = v; });
+    return o;
+  };
+  const root = conv(doc.documentElement);
+  return root && typeof root === "object" ? root : { value: root };
+}
+function _rwParseBody(text, label, status) {
+  const t = String(text || "").trim();
+  if (t.startsWith("<")) { try { return _rwXmlToObj(t); } catch (e) { throw new Error(`${label}: XML couldn't be read (${status}) ${t.slice(0, 100)}`); } }
+  try { return JSON.parse(t); } catch (e) { throw new Error(`${label}: not JSON (${status}) ${_rwMask(t.slice(0, 120))}`); }
+}
 function getRwKey() { if (_rwHosted()) return ""; try { return localStorage.getItem(RW_KEY_STORAGE) || ""; } catch (e) { return ""; } }
 function _rwMaskKey(k) { return k ? "••••" + String(k).slice(-3) : ""; }
 function _rwMask(u) { return String(u || "").replace(/([?&](?:key|apikey|api_key|token|k)=)[^&]+/ig, "$1••••••"); }
@@ -25085,7 +25106,7 @@ async function _rwGetJson(url, label) {
     throw Object.assign(new Error(`${label}: ${why}`), { blocked: true });
   }
   const text = await r.text();
-  let data; try { data = JSON.parse(text); } catch (e) { throw new Error(`${label}: not JSON (${r.status}) ${_rwMask(text.slice(0, 120))}`); }
+  const data = _rwParseBody(text, label, r.status);
   if (!r.ok || (data && !Array.isArray(data) && (data.error || data.Error) && Object.keys(data).length <= 3)) throw new Error(`${label}: ${r.status} ${_rwMask(String(data.error || data.Error || ""))}`);
   return data;
 }
@@ -25109,11 +25130,12 @@ async function rwApiFetch(feed, date) {
   const url = base + (base.includes("?") ? "&" : "?") + "feed=" + encodeURIComponent(feed) + (date ? "&date=" + date : "");
   let r;
   const _lk = getRwLink();
-  const _viaBrowser = async () => { try { const rr = await fetch(`${RW_PROXY_URL}?feed=${encodeURIComponent(feed)}${date ? "&date=" + date : ""}`, { cache: "no-store" }); const dd = await rr.json(); if (rr.ok && !(dd && !Array.isArray(dd) && dd.error)) return dd; } catch (e) {} return null; };
+  const _viaBrowser = async () => { try { const rr = await fetch(`${RW_PROXY_URL}?feed=${encodeURIComponent(feed)}&format=json${date ? "&date=" + date : ""}`, { cache: "no-store" }); const dd = _rwParseBody(await rr.text(), feed, rr.status); if (rr.ok && !(dd && !Array.isArray(dd) && dd.error)) return dd; } catch (e) {} return null; };
   try { r = await fetch(url, { cache: "no-store", headers: _lk ? { "x-rw-link": encodeURIComponent(_lk) } : {} }); }
   catch (e) { throw new Error(`${feed}: couldn't reach the RotoWire proxy — click ⚙ and paste your RotoWire API key`); }
   const text = await r.text();
-  let data; try { data = JSON.parse(text); } catch (e) { throw new Error(`${feed}: not JSON (${r.status}) ${text.slice(0, 120)}`); }
+  let data;
+  try { data = _rwParseBody(text, feed, r.status); } catch (e) { if (/^(NBACeilFloor|nba-DFS-dk|nba-DFS-fd|NBALineups)$/.test(feed)) { const viaB0 = await _viaBrowser(); if (viaB0) return viaB0; } throw e; }
   if (!r.ok || (data && data.error && !Array.isArray(data))) {
     // The helper couldn't get it (RotoWire's proxy may be blocking Vercel) — let the browser ask RotoWire's proxy itself.
     if (/^(NBACeilFloor|nba-DFS-dk|nba-DFS-fd|NBALineups)$/.test(feed)) { const viaB = await _viaBrowser(); if (viaB) return viaB; }
@@ -25464,7 +25486,8 @@ async function rwApiTest() {
   for (const feed of ["NBAInjuries", "NBALineups", "NBANews", "NBADepth", "NBADailyProj", "NBAPlayers", "NBACeilFloor", "nba-DFS-dk"]) {
     try {
       let data = await rwApiFetch(feed);
-      let rows = feed === "NBADailyProj" ? _rwDeepPlayers(data) : feed === "NBALineups" ? _rwDeepNamed(data) : _rwRows(data);
+      let rows = feed === "NBADailyProj" ? _rwDeepPlayers(data) : (feed === "NBALineups" || feed === "NBACeilFloor") ? _rwDeepNamed(data) : _rwRows(data);
+      if (feed === "NBACeilFloor" && !rows.length) out.push(`NBACeilFloor: no players posted yet · Games listed: ${data && data.Games && typeof data.Games === "object" ? (Array.isArray(data.Games) ? data.Games.length : Object.keys(data.Games).length) : 0} · Date: ${data && data.Date}`);
       if (feed === "NBALineups" && !rows.length) out.push(`NBALineups: no players posted yet · Games listed: ${Array.isArray(data && data.Games) ? data.Games.length : "?"} · Date: ${data && data.Date}`);
       if (feed === "NBADailyProj" && !rows.length) { const r2 = await _rwFetchDailyProj(); if (r2.rows.length) { rows = r2.rows; data = r2.data; } else out.push("NBADailyProj: no games/projections posted for the next 4 days (top-level: " + Object.keys(data || {}).join(", ") + ")"); }
       const keys = rows.length ? Object.keys(rows[0]).filter(k => k !== "__parent").join(", ") : "(no rows)";

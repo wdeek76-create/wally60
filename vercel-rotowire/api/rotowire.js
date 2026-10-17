@@ -28,11 +28,13 @@ const RW_PROXY = (process.env.ROTOWIRE_PROXY_URL || "https://rotowire-secrets-eb
 let proxyNote = null;   // what RotoWire's proxy last said — shown in errors so a block is visible
 async function viaProxy(feed, date, link) {
   const base = (link && link.proxy) || RW_PROXY;
-  const url = `${base}${base.includes("?") ? "&" : "?"}feed=${encodeURIComponent(feed)}${date}`;
+  const url = `${base}${base.includes("?") ? "&" : "?"}feed=${encodeURIComponent(feed)}&format=json${date}`;
   const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 12000);
   try {
     const r = await fetch(url, { headers: { Accept: "application/json", "User-Agent": "Mozilla/5.0 (compatible; NBA-blender)", Referer: "https://www.rotowire.com/" }, signal: ctl.signal });
     const text = await r.text();
+    // RotoWire's proxy often answers in XML whatever you ask for — pass it through; the blender reads XML.
+    if (r.ok && /^\s*</.test(text) && !/<error/i.test(text.slice(0, 200))) { proxyNote = null; return text; }
     let data; try { data = JSON.parse(text); } catch (e) { proxyNote = { status: r.status, body: text.slice(0, 160).replace(/\s+/g, " ") }; return null; }
     if (!r.ok || (data && !Array.isArray(data) && data.error)) { proxyNote = { status: r.status, body: String((data && data.error) || text).slice(0, 160) }; return null; }
     proxyNote = null;
@@ -112,7 +114,7 @@ module.exports = async (req, res) => {
   if (!paths.length && !PARAM_FEEDS.has(feed)) { res.status(400).json({ error: "unknown feed", feeds: [...Object.keys(PATHS), ...PARAM_FEEDS] }); return; }
 
   const date = /^\d{4}-\d{2}-\d{2}$/.test(String((req.query && req.query.date) || "")) ? `&date=${req.query.date}` : "";
-  const sendOk = (text) => { res.setHeader("Cache-Control", "s-maxage=120, stale-while-revalidate=300"); res.setHeader("Content-Type", "application/json"); res.status(200).send(text); };
+  const sendOk = (text) => { res.setHeader("Cache-Control", "s-maxage=120, stale-while-revalidate=300"); res.setHeader("Content-Type", /^\s*</.test(text) ? "application/xml" : "application/json"); res.status(200).send(text); };
   // Feeds the regular API has no address for (ceiling/floor, lineups, DFS) go straight to RotoWire's proxy.
   if (PARAM_FEEDS.has(feed)) { const t0 = await viaProxy(feed, date, link); if (t0) { sendOk(t0); return; } }
   let last = null;
