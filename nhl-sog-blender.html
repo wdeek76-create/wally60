@@ -2439,6 +2439,9 @@ async function runNhlModel(opts) {
       const cur = mainLine[pk];
       if (!cur || books > cur.books || (books === cur.books && pin && !cur.pin) || (books === cur.books && pin === cur.pin && ln < cur.line)) mainLine[pk] = { line: ln, books, pin };
     });
+    let autoLinked = 0;
+    try { autoLinked = _nhlAutoLinkNames(byPL, mainLine); } catch (e) { console.warn("[NHL names] auto-match failed", e && e.message); }
+    if (autoLinked && !opts.preview) showNhlToast(`Auto-matched ${autoLinked} player name${autoLinked === 1 ? "" : "s"} across sources`);
     for (const key of Object.keys(byPL)) {
       const ents = byPL[key]; if (!ents || !ents.length) continue;
       const player = ents[0].player, line = Number(ents[0].line), home = ents[0].home, away = ents[0].away;
@@ -2507,6 +2510,51 @@ async function runNhlModel(opts) {
   } catch (e) { console.error("[NHL model] run failed", e); showNhlToast("Model run failed: " + (e && e.message)); }
   finally { _nhlModelBusy = false; renderNhlModelTab(); }
 }
+// ── Automatic name matching ───────────────────────────────────────────────
+// Before the model prices anything: for every board player a source doesn't have under the same name, look in
+// that source for the one player who is clearly him — same last name (suffixes like Jr. ignored), first names
+// compatible (same initial: Jake/Jacob, Ben/Benjamin, Will/William, Mitch/Mitchell, JJ/J.J.), and the right team
+// when the source has teams. Exactly one such player → linked automatically (saved). Anything unclear goes to the popup.
+const _NHL_NICK_PAIRS = [["tony","anthony"],["andy","andrew"],["drew","andrew"],["bob","robert"],["bobby","robert"],["rob","robert"],["bill","william"],["billy","william"],["dick","richard"],["rick","richard"],["ted","edward"],["teddy","edward"],["peggy","margaret"],["sasha","alexander"],["kirby","kirby"]];
+function _nhlNameParts(name) {
+  const raw = String(name || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\b(jr|sr|ii|iii|iv)\.?$/i, "").trim();
+  const toks = raw.split(/\s+/).filter(Boolean);
+  const last = (toks.length > 1 ? toks.slice(1).join("") : toks[0] || "").toLowerCase().replace(/[^a-z]/g, "");
+  const first = (toks[0] || "").toLowerCase().replace(/[^a-z]/g, "");
+  return { first, last };
+}
+function _nhlFirstCompatible(a, b) {
+  if (!a || !b) return false;
+  if (a === b || a.startsWith(b) || b.startsWith(a)) return true;
+  if (_NHL_NICK_PAIRS.some(([x, y]) => (a === x && b === y) || (a === y && b === x))) return true;
+  return a.length >= 2 && b.length >= 2 && a.slice(0, 2) === b.slice(0, 2); // same first two letters (Jake/Jacob, Nate/Nathan) — never Ryan/Robert; only with a unique last name + team
+}
+function _nhlAutoLinkNames(byPL, mainLine) {
+  let linked = 0; const done = new Set();
+  Object.keys(byPL).forEach(key => {
+    const ents = byPL[key]; if (!ents || !ents.length) return;
+    const player = ents[0].player, pk = nn(player), home = ents[0].home, away = ents[0].away;
+    if (done.has(pk) || !mainLine[pk] || _nhlPsRejected(player)) return;
+    done.add(pk);
+    const me = _nhlNameParts(player);
+    PS_SOURCE_KEYS_NHL.forEach(src => {
+      if (!srcs[src] || !Object.keys(srcs[src]).length || _nhlModelCsvProj(src, player, home, away) != null) return;
+      const cands = Object.values(srcs[src]).filter(v => {
+        if (!v || !v.name || !(v.sog > 0)) return false;
+        const p2 = _nhlNameParts(v.name);
+        if (p2.last !== me.last || !_nhlFirstCompatible(me.first, p2.first)) return false;
+        if (v.team && !(_nhlTeamCanon(v.team) === _nhlTeamCanon(home) || _nhlTeamCanon(v.team) === _nhlTeamCanon(away))) return false; // wrong team
+        return !Object.keys(byPL).some(k2 => { const e2 = byPL[k2]; return e2 && e2[0] && nn(e2[0].player) === nn(v.name); }); // he isn't someone else on the board
+      });
+      if (cands.length === 1) {
+        _NHL_NAME_ALIAS[nn(cands[0].name)] = pk; linked++;
+        console.log(`[NHL names] auto-matched ${_NHL_SRC_TAG[src]} "${cands[0].name}" = "${player}"`);
+      }
+    });
+  });
+  if (linked) { try { localStorage.setItem("nhl_name_alias", JSON.stringify(_NHL_NAME_ALIAS)); } catch (e) {} }
+  return linked;
+}
 // ── Missing-source name check ──────────────────────────────────────────────
 // After a model run: any board player (main line) that some sources project and another doesn't. For the
 // missing source, the closest names in its CSV (same last name, or a near-identical spelling) are offered in a
@@ -2528,7 +2576,7 @@ function _nhlFindMissingSources(byPL, mainLine, iso) {
     if (seen.has(pk) || !mainLine[pk] || mainLine[pk].line !== Number(ents[0].line) || _nhlPsRejected(player)) return;
     seen.add(pk);
     const have = PS_SOURCE_KEYS_NHL.filter(src => _nhlModelCsvProj(src, player, home, away) != null);
-    if (!have.length || have.length === PS_SOURCE_KEYS_NHL.length) return;
+    if (have.length < 2 || have.length === PS_SOURCE_KEYS_NHL.length) return; // nobody/one source = not a name problem
     PS_SOURCE_KEYS_NHL.filter(src => !have.includes(src) && srcs[src] && Object.keys(srcs[src]).length).forEach(src => {
       if (skipped[iso + "|" + src + "|" + pk]) return;
       const last = nn(String(player).trim().split(/\s+/).slice(-1)[0]);
