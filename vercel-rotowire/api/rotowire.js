@@ -16,6 +16,32 @@ const PATHS = {
   NBACeilFloor: ["CeilFloor.php", "CeilingFloor.php", "DailyProjectionsCeilFloor.php"],
 };
 
+// RotoWire's second API style: one endpoint that takes  ?key=…&feed=NBACeilFloor  (the one that answers
+// "Missing or invalid feed parameter" + a list of valid feeds). Its exact address isn't documented to us,
+// so likely addresses are tried and the first that answers with real data (not that error) is remembered.
+const FEED_HOSTS = ["https://api.rotowire.com", "https://www.rotowire.com", "https://rotowire.com"];
+const FEED_FILES = ["feed.php", "feeds.php", "Feed.php", "api.php", "index.php", "feed", "api/feed.php", "Basketball/NBA/feed.php", "Basketball/NBA/Feed.php", "Basketball/feed.php"];
+const PARAM_FEEDS = new Set(["NBACeilFloor", "nba-DFS-dk", "nba-DFS-fd", "NBALineups"]);
+let feedBase = null;   // remembered between calls while the function stays warm
+async function viaFeedParam(feed, key, date) {
+  const tryOne = async (base) => {
+    const url = `${base}?key=${encodeURIComponent(key)}&feed=${encodeURIComponent(feed)}${date}`;
+    const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 9000);
+    try {
+      const r = await fetch(url, { headers: { Accept: "application/json" }, signal: ctl.signal });
+      const text = await r.text();
+      let data; try { data = JSON.parse(text); } catch (e) { return null; }
+      if (!r.ok || (data && !Array.isArray(data) && data.error)) return null;
+      return { base, text };
+    } catch (e) { return null; } finally { clearTimeout(t); }
+  };
+  if (feedBase) { const hit = await tryOne(feedBase); if (hit) return hit.text; feedBase = null; }
+  const results = await Promise.all(FEED_HOSTS.flatMap(h => FEED_FILES.map(f => tryOne(`${h}/${f}`))));
+  const hit = results.find(Boolean);
+  if (hit) { feedBase = hit.base; return hit.text; }
+  return null;
+}
+
 module.exports = async (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
@@ -48,8 +74,8 @@ module.exports = async (req, res) => {
     return;
   }
   const feed = String((req.query && req.query.feed) || "");
-  const paths = PATHS[feed];
-  if (!paths) { res.status(400).json({ error: "unknown feed", feeds: Object.keys(PATHS) }); return; }
+  const paths = PATHS[feed] || [];
+  if (!paths.length && !PARAM_FEEDS.has(feed)) { res.status(400).json({ error: "unknown feed", feeds: [...Object.keys(PATHS), ...PARAM_FEEDS] }); return; }
 
   const date = /^\d{4}-\d{2}-\d{2}$/.test(String((req.query && req.query.date) || "")) ? `&date=${req.query.date}` : "";
   let last = null;
@@ -68,6 +94,10 @@ module.exports = async (req, res) => {
     } catch (e) {
       last = { status: 502, endpoint: path.split("?")[0], body: String(e && e.message || e) };
     }
+  }
+  if (PARAM_FEEDS.has(feed)) {
+    const text = await viaFeedParam(feed, key, date);
+    if (text) { res.setHeader("Cache-Control", "s-maxage=120, stale-while-revalidate=300"); res.setHeader("Content-Type", "application/json"); res.status(200).send(text); return; }
   }
   // Never echo the key back.
   res.status(last ? last.status : 502).json({ error: "RotoWire request failed", ...last });
