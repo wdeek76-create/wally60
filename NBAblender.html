@@ -25070,13 +25070,13 @@ async function _rwGetJson(url, label) {
   if (!r.ok || (data && !Array.isArray(data) && (data.error || data.Error) && Object.keys(data).length <= 3)) throw new Error(`${label}: ${r.status} ${_rwMask(String(data.error || data.Error || ""))}`);
   return data;
 }
-async function rwApiFetch(feed) {
+async function rwApiFetch(feed, date) {
   const key = getRwKey();
   if (key) {
     const paths = RW_NBA_PATHS[feed] || [];
     let lastErr = null;
     for (const path of paths) {
-      const url = `${RW_NBA_BASE}/${path}${path.includes("?") ? "&" : "?"}format=json&key=${encodeURIComponent(key)}`;
+      const url = `${RW_NBA_BASE}/${path}${path.includes("?") ? "&" : "?"}format=json&key=${encodeURIComponent(key)}${date ? "&date=" + date : ""}`;
       try { return await _rwGetJson(url, `${feed} (${path.split("?")[0]})`); }
       catch (e) { if (e.blocked) throw e; lastErr = e; }
     }
@@ -25084,7 +25084,7 @@ async function rwApiFetch(feed) {
   }
   const base = getRwApiUrl();
   if (/rotowire\.com/i.test(base) && !/\/api\/rotowire\b/i.test(base)) throw new Error(`${feed}: click ⚙ and paste your RotoWire API key`);
-  const url = base + (base.includes("?") ? "&" : "?") + "feed=" + encodeURIComponent(feed);
+  const url = base + (base.includes("?") ? "&" : "?") + "feed=" + encodeURIComponent(feed) + (date ? "&date=" + date : "");
   let r;
   try { r = await fetch(url, { cache: "no-store" }); }
   catch (e) { throw new Error(`${feed}: couldn't reach the RotoWire proxy — click ⚙ and paste your RotoWire API key`); }
@@ -25278,8 +25278,32 @@ function _rwProjRow(o) {
   const pra = pts != null && reb != null && ast != null ? pts + reb + ast : null;
   return { rawName: name, norm: resolveNorm(name), team: _rwTeam(o), pos: String(_rwPick(o, ["Position", "Pos", "Player.Position"]) || ""), pts, reb, ast, threepm: tpm, pra, min };
 }
+// Find player-like objects ANYWHERE in a nested payload (Games → Teams → Players …): an object with a
+// name and at least one projection stat. The nearest ancestor team code rides along as __parent.
+function _rwDeepPlayers(node, team, out) {
+  out = out || [];
+  if (Array.isArray(node)) { node.forEach(n => _rwDeepPlayers(n, team, out)); return out; }
+  if (!node || typeof node !== "object") return out;
+  const t = _rwPick(node, ["Team.Code", "Team.Abbreviation", "TeamCode", "Code", "Abbreviation", "Team"]);
+  const tm = t && String(t).length <= 4 ? t : team;
+  const hasName = _rwName(node);
+  const f = hasName ? _rwFlat(node) : null;
+  if (hasName && f && Object.keys(f).some(k => /(^|\.)(points|pts|rebounds|reb|assists|ast)$/.test(k))) { out.push(Object.assign({ __parent: { Team: tm } }, node)); return out; }
+  Object.keys(node).forEach(k => { const v = node[k]; if (v && typeof v === "object") _rwDeepPlayers(v, tm, out); });
+  return out;
+}
+async function _rwFetchDailyProj() {
+  // Today first; an empty slate (no games / not posted yet) falls through to the next 3 days.
+  for (let i = 0; i < 4; i++) {
+    const d = new Date(); d.setDate(d.getDate() + i);
+    const data = await rwApiFetch("NBADailyProj", i === 0 ? null : localYMD(d));
+    const rows = _rwDeepPlayers(data);
+    if (rows.length) return { rows, date: i === 0 ? localYMD(d) : localYMD(d), data };
+  }
+  return { rows: [], date: null, data: null };
+}
 async function rwApiSyncProjections() {
-  const rows = _rwRows(await rwApiFetch("NBADailyProj"));
+  const { rows } = await _rwFetchDailyProj();
   const players = rows.map(_rwProjRow).filter(p => p && p.norm.length >= 3 && (p.pts || 0) > 0);
   const idx = SOURCES.findIndex(x => x.key === "rotowire");
   if (idx < 0) throw new Error("NBADailyProj: no RW source slot");
@@ -25327,8 +25351,9 @@ async function rwApiTest() {
   const out = [];
   for (const feed of ["NBAInjuries", "NBALineups", "NBANews", "NBADepth", "NBADailyProj", "NBAPlayers", "NBACeilFloor"]) {
     try {
-      const data = await rwApiFetch(feed);
-      const rows = _rwRows(data);
+      let data = await rwApiFetch(feed);
+      let rows = feed === "NBADailyProj" ? _rwDeepPlayers(data) : _rwRows(data);
+      if (feed === "NBADailyProj" && !rows.length) { const r2 = await _rwFetchDailyProj(); if (r2.rows.length) { rows = r2.rows; data = r2.data; } else out.push("NBADailyProj: no games/projections posted for the next 4 days (top-level: " + Object.keys(data || {}).join(", ") + ")"); }
       const keys = rows.length ? Object.keys(rows[0]).filter(k => k !== "__parent").join(", ") : "(no rows)";
       let mapped = "";
       if (feed === "NBADailyProj" && rows.length) { const m = _rwProjRow(rows[0]); mapped = m ? ` · read as ${m.rawName}: PTS ${m.pts} REB ${m.reb} AST ${m.ast} 3PM ${m.threepm} MIN ${m.min}` : " · COULDN'T read points/rebounds/assists from row 1"; }

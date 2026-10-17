@@ -28,9 +28,10 @@ module.exports = async (req, res) => {
   const paths = PATHS[feed];
   if (!paths) { res.status(400).json({ error: "unknown feed", feeds: Object.keys(PATHS) }); return; }
 
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(String((req.query && req.query.date) || "")) ? `&date=${req.query.date}` : "";
   let last = null;
   for (const path of paths) {
-    const url = `${BASE}/${path}${path.includes("?") ? "&" : "?"}format=json&key=${encodeURIComponent(key)}`;
+    const url = `${BASE}/${path}${path.includes("?") ? "&" : "?"}format=json&key=${encodeURIComponent(key)}${date}`;
     try {
       const r = await fetch(url, { headers: { Accept: "application/json" } });
       const text = await r.text();
