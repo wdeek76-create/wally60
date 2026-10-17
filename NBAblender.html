@@ -574,6 +574,7 @@ table colgroup col.avg-col{width:16%;}
               <textarea id="rw-injury-paste" placeholder="Paste the full RotoWire injury news page here..." spellcheck="false"
                 style="width:100%;min-height:80px;background:#050507;border:1px solid #1a1d22;border-radius:6px;padding:8px 10px;color:#e2e8f0;font-family:'JetBrains Mono','Menlo',monospace;font-size:11px;outline:none;resize:vertical;"></textarea>
               <div style="display:flex;gap:6px;margin-top:6px;">
+                <button onclick="rwApiSyncAll()" title="Pull injuries + news blurbs from the RotoWire API (same store as the paste)" style="background:#22c55e;border:none;color:#050507;border-radius:5px;padding:5px 12px;font-size:11px;font-weight:700;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;letter-spacing:0.3px;">⚡ SYNC RW API</button>
                 <button onclick="parseRotoWireInjuriesPaste()" style="background:#93c5fd;border:none;color:#050507;border-radius:5px;padding:5px 12px;font-size:11px;font-weight:700;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;letter-spacing:0.3px;">PARSE</button>
                 <button onclick="document.getElementById('rw-injury-paste').value='';document.getElementById('rw-injury-status').textContent='';" style="background:transparent;border:1px solid #1a1d22;color:#d4dae3;border-radius:5px;padding:5px 12px;font-size:11px;font-weight:600;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;letter-spacing:0.3px;">CLEAR</button>
                 <button onclick="clearStoredInjuries()" title="Wipe the saved injury report. Otherwise it persists until you clear it." style="background:transparent;border:1px solid #f8717155;color:#f87171;border-radius:5px;padding:5px 12px;font-size:11px;font-weight:600;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;letter-spacing:0.3px;">CLEAR SAVED</button>
@@ -1466,12 +1467,13 @@ function switchTab(tab) {
   if (tab==="autograde") renderAutoGrade();
   if (tab==="totals") renderTotals();
   if (tab==="results" && typeof updateInjuryPanel === "function") updateInjuryPanel();
+  if (tab==="results" && typeof rwAutoIfStale === "function") rwAutoIfStale();
   if (tab==="pace") renderPace();
   if (tab==="captool") renderCapTool();
   if (tab==="evcalc") renderNbaModel();
   if (tab==="morning") {
     renderMorning();
-    try { const sy = JSON.parse(localStorage.getItem("nba_rw_api_synced_at") || "null"); if (!sy || Date.now() - sy.at > 20 * 60 * 1000) rwApiSyncAll(true); } catch (e) {}
+    rwAutoIfStale();
   }
 }
 
@@ -25273,6 +25275,11 @@ function _injApplyMerged() {
   } catch (e) {}
   _injurySource = "rotowire";
   if (typeof updateInjuryPanel === "function") updateInjuryPanel();
+  try {
+    const st = document.getElementById("rw-injury-status");
+    if (st) { st.style.color = "#22c55e"; st.textContent = `API · ${records.length} players · ${new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })} (RW${_injStore.oo.length ? " + OpticOdds" : ""})`; }
+    if (typeof renderTable === "function" && typeof merged !== "undefined" && merged) renderTable();
+  } catch (e) {}
   return records.length;
 }
 async function ooSyncInjuries() {
@@ -25454,11 +25461,20 @@ async function rwApiSyncNews() {
   try { localStorage.setItem(RW_NEWS_FEED_KEY, JSON.stringify({ fetchedAt: Date.now(), items })); } catch (e) {}
   return items.length;
 }
+// Keeps RotoWire data fresh with no clicking: shortly after load, every 10 minutes while the page is open, when you
+// come back to the page, and when you open Projections / Morning with data older than 10 minutes.
+const RW_STALE_MS = 10 * 60 * 1000;
+function rwAutoIfStale(force) {
+  try {
+    if (!(_rwHosted() || getRwKey())) return;
+    const sy = JSON.parse(localStorage.getItem(RW_API_SYNC_KEY) || "null");
+    if (force || !sy || Date.now() - sy.at > RW_STALE_MS) rwApiSyncAll(true);
+  } catch (e) {}
+}
 (function rwAutoRefresh() {
-  const configured = () => _rwHosted() || !!getRwKey();
-  const stale = () => { try { const sy = JSON.parse(localStorage.getItem(RW_API_SYNC_KEY) || "null"); return !sy || Date.now() - sy.at > 20 * 60 * 1000; } catch (e) { return true; } };
-  setTimeout(() => { if (configured() && stale()) rwApiSyncAll(true); }, 3000);
-  setInterval(() => { if (configured() && !document.hidden) rwApiSyncAll(true); }, 20 * 60 * 1000);
+  setTimeout(() => rwAutoIfStale(), 3000);
+  setInterval(() => { if (!document.hidden) rwAutoIfStale(true); }, RW_STALE_MS);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) rwAutoIfStale(); });
 })();
 function getRwNewsFeed() { try { return JSON.parse(localStorage.getItem(RW_NEWS_FEED_KEY) || "null"); } catch (e) { return null; } }
 async function rwApiSyncAll(quiet) {
