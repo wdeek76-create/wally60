@@ -2420,7 +2420,7 @@ async function runNhlModel(opts) {
       const have = Object.keys(projs);
       if (have.length < 3) continue;
       for (const ou of ["over", "under"]) {
-        const live = await _nhlLiveBookFor(player, line, ou, iso, [home, away]);
+        const live = await _nhlLiveBookFor(player, line, ou, iso, [home, away], { exch500: true });
         if (!live) continue;
         const d = oddsToDecimal(live.price); if (d == null) continue;
         const evs = {};
@@ -2496,6 +2496,21 @@ async function shareNhlModelCard() {
 // The ensemble now feeds from the model: every model pick goes to the tracker as an ensemble bet at the live
 // price it qualified at (one per player per day, like before). Only once all 4 sources have projections
 // loaded (CSV or paste) — a source that's simply not loaded yet would otherwise turn 3-of-4 into 3-of-3.
+// Model picks going into the ensemble tracker are priced like the ensemble: best of Pinnacle / Prop Builder /
+// FanDuel / Bet105 right now (exchanges and the rest stay alt books), with every source's EV redone at it.
+async function _nhlToTrackerPrice(r) {
+  const gm = String(r.game || "").split("@").map(t => t.trim());
+  const live = await _nhlLiveBookFor(r.player, r.line, r.ou, r.gameDateIso, r.team ? [r.team] : gm);
+  let odds = null, book = null;
+  if (live) { odds = live.price; book = live.book; }
+  else if (NHL_BOOK_PRIORITY.includes(r.book)) { odds = r.odds; book = r.book; }
+  if (odds == null) return null;
+  const d = oddsToDecimal(odds), evs = {};
+  Object.keys(r.sourceProjs || {}).forEach(k => { evs[k] = Math.round((_nhlPoissonHit(r.ou, r.line, r.sourceProjs[k]) * d - 1) * 1000) / 10; });
+  const vals = Object.values(evs);
+  return Object.assign({}, r, { odds, book, sourceEvs: evs, qualCount: vals.filter(e => e >= NHL_PS_QUAL_EV).length, minEv: Math.min(...vals),
+    anchorEv: r.anchorFairProb != null && d != null ? Math.round((r.anchorFairProb * d - 1) * 1000) / 10 : r.anchorEv });
+}
 async function _nhlModelLogToTracker(rows) {
   const ready = PS_SOURCE_KEYS_NHL.every(src => (srcs[src] && Object.keys(srcs[src]).length) || (nhlPsBySource[src] || []).length);
   if (!ready) return { logged: 0, waiting: rows.length };
@@ -2508,7 +2523,7 @@ async function _nhlModelLogToTracker(rows) {
       missingSrc: have.length === 3 ? PS_SOURCE_KEYS_NHL.find(k => !have.includes(k)) : null, missingProj: null,
       sourceProjs: m.projs, sourceEvs: m.evs, qualCount: m.agree, minEv: m.minEv,
       anchorFairProb: m.fairProb, anchorFairOdds: p2american(m.fairProb), anchorEv: m.anchorEv };
-    try { if (await _nhlPsLogRow(r)) { const b = bets[0]; if (b && b.player === m.player) b._modelFed = true; logged++; } } catch (e) { console.warn("[NHL ensemble] log failed", m.player, e && e.message); }
+    try { const rt = await _nhlToTrackerPrice(r); if (rt && await _nhlPsLogRow(rt)) { const b = bets[0]; if (b && b.player === m.player) b._modelFed = true; logged++; } } catch (e) { console.warn("[NHL ensemble] log failed", m.player, e && e.message); }
   }
   if (logged) { saveBets(); if (currentTab === "tracker") renderTracker(); }
   return { logged, waiting: 0 };
@@ -2534,7 +2549,8 @@ async function _nhlCarryModelPicks() {
       sourceProjs: x.projs, sourceEvs: evs, qualCount: have.filter(k => (evs[k] || 0) >= NHL_PS_QUAL_EV).length, minEv: Math.min(...have.map(k => evs[k] || 0)),
       anchorFairProb: fp, anchorFairOdds: p2american(fp), anchorEv: evs[anchor] };
     try {
-      if (await _nhlPsLogRow(r)) { const b = bets[0]; if (b && b.player === x.player) b._modelFed = true; n++; }
+      const rt = await _nhlToTrackerPrice(r);
+      if (rt && await _nhlPsLogRow(rt)) { const b = bets[0]; if (b && b.player === x.player) b._modelFed = true; n++; }
       x.carried = true; // logged now, or the player already has a bet today
     } catch (e) { console.warn("[NHL ensemble] carry failed", x.player, e && e.message); }
   }
@@ -2624,7 +2640,7 @@ function renderNhlModelTab() {
       <button onclick="gradeNhlModelLog(true)" style="background:transparent;border:1px solid #0d2035;color:#fff;${btn}">Grade now</button>
       ${_nhlModelRows && _nhlModelRows.length ? `<button id="model-card-btn" onclick="shareNhlModelCard()" style="background:#0a1628;border:1px solid #0d2035;color:#00cc66;${btn}">🖼 Model card</button>` : ""}
     </div>
-    <div style="font-size:12px;color:#9fb8d6;margin-bottom:14px;">CSVs loaded: ${loaded.length ? loaded.join(", ") : "none — upload them on the Upload tab"}. Poisson on each projection → EV at the best Pinnacle / Prop Builder / FanDuel / Bet105 price. Same gate as the ensemble (3 at ${NHL_PS_QUAL_EV}%+, none negative). This is now the ensemble: once all 4 sources are loaded, every pick here is logged to the tracker at the live price it qualified at. The record below is the same picks at 1u flat.</div>
+    <div style="font-size:12px;color:#9fb8d6;margin-bottom:14px;">CSVs loaded: ${loaded.length ? loaded.join(", ") : "none — upload them on the Upload tab"}. Poisson on each projection → EV at the best Pinnacle / Prop Builder / FanDuel / Bet105 price — or Novig / ProphetX / Kalshi when $${NHL_MODEL_EXCH_MIN}+ is available there. Same gate as the ensemble (3 at ${NHL_PS_QUAL_EV}%+, none negative). Once all 4 sources are loaded, picks go to the tracker priced like the ensemble (best of the four books only, exchanges as alts) and only if they still pass there. The record below is the same picks at 1u flat.</div>
     ${matchHtml}${records}${today}`;
 }
 // opts.silent — used by the auto-trigger poll below so it doesn't fight with
@@ -3452,7 +3468,12 @@ function _nhlFairOddsFromPriceEv(price, evPct) {
   if (Math.abs(fairProb - 0.5) < 1e-9) return 100; // exact coinflip reads as +100
   return p2american(fairProb);
 }
-async function _nhlLiveBookFor(player, line, side, dateIso, teamHints) {
+// opts.exch500: also let Novig / ProphetX / Kalshi set the best price when $500+ is available at it
+// (Model tab and Model card). Default = the four logging books only, everything else an alt.
+const NHL_MODEL_EXCH = ["Novig", "ProphetX", "Kalshi"];
+const NHL_MODEL_EXCH_MIN = 500;
+async function _nhlLiveBookFor(player, line, side, dateIso, teamHints, opts) {
+  opts = opts || {};
   const byPlayerLine = await _nhlGetLiveLinesForDate(dateIso);
   let entries = byPlayerLine[nn(player) + "|" + line];
   if (!entries || !entries.length) return null;
@@ -3485,7 +3506,8 @@ async function _nhlLiveBookFor(player, line, side, dateIso, teamHints) {
     const lv = side === "over" ? r.overLevels : r.underLevels;
     if (entry.isExch && lv && lv.length) entry.levels = lv;
     allBooks.push(entry);
-    if (nhlBookRank(r.book) < 500) anchorCandidates.push(entry); // best price = Pinnacle / Prop Builder / FanDuel / Bet105 only; everything else is an alt book
+    if (nhlBookRank(r.book) < 500) anchorCandidates.push(entry); // best price = Pinnacle / Prop Builder / FanDuel / Bet105; everything else is an alt book
+    else if (opts.exch500 && NHL_MODEL_EXCH.includes(r.book) && entry.limit != null && entry.limit >= NHL_MODEL_EXCH_MIN) anchorCandidates.push(entry); // model only: deep exchange price
   });
   if (!allBooks.length) return null;
   // Best price = highest American odds number, full stop — that's true
