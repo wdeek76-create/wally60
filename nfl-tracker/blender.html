@@ -18227,6 +18227,15 @@ function _rwnFindField(flat, stat) {
     if (groups.some(g => names.some(n => last === g + n))) return k;
   }
   if (bare) for (const k of keys) { if (bare.includes(_rwnSeg(k.split(".").pop()))) return k; }
+  if (stat === "fpts") { // fantasy points go by many names: PPR, FantasyPointsPPR, Fantasy.PPR, Points.PPR, FantasyPoints, Points
+    const seg = k => k.split(".").map(_rwnSeg);
+    const tests = [
+      k => seg(k).some(x => /ppr/.test(x) && !/half|standard|std/.test(x)),
+      k => { const ss = seg(k); return ss.some(x => /fantasy/.test(x)) && /(points|pts)/.test(ss.join(".")); },
+      k => /^(points|pts|fantasy|fantasypts|projpoints|projectedpoints)$/.test(seg(k).pop()),
+    ];
+    for (const t of tests) { const hit = keys.find(t); if (hit) return hit; }
+  }
   return null;
 }
 const _rwn2 = v => { const n = parseFloat(v); return isNaN(n) ? null : Math.round(n * 100) / 100; };
@@ -18358,19 +18367,24 @@ async function rwnVerify(input) {
     if (c1.length > 1) { const q = c1.filter(p => P(p.pos) === P(c.pos)); if (q.length) c1 = q; }
     return c1[0] || null;
   };
-  let same = 0; const diffs = [], onlyCsv = [];
+  let same = 0, fptsOnly = 0; const diffs = [], onlyCsv = [], diffTeams = {};
   csv.forEach(c => {
     const a = match(c); if (!a) { onlyCsv.push(`${c.rawName} (${c.team} ${c.pos})`); return; }
     used.add(a);
     const d = _RWN_CMP.filter(k => c[k] != null && Math.abs((a[k] ?? NaN) - Math.round(c[k] * 100) / 100) > 0.011 || (c[k] != null && a[k] == null))
       .map(k => `${k} csv ${c[k]} / api ${a[k] == null ? "—" : a[k]}`);
-    if (d.length) diffs.push(`${c.rawName} (${c.team} ${c.pos}): ${d.join(" · ")}`); else same++;
+    const real = d.filter(x => !/^fpts /.test(x));
+    if (!d.length) same++;
+    else if (!real.length) fptsOnly++;
+    else { diffs.push(`${c.rawName} (${c.team} ${c.pos}): ${d.join(" · ")}`); diffTeams[c.team] = (diffTeams[c.team] || 0) + 1; }
   });
   const onlyApi = api.filter(p => !used.has(p)).map(p => `${p.rawName} (${p.team} ${p.pos})`);
   const lines = [
     `CSV: ${file.name} · ${csv.length} players   API: ${api.length} players · week ${window._rwnLast.week && window._rwnLast.week.week || "default"}`,
-    ``, `IDENTICAL: ${same}/${csv.length}   DIFFERENT: ${diffs.length}   ONLY IN CSV: ${onlyCsv.length}   ONLY IN API: ${onlyApi.length}`,
-    ``, `── Different (both numbers) ──`, ...(diffs.length ? diffs : ["(none)"]),
+    ``, `IDENTICAL: ${same}/${csv.length}   ONLY FANTASY PTS DIFFER: ${fptsOnly}   STATS DIFFER: ${diffs.length}   ONLY IN CSV: ${onlyCsv.length}   ONLY IN API: ${onlyApi.length}`,
+    `(fantasy pts aren't used for any bet — only the stat lines below matter)`,
+    diffs.length ? `Stat differences by team: ${Object.entries(diffTeams).sort((a, b) => b[1] - a[1]).map(([t, n]) => t + " " + n).join(", ")}  — a few teams with many changes usually means RotoWire updated those projections after the CSV was downloaded` : ``,
+    ``, `── Stats differ (both numbers) ──`, ...(diffs.length ? diffs : ["(none)"]),
     ``, `── Only in CSV ──`, ...(onlyCsv.length ? onlyCsv : ["(none)"]),
     ``, `── Only in API ──`, ...(onlyApi.length ? onlyApi.slice(0, 200) : ["(none)"]), onlyApi.length > 200 ? `…and ${onlyApi.length - 200} more` : "",
     ``, `(Nothing was changed.)`];
