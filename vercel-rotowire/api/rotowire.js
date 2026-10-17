@@ -23,7 +23,7 @@ const FEED_HOSTS = ["https://api.rotowire.com", "https://www.rotowire.com", "htt
 const FEED_FILES = ["feed.php", "feeds.php", "Feed.php", "api.php", "index.php", "feed", "api/feed.php", "Basketball/NBA/feed.php", "Basketball/NBA/Feed.php", "Basketball/feed.php"];
 const PARAM_FEEDS = new Set(["NBACeilFloor", "nba-DFS-dk", "nba-DFS-fd", "NBALineups"]);
 let feedBase = null;   // remembered between calls while the function stays warm
-async function viaFeedParam(feed, key, date) {
+async function viaFeedParam(feed, key, date, link) {
   const tryOne = async (base) => {
     const url = `${base}?key=${encodeURIComponent(key)}&feed=${encodeURIComponent(feed)}${date}`;
     const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 9000);
@@ -36,10 +36,26 @@ async function viaFeedParam(feed, key, date) {
     } catch (e) { return null; } finally { clearTimeout(t); }
   };
   if (feedBase) { const hit = await tryOne(feedBase); if (hit) return hit.text; feedBase = null; }
-  const results = await Promise.all(FEED_HOSTS.flatMap(h => FEED_FILES.map(f => tryOne(`${h}/${f}`))));
+  if (link && link.origin && link.path) { const hit0 = await tryOne(link.origin + link.path); if (hit0) { feedBase = hit0.base; return hit0.text; } }
+  const hosts = link && link.origin && !FEED_HOSTS.includes(link.origin) ? [link.origin, ...FEED_HOSTS] : FEED_HOSTS;
+  const results = await Promise.all(hosts.flatMap(h => FEED_FILES.map(f => tryOne(`${h}/${f}`))));
   const hit = results.find(Boolean);
   if (hit) { feedBase = hit.base; return hit.text; }
   return null;
+}
+
+// The blender can send a RotoWire link (or key) it saved in YOUR browser, in the x-rw-link header, so you
+// can type it into the tool instead of Vercel. Only https://*.rotowire.com addresses are accepted; the key
+// in it is used when no ROTOWIRE_API_KEY is set. The header is never logged or echoed.
+function parseLink(h) {
+  try {
+    const raw = decodeURIComponent(String(h || "")).trim();
+    if (!raw) return null;
+    if (/^[A-Za-z0-9_\-]{6,}$/.test(raw)) return { key: raw, origin: null, path: null };      // just a key
+    const u = new URL(raw);
+    if (u.protocol !== "https:" || !/(^|\.)rotowire\.com$/i.test(u.hostname)) return null;
+    return { key: u.searchParams.get("key"), origin: u.origin, path: u.pathname };
+  } catch (e) { return null; }
 }
 
 module.exports = async (req, res) => {
@@ -48,8 +64,9 @@ module.exports = async (req, res) => {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   if (req.method === "OPTIONS") { res.status(204).end(); return; }
 
-  const key = (process.env.ROTOWIRE_API_KEY || "").trim();
-  if (!key) { res.status(500).json({ error: "ROTOWIRE_API_KEY is not set on this Vercel project (Settings → Environment Variables), then redeploy" }); return; }
+  const link = parseLink(req.headers && req.headers["x-rw-link"]);
+  const key = (link && link.key) || (process.env.ROTOWIRE_API_KEY || "").trim();
+  if (!key) { res.status(500).json({ error: "No RotoWire key yet — click ⚙ on the blender's Morning tab and paste your key or link (or set ROTOWIRE_API_KEY on Vercel)" }); return; }
   // DIAGNOSTIC: /api/rotowire?probe=1 — tries likely RotoWire "feed=" endpoints with your key (no feed
   // parameter, so the right one answers "Missing or invalid feed parameter" + its feed list).
   // Results show the address pattern with the key hidden. Open it in a browser and copy the page.
@@ -96,7 +113,7 @@ module.exports = async (req, res) => {
     }
   }
   if (PARAM_FEEDS.has(feed)) {
-    const text = await viaFeedParam(feed, key, date);
+    const text = await viaFeedParam(feed, key, date, link);
     if (text) { res.setHeader("Cache-Control", "s-maxage=120, stale-while-revalidate=300"); res.setHeader("Content-Type", "application/json"); res.status(200).send(text); return; }
   }
   // Never echo the key back.
