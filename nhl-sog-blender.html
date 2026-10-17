@@ -1229,6 +1229,13 @@ function _nhlToggleDiscord(id) {
 }
 function deleteBet(id) {
   if (!confirm("Delete this bet?")) return;
+  // A deleted model-fed bet stays out — the model won't put that pick back in the tracker.
+  const del = bets.find(b => b.id === id);
+  if (del && del._modelFed) {
+    const day = _ymdLocal(new Date(del.date));
+    nhlModelLog.forEach(x => { if (nn(x.player) === nn(del.player) && x.gameDateIso === day) x.dismissed = true; });
+    _nhlModelSave();
+  }
   bets = bets.filter(b => b.id !== id);
   deleteBetFromDB(id);
   renderTracker();
@@ -2572,7 +2579,10 @@ async function _nhlModelLogToTracker(rows) {
 // tracker as ensemble bets at the price the model logged them at, so every card and the Discord flow see them.
 async function _nhlCarryModelPicks() {
   const today = _ymdLocal(new Date());
-  const open = nhlModelLog.filter(x => x.result === "pending" && x.gameDateIso >= today && !x.carried);
+  // Every open model pick that isn't in the tracker right now (so deleting old ensemble bets lets the model's
+  // pick for that player in) — except ones you deleted from the tracker yourself (dismissed).
+  const open = nhlModelLog.filter(x => x.result === "pending" && x.gameDateIso >= today && !x.dismissed
+    && !bets.some(b => nn(b.player) === nn(x.player) && _ymdLocal(new Date(b.date)) === x.gameDateIso));
   let n = 0;
   for (const x of open) {
     const have = Object.keys(x.projs || {}); if (have.length < 3) continue;
@@ -2591,10 +2601,8 @@ async function _nhlCarryModelPicks() {
     try {
       const rt = await _nhlToTrackerPrice(r);
       if (rt && await _nhlPsLogRow(rt)) { const b = bets[0]; if (b && b.player === x.player) b._modelFed = true; n++; }
-      x.carried = true; // logged now, or the player already has a bet today
     } catch (e) { console.warn("[NHL ensemble] carry failed", x.player, e && e.message); }
   }
-  if (open.length) _nhlModelSave();
   if (n) { saveBets(); if (currentTab === "tracker") renderTracker(); showNhlToast(`Moved ${n} open model pick${n === 1 ? "" : "s"} into the tracker`); }
   return n;
 }
@@ -2725,6 +2733,7 @@ function renderNhlModelTab() {
       <span style="font-size:15px;font-weight:800;color:#fff;">Ensemble model — uploaded CSVs + live prices</span>
       <button onclick="runNhlModel()" ${_nhlModelBusy ? "disabled" : ""} style="background:#0066cc;border:none;color:#fff;${btn}">${_nhlModelBusy ? "Running…" : "Run model"}</button>
       <button onclick="gradeNhlModelLog(true)" style="background:transparent;border:1px solid #0d2035;color:#fff;${btn}">Grade now</button>
+      <button onclick="_nhlCarryModelPicks().then(n => { if (!n) showNhlToast('Nothing new to send — open model picks are already in the tracker (or fail at the price now)'); renderNhlModelTab(); })" style="background:#7c3aed;border:none;color:#fff;${btn}">Send open picks to tracker</button>
       <button onclick="navigator.clipboard.writeText(_nhlModelRecapText());showNhlToast('Recap copied')" style="background:transparent;border:1px solid #0d2035;color:#00cc66;${btn}">Copy recap</button>
       <button onclick="_nhlModelClearOpen()" style="background:transparent;border:1px solid #f8717155;color:#f87171;${btn}">Clear open picks</button>
       ${_nhlModelRows && _nhlModelRows.length ? `<button id="model-card-btn" onclick="shareNhlModelCard()" style="background:#0a1628;border:1px solid #0d2035;color:#00cc66;${btn}">🖼 Model card</button>` : ""}
