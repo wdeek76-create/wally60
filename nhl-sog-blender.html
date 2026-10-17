@@ -2402,7 +2402,7 @@ function renderNhlSoloTab() {
 // from the tracker, so it can be compared against the PropShop ensemble before trusting it.
 let nhlModelLog = [];
 try { nhlModelLog = JSON.parse(localStorage.getItem("nhl_model_log") || "[]") || []; } catch (e) { nhlModelLog = []; }
-let _nhlModelRows = null, _nhlModelRunAt = null, _nhlModelBusy = false, _nhlModelGrading = false;
+let _nhlModelRows = null, _nhlModelRunAt = null, _nhlModelBusy = false, _nhlModelGrading = false, _nhlModelPreview = false;
 function _nhlModelSave() { try { localStorage.setItem("nhl_model_log", JSON.stringify(nhlModelLog)); } catch (e) { console.warn("[NHL model] save failed", e); } }
 // One source's CSV projection for a player in this game (name, then team if the name is shared).
 function _nhlModelCsvProj(src, name, home, away) {
@@ -2486,6 +2486,9 @@ async function runNhlModel(opts) {
     rows.sort((a, b) => b.anchorEv - a.anchorEv);
     _nhlModelRows = rows; _nhlModelRunAt = new Date();
     try { _nhlFindMissingSources(byPL, mainLine, iso); } catch (e) { console.warn("[NHL names] check failed", e && e.message); }
+    // Check-only run: show what the model sees right now, log nothing (model log, tracker and solo untouched).
+    if (opts.preview) { _nhlModelPreview = true; showNhlToast(`Check: ${rows.length} play${rows.length === 1 ? "" : "s"} at current prices — nothing logged`); return; }
+    _nhlModelPreview = false;
     _nhlSoloFromModel(soloHits);
     // Log today's picks (first run's price sticks, like a real bet).
     const logBefore = nhlModelLog.length;
@@ -2535,7 +2538,7 @@ function _nhlFindMissingSources(byPL, mainLine, iso) {
         const score = (vLast === last ? 0.6 : 0) + _nhlNameSim(nn(v.name), pk) * 0.4 + (teamOk ? 0.2 : 0);
         return { name: v.name, team: v.team || "", sog: v.sog, score };
       }).filter(c => c.score >= 0.55).sort((a, b) => b.score - a.score).slice(0, 3);
-      if (cands.length) asks.push({ player, pk, src, iso, game: away + " @ " + home, cands });
+      asks.push({ player, pk, src, iso, game: away + " @ " + home, home, away, cands });
     });
   });
   _nhlNameAsk = asks;
@@ -2553,8 +2556,14 @@ function _nhlPaintNamePopup() {
       <div style="font-size:13px;"><b>${escapeHtmlBasic(a.player)}</b> <span style="color:#9fb8d6;font-size:11px;">${escapeHtmlBasic(a.game)}</span> — not in <b style="color:#7dd3fc;">${_NHL_SRC_TAG[a.src]}</b>. Same player as:</div>
       <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;">
         ${a.cands.map((c, j) => `<button onclick="_nhlNameLink(${i},${j})" style="background:#00cc6622;border:1px solid #00cc6688;color:#00cc66;${btn}">${escapeHtmlBasic(c.name)}${c.team ? " · " + escapeHtmlBasic(c.team) : ""} · ${Number(c.sog).toFixed(2)}</button>`).join("")}
-        <button onclick="_nhlNameSkip(${i})" style="background:transparent;border:1px solid #0d2035;color:#9fb8d6;${btn}">None of these</button>
-      </div></div>`).join("")}`;
+        <button onclick="_nhlNameSkip(${i})" style="background:transparent;border:1px solid #0d2035;color:#9fb8d6;${btn}">${a.cands.length ? "None of these" : "Skip"}</button>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;align-items:center;">
+        <input id="nhl-name-q-${i}" placeholder="search ${_NHL_SRC_TAG[a.src]} names…" oninput="_nhlNameSearch(${i})" style="background:#060b14;border:1px solid #0d2035;border-radius:5px;color:#fff;padding:4px 8px;font-size:12px;width:170px;"/>
+        <input id="nhl-name-p-${i}" type="number" step="0.01" placeholder="or ${_NHL_SRC_TAG[a.src]} proj" style="background:#060b14;border:1px solid #0d2035;border-radius:5px;color:#fff;padding:4px 8px;font-size:12px;width:110px;"/>
+        <button onclick="_nhlNameManual(${i})" style="background:transparent;border:1px solid #00aaff;color:#00aaff;${btn}">Use proj</button>
+      </div>
+      <div id="nhl-name-r-${i}" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;"></div></div>`).join("")}`;
 }
 function _nhlNameLink(i, j) {
   const a = _nhlNameAsk[i]; if (!a) return;
@@ -2566,6 +2575,33 @@ function _nhlNameLink(i, j) {
   _nhlNameAsk = _nhlNameAsk.filter(x => !(x.pk === a.pk && x.src === a.src));
   _nhlPaintNamePopup();
   showNhlToast(`Linked ${c.name} (${_NHL_SRC_TAG[a.src]}) = ${a.player}`);
+  runNhlModel({ silent: true });
+}
+// Search the missing source's CSV by any typed name (for when the suggestions don't have him).
+function _nhlNameSearch(i) {
+  const a = _nhlNameAsk[i]; if (!a) return;
+  const q = nn((document.getElementById("nhl-name-q-" + i) || {}).value || ""), out = document.getElementById("nhl-name-r-" + i);
+  if (!out) return;
+  if (q.length < 2) { out.innerHTML = ""; return; }
+  const hits = Object.values(srcs[a.src] || {}).filter(v => v && v.name).map(v => ({ v, s: nn(v.name).includes(q) ? 1 + _nhlNameSim(nn(v.name), q) : _nhlNameSim(nn(v.name), q) }))
+    .filter(h => h.s >= 0.4).sort((x, y) => y.s - x.s).slice(0, 6);
+  a.searchHits = hits.map(h => ({ name: h.v.name, team: h.v.team || "", sog: h.v.sog }));
+  const btn = "border-radius:5px;padding:4px 10px;font-size:12px;font-weight:700;cursor:pointer;";
+  out.innerHTML = a.searchHits.length ? a.searchHits.map((c, j) => `<button onclick="_nhlNameLinkSearch(${i},${j})" style="background:#00cc6622;border:1px solid #00cc6688;color:#00cc66;${btn}">${escapeHtmlBasic(c.name)}${c.team ? " · " + escapeHtmlBasic(c.team) : ""} · ${Number(c.sog).toFixed(2)}</button>`).join("") : `<span style="font-size:11px;color:#9fb8d6;">no match in ${_NHL_SRC_TAG[a.src]}</span>`;
+}
+function _nhlNameLinkSearch(i, j) { const a = _nhlNameAsk[i]; if (!a || !a.searchHits) return; a.cands = a.searchHits; _nhlNameLink(i, j); }
+// Last resort: type the source's projection yourself — added to that source's data for today under the
+// board's name, then the model re-runs.
+function _nhlNameManual(i) {
+  const a = _nhlNameAsk[i]; if (!a) return;
+  const v = parseFloat((document.getElementById("nhl-name-p-" + i) || {}).value);
+  if (!(v > 0)) { showNhlToast("Type the projection first"); return; }
+  if (!srcs[a.src]) srcs[a.src] = {};
+  srcs[a.src]["manual|" + a.pk] = { name: a.player, sog: v, team: "", manual: true };
+  _nhlSaveCsvs();
+  _nhlNameAsk = _nhlNameAsk.filter(x => !(x.pk === a.pk && x.src === a.src));
+  _nhlPaintNamePopup();
+  showNhlToast(`${_NHL_SRC_TAG[a.src]} ${v.toFixed(2)} added for ${a.player}`);
   runNhlModel({ silent: true });
 }
 function _nhlNameSkip(i) {
@@ -2781,7 +2817,7 @@ function renderNhlModelTab() {
       return `<tr>${td(`<b>${escapeHtmlBasic(r.player)}</b> <span style="color:#9fb8d6;font-size:11px;">${escapeHtmlBasic(r.game)}</span>`)}${td(`<span style="color:${r.ou === "over" ? "#fb923c" : "#38bdf8"};font-weight:800;">${r.ou === "over" ? "O" : "U"}${r.line}</span>`)}${td(`${fmt(r.odds)} <span style="color:#9fb8d6;">${escapeHtmlBasic(r.book)}</span>`, "white-space:nowrap;")}${td(r.playTo != null && isFinite(Number(r.playTo)) ? fmt(Number(r.playTo)) : "—")}${td(`${r.agree}/${r.of}`)}${td(srcOrder.map(s => chip(s, r)).join(""))}${td(inPs ? `<span style="color:#00cc66;font-weight:800;">✓ PS</span>` : `<span style="color:#eab308;font-weight:800;">model only</span>`)}</tr>`;
     }).join("");
     const head = ["Player", "Side", "Best price", "Play to", "Agree", "Sources (proj · EV at this price)", "PropShop"].map(h => `<th style="padding:6px 9px;font-size:11px;text-align:left;letter-spacing:.5px;text-transform:uppercase;white-space:nowrap;">${h}</th>`).join("");
-    today = `<div style="font-size:13px;color:#fff;font-weight:700;margin-bottom:8px;">Run at ${_nhlModelRunAt.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}: ${_nhlModelRows.length} model picks · ${both} also PropShop · ${_nhlModelRows.length - both} model only · ${psOnly.length} PropShop only</div>
+    today = `<div style="font-size:13px;color:#fff;font-weight:700;margin-bottom:8px;">${_nhlModelPreview ? `<span style="color:#00aaff;">CHECK ONLY (nothing logged)</span> · ` : ""}Run at ${_nhlModelRunAt.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}: ${_nhlModelRows.length} model picks · ${both} also PropShop · ${_nhlModelRows.length - both} model only · ${psOnly.length} PropShop only</div>
       ${psOnly.length ? `<div style="font-size:12px;color:#9fb8d6;margin-bottom:10px;">PropShop only: ${psOnly.map(k => { const [n, ou, ln] = k.split("|"); const b = bets.find(x => nn(x.player) === n) || (window._nhlPsEnsembleRows || []).find(x => nn(x.player) === n); return escapeHtmlBasic((b ? b.player : n) + " " + (ou === "over" ? "O" : "U") + ln); }).join(", ")}</div>` : ""}
       ${_nhlModelRows.length ? `<div style="overflow-x:auto;border:1px solid #0d2035;border-radius:8px;"><table style="border-collapse:collapse;color:#fff;width:100%;"><thead style="background:#0a1628;"><tr>${head}</tr></thead><tbody>${rowsHtml}</tbody></table></div>` : `<div style="color:#9fb8d6;font-size:13px;">No line clears the bar at current prices.</div>`}`;
   }
@@ -2807,6 +2843,7 @@ function renderNhlModelTab() {
   el.innerHTML = `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:6px;">
       <span style="font-size:15px;font-weight:800;color:#fff;">Ensemble model — uploaded CSVs + live prices</span>
       <button onclick="runNhlModel()" ${_nhlModelBusy ? "disabled" : ""} style="background:#0066cc;border:none;color:#fff;${btn}">${_nhlModelBusy ? "Running…" : "Run model"}</button>
+      <button onclick="runNhlModel({ preview: true })" ${_nhlModelBusy ? "disabled" : ""} title="See what the model has at current prices without logging anything — picks already made stay exactly as they are" style="background:transparent;border:1px solid #00aaff;color:#00aaff;${btn}">Check now (no logging)</button>
       <button onclick="gradeNhlModelLog(true)" style="background:transparent;border:1px solid #0d2035;color:#fff;${btn}">Grade now</button>
       <button onclick="_nhlCarryModelPicks().then(n => { if (!n) showNhlToast('Nothing new to send — open model picks are already in the tracker (or fail at the price now)'); renderNhlModelTab(); })" style="background:#7c3aed;border:none;color:#fff;${btn}">Send open picks to tracker</button>
       <button onclick="navigator.clipboard.writeText(_nhlModelRecapText());showNhlToast('Recap copied')" style="background:transparent;border:1px solid #0d2035;color:#00cc66;${btn}">Copy recap</button>
