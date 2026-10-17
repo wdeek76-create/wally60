@@ -24,6 +24,29 @@ module.exports = async (req, res) => {
 
   const key = (process.env.ROTOWIRE_API_KEY || "").trim();
   if (!key) { res.status(500).json({ error: "ROTOWIRE_API_KEY is not set on this Vercel project (Settings → Environment Variables), then redeploy" }); return; }
+  // DIAGNOSTIC: /api/rotowire?probe=1 — tries likely RotoWire "feed=" endpoints with your key (no feed
+  // parameter, so the right one answers "Missing or invalid feed parameter" + its feed list).
+  // Results show the address pattern with the key hidden. Open it in a browser and copy the page.
+  if (req.query && req.query.probe) {
+    const hosts = ["https://api.rotowire.com", "https://www.rotowire.com", "https://rotowire.com"];
+    const files = ["feed.php", "feeds.php", "Feed.php", "api.php", "index.php", "feed", "api/feed.php", "Basketball/NBA/feed.php", "Basketball/NBA/Feed.php", "Basketball/feed.php"];
+    const out = [];
+    const key0 = encodeURIComponent(key);
+    await Promise.all(hosts.flatMap(h => files.map(async f => {
+      const url = `${h}/${f}?key=${key0}`;
+      const label = `${h}/${f}?key=•••`;
+      try {
+        const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 8000);
+        const r = await fetch(url, { headers: { Accept: "application/json" }, signal: ctl.signal }); clearTimeout(t);
+        const body = (await r.text()).split(key).join("•••").slice(0, 140).replace(/\s+/g, " ");
+        out.push({ url: label, status: r.status, type: (r.headers.get("content-type") || "").split(";")[0], body, hit: /valid_feeds|Missing or invalid feed/i.test(body) });
+      } catch (e) { out.push({ url: label, status: 0, body: String(e && e.message || e).slice(0, 60) }); }
+    })));
+    out.sort((a, b) => (b.hit ? 1 : 0) - (a.hit ? 1 : 0) || (b.status === 200 ? 1 : 0) - (a.status === 200 ? 1 : 0));
+    res.setHeader("Content-Type", "application/json");
+    res.status(200).send(JSON.stringify({ FOUND: out.filter(o => o.hit), others: out.filter(o => !o.hit && o.status && o.status !== 404).slice(0, 12) }, null, 1));
+    return;
+  }
   const feed = String((req.query && req.query.feed) || "");
   const paths = PATHS[feed];
   if (!paths) { res.status(400).json({ error: "unknown feed", feeds: Object.keys(PATHS) }); return; }
