@@ -4837,6 +4837,7 @@ function saveBet() {
 function setBetResult(id, result) {
   const b = bets.find(x => x.id === id);
   if (!b) return;
+  if (b.result !== result) b.gradedAt = result === "pending" ? null : Date.now();
   b.result = result;
   saveBets();
   renderTracker();
@@ -6834,6 +6835,7 @@ async function gradeAllPending(mode) {
       const target = bets.find(x => x.id === b.id);
       if (target) {
         const didChange = isRegrade && target.result !== r.result;
+        if (target.result !== r.result) target.gradedAt = Date.now();
         target.result = r.result;
         target.actual = r.total;
         graded++;
@@ -7280,6 +7282,7 @@ async function gradeOneBet(id) {
   if (!b) return;
   const r = await gradeBet(b);
   if (r.ok) {
+    if (b.result !== r.result) b.gradedAt = Date.now();
     b.result = r.result;
     b.actual = r.total;
     saveBets();
@@ -11159,14 +11162,23 @@ function renderTracker() {
 
   // Most-recent-first. IDs are `Date.now()...` so the leading numeric portion
   // sorts chronologically; fall back to gameDate/date when needed.
-  const _recencyKey = (b) => {
-    const idNum = parseInt(String(b.id || "").split("_")[0]);
-    if (!isNaN(idNum)) return idNum;
+  // Order: open picks first (latest game date first), then graded picks by WHEN they were graded,
+  // newest first. Bets graded before grade times were recorded fall back to their game date.
+  const _gameMs = (b) => {
     const d = b.gameDate || b.date || "";
-    const t = Date.parse(d);
-    return isNaN(t) ? 0 : t;
+    const t = (typeof _parseLocalDate === "function" && /^\d{4}-\d{2}-\d{2}/.test(d)) ? (_parseLocalDate(d)?.getTime?.() ?? NaN) : Date.parse(d);
+    if (!isNaN(t)) return t;
+    const idNum = parseInt(String(b.id || "").split("_")[0]);
+    return isNaN(idNum) ? 0 : idNum;
   };
-  filtered = filtered.slice().sort((a, b) => _recencyKey(b) - _recencyKey(a));
+  const _isOpen = (b) => b.result === "pending" || !b.result;
+  const _gradeMs = (b) => b.gradedAt || (_gameMs(b) + 23 * 3600000);
+  filtered = filtered.slice().sort((a, b) => {
+    const ao = _isOpen(a), bo = _isOpen(b);
+    if (ao !== bo) return ao ? -1 : 1;
+    const k = ao ? _gameMs(b) - _gameMs(a) : _gradeMs(b) - _gradeMs(a);
+    return k || ((parseFloat(b.id) || 0) - (parseFloat(a.id) || 0));
+  });
 
   const betCards = filtered.map(b => {
     const plVal = b.result==="hit" ? `+${b.toWin.toFixed(2)}u` : b.result==="miss" ? `-${b.stake.toFixed(2)}u` : b.result==="void" ? "VOID" : "—";
@@ -11676,7 +11688,7 @@ function qgShow() {
 function qgGrade(result) {
   const b = qgQueue[qgIdx];
   const bet = bets.find(x => x.id === b.id);
-  if (bet) { bet.result = result; saveBets(); }
+  if (bet) { if (bet.result !== result) bet.gradedAt = result === "pending" ? null : Date.now(); bet.result = result; saveBets(); }
   qgIdx++;
   qgShow();
 }
@@ -18494,7 +18506,9 @@ function syncEnsembleBets(quiet) {
     const ex = bets.find(b => b.id === id);
     if (!ex) { bets.push(nb); added++; return; }
     const keepLocalGrade = nb.result === "pending" && ex.result && ex.result !== "pending";
-    const next = { ...ex, ...nb, result: keepLocalGrade ? ex.result : nb.result, actual: nb.actual != null ? nb.actual : (ex.actual ?? null) };
+    const finalResult = keepLocalGrade ? ex.result : nb.result;
+    const gradedAt = finalResult === ex.result ? (ex.gradedAt ?? null) : (finalResult === "pending" ? null : Date.now());
+    const next = { ...ex, ...nb, result: finalResult, gradedAt, actual: nb.actual != null ? nb.actual : (ex.actual ?? null) };
     if (JSON.stringify(next) !== JSON.stringify(ex)) { Object.assign(ex, next); updated++; }
   });
   if (added || updated || removed) {
