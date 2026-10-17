@@ -2057,19 +2057,104 @@ function _extractCells(tokens) {
   return { gameStr, gameTime, cells, allCells, projection };
 }
 
+// ---- PropShop layout v2 (Oct 2026) ----
+// Game line has no "•" anymore: "ARI @ LAR Oct-18 4:05 PM". Missing sides are just left out
+// (no "—" placeholder), exchanges add "$liq" tokens, and books are short codes (FD, PIN, PB).
+// Token stream is a run of "sides": line, odds, [+EV%], [BOOK], [$liq]
+//   side 0-1 = Consensus (over, under), side 2 = Best Line (ONE side only, always has EV),
+//   then book columns: (over side, under side) pairs at the same line; one-sided columns happen.
+// The EV% sits right after the side that has the edge — after the 1st price for an over,
+// after the 2nd for an under — which is how we know which side the Best Line is.
+const _PS2_GAME_RE = /^(.+?@.+?)\s+([A-Z][a-z]{2,4}-\d{1,2}\s+\d{1,2}:\d{2}\s*[AP]M)$/i;
+const _isLiqStr = s => /^\$[\d.,]+k?$/i.test(String(s || ''));
+const _isBookCode = s => /^[A-Z]{2,4}$/.test(String(s || '')) || _PROPSHOP_BOOKS.has(String(s || '').toLowerCase());
+function _isPropShopV2(tokens) {
+  return !tokens.some(t => t.includes('@') && (t.includes('•') || t.includes('—'))) && tokens.some(t => _PS2_GAME_RE.test(t));
+}
+function _extractCellsV2(tokens) {
+  let gameStr = '', gameTime = '';
+  const pre = [], rest = [];
+  let sawGame = false;
+  for (const t of tokens) {
+    const gm = !sawGame && t.match(_PS2_GAME_RE);
+    if (gm) { gameStr = gm[1].trim(); gameTime = gm[2].trim(); sawGame = true; continue; }
+    if (!sawGame) { if (_isLineStr(t)) pre.push(parseFloat(t)); continue; }
+    rest.push(t);
+  }
+  // projection + stdev now come right AFTER the game line (bare numbers before the first line/odds pair).
+  // "−" (no projection) isn't a number -> null
+  const lead = [];
+  for (let k = 0; k < rest.length && !(_isLineStr(rest[k]) && _isOddsStr(rest[k + 1])); k++) if (_isLineStr(rest[k])) lead.push(parseFloat(rest[k]));
+  const projection = lead.length ? lead[0] : (pre.length ? pre[0] : null);
+  // tokens -> sides
+  const sides = [];
+  for (let i = 0; i < rest.length; ) {
+    if (!(_isLineStr(rest[i]) && _isOddsStr(rest[i + 1]))) { i++; continue; }
+    const s = { line: parseFloat(rest[i]), odds: rest[i + 1], ev: null, book: '', liq: null };
+    i += 2;
+    while (i < rest.length && !(_isLineStr(rest[i]) && _isOddsStr(rest[i + 1]))) {
+      const t = rest[i];
+      if (_isEVStr(t) && s.ev === null) s.ev = _parseEV(t);
+      else if (_isLiqStr(t)) s.liq = t;
+      else if (_isBookCode(t) && !s.book) s.book = t;
+      i++;
+    }
+    sides.push(s);
+  }
+  if (sides.length < 3 || sides[2].ev === null) return { gameStr, gameTime, projection, best: null, cells: [] };
+  const best = sides[2];
+  // pair book sides into columns: same line back-to-back = (over, under); otherwise one-sided, side unknown
+  const cells = [];
+  for (let j = 3; j < sides.length; ) {
+    const a = sides[j], b = sides[j + 1];
+    if (b && b.line === a.line) { cells.push({ ...a, side: 'O' }, { ...b, side: 'U' }); j += 2; }
+    else { cells.push({ ...a, side: null }); j++; }
+  }
+  // Best Line side: a column side with the same line+odds+EV, else majority of EV-carrying sides, else projection
+  const same = c => c.side && c.ev !== null && c.line === best.line && c.odds === best.odds;
+  let hit = cells.find(c => same(c) && c.ev === best.ev) || cells.find(same);
+  let side = hit ? hit.side : null;
+  if (!side) {
+    const o = cells.filter(c => c.side === 'O' && c.ev !== null).length, u = cells.filter(c => c.side === 'U' && c.ev !== null).length;
+    if (o !== u) side = o > u ? 'O' : 'U';
+  }
+  if (!side && projection !== null) side = projection >= best.line ? 'O' : 'U';
+  if (!side) return { gameStr, gameTime, projection, best: null, cells: [] };
+  return { gameStr, gameTime, projection, best: { side, line: best.line, odds: best.odds, ev: best.ev, book: best.book }, cells: cells.filter(c => c.side) };
+}
+
+// PropShop v2 footer: "My top bets" list spells the side out —
+//   Tyler Allgeier / 64.2% / Rush Yards Under 46.5 FD
+// Returns { normName: { side, line } }. Cut off from the paste before block-splitting.
+function _parsePropShopTopBets(raw) {
+  const out = {};
+  const i = raw.search(/^\s*My top bets\s*$/im);
+  if (i < 0) return { body: raw, top: out };
+  const lines = raw.slice(i).split('\n').map(l => l.trim()).filter(Boolean);
+  for (let k = 0; k < lines.length; k++) {
+    const m = lines[k].match(/\b(Over|Under)\s+(\d+(?:\.\d+)?)\b/i);
+    if (!m || k < 2 || !_isEVStr(lines[k - 1])) continue;
+    out[normName(lines[k - 2])] = { side: m[1].toLowerCase() === 'over' ? 'O' : 'U', line: parseFloat(m[2]) };
+  }
+  return { body: raw.slice(0, i), top: out };
+}
+
 function parsePropShop(raw, minEdge, marketKey) {
   if (!marketKey) return { results: [], errors: ['No market selected.'] };
   if (!MARKET_MAP[marketKey]) return { results: [], errors: ['Unknown market: '+marketKey] };
   const currentYear = new Date().getFullYear();
+  const { body: rawBody, top: topBets } = _parsePropShopTopBets(raw);
+  raw = rawBody;
   const blocks = _splitPropShopBlocks(raw);
   const results = [];
   const errors = [];
 
   for (const block of blocks) {
     try {
-      const { gameStr, gameTime, cells, allCells, projection } = _extractCells(block.tokens);
+      const v2 = _isPropShopV2(block.tokens);
+      const { gameStr, gameTime, cells, allCells, projection, best: v2Best } = v2 ? _extractCellsV2(block.tokens) : _extractCells(block.tokens);
       if (!gameStr) continue;
-      if (allCells.length < 2) continue;
+      if (v2 ? !v2Best : allCells.length < 2) continue;
 
       // A published-but-zero projection means the source didn't actually give
       // this row a real number — the "edge" it shows is computed off junk, not
@@ -2085,14 +2170,19 @@ function parsePropShop(raw, minEdge, marketKey) {
       const effMinEdge = isRTS ? -Infinity : minEdge;
 
       // The PLAY is the Best Line cell (index 1). Consensus is index 0.
-      const bestLineCell = allCells[1];
+      const bestLineCell = v2 ? v2Best : allCells[1];
       if (!bestLineCell || bestLineCell.ev === null || bestLineCell.ev < effMinEdge) continue;
 
       // Determine which side the EV is on. If both sides present, EV goes to the
       // side with more + odds. If only one side present, EV is on that side.
+      // (v2: side already worked out from where the EV% sits in the book columns)
       let bestPlay = null;
-      const o = bestLineCell.over, u = bestLineCell.under;
-      if (o.odds && u.odds) {
+      const o = v2 ? {} : bestLineCell.over, u = v2 ? {} : bestLineCell.under;
+      if (v2) {
+        bestPlay = { side: v2Best.side, line: v2Best.line, odds: v2Best.odds };
+        const tb = topBets[normName(block.player)];
+        if (tb && tb.line === v2Best.line && tb.side !== v2Best.side) { console.log('[propshop] top-bets list overrides side for', block.player, v2Best.side, '->', tb.side); bestPlay.side = tb.side; }
+      } else if (o.odds && u.odds) {
         const oN = parseInt(o.odds), uN = parseInt(u.odds);
         if (oN >= uN) bestPlay = { side: 'O', line: o.line, odds: o.odds };
         else          bestPlay = { side: 'U', line: u.line, odds: u.odds };
