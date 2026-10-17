@@ -16107,7 +16107,8 @@ function _ingestInjuryRecords(records) {
       returnDate: rec.details?.returnDate || "",
       comment: rec.shortComment || "",
       longComment: rec.longComment || "",
-      date: rec.date || ""
+      date: rec.date || "",
+      _src: rec._src || ""
     };
     // Index by normalized name (handles diacritics) so lookup from Results works.
     injuriesCache.set(norm(name), entry);
@@ -23144,7 +23145,7 @@ function _wmInjuryGate(playerRaw, team) {
     const selfNorm = norm(playerRaw);
     const own = (typeof getInjuryForPlayer === "function") ? getInjuryForPlayer(playerRaw, team) : null;
     const depth = (typeof getDepthChartStatusForPlayer === "function") ? getDepthChartStatusForPlayer(playerRaw) : null;
-    if (own) { out.both = "on the injury report (" + (_injuryStatusLabel(own.status) || own.status || "listed") + ")"; return out; }
+    if (own) { out.both = "on the injury report (" + (_injuryStatusLabel(own.status) || own.status || "listed") + (own._src ? " · " + own._src : "") + ")"; return out; }
     if (depth && depth.status) { out.both = "depth chart " + depth.status; return out; }
     const ben = (typeof getBeneficiaryForPlayer === "function") ? getBeneficiaryForPlayer(playerRaw) : null;
     // Named in a teammate's blurb — same reading as the bet window: CEILING (upside) is
@@ -25157,16 +25158,62 @@ async function rwApiSyncInjuries() {
     records.push({ id: `rwapi-${name}`, athlete: { displayName: name, team: { abbreviation: team } }, status, details: { type: String(type), detail: "", returnDate: String(ret) }, shortComment: String(headline), longComment: String(analysis), date: String(date), _teamAbbr: team });
   });
   if (!records.length) throw new Error("NBAInjuries: no players read — run TEST FEEDS and send me the field names");
+  records.forEach(r => { r._src = "RW"; });
+  _injStore.rw = records;
+  try { localStorage.setItem("nba_rw_news_at", String(Date.now())); } catch (e) {}
+  return _injApplyMerged();
+}
+// ── Injuries from BOTH RotoWire and OpticOdds ───────────────────────────────
+// Each feed keeps its own list; the injury store is the merge — per player the MORE SERIOUS
+// status wins (OUT > Doubtful > Questionable/GTD > Day-To-Day > Probable), so a late scratch
+// showing on either feed counts. When both agree on severity, RotoWire's text is kept.
+// OpticOdds comes through your OpticOdds backend (/injuries); TEST FEEDS shows what it returned.
+const _injStore = { rw: [], oo: [] };
+function _injRank(st) {
+  const s = String(st || "").toLowerCase();
+  if (/out|ofs|season/.test(s)) return 5;
+  if (/doubt/.test(s)) return 4;
+  if (/question|game[- ]?time|gtd/.test(s)) return 3;
+  if (/day/.test(s)) return 2;
+  if (/probable/.test(s)) return 1;
+  return 2;
+}
+function _injApplyMerged() {
+  const by = new Map();
+  [..._injStore.rw, ..._injStore.oo].forEach(r => {
+    const nm = r.athlete && r.athlete.displayName; if (!nm) return;
+    const k = norm(nm), cur = by.get(k);
+    if (!cur || _injRank(r.status) > _injRank(cur.status)) by.set(k, r);
+  });
+  const records = [...by.values()];
   _ingestInjuryRecords(records);
   injuriesLastFetched = Date.now();
   try {
-    localStorage.setItem("nba_injuries_cache", JSON.stringify({ fetchedAt: Date.now(), day: localYMD(new Date()), source: "rotowire-api", records }));
+    localStorage.setItem("nba_injuries_cache", JSON.stringify({ fetchedAt: Date.now(), day: localYMD(new Date()), source: "rotowire-api+opticodds", records }));
     localStorage.removeItem("nba_injuries_cleared");
-    localStorage.setItem("nba_rw_news_at", String(Date.now()));
   } catch (e) {}
   _injurySource = "rotowire";
   if (typeof updateInjuryPanel === "function") updateInjuryPanel();
   return records.length;
+}
+async function ooSyncInjuries() {
+  const r = await ooCall("/injuries", { sport: "basketball", league: "nba" });
+  const rows = _rwRows(r);
+  const records = [];
+  rows.forEach(o => {
+    const name = _rwPick(o, ["player.name", "player_name", "playerName", "name", "player.full_name", "player.display_name"]) || _rwName(o);
+    if (!name) return;
+    const teamRaw = _rwPick(o, ["team.abbreviation", "team.abbr", "team_abbreviation", "team.name", "team_name", "team.display_name", "team"]) || _rwTeam(o);
+    const team = teamRaw ? (String(teamRaw).length <= 4 ? (normTeamAbbr(String(teamRaw)) || String(teamRaw).toUpperCase()) : (teamLineToAbbr(String(teamRaw)) || String(teamRaw))) : "";
+    const status = _rwStatus(_rwPick(o, ["status", "injury_status", "injury.status", "designation", "player.status"]));
+    const type = _rwPick(o, ["injury", "injury_type", "injury.type", "body_part", "body", "type"]) || "";
+    const note = _rwPick(o, ["description", "notes", "note", "comment", "headline", "news", "details", "injury.description"]) || "";
+    const date = _rwPick(o, ["updated", "updated_at", "date", "timestamp", "last_updated"]) || "";
+    records.push({ id: `oo-${name}`, athlete: { displayName: String(name), team: { abbreviation: team } }, status, details: { type: String(type), detail: "", returnDate: "" }, shortComment: String(note), longComment: "", date: String(date), _teamAbbr: team, _src: "OO" });
+  });
+  if (!records.length) throw new Error("OpticOdds injuries: 0 players read — click TEST FEEDS and send me that line");
+  _injStore.oo = records;
+  return _injApplyMerged();
 }
 async function rwApiSyncLineups() {
   const rows = _rwRows(await rwApiFetch("NBALineups"));
@@ -25264,7 +25311,7 @@ async function rwApiSyncAll(quiet) {
   const btn = document.getElementById("rw-api-sync-btn");
   if (btn) { btn.disabled = true; btn.textContent = "SYNCING…"; }
   const done = [], fail = [];
-  for (const [label, fn] of [["injuries", rwApiSyncInjuries], ["lineups", rwApiSyncLineups], ["news", rwApiSyncNews], ["projections", rwApiSyncProjections]]) {
+  for (const [label, fn] of [["injuries", rwApiSyncInjuries], ["OpticOdds injuries", ooSyncInjuries], ["lineups", rwApiSyncLineups], ["news", rwApiSyncNews], ["projections", rwApiSyncProjections]]) {
     try { done.push(`${label} ${await fn()}`); } catch (e) { fail.push(e.message); console.warn("[RW API]", e); }
   }
   try { localStorage.setItem(RW_API_SYNC_KEY, JSON.stringify({ at: Date.now(), done, fail })); } catch (e) {}
@@ -25286,6 +25333,11 @@ async function rwApiTest() {
       out.push(`${feed}: ${rows.length} rows · fields: ${keys}${mapped}` + (rows.length ? ` · first name read: ${_rwName(rows[0]) || "?"} / team: ${_rwTeam(rows[0]) || "?"}` : "") + (rows.length ? "" : ` · top-level: ${Object.keys(data || {}).slice(0, 8).join(", ")}`));
     } catch (e) { out.push(`${feed}: ERROR ${e.message}`); }
   }
+  try {
+    const rows = _rwRows(await ooCall("/injuries", { sport: "basketball", league: "nba" }));
+    const keys = rows.length ? Object.keys(rows[0]).filter(k => k !== "__parent").join(", ") : "(no rows)";
+    out.push(`OpticOdds /injuries: ${rows.length} rows · fields: ${keys}`);
+  } catch (e) { out.push(`OpticOdds /injuries: ERROR ${e.message}`); }
   const text = out.join("\n");
   console.log("[RW API TEST]\n" + text);
   alert(text + "\n\n(No key in here — safe to copy/paste back to Claude.)");
