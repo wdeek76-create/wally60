@@ -24379,7 +24379,10 @@ const MORNING_STAT_LABEL = { PTS: "Points", REB: "Rebounds", AST: "Assists", "3P
 // Market names PropShop prints in its market picker / board header → our stat key.
 // Longest first so "Points + Rebounds + Assists" isn't read as "Points".
 const MORNING_MARKET_PATTERNS = [
-  [/\b(pts\s*\+\s*reb\s*\+\s*ast|points\s*\+\s*rebounds\s*\+\s*assists|pra)\b/i, "PRA"],
+  [/\b(pts\s*\+\s*reb\s*\+\s*ast|points\s*\+\s*rebounds\s*\+\s*assists|points[\s_]+rebounds[\s_]+assists|pra)\b/i, "PRA"],
+  [/\bpoints[\s_]+rebounds\b/i, "PR"],
+  [/\bpoints[\s_]+assists\b/i, "PA"],
+  [/\brebounds[\s_]+assists\b/i, "RA"],
   [/\b(pts\s*\+\s*reb|points\s*\+\s*rebounds)\b/i, "PR"],
   [/\b(pts\s*\+\s*ast|points\s*\+\s*assists)\b/i, "PA"],
   [/\b(reb\s*\+\s*ast|rebounds\s*\+\s*assists)\b/i, "RA"],
@@ -24454,8 +24457,11 @@ function _mSplitBlocks(raw) {
 function _mExtractCells(tokens) {
   let gameStr = "", gameTime = "";
   const rest = [], preGameNums = [];
-  let sawGame = false;
+  let sawGame = false, noProj = false;
   for (const t of tokens) {
+    // Current PropShop layout: "OKC @ SAS Oct-20 9:30 PMalts" (no separator, "alts" glued on, no projection column)
+    const gm = !sawGame && t.match(/^([A-Z]{2,4})\s*@\s*([A-Z]{2,4})\s+([A-Za-z]{3}-\d+\s+\d+:\d+\s*[AP]M)/);
+    if (gm) { gameStr = gm[1] + " @ " + gm[2]; gameTime = gm[3]; sawGame = true; noProj = true; continue; }
     if (!sawGame && t.includes("@") && (t.includes("•") || t.includes("—"))) {
       const sep = t.includes("•") ? "•" : "—";
       const parts = t.split(sep);
@@ -24466,7 +24472,8 @@ function _mExtractCells(tokens) {
     if (!sawGame) continue;
     rest.push(t);
   }
-  const projection = preGameNums.length ? preGameNums[0] : null;
+  const projection = preGameNums.length ? preGameNums[0] : null;   // new layout has no projection column
+  if (noProj) { while (rest.length && /^[\u2212\u2014\u2013-]$/.test(rest[0])) rest.shift(); }   // leading "− −" placeholders
   const parseSide = i => {
     if (i >= rest.length) return { line: null, odds: null, consumed: 0 };
     if (rest[i] === "—") return { line: "—", odds: "—", consumed: 1 };
@@ -24492,11 +24499,11 @@ function _mExtractCells(tokens) {
     });
     cellIdx++;
   }
-  return { gameStr, gameTime, allCells, projection };
+  return { gameStr, gameTime, allCells, projection, noProj };
 }
 // Market from the header region of the paste (before the first player block).
 function morningDetectMarket(raw) {
-  const head = raw.split("\n").slice(0, 60).join("\n");
+  const head = raw.split("\n").slice(0, 60).join("\n").replace(/_/g, " ");
   for (const [re, stat] of MORNING_MARKET_PATTERNS) if (re.test(head)) return MORNING_STATS.includes(stat) ? stat : "UNSUPPORTED:" + stat;
   return null;
 }
@@ -24505,15 +24512,30 @@ function parseMorningPropShop(raw) {
   const results = [], errors = [];
   for (const block of _mSplitBlocks(raw)) {
     try {
-      const { gameStr, gameTime, allCells, projection } = _mExtractCells(block.tokens);
+      const { gameStr, gameTime, allCells, projection, noProj } = _mExtractCells(block.tokens);
       if (!gameStr || allCells.length < 2) continue;
-      if (projection === 0 || projection == null) continue;
+      if (!noProj && (projection === 0 || projection == null)) continue;
       const best = allCells[1];   // 0 = Consensus, 1 = Best Line
       if (!best || best.ev === null) continue;
       const o = best.over, u = best.under;
       let play = null;
       if (o.odds && u.odds) play = parseInt(o.odds) >= parseInt(u.odds) ? { ou: "over", line: o.line, odds: o.odds } : { ou: "under", line: u.line, odds: u.odds };
-      else if (o.odds) play = { ou: "over", line: o.line, odds: o.odds };
+      else if (o.odds) {
+        // Best Line shows only the +EV side's price, so work out which side it is from the Consensus over/under:
+        // same line → whichever side's price, against Consensus no-vig odds, gives the listed EV; different line → above consensus = under.
+        const c = allCells[0], one = o;
+        let side = "over";
+        if (c && c.over.odds && c.under.odds && c.over.line != null) {
+          if (Number(one.line) === Number(c.over.line)) {
+            const dO = oddsToDecimal(c.over.odds), dU = oddsToDecimal(c.under.odds), dB = oddsToDecimal(one.odds);
+            if (dO && dU && dB) {
+              const pO = (1 / dO) / (1 / dO + 1 / dU);
+              side = Math.abs(pO * dB - 1 - best.ev / 100) <= Math.abs((1 - pO) * dB - 1 - best.ev / 100) ? "over" : "under";
+            }
+          } else side = Number(one.line) > Number(c.over.line) ? "under" : "over";
+        }
+        play = { ou: side, line: o.line, odds: o.odds };
+      }
       else if (u.odds) play = { ou: "under", line: u.line, odds: u.odds };
       if (!play || play.line == null) continue;
       let gameDateIso = localYMD(new Date());
@@ -24523,7 +24545,7 @@ function parseMorningPropShop(raw) {
         // The season crosses New Year: an "Oct-28" pasted in January is last year's slate.
         if (mo) { let y = year; if (Number(mo) >= 9 && new Date().getMonth() < 6) y = year - 1; gameDateIso = y + "-" + mo + "-" + String(dm[2]).padStart(2, "0"); }
       }
-      results.push({ player: block.player, game: gameStr, gameDateIso, ou: play.ou, line: Number(play.line), odds: parseInt(play.odds, 10), book: best.book || "", ev: best.ev, proj: projection });
+      results.push({ player: block.player, game: gameStr, gameDateIso, ou: play.ou, line: Number(play.line), odds: parseInt(play.odds, 10), book: best.book || "", ev: best.ev, proj: noProj ? null : projection });
     } catch (e) { errors.push((block.player || "?") + ": " + e.message); }
   }
   return { results, errors };
