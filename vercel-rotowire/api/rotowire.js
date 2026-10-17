@@ -22,6 +22,21 @@ const PATHS = {
 const FEED_HOSTS = ["https://api.rotowire.com", "https://www.rotowire.com", "https://rotowire.com"];
 const FEED_FILES = ["feed.php", "feeds.php", "Feed.php", "api.php", "index.php", "feed", "api/feed.php", "Basketball/NBA/feed.php", "Basketball/NBA/Feed.php", "Basketball/feed.php"];
 const PARAM_FEEDS = new Set(["NBACeilFloor", "nba-DFS-dk", "nba-DFS-fd", "NBALineups"]);
+// RotoWire's own keyless proxy (they hold the key on their side): …/api/proxy?feed=NBACeilFloor.
+// Serves every feed name RotoWire lists. Override with ROTOWIRE_PROXY_URL if they ever move it.
+const RW_PROXY = (process.env.ROTOWIRE_PROXY_URL || "https://rotowire-secrets-ebgmaeh8ecc4huhf.canadaeast-01.azurewebsites.net/api/proxy").trim();
+async function viaProxy(feed, date, link) {
+  const base = (link && link.proxy) || RW_PROXY;
+  const url = `${base}${base.includes("?") ? "&" : "?"}feed=${encodeURIComponent(feed)}${date}`;
+  const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 12000);
+  try {
+    const r = await fetch(url, { headers: { Accept: "application/json" }, signal: ctl.signal });
+    const text = await r.text();
+    let data; try { data = JSON.parse(text); } catch (e) { return null; }
+    if (!r.ok || (data && !Array.isArray(data) && data.error)) return null;
+    return text;
+  } catch (e) { return null; } finally { clearTimeout(t); }
+}
 let feedBase = null;   // remembered between calls while the function stays warm
 async function viaFeedParam(feed, key, date, link) {
   const tryOne = async (base) => {
@@ -53,6 +68,7 @@ function parseLink(h) {
     if (!raw) return null;
     if (/^[A-Za-z0-9_\-]{6,}$/.test(raw)) return { key: raw, origin: null, path: null };      // just a key
     const u = new URL(raw);
+    if (u.protocol === "https:" && /^rotowire-[a-z0-9-]+\.[a-z0-9.-]*azurewebsites\.net$/i.test(u.hostname)) return { key: null, origin: null, path: null, proxy: u.origin + u.pathname };
     if (u.protocol !== "https:" || !/(^|\.)rotowire\.com$/i.test(u.hostname)) return null;
     return { key: u.searchParams.get("key"), origin: u.origin, path: u.pathname };
   } catch (e) { return null; }
@@ -66,11 +82,10 @@ module.exports = async (req, res) => {
 
   const link = parseLink(req.headers && req.headers["x-rw-link"]);
   const key = (link && link.key) || (process.env.ROTOWIRE_API_KEY || "").trim();
-  if (!key) { res.status(500).json({ error: "No RotoWire key yet — click ⚙ on the blender's Morning tab and paste your key or link (or set ROTOWIRE_API_KEY on Vercel)" }); return; }
   // DIAGNOSTIC: /api/rotowire?probe=1 — tries likely RotoWire "feed=" endpoints with your key (no feed
   // parameter, so the right one answers "Missing or invalid feed parameter" + its feed list).
   // Results show the address pattern with the key hidden. Open it in a browser and copy the page.
-  if (req.query && req.query.probe) {
+  if (req.query && req.query.probe && key) {
     const hosts = ["https://api.rotowire.com", "https://www.rotowire.com", "https://rotowire.com"];
     const files = ["feed.php", "feeds.php", "Feed.php", "api.php", "index.php", "feed", "api/feed.php", "Basketball/NBA/feed.php", "Basketball/NBA/Feed.php", "Basketball/feed.php"];
     const out = [];
@@ -95,8 +110,11 @@ module.exports = async (req, res) => {
   if (!paths.length && !PARAM_FEEDS.has(feed)) { res.status(400).json({ error: "unknown feed", feeds: [...Object.keys(PATHS), ...PARAM_FEEDS] }); return; }
 
   const date = /^\d{4}-\d{2}-\d{2}$/.test(String((req.query && req.query.date) || "")) ? `&date=${req.query.date}` : "";
+  const sendOk = (text) => { res.setHeader("Cache-Control", "s-maxage=120, stale-while-revalidate=300"); res.setHeader("Content-Type", "application/json"); res.status(200).send(text); };
+  // Feeds the regular API has no address for (ceiling/floor, lineups, DFS) go straight to RotoWire's proxy.
+  if (PARAM_FEEDS.has(feed)) { const t0 = await viaProxy(feed, date, link); if (t0) { sendOk(t0); return; } }
   let last = null;
-  for (const path of paths) {
+  for (const path of key ? paths : []) {
     const url = `${BASE}/${path}${path.includes("?") ? "&" : "?"}format=json&key=${encodeURIComponent(key)}${date}`;
     try {
       const r = await fetch(url, { headers: { Accept: "application/json" } });
@@ -112,6 +130,8 @@ module.exports = async (req, res) => {
       last = { status: 502, endpoint: path.split("?")[0], body: String(e && e.message || e) };
     }
   }
+  { const t1 = await viaProxy(feed, date, link); if (t1) { sendOk(t1); return; } }   // last resort for every feed
+  if (!key) { res.status(500).json({ error: "RotoWire's proxy didn't answer and no key is saved — click ⚙ on the blender's Morning tab and type your key (or set ROTOWIRE_API_KEY on Vercel)" }); return; }
   if (PARAM_FEEDS.has(feed)) {
     const text = await viaFeedParam(feed, key, date, link);
     if (text) { res.setHeader("Cache-Control", "s-maxage=120, stale-while-revalidate=300"); res.setHeader("Content-Type", "application/json"); res.status(200).send(text); return; }
