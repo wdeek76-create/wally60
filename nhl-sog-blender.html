@@ -235,6 +235,7 @@ tr:hover td{background:#0a1628;}
         <div style="display:flex;gap:6px;margin-top:6px;">
           <button class="fb" id="rw-api-btn" onclick="pullNhlRwApi()" title="Pull RotoWire NHL projections through your Vercel /api/rotowire helper — no CSV needed" style="color:#22c55e;border-color:#22c55e55;">⚡ PULL RW API</button>
           <button class="fb" onclick="testNhlRwApi()" title="Show what the RotoWire feed returns (no key shown)">TEST</button>
+          <label class="fb" style="cursor:pointer;" title="Pick today's RotoWire CSV — compares every player to the API pull (doesn't load it)">VERIFY vs CSV<input type="file" accept=".csv" style="display:none" onchange="verifyNhlRwCsv(this)"/></label>
           <button class="fb" onclick="promptNhlRwApi()" title="Set the RotoWire helper URL (normally auto-detected)">⚙</button>
         </div>
       </div>
@@ -640,6 +641,7 @@ function _nhlRwNum(flat, names) {
   }
   return null;
 }
+let _nhlRwSogField = "";
 function _nhlRwRow(o) {
   const full = _nhlRwPick(o, ["Name", "PlayerName", "FullName", "Player.Name", "Player.FullName", "Player"]);
   const f = _nhlRwPick(o, ["FirstName", "Player.FirstName", "First"]), l = _nhlRwPick(o, ["LastName", "Player.LastName", "Last"]);
@@ -648,10 +650,14 @@ function _nhlRwRow(o) {
   const pos = String(_nhlRwPick(o, ["Position", "Pos", "Player.Position"]) || "").trim();
   if (/^g$|goal/i.test(pos)) return null;   // goalie "shots" are shots against
   const flat = _nhlRwFlat(o);
-  let sog = _nhlRwNum(flat, ["shotsongoal", "shots_on_goal", "sog", "shots", "projshots", "projectedshots", "shotsog"]);
+  let sog = null;
+  for (const n of ["shotsongoal", "shots_on_goal", "sog", "shots", "projshots", "projectedshots", "shotsog"]) {
+    const k = Object.keys(flat).find(k => k.split(".").pop() === n && !isNaN(parseFloat(flat[k])));
+    if (k) { sog = parseFloat(flat[k]); _nhlRwSogField = k; break; }
+  }
   if (sog == null) {   // any other "shots" field, skipping blocked / against / % / attempts / missed
     const k = Object.keys(flat).find(k => { const l = k.split(".").pop(); return /shot/.test(l) && !/block|against|pct|percent|attempt|miss|ga$|allowed/.test(l); });
-    if (k) { const v = parseFloat(flat[k]); if (!isNaN(v)) sog = v; }
+    if (k) { const v = parseFloat(flat[k]); if (!isNaN(v)) { sog = v; _nhlRwSogField = k; } }
   }
   if (sog == null || !(sog > 0)) return null;
   const team = String(_nhlRwPick(o, ["Team.Code", "Team.Abbreviation", "Team.Abbr", "TeamCode", "TeamAbbr", "Team.Alias", "Team", "__parent.Team.Code", "__parent.TeamCode", "__parent.Team", "__parent.Code"]) || "").trim().toUpperCase();
@@ -689,6 +695,43 @@ async function pullNhlRwApi(auto) {
     if (btn) { btn.disabled = false; btn.textContent = "⚡ PULL RW API"; }
   }
 }
+// Compare the API pull against a RotoWire CSV, player by player (nothing is loaded or changed).
+function verifyNhlRwCsv(inp) {
+  const file = inp.files && inp.files[0]; if (!file) return;
+  const r = new FileReader();
+  r.onload = ev => {
+    inp.value = "";
+    let csv;
+    try { csv = parse("roto", ev.target.result); } catch (e) { alert("Couldn't read that CSV: " + e.message); return; }
+    const meta = _nhlRwMeta();
+    if (!srcs.roto || !meta || meta.date !== _ymdLocal(new Date())) { alert("The ROTOWIRE slot isn't from the API right now — tap ⚡ PULL RW API first, then verify."); return; }
+    const key = e => nn(e.name) + "|" + nn(e.team || "");
+    const api = {}; Object.values(srcs.roto).forEach(e => { api[key(e)] = e; });
+    const apiByName = {}; Object.values(srcs.roto).forEach(e => { (apiByName[nn(e.name)] = apiByName[nn(e.name)] || []).push(e); });
+    let same = 0, close = 0; const off = [], csvOnly = [];
+    const seen = new Set();
+    Object.values(csv).forEach(c => {
+      let a = api[key(c)];
+      if (!a) { const l = apiByName[nn(c.name)] || []; if (l.length === 1) a = l[0]; }
+      if (!a) { csvOnly.push(`${c.name} ${c.team} ${c.sog}`); return; }
+      seen.add(a);
+      const d = Math.abs(a.sog - c.sog);
+      if (d < 0.005) same++; else if (d < 0.05) close++; else off.push({ n: c.name, c: c.sog, a: a.sog, d });
+    });
+    const apiOnly = Object.values(srcs.roto).filter(a => !seen.has(a));
+    off.sort((x, y) => y.d - x.d);
+    const matched = same + close + off.length;
+    const msg = `RotoWire API vs your CSV (${Object.keys(csv).length} CSV players, ${apiOnly.length + matched} API players)\n` +
+      `✓ identical: ${same}/${matched}\n≈ within 0.05: ${close}\n✗ different: ${off.length}` +
+      (off.length ? "\n" + off.slice(0, 12).map(o => `   ${o.n}: CSV ${o.c} vs API ${o.a}`).join("\n") : "") +
+      `\nIn CSV, not API: ${csvOnly.length}` + (csvOnly.length ? " — " + csvOnly.slice(0, 8).join(", ") : "") +
+      `\nIn API, not CSV: ${apiOnly.length}` + (apiOnly.length ? " — " + apiOnly.slice(0, 8).map(a => `${a.name} ${a.team} ${a.sog}`).join(", ") : "") +
+      `\nSOG field used: ${_nhlRwSogField || "?"}`;
+    console.log("[NHL RW verify]\n" + msg);
+    alert(msg);
+  };
+  r.readAsText(file);
+}
 async function testNhlRwApi() {
   let msg;
   try {
@@ -697,6 +740,9 @@ async function testNhlRwApi() {
     const keys = rows.length ? Object.keys(rows[0]).filter(k => k !== "__parent").join(", ") : "(no rows) top-level: " + Object.keys(data || {}).slice(0, 8).join(", ");
     const read = rows.map(_nhlRwRow).filter(Boolean), first = read[0];
     let rawP = ""; try { const t = (Array.isArray(data) ? data : Object.values(data || {}).find(Array.isArray) || [])[0] || {}; const pk = Object.keys(t).find(k => /^players?$/i.test(k)); rawP = pk ? `\nraw ${pk}: ${JSON.stringify(t[pk]).slice(0, 400)}` : ""; } catch (e) {}
+    const fRow = rows.find(r => _nhlRwRow(r));
+    const shotKeys = fRow ? Object.entries(_nhlRwFlat(fRow)).filter(([k]) => /shot|sog/.test(k)).map(([k, v]) => `${k}=${v}`).join(", ") : "";
+    rawP += `\nSOG read from: ${_nhlRwSogField || "?"}` + (shotKeys ? `\nall shot fields on that player: ${shotKeys}` : "");
     const sample = rows.length ? Object.entries(_nhlRwFlat(rows[0])).slice(0, 40).map(([k, v]) => `${k}=${String(v).slice(0, 18)}`).join(", ") : "";
     msg = `NHLDailyProj: ${rows.length} rows · ${read.length} skaters with shots\nfields: ${keys}\n` + (first ? `read as: ${first.name} ${first.team} ${first.pos || ""} SOG ${first.sog}` : "COULDN'T read a skater with shots — send me this") + (sample ? `\nrow 1: ${sample}` : "") + rawP;
   } catch (e) { msg = "NHLDailyProj: ERROR " + e.message; }
