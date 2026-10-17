@@ -409,6 +409,8 @@ main{flex:1;padding:12px calc(var(--sar) + 12px) max(160px, calc(var(--ftrh,76px
 .flnm{font-weight:800;font-size:13px;text-align:center;line-height:1.2}
 .flm{font-family:var(--mono);font-size:12px;font-weight:800;color:var(--text);text-align:center;white-space:normal}
 .fight{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:6px;margin-bottom:8px}
+.fight .vs.fdraw{display:flex;flex-direction:column;align-items:center;gap:3px;font-size:9px}
+.fight .vs.fdraw b{font-family:var(--mono);font-size:12px;color:var(--text)}
 .fight .vs{font-size:10px;color:var(--green);font-weight:800}
 .bl{width:16px;height:16px;border-radius:4px;object-fit:cover;flex:0 0 auto;margin-right:6px;vertical-align:middle}
 .bk .n{display:flex;align-items:center}
@@ -774,6 +776,8 @@ const SPORTS = {
   mlb:  { label:'MLB',  sport:'baseball',   league:'mlb',  days:1, markets:MLB_MKTS },
   ufc:  { label:'UFC',  sport:'mma',        league:'ufc',  ml:true, cards:2, markets:[['ml','Moneyline', m=>MMA_ML.has(m)]] },
   // Every tour/tournament (no league filter), singles only, next 48h -- one entity per player.
+  // Every soccer league worldwide (no league filter), 3-way moneyline (home / draw / away), next 48h.
+  soccer:{ label:'Soccer', sport:'soccer', league:null, ml:true, threeWay:true, days:2, markets:[['ml','Moneyline', m=>m==='moneyline'||m==='1x2'||m==='match result'||m==='full time result'||m==='3-way moneyline']] },
   tennis:{ label:'Tennis', sport:'tennis', league:null, ml:true, days:2, singlesOnly:true, markets:[['ml','Moneyline', m=>MMA_ML.has(m)||m==='match winner'||m==='to win match']] },
 };
 // NBA/WNBA share NBA_MKTS by reference -- append game markets to it once, after SPORTS exists, so
@@ -1359,7 +1363,10 @@ async function fetchSportData(sk, status){
     catch(e){ console.warn('[props] chunk failed',e.message); }
     say(`${S.label} · loading lines ${++done}/${total}…`);
   });
-  await runPool(jobs, 4);
+  await runPool(jobs, S.league ? 4 : 6);
+  // Every-league sports (soccer, tennis) list plenty of matches no book we use prices -- drop
+  // those so the slate is only games you can actually bet.
+  if(!S.league){ const priced=new Set(rows.map(o=>o._fx)); fx=fx.filter(f=>priced.has(f.id)); }
   // index players from prop rows (player_id set) or fighters from moneyline selections (UFC)
   // — team totals are the one entity here that's never a player: no player_id, selection is a
   // TEAM name, so they're indexed separately, keyed and labeled off the fixture's own home/away
@@ -1888,7 +1895,7 @@ function boardHtml(rows, p, mkey, ctxKey, mainLine, pt, ro){
     return { totalSize, avg: totalSize ? toAm(totalNotionalDec/totalSize) : null };
   };
   let mlCompare='';
-  if(single && SPORTS[sportKey].ml){
+  if(single && SPORTS[sportKey].ml && !SPORTS[sportKey].threeWay){
     const f=fixtures.find(x=>x.id===p.fixtureId);
     if(f){
       const oppName = normName(f.home.name)===p.key ? f.away.name : f.home.name;
@@ -1926,7 +1933,11 @@ function boardHtml(rows, p, mkey, ctxKey, mainLine, pt, ro){
       const oppName = normName(f.home.name)===p.key ? f.away.name : f.home.name;
       const oppRows = rowsFor({fixtureId:p.fixtureId, key:normName(oppName)}, mkey, mainRows);
       const myBest=bestFirst(rows)[0], oppBest=bestFirst(oppRows)[0];
-      const fair = (myBest&&oppBest) ? devigFair(Number(myBest.price), Number(oppBest.price)) : null;
+      // 3-way (soccer): the draw's best price joins the devig as a third outcome.
+      const drawBest = SPORTS[sportKey].threeWay ? bestFirst(mainRows.filter(o=>o._fx===p.fixtureId && marketKeyFor(sportKey,o.market)===mkey && /^(draw|tie)\b/.test(normName(cleanSel(o.selection||o.name)))))[0] : null;
+      let fair = null;
+      if(myBest&&oppBest&&drawBest){ const a=toImplied(Number(myBest.price)), b=toImplied(Number(oppBest.price)), c=toImplied(Number(drawBest.price)); const fp=a/(a+b+c); const am=fp<0.5?Math.round(100/fp-100):Math.round(-fp/(1-fp)*100); fair=am>0?'+'+am:String(am); }
+      else if(myBest&&oppBest) fair = devigFair(Number(myBest.price), Number(oppBest.price));
       if(fair) mlFair = `<div class="mlfair">No-vig fair for ${esc(titleCase(p.name))}: <b>${fmtAm(Number(fair))}</b></div>`;
     }
   }
@@ -2728,10 +2739,8 @@ function robustAvgImp(rows){
 function legFairPrice(leg){
   const rows=rowsForLeg(leg);
   const mine=bestFirst(myRowsForLeg(leg,rows));
-  const opp=bestFirst(oppRowsForLeg(leg,rows));
   const avgImp = mine.length ? robustAvgImp(mine) : null;
-  const oppAvgImp = opp.length ? robustAvgImp(opp) : null;
-  const fairP = (avgImp!=null && oppAvgImp!=null && (avgImp+oppAvgImp)>0) ? avgImp/(avgImp+oppAvgImp) : null;
+  const fairP = fairPFromRows(mine, oppRowsForLeg(leg,rows), true);
   if(fairP==null || fairP<=0 || fairP>=1) return null;
   return { fairP, mineCount: mine.length, avgImp };
 }
@@ -2942,11 +2951,17 @@ let autoSGP = LS.get('props_autosgp','')==='1';
 // full-game and regulation-time variants) -- everything else indexed is a player prop. Used to
 // split "Scope" (props-only/mains-only/both) and apply the right one of the two liquidity floors.
 const MAIN_MKS = new Set([...TEAM_MKS, ...GAME_MKS]);
-function fairPFromRows(myRows, oppRows){
+function fairPFromRows(myRows, oppRows, dedupe){
   const avgImp = myRows.length ? robustAvgImp(myRows) : null;
-  const oppAvgImp = oppRows.length ? robustAvgImp(oppRows) : null;
-  if(avgImp==null||oppAvgImp==null||(avgImp+oppAvgImp)<=0) return null;
-  return avgImp/(avgImp+oppAvgImp);
+  if(avgImp==null || !oppRows.length) return null;
+  // Every OTHER outcome is its own group (opponent, and the Draw/Tie in a 3-way soccer or NHL
+  // regulation moneyline) -- averaging a draw price together with the opponent's would be
+  // meaningless, so each is averaged on its own and they're all summed into the devig.
+  const groups={}; oppRows.forEach(o=>{ const k=normName(cleanSel(o.selection||o.name)); (groups[k]=groups[k]||[]).push(o); });
+  const others=Object.values(groups).map(g=>robustAvgImp(dedupe?bestFirst(g):g));
+  if(others.some(x=>x==null)) return null;
+  const tot=avgImp+others.reduce((a,x)=>a+x,0);
+  return tot>0 ? avgImp/tot : null;
 }
 // What a row's own real size actually is: an exchange's top-of-book depth at that exact price
 // (same number cellPrice/the cell UI would show), or a flat-limit book's posted max. Null (not 0)
@@ -3869,7 +3884,7 @@ function renderSlateCards(){
       const initB=f.home.name.split(' ').map(w=>w[0]).slice(0,2).join('').toUpperCase();
       h+=`<div class="fight">
         <div class="flc" data-fk="${a?esc(a.key):''}"><div class="flph"><span class="ph">${initA}</span>${f.away.logo?`<img src="${esc(f.away.logo)}" alt="" onerror="this.style.display='none'">`:''}</div><div class="flnm">${esc(f.away.name)}</div><div class="flm">${mlA}</div></div>
-        <span class="vs">VS</span>
+        ${SPORTS[sportKey].threeWay ? (()=>{ const dr=bestFirst(mainRows.filter(o=>o._fx===f.id && marketKeyFor(sportKey,o.market)==='ml' && /^(draw|tie)\b/.test(normName(cleanSel(o.selection||o.name)))))[0]; return `<span class="vs fdraw">DRAW<b>${dr?fmtAm(dr.price):'—'}</b></span>`; })() : '<span class="vs">VS</span>'}
         <div class="flc" data-fk="${b?esc(b.key):''}"><div class="flph"><span class="ph">${initB}</span>${f.home.logo?`<img src="${esc(f.home.logo)}" alt="" onerror="this.style.display='none'">`:''}</div><div class="flnm">${esc(f.home.name)}</div><div class="flm">${mlB}</div></div>
       </div>`;
     });
