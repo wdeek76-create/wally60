@@ -18414,5 +18414,87 @@ async function rwnVerify(input) {
 })();
 </script>
 
+<script>
+// ══ Ensemble picks from the NFL tracker → blender TRACKER (+ Source / Player Analytics) ══
+// Same site as the tracker, so its saved Ensemble picks (localStorage "nfl_props_ensemble") are
+// readable here. Each pick becomes a normal tracked bet, tagged fromEnsemble, with every agreeing
+// source's projection (srcProjs) and PropShop edge (srcEdges) so Source Analytics can use them.
+// Kept in sync: re-runs on load, whenever the tracker saves, and when this tab comes back into view.
+// Tracker's grade wins; a grade set here is kept while the tracker still has the pick pending.
+const _ENS_SRC = { ftn: "ftn", rotowire: "rw", "4for4": "ff4", stok: "stok", dimers: "dimers", rts: "rts", fantasy_points: "fpts" };
+const _ENS_STAT = { pass_att: "PASS ATT", pass_cmp: "PASS CMP", pass_td: "PASS TD", pass_yds: "PASS YDS", rec_yds: "REC YDS", rec: "REC", rush_att: "RUSH ATT", rush_yds: "RUSH YDS", anytime_td: "TD" };
+const _ENS_RES = { win: "hit", loss: "miss", push: "void", skip: "void" };
+function _ensId(p) { // numeric (the tracker's own id), clear of the blender's Date.now() ids
+  const n = Number(p.id);
+  if (isFinite(n) && n > 1e11) return n;
+  const s = String(p.id ?? (p.player + p.market + p.date)); let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+  return 8e12 + h;
+}
+function _ensToBet(p) {
+  const stat = _ENS_STAT[p.market]; const odds = parseInt(p.odds);
+  if (!stat || isNaN(odds) || p.line == null || !p.player) return null;
+  const dec = odds > 0 ? 1 + odds / 100 : 1 + 100 / Math.abs(odds);
+  const srcProjs = {}, srcEdges = {};
+  (p.ensembleSources || []).forEach(x => {
+    const k = _ENS_SRC[x.src]; if (!k) return;
+    if (x.proj != null && !isNaN(Number(x.proj))) srcProjs[k] = Number(x.proj);
+    if (x.ev != null && !isNaN(Number(x.ev))) srcEdges[k] = Number(x.ev);
+  });
+  const projs = Object.values(srcProjs);
+  const pFair = Math.min(0.99, Math.max(0.01, (1 + (Number(p.ev) || 0) / 100) / dec));
+  const fair = pFair >= 0.5 ? Math.round(-(pFair / (1 - pFair)) * 100) : Math.round(((1 - pFair) / pFair) * 100);
+  const iso = String(p.date || "").slice(0, 10), m = iso.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  const s = calcStake(odds);
+  const srcNames = (p.ensembleSources || []).map(x => ({ ftn: "FTN", rotowire: "RW", "4for4": "4F4", stok: "STOK", dimers: "DMR", rts: "RTS", fantasy_points: "FPTS" })[x.src] || x.src);
+  return {
+    id: _ensId(p), fromEnsemble: true, ensembleId: p.id,
+    date: m ? `${+m[2]}/${+m[3]}/${m[1]}` : "", gameDate: iso,
+    timestamp: (p.gameTime || "") + (m ? ` ${+m[2]}/${+m[3]}/${m[1]}` : ""),
+    player: p.player, pos: p.pos || "", team: p.team || "",
+    stat, ou: p.side === "U" ? "under" : "over", line: Number(p.line), odds, fair, altBooks: [],
+    stake: s ? s.stake : 1, toWin: s ? s.toWin : 1, type: s ? s.type : "fav",
+    book: "Ensemble", proj: projs.length ? +(projs.reduce((a, b) => a + b, 0) / projs.length).toFixed(2) : null,
+    srcProjs, srcEdges, deciderSource: "avg",
+    result: _ENS_RES[p.result] || "pending",
+    actual: p.actual != null && p.actual !== "" ? Number(p.actual) : null,
+    notes: `Ensemble ${srcNames.join("+")}${p.tier === "strong" ? " · 10%+" : ""}${p.playTo && p.playTo.odds ? " · play to " + p.playTo.odds : ""}`,
+  };
+}
+function syncEnsembleBets(quiet) {
+  let picks = [];
+  try { picks = JSON.parse(localStorage.getItem("nfl_props_ensemble") || "[]") || []; } catch (e) { return 0; }
+  if (!Array.isArray(picks)) return 0;
+  const want = new Map();
+  picks.forEach(p => { const b = _ensToBet(p); if (b) want.set(b.id, b); });
+  let added = 0, updated = 0, removed = 0;
+  // drop synced bets whose pick is gone from the tracker
+  for (let i = bets.length - 1; i >= 0; i--) {
+    if (bets[i] && bets[i].fromEnsemble && !want.has(bets[i].id)) { bets.splice(i, 1); removed++; }
+  }
+  want.forEach((nb, id) => {
+    const ex = bets.find(b => b.id === id);
+    if (!ex) { bets.push(nb); added++; return; }
+    const keepLocalGrade = nb.result === "pending" && ex.result && ex.result !== "pending";
+    const next = { ...ex, ...nb, result: keepLocalGrade ? ex.result : nb.result, actual: nb.actual != null ? nb.actual : (ex.actual ?? null) };
+    if (JSON.stringify(next) !== JSON.stringify(ex)) { Object.assign(ex, next); updated++; }
+  });
+  if (added || updated || removed) {
+    bets.sort((a, b) => b.id - a.id);
+    saveBets();
+    try { if (currentTab === "tracker") renderTracker(); } catch (e) {}
+    try { if (currentTab === "srcanalytics") renderSrcAnalytics(); } catch (e) {}
+    try { if (currentTab === "playeranalytics") renderPlayerAnalytics(); } catch (e) {}
+    if (!quiet && typeof showToast === "function") showToast(`Ensemble → Tracker: ${added} new · ${updated} updated${removed ? " · " + removed + " removed" : ""}`);
+  }
+  return added + updated + removed;
+}
+(function ensSyncInit() {
+  try { syncEnsembleBets(true); } catch (e) { console.warn("[ensemble sync]", e); }
+  window.addEventListener("storage", e => { if (e.key === "nfl_props_ensemble") { try { syncEnsembleBets(false); } catch (err) {} } });
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) { try { syncEnsembleBets(true); } catch (err) {} } });
+})();
+</script>
+
 </body>
 </html>
