@@ -587,7 +587,10 @@ function _nhlRwRows(data) {
   if (Array.isArray(data)) {
     if (!data.length || typeof data[0] !== "object" || Array.isArray(data[0])) return [];
     const inner = data.map(d => Object.values(d).find(v => Array.isArray(v) && v.length && typeof v[0] === "object")).filter(Boolean);
-    const looksGrouped = inner.length === data.length && !_nhlRwPick(data[0], ["Name", "PlayerName", "FirstName", "Player.Name", "Player.FirstName"]);
+    // Teams/games holding a Players list (RotoWire NHL: [{Name, Code, Players:[…]}]) → flatten to players.
+    const hasPlayers = data.every(d => Object.keys(d).some(k => /^players$/i.test(k) && Array.isArray(d[k])));
+    const looksGrouped = hasPlayers || (inner.length === data.length && !_nhlRwPick(data[0], ["Name", "PlayerName", "FirstName", "Player.Name", "Player.FirstName"]));
+    if (hasPlayers) return data.flatMap(d => d[Object.keys(d).find(k => /^players$/i.test(k))].map(x => ({ __parent: d, ...x })));
     return looksGrouped ? data.flatMap((d, i) => inner[i].map(x => ({ __parent: d, ...x }))) : data;
   }
   if (data && typeof data === "object") for (const v of Object.values(data)) { const r = _nhlRwRows(v); if (r.length) return r; }
@@ -629,7 +632,11 @@ function _nhlRwRow(o) {
   const pos = String(_nhlRwPick(o, ["Position", "Pos", "Player.Position"]) || "").trim();
   if (/^g$|goal/i.test(pos)) return null;   // goalie "shots" are shots against
   const flat = _nhlRwFlat(o);
-  const sog = _nhlRwNum(flat, ["shotsongoal", "shots_on_goal", "sog", "shots", "projshots", "projectedshots", "shotsog"]);
+  let sog = _nhlRwNum(flat, ["shotsongoal", "shots_on_goal", "sog", "shots", "projshots", "projectedshots", "shotsog"]);
+  if (sog == null) {   // any other "shots" field, skipping blocked / against / % / attempts / missed
+    const k = Object.keys(flat).find(k => { const l = k.split(".").pop(); return /shot/.test(l) && !/block|against|pct|percent|attempt|miss|ga$|allowed/.test(l); });
+    if (k) { const v = parseFloat(flat[k]); if (!isNaN(v)) sog = v; }
+  }
   if (sog == null || !(sog > 0)) return null;
   const team = String(_nhlRwPick(o, ["Team.Code", "Team.Abbreviation", "Team.Abbr", "TeamCode", "TeamAbbr", "Team.Alias", "Team", "__parent.Team.Code", "__parent.TeamCode", "__parent.Team", "__parent.Code"]) || "").trim().toUpperCase();
   const e = { name, sog, team };
@@ -672,8 +679,9 @@ async function testNhlRwApi() {
     const data = await _nhlRwFetch("NHLDailyProj");
     const rows = _nhlRwRows(data);
     const keys = rows.length ? Object.keys(rows[0]).filter(k => k !== "__parent").join(", ") : "(no rows) top-level: " + Object.keys(data || {}).slice(0, 8).join(", ");
-    const first = rows.map(_nhlRwRow).find(Boolean);
-    msg = `NHLDailyProj: ${rows.length} rows\nfields: ${keys}\n` + (first ? `read as: ${first.name} ${first.team} ${first.pos || ""} SOG ${first.sog}` : "COULDN'T read a skater with shots — send me this");
+    const read = rows.map(_nhlRwRow).filter(Boolean), first = read[0];
+    const sample = rows.length ? Object.entries(_nhlRwFlat(rows[0])).slice(0, 40).map(([k, v]) => `${k}=${String(v).slice(0, 18)}`).join(", ") : "";
+    msg = `NHLDailyProj: ${rows.length} rows · ${read.length} skaters with shots\nfields: ${keys}\n` + (first ? `read as: ${first.name} ${first.team} ${first.pos || ""} SOG ${first.sog}` : "COULDN'T read a skater with shots — send me this") + (sample ? `\nrow 1: ${sample}` : "");
   } catch (e) { msg = "NHLDailyProj: ERROR " + e.message; }
   alert(msg + "\n\n(No key in here — safe to paste back to Claude.)");
 }
