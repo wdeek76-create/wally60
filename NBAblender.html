@@ -24699,7 +24699,7 @@ function renderMorning() {
       const onCard = new Set(cleared.concat(morningBets.filter(b => b.gameDate === today)).map(r => resolveNorm(r.player)));
       const items = feed.items.slice().sort((a, b) => (onCard.has(resolveNorm(b.name)) ? 1 : 0) - (onCard.has(resolveNorm(a.name)) ? 1 : 0)).slice(0, 12);
       return `<details style="margin-top:8px;"><summary style="cursor:pointer;font-size:11px;font-weight:800;color:#93c5fd;letter-spacing:.5px;">LATEST RW NEWS (${feed.items.length})</summary>
-        ${items.map(n => `<div style="padding:7px 0;border-top:1px solid #1a1d22;font-size:11px;line-height:1.45;"><b style="color:${onCard.has(resolveNorm(n.name)) ? "#c4b5fd" : "#fff"};">${_mEsc(n.name)}</b>${n.team ? ` <span style="color:#7dd3fc;">${_mEsc(n.team)}</span>` : ""} <span style="color:#525a64;">${_mEsc(n.at)}</span><div style="color:#d4dae3;">${_mEsc(n.headline)}</div>${n.analysis ? `<div style="color:#8b93a0;">${_mEsc(n.analysis)}</div>` : ""}</div>`).join("")}</details>`;
+        ${items.map(n => `<div style="padding:7px 0;border-top:1px solid #1a1d22;font-size:11px;line-height:1.45;"><b style="color:${onCard.has(resolveNorm(n.name)) ? "#c4b5fd" : "#fff"};">${_mEsc(n.name)}</b>${n.team ? ` <span style="color:#7dd3fc;">${_mEsc(n.team)}</span>` : ""} <span style="color:#525a64;">${_mEsc(n.at)}</span><div style="color:#fff;font-weight:700;">${_mEsc(n.headline)}</div>${n.notes ? `<div style="color:#d4dae3;">${_mEsc(n.notes)}</div>` : ""}${n.analysis ? `<div style="color:#8b93a0;margin-top:3px;"><b style="color:#a8b0bb;letter-spacing:.5px;">ANALYSIS</b> ${_mEsc(n.analysis)}</div>` : ""}</div>`).join("")}</details>`;
     })()}
   </div>`;
 
@@ -25211,6 +25211,32 @@ async function rwApiSyncInjuries() {
     records.push({ id: `rwapi-${name}`, athlete: { displayName: name, team: { abbreviation: team } }, status, details: { type: String(type), detail: "", returnDate: String(ret) }, shortComment: String(headline), longComment: String(analysis), date: String(date), _teamAbbr: team });
   });
   if (!records.length) throw new Error("NBAInjuries: no players read — run TEST FEEDS and send me the field names");
+  // The injuries feed has no text. The news feed has the blurbs (Headline / Notes = the blurb / Analysis), so attach each
+  // player's LATEST item to his record — that text drives the teammate upside / floor-risk reading — and add anyone whose
+  // latest news carries an injury status but isn't on the injuries list.
+  try {
+    const latest = new Map();
+    _rwRows(await rwApiFetch("NBANews")).forEach(n => {
+      const nm = _rwName(n); if (!nm) return;
+      const at = Date.parse(_rwPick(n, ["DateTime", "LastEdited"]) || "") || 0, k = norm(nm), cur = latest.get(k);
+      if (!cur || at > cur.at) latest.set(k, { n, at, nm });
+    });
+    const have = new Set(records.map(r => norm(r.athlete.displayName)));
+    records.forEach(r => {
+      const x = latest.get(norm(r.athlete.displayName)); if (!x) return;
+      r.shortComment = String(_rwPick(x.n, ["Notes"]) || _rwPick(x.n, ["Headline"]) || "");
+      r.longComment = String(_rwPick(x.n, ["Analysis"]) || "");
+      r.headline = String(_rwPick(x.n, ["Headline"]) || "");
+      r.date = String(_rwPick(x.n, ["DateTime"]) || r.date || "");
+    });
+    const fresh = Date.now() - 5 * 86400000;
+    latest.forEach((x, k) => {
+      if (have.has(k) || x.at < fresh) return;
+      const st = _rwPick(x.n, ["Injury.Status"]); if (!st) return;
+      const team = _rwTeam(x.n);
+      records.push({ id: `rwnews-${x.nm}`, athlete: { displayName: x.nm, team: { abbreviation: team } }, status: _rwStatus(st), details: { type: String(_rwPick(x.n, ["Injury.Type"]) || ""), detail: "", returnDate: String(_rwPick(x.n, ["Injury.ReturnDate"]) || "") }, shortComment: String(_rwPick(x.n, ["Notes"]) || ""), longComment: String(_rwPick(x.n, ["Analysis"]) || ""), headline: String(_rwPick(x.n, ["Headline"]) || ""), date: String(_rwPick(x.n, ["DateTime"]) || ""), _teamAbbr: team });
+    });
+  } catch (e) { console.warn("[RW API] news blurbs unavailable", e && e.message); }
   records.forEach(r => { r._src = "RW"; });
   _injStore.rw = records;
   try { localStorage.setItem("nba_rw_news_at", String(Date.now())); } catch (e) {}
@@ -25420,8 +25446,9 @@ async function rwApiSyncNews() {
   const rows = _rwRows(await rwApiFetch("NBANews"));
   const items = rows.map(o => ({
     name: _rwName(o) || "", team: _rwTeam(o),
-    headline: String(_rwPick(o, ["Headline", "Title", "News.Headline", "Notes"]) || ""),
-    analysis: String(_rwPick(o, ["Analysis", "Impact", "News.Analysis", "Body", "Details"]) || ""),
+    headline: String(_rwPick(o, ["Headline", "Title", "News.Headline"]) || ""),
+    notes: String(_rwPick(o, ["Notes", "Body"]) || ""),
+    analysis: String(_rwPick(o, ["Analysis", "Impact", "News.Analysis", "Details"]) || ""),
     at: String(_rwPick(o, ["DateTime", "Date", "Updated", "LastUpdated", "Published"]) || ""),
   })).filter(x => x.headline || x.analysis).slice(0, 120);
   try { localStorage.setItem(RW_NEWS_FEED_KEY, JSON.stringify({ fetchedAt: Date.now(), items })); } catch (e) {}
