@@ -4939,7 +4939,25 @@ function _nhlMeCardPicks(refreshed) {
   });
   return out;
 }
+// The full ensemble rule at the card's live price: every source's EV redone with Poisson at b.odds —
+// 3 at 3%+ and none negative (all at 3%+ when only 3 sources project him). null = can't check (no projections).
+function _nhlLiveGate(b) {
+  if (b.stat !== "SOG" || !b.sourceProjs) return null;
+  const d = oddsToDecimal(b.odds); if (d == null) return null;
+  const evs = {};
+  PS_SOURCE_KEYS_NHL.forEach(src => {
+    const pr = b.sourceProjs[src] != null ? Number(b.sourceProjs[src]) : (b.psMissingSrc === src && b.psMissingProj != null ? Number(b.psMissingProj) : null);
+    if (pr != null && pr > 0) evs[src] = Math.round((_nhlPoissonHit(b.ou, b.line, pr) * d - 1) * 1000) / 10;
+  });
+  const keys = Object.keys(evs); if (keys.length < 3) return null;
+  const qual = keys.filter(k => evs[k] >= NHL_PS_QUAL_EV).length, neg = keys.filter(k => evs[k] < 0);
+  const ok = qual >= 3 && !neg.length;
+  const why = ok ? "" : neg.length ? neg.map(k => `${_NHL_SRC_TAG[k]} ${evs[k]}%`).join(", ") : `only ${qual} source${qual === 1 ? "" : "s"} at ${NHL_PS_QUAL_EV}%+`;
+  return { ok, evs, why };
+}
 function _nhlStillInRange(b) {
+  const g = _nhlLiveGate(b);
+  if (g && !g.ok) return false; // a source negative (or <3 at 3%+) at the best price now — not a play any more
   const e = _nhlDisplayEv(b);
   if (b._psEnsemble && b.fairProb != null) return e == null || e >= NHL_PS_QUAL_EV - 0.05; // 0.05 = rounding slack so a pick sitting exactly on play-to isn't dropped
   const pt = parseInt(b.playTo), o = parseInt(b.odds);
@@ -4969,7 +4987,8 @@ function _nhlBuildCardReport(refreshed, kept, mode) {
       return `• ${head} — play to ${pt != null ? fmt(pt) : "?"}, best FD/NV/PX ${fmt(mine[0].price)} ${mine[0].book}${need != null ? ` (needed ${fmt(need)})` : ""}`;
     }
     const bestTxt = best && best.price !== Number(b.odds) ? ` · best ${fmt(best.price)} ${best.book}` : "";
-    return `• ${head} — play to ${pt != null ? fmt(pt) : "?"}, now ${fmt(Number(b.odds))} ${b.book}${bestTxt}`;
+    const g = _nhlLiveGate(b);
+    return `• ${head} — play to ${pt != null ? fmt(pt) : "?"}, now ${fmt(Number(b.odds))} ${b.book}${g && !g.ok ? ` · at this price: ${g.why}` : ""}${bestTxt}`;
   });
   const detail = dropped.map(b => {
     const pt = _nhlCardPlayTo(b);
