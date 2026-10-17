@@ -15,6 +15,9 @@ DEPLOY (Vercel Drop — same way you deployed before)
 FILES
 =====
 index.html     your tracker (calls /api/odds on the same site)
+blender.html   the NFL Blender — opens inside the tracker's "Blender" tab (first tab).
+               To update the blender later, replace this file with the new version
+               (keep the name blender.html) and redeploy.
 api/odds.js    tiny server function: adds your key, calls OpticOdds, returns data
 package.json   tells Vercel the api file is modern JS
 
