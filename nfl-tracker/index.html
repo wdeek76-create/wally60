@@ -2214,6 +2214,15 @@ function _extractCellsV2(tokens) {
   return { gameStr, gameTime, projection, best: { side, line: best.line, odds: best.odds, ev: best.ev, book: best.book }, cells: betCells };
 }
 
+// PropShop's projection setting, shown on the line after "Group by game": "proj-1792172297607" or "market"
+function _propShopProjTag(raw) {
+  const lines = String(raw || '').split('\n').map(l => l.trim()).filter(Boolean);
+  const i = lines.findIndex(l => /^group by game$/i.test(l));
+  const t = i >= 0 ? lines[i + 1] : null;
+  return t && (/^proj-\d+$/i.test(t) || /^market$/i.test(t)) ? t : null;
+}
+function _projTagOwners() { try { return JSON.parse(localStorage.getItem('nfl_ps_proj_owner') || '{}') || {}; } catch (e) { return {}; } }
+
 // PropShop v2 footer: "My top bets" list spells the side out —
 //   Tyler Allgeier / 64.2% / Rush Yards Under 46.5 FD
 // Returns { "normName|line": { side } }. Cut off from the paste before block-splitting.
@@ -2906,6 +2915,21 @@ async function parsePaste() {
       console.log('[parse] market detected from paste:', det.label, 'hits', det.hits);
     }
     if (!marketKey) { info.textContent = 'Pick a market first.'; info.className='parse-info warn'; return; }
+    // Which projection the board is graded against: the line after "Group by game" —
+    // "proj-<id>" = a source's projection set, "market" = market consensus (no source at all).
+    const projTag = _propShopProjTag(raw);
+    if (projTag && /^market$/i.test(projTag)) {
+      info.textContent = `This board is set to "Market" in PropShop, not ${SOURCE_LABELS[currentSource] || currentSource}'s projection — its edges are vs the market consensus. Switch PropShop's projection to ${SOURCE_LABELS[currentSource] || currentSource} and copy again. Nothing imported.`;
+      info.className = 'parse-info err'; return;
+    }
+    if (projTag && /^proj-/i.test(projTag)) {
+      const seen = _projTagOwners();
+      const owner = seen[projTag];
+      if (owner && owner !== currentSource && !confirm(`This PropShop board (${projTag}) was pasted as ${SOURCE_LABELS[owner] || owner} before, but you're on ${SOURCE_LABELS[currentSource] || currentSource}.\n\nOK = import as ${SOURCE_LABELS[currentSource] || currentSource} anyway · Cancel = stop`)) {
+        info.textContent = `Stopped — this board looks like ${SOURCE_LABELS[owner] || owner}'s projection. Switch source or PropShop projection.`; info.className = 'parse-info warn'; return;
+      }
+      seen[projTag] = currentSource; try { localStorage.setItem('nfl_ps_proj_owner', JSON.stringify(seen)); } catch (e) {}
+    }
     parseResult = parsePropShop(raw, minEdge, marketKey);
     parseResult._marketNote = det ? `Market: ${det.label} (${det.header ? 'from ' + det.header : 'guessed from paste'})` : `Market: ${PROPSHOP_MARKET_LABELS[marketKey] || marketKey} (not found in paste — used dropdown)`;
   } else {
