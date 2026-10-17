@@ -468,7 +468,7 @@ a.p{color:var(--text);text-decoration:none;border-color:rgba(34,197,94,.55)!impo
 .plmk b{font-family:var(--mono);font-weight:800}
 .plbar{margin:0 6px;color:var(--line2)}
 .plmkbk{font-family:var(--mono);font-size:10px;font-weight:800;color:var(--green)}
-.pllim{font-family:var(--mono);font-size:12px;margin-top:3px}
+.pllim{font-family:var(--mono);font-size:12px;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .pllim b{font-weight:800}
 .plgame{font-size:12.5px;margin-top:2px;color:var(--text)}
 .plmore{display:inline-flex;align-items:center;gap:6px;margin-top:8px;padding:0;border:none;background:none;color:var(--text);font-size:13px;font-weight:600;cursor:pointer}
@@ -506,6 +506,7 @@ a.p{color:var(--text);text-decoration:none;border-color:rgba(34,197,94,.55)!impo
 .plpin .lbl,.plliq .lbl{font-weight:800}
 .pllqhead{display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap}
 .pllqsum{white-space:nowrap}
+.pllqzero{font-size:11px;margin-top:2px}
 .pllad{display:flex;flex-direction:column;gap:3px;margin-top:5px}
 .pllv{display:grid;grid-template-columns:34px 46px 1fr auto;align-items:center;gap:6px}
 .pllvbk{display:flex;gap:2px}
@@ -2871,7 +2872,8 @@ const SHARP_MOVE_BOOKS = ['Pinnacle','BetOnline','BookMaker','Circa'];
 
 const SHARP_MOVE_MIN_CENTS = 1;
 // Off (0) / Prefer (-1: mains with sharp moves ranked first, nothing required) / require 1+, 2+, 3+.
-let autoSharpMin = (()=>{ const v=LS.get('props_autosharp2','prefer'); return v==='prefer'?-1:(Number(v)||0); })();
+// Sharp signal is a preference only: Off (0) or Prefer (-1, ranked first). Older strict settings read as Prefer.
+let autoSharpMin = (()=>{ const v=LS.get('props_autosharp2','prefer'); return v==='0'?0:-1; })();
 // Where the sharp signal comes from: sharp books moving after a limit raise, exchange money backing
 // the side (OddsJam style: the opposite side's exchange book within 20c of the target price, at
 // least the mains liquidity minimum or $1k), or both -- each moving book and the exchange backing
@@ -2881,7 +2883,9 @@ const srcSharps = () => autoSharpSrc!=='exch', srcExch = () => autoSharpSrc!=='s
 const exchBackMin = () => autoMinLiqMains>0 ? autoMinLiqMains : 1000;
 const sharpN = c => (srcSharps() && c.sharp ? sharpBySrc(c.sharp).length : 0) + (srcExch() && c.exchBack>=exchBackMin() ? 1 : 0);
 // Prefer: more sharp books moving your way first, then best edge.
-const autoRank = (a,b) => (autoSharpMin<0 ? sharpN(b)-sharpN(a) : 0) || b.edgePct-a.edgePct;
+// Hold tier vs the exchanges: arb/zero-hold first, then low holds (<=2%), then the rest.
+const holdTier = c => c.hold==null ? 3 : c.hold<=1e-7 ? 0 : c.hold<=2 ? 1 : 2;
+const autoRank = (a,b) => (autoSharpMin<0 ? sharpN(b)-sharpN(a) : 0) || (autoHoldPref ? holdTier(a)-holdTier(b) : 0) || b.edgePct-a.edgePct;
 const sharpHist = {}; // fixtureId -> {at, rows, pending}
 async function ensureSharpHist(fid){
   const c=sharpHist[fid]; if(c && (c.pending || Date.now()-c.at<600000)) return c.pending||c.rows;
@@ -2993,7 +2997,10 @@ function pinMoveHtml(leg, pin){
 // market (ownOk), where there's no single other side to read.
 // How much hold an exchange level may have against your price and still count. OddsJam counts
 // only zero-hold/arbs (0%); parlays get profit-boosted, so a little hold is fine by default.
-let liqHoldMax = (()=>{ const v=Number(LS.get('props_liqholdmax','2')); return isNaN(v)?2:v; })();
+// Hold isn't a cutoff for parlays (they get profit-boosted): every exchange level near your price
+// counts toward liquidity, and Auto Build just PREFERS picks that are arbs / zero-hold vs the
+// exchanges, then low holds. Levels at 0% hold or better are the green (OddsJam) ones.
+let autoHoldPref = LS.get('props_autoholdpref','1')==='1';
 function legLadder(mine, refPrice, ownOk){
   const ref = refPrice!=null ? cents(Number(refPrice)) : null;
   const levels={}, byBook={}, seen=new Set();
@@ -3005,23 +3012,25 @@ function legLadder(mine, refPrice, ownOk){
     levelsOf(base).forEach(l=>{
       const mine$=src ? -l.price : l.price, opp=-mine$;
       if(ref!=null && Math.abs(cents(mine$)-ref)>LIQ_BAND_CENTS) return;
-      // OddsJam rule: a level only counts when it backs your side at a price AS BAD OR WORSE than
-      // your book's (the money values your bet at least as highly as what you're getting). Levels
-      // only backing you at a BETTER price than your book are shown, dimmed, but not counted.
-      // hold = your price + this order on the other side; counts up to the allowed hold.
-      const counted = refPrice==null || (toImplied(Number(refPrice)) + toImplied(opp) - 1) <= liqHoldMax/100 + 1e-9;
-      const lv=levels[opp]||(levels[opp]={opp, mine:mine$, size:0, books:new Set(), counted});
-      lv.size+=l.size; lv.books.add(k); if(counted) byBook[k]=(byBook[k]||0)+l.size;
+      // hold = your price + this order on the other side. At 0% or better (arb / zero-hold) it's the
+      // OddsJam-style green level; above that it still counts, it's just a hold.
+      const hold = refPrice==null ? null : (toImplied(Number(refPrice)) + toImplied(opp) - 1)*100;
+      const counted = true, zero = hold==null || hold<=1e-7;
+      const lv=levels[opp]||(levels[opp]={opp, mine:mine$, size:0, books:new Set(), counted, zero, hold});
+      lv.size+=l.size; lv.books.add(k); byBook[k]=(byBook[k]||0)+l.size;
     });
   });
   const rows=Object.values(levels).sort((a,b)=>b.opp-a.opp);
   const cnt=rows.filter(l=>l.counted);
   const total=cnt.reduce((a,l)=>a+l.size,0);
   const avgDec = total ? cnt.reduce((a,l)=>a+toDec(l.opp)*l.size,0)/total : null;
-  return { rows, total, byBook, avgOpp: avgDec?toAm(avgDec):null };
+  const zeroTotal=rows.filter(l=>l.zero).reduce((a,l)=>a+l.size,0);
+  const holds=rows.map(l=>l.hold).filter(h=>h!=null);
+  return { rows, total, byBook, zeroTotal, bestHold: holds.length?Math.min(...holds):null, avgOpp: avgDec?toAm(avgDec):null };
 }
 // Per-exchange totals off that same ladder (what the chips and the Auto Build floor read).
 function legExchDepths(mine, refPrice){ const L=legLadder(mine, refPrice); return Object.entries(L.byBook).map(([k,d])=>({k,d})); }
+const holdTxt = h => h<=-0.005 ? `${Math.abs(h).toFixed(1)}% arb` : `${Math.max(0,h).toFixed(1)}% hold`;
 function ladderHtml(leg, L, hero){
   const opp = leg.side==='over'?'Under':leg.side==='under'?'Over':'other side';
   // Team bets: name the other team and its own number, the way the exchange lists it.
@@ -3030,8 +3039,9 @@ function ladderHtml(leg, L, hero){
   const tgt = hero ? `${esc(bookShort(canonBook(hero.sportsbook)))} ${fmtAm(hero.price)}` : 'price';
   if(!L.rows.length) return `<div class="plliq"><span class="lbl">Exch liq $0</span> · nothing on the ${opp} book within ${LIQ_BAND_CENTS}¢ of ${tgt}</div>`;
   const max=Math.max(...L.rows.map(l=>l.size));
-  return `<div class="plliq"><div class="pllqhead"><span><span class="lbl">${oppTeam?`${esc(titleCase(oppTeam))}${leg.line!=null?' '+(-leg.line>0?'+':'')+(-leg.line):''}`:`${esc(titleCase(leg.playerName))} ${opp}${leg.line!=null?' '+leg.line:''}`}</span> book · ≤${liqHoldMax}% hold vs ${tgt}</span><span class="pllqsum"><b>${fmtAm(L.avgOpp)}</b> avg · <b class="pos">${usd(L.total)}</b> liq</span></div>
-    <div class="pllad">${L.rows.map(l=>`<div class="pllv${l.counted?'':' off'}"><span class="pllvbk">${[...l.books].map(k=>{ const lg=bookLogo(k); return lg?`<img src="${esc(lg)}" alt="">`:`<span class="rlogotxt">${esc(bookShort(k))}</span>`; }).join('')}</span><span class="pllvp">${fmtAm(l.opp)}</span><span class="pllvbar"><i style="width:${Math.max(4,Math.round(l.size/max*100))}%"></i></span><span class="pllvs">${usd(l.size)}</span></div>`).join('')}</div></div>`;
+  return `<div class="plliq"><div class="pllqhead"><span><span class="lbl">${oppTeam?`${esc(titleCase(oppTeam))}${leg.line!=null?' '+(-leg.line>0?'+':'')+(-leg.line):''}`:`${esc(titleCase(leg.playerName))} ${opp}${leg.line!=null?' '+leg.line:''}`}</span> book · vs ${tgt}</span><span class="pllqsum"><b>${fmtAm(L.avgOpp)}</b> avg · <b class="pos">${usd(L.total)}</b> liq</span></div>
+    <div class="pllqzero">${L.zeroTotal?`<b class="pos">${usd(L.zeroTotal)}</b> at 0% hold or better (green)`:'None at 0% hold or better'}${L.bestHold!=null?` · best ${holdTxt(L.bestHold)}`:''}</div>
+    <div class="pllad">${L.rows.map(l=>`<div class="pllv${l.zero?'':' off'}"><span class="pllvbk">${[...l.books].map(k=>{ const lg=bookLogo(k); return lg?`<img src="${esc(lg)}" alt="">`:`<span class="rlogotxt">${esc(bookShort(k))}</span>`; }).join('')}</span><span class="pllvp">${fmtAm(l.opp)}</span><span class="pllvbar"><i style="width:${Math.max(4,Math.round(l.size/max*100))}%"></i></span><span class="pllvs">${usd(l.size)}</span></div>`).join('')}</div></div>`;
 }
 // One compact section per leg (not its own card) -- name/bet/remove on top, then every shop
 // currently posting that exact side+line as its own linked row, then the weighted-average no-vig
@@ -3102,7 +3112,7 @@ function parlayLegHtml(leg){
       <div class="plmain">
         <div class="pltitle">${esc(title)}</div>
         <div class="plmk">${esc(leg.marketLabel)}${hero?`<span class="plbar">|</span><b>${fmtAm(hero.price)}</b>${hero?` <span class="plmkbk">${esc(bookShort(canonBook(hero.sportsbook)))}</span>`:''}`:''}</div>
-        <div class="pllim"><b class="${ladder.total?'pos':''}">${usd(ladder.total)}</b> liq<span class="plbar">·</span>${pin?.limits?.max!=null?`<b>${usd(Number(pin.limits.max))}</b> P limit`:'no Pin limit'}</div>
+        <div class="pllim"><b class="${ladder.total?'pos':''}">${usd(ladder.total)}</b> liq${ladder.bestHold!=null?`<span class="plbar">·</span><b class="${ladder.bestHold<=1e-7?'pos':''}">${holdTxt(ladder.bestHold)}</b>`:''}<span class="plbar">·</span>${pin?.limits?.max!=null?`<b>${usd(Number(pin.limits.max))}</b> P limit`:'no Pin'}</div>
         <div class="plgame">${leg.away||leg.home?`${esc(leg.away)} @ ${esc(leg.home)}`:esc(f?.card||'')}</div>
         ${(()=>{ const tags=[...(srcSharps()?sharpBySrc(leg.sharpMoves).map(x=>`<span>${esc(bookShort(x.book))} ▲${x.d}¢</span>`):[]), ...(srcExch() && MAIN_MKS.has(leg.mkey) && ladder.total>=exchBackMin() ? [`<span>Exch ${usd(ladder.total)} backing</span>`] : [])]; return tags.length?`<div class="plsharpchip">${tags.join('')}</div>`:''; })()}
         <button class="plmore" data-plmore="${leg.id}"><span class="${edgeCls||'pos'}">${edgePct!=null?`${edgePct>0?'+':''}${edgePct.toFixed(2)}%`:fair?fmtAm(Number(fair)):'—'}</span> ${edgePct!=null?'edge':'fair'}${fair&&edgePct!=null?` · fair ${fmtAm(Number(fair))}`:''}<i>⌄</i></button>
@@ -3274,7 +3284,8 @@ function buildAutoCandidates(){
           if(srcExch()) exchBack=legLadder(myRows, refRow.price, S.threeWay).total;
           if(autoSharpMin>0 && sharpN({sharp, exchBack})<autoSharpMin){ why('sharp'); return; }
         }
-        out.push({ p, mkey, side, line, refRow, fairP, edgePct, isMain, sharp, exchBack });
+        const hold = autoHoldPref ? legLadder(myRows, refRow.price, S.threeWay).bestHold : null;
+        out.push({ p, mkey, side, line, refRow, fairP, edgePct, isMain, sharp, exchBack, hold });
       });
     });
   });
@@ -3442,8 +3453,8 @@ function autoBuildHtml(){
         <button class="abbtn${autoBasis==='mix'?' on':''}" data-basis="mix">Mix</button>
       </div></div>`}
       <div class="autorow"><label>Min exch liq · props</label><input type="text" inputmode="numeric" id="autoLiqProps" placeholder="any" value="${autoMinLiqProps||''}"></div>
-      <div class="autorow" style="align-items:flex-start"><label style="margin-top:4px">Exch liq · max hold<span class="ablbl2">An exchange order counts when your price plus it is at most this much hold. 0% = zero-hold/arbs only.</span></label><div class="qarbrow qarbpresets" style="border-bottom:none;padding-bottom:0">
-        ${[0,1,2,3].map(v=>`<button class="qarbchip${liqHoldMax===v?' on':''}" data-liqhold="${v}">${v}%</button>`).join('')}
+      <div class="autorow" style="align-items:flex-start"><label style="margin-top:4px">Low hold / arb vs exch<span class="ablbl2">Prefer picks that are arbs or 0%+ low holds against the exchanges. Not required.</span></label><div class="qarbrow qarbpresets" style="border-bottom:none;padding-bottom:0">
+        ${[[false,'Off'],[true,'Prefer']].map(([v,t])=>`<button class="qarbchip${autoHoldPref===v?' on':''}" data-holdpref="${v?1:0}">${t}</button>`).join('')}
       </div></div>
       <div class="autorow"><label>Min exch liq · mains</label><input type="text" inputmode="numeric" id="autoLiqMains" placeholder="any" value="${autoMinLiqMains||''}"></div>
       <div class="autorow"><label>Min Pin limit · props</label><input type="text" inputmode="numeric" id="autoPinProps" placeholder="any" value="${autoMinPinProps||''}"></div>
@@ -3452,8 +3463,8 @@ function autoBuildHtml(){
         <button class="qarbchip${autoEdge===''?' on':''}" data-autoedgechip="">Any</button>
         ${[0,1,2,5,10].map(v=>`<button class="qarbchip${autoEdge===v?' on':''}" data-autoedgechip="${v}">${v}%</button>`).join('')}
       </div></div>
-      <div class="autorow" style="align-items:flex-start"><label style="margin-top:4px">Sharp move · mains<span class="ablbl2">${autoSharpSrc==='exch'?`Exchange money backing your side: ${usd(exchBackMin())}+ on the other side's book within 20¢ of your price.`:autoSharpSrc==='both'?`Pin · BOL · BKM · Circa moving your way after a limit raise, and/or ${usd(exchBackMin())}+ exchange money backing you. Each counts once.`:'Pin · BOL · BKM · Circa moved your way after a limit raise.'} Prefer ranks those first; 1+/2+/3+ require it.</span></label><div class="qarbrow qarbpresets" style="border-bottom:none;padding-bottom:0">
-        ${[[0,'Off'],[-1,'Prefer'],[1,'1+'],[2,'2+'],[3,'3+']].map(([v,t])=>`<button class="qarbchip${autoSharpMin===v?' on':''}" data-autosharp="${v}">${t}</button>`).join('')}
+      <div class="autorow" style="align-items:flex-start"><label style="margin-top:4px">Sharp move · mains<span class="ablbl2">${autoSharpSrc==='exch'?`Exchange money backing your side: ${usd(exchBackMin())}+ on the other side's book within 20¢ of your price.`:autoSharpSrc==='both'?`Pin · BOL · BKM · Circa moving your way after a limit raise, and/or ${usd(exchBackMin())}+ exchange money backing you. Each counts once.`:'Pin · BOL · BKM · Circa moved your way after a limit raise.'} Prefer ranks those first; nothing's required.</span></label><div class="qarbrow qarbpresets" style="border-bottom:none;padding-bottom:0">
+        ${[[0,'Off'],[-1,'Prefer']].map(([v,t])=>`<button class="qarbchip${autoSharpMin===v?' on':''}" data-autosharp="${v}">${t}</button>`).join('')}
       </div></div>
       ${autoSharpMin!==0?`<div class="autorow"><label>Sharp signal from</label><div style="display:flex;gap:6px">
         ${[['sharps','Sharps'],['exch','Exchanges'],['both','Both']].map(([v,t])=>`<button class="abbtn${autoSharpSrc===v?' on':''}" data-sharpsrc="${v}">${t}</button>`).join('')}
@@ -3500,7 +3511,7 @@ function bindAutoBuild(view){
     LS.set('props_autoedge', autoEdge===''?'':String(autoEdge)); renderParlay();
   }));
   view.querySelectorAll('[data-sharpsrc]').forEach(b=>b.addEventListener('click',()=>{ autoSharpSrc=b.dataset.sharpsrc; LS.set('props_autosharpsrc2',autoSharpSrc); renderParlay(); }));
-  view.querySelectorAll('[data-liqhold]').forEach(b=>b.addEventListener('click',()=>{ liqHoldMax=Number(b.dataset.liqhold)||0; LS.set('props_liqholdmax',String(liqHoldMax)); renderParlay(); }));
+  view.querySelectorAll('[data-holdpref]').forEach(b=>b.addEventListener('click',()=>{ autoHoldPref=b.dataset.holdpref==='1'; LS.set('props_autoholdpref',autoHoldPref?'1':'0'); renderParlay(); }));
   view.querySelectorAll('[data-autosharp]').forEach(b=>b.addEventListener('click',()=>{ autoSharpMin=Number(b.dataset.autosharp)||0; LS.set('props_autosharp2',autoSharpMin<0?'prefer':String(autoSharpMin)); renderParlay(); }));
   $('#autoGenerate')?.addEventListener('click',runAutoBuild);
 }
