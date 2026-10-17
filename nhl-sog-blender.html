@@ -311,6 +311,7 @@ function parseCSV(text){
   });
 }
 
+var _NHL_NAME_ALIAS = (() => { try { return JSON.parse(localStorage.getItem("nhl_name_alias") || "{}") || {}; } catch (e) { return {}; } })();
 function nn(s){
   if(!s) return '';
   // Accents off first ("Nečas" → "necas"), otherwise the letter is dropped and the name stops matching.
@@ -331,16 +332,14 @@ function nn(s){
     ['aj','andrewj'],
     ['ben','benjamin'], // Saber lists "Benjamin Kindel", the books "Ben Kindel"
   ];
+  let out = clean;
   for (const [short, full] of prefixMap) {
     // if name starts with short form, replace with full
-    if (clean.startsWith(short) && !clean.startsWith(full)) {
-      const rest = clean.slice(short.length);
-      return full + rest;
-    }
+    if (clean.startsWith(short) && !clean.startsWith(full)) { out = full + clean.slice(short.length); break; }
     // if name starts with full form, keep as is (already canonical)
   }
-  // No aliases needed - prefix map handles Matt/Matthew etc
-  return clean;
+  // Name links you confirmed in the "missing source" popup (e.g. a source's "Benjamin X" = the books' "Ben X").
+  return (_NHL_NAME_ALIAS && _NHL_NAME_ALIAS[out]) || out;
 }
 
 // Same-name collision guard for anything matching AGAINST the blend by name
@@ -2486,6 +2485,7 @@ async function runNhlModel(opts) {
     }
     rows.sort((a, b) => b.anchorEv - a.anchorEv);
     _nhlModelRows = rows; _nhlModelRunAt = new Date();
+    try { _nhlFindMissingSources(byPL, mainLine, iso); } catch (e) { console.warn("[NHL names] check failed", e && e.message); }
     _nhlSoloFromModel(soloHits);
     // Log today's picks (first run's price sticks, like a real bet).
     const logBefore = nhlModelLog.length;
@@ -2503,6 +2503,75 @@ async function runNhlModel(opts) {
     if (!opts.silent || newCount || tracked.logged) showNhlToast(`Ensemble: ${rows.length} pick${rows.length === 1 ? "" : "s"}${tracked.logged ? ` · ${tracked.logged} logged to tracker` : ""}${tracked.waiting ? ` · waiting on ${tracked.waiting} (load all 4 sources)` : ""}`);
   } catch (e) { console.error("[NHL model] run failed", e); showNhlToast("Model run failed: " + (e && e.message)); }
   finally { _nhlModelBusy = false; renderNhlModelTab(); }
+}
+// ── Missing-source name check ──────────────────────────────────────────────
+// After a model run: any board player (main line) that some sources project and another doesn't. For the
+// missing source, the closest names in its CSV (same last name, or a near-identical spelling) are offered in a
+// popup; picking one links the two names for good (localStorage) and re-runs the model.
+let _nhlNameAsk = [];
+function _nhlNameSim(a, b) { // Dice coefficient on letter pairs
+  if (a === b) return 1; if (a.length < 2 || b.length < 2) return 0;
+  const pairs = s => { const m = new Map(); for (let i = 0; i < s.length - 1; i++) { const p = s.slice(i, i + 2); m.set(p, (m.get(p) || 0) + 1); } return m; };
+  const A = pairs(a), B = pairs(b); let hit = 0;
+  A.forEach((n, p) => { hit += Math.min(n, B.get(p) || 0); });
+  return 2 * hit / (a.length - 1 + b.length - 1);
+}
+function _nhlFindMissingSources(byPL, mainLine, iso) {
+  const skipped = (() => { try { return JSON.parse(localStorage.getItem("nhl_name_skip") || "{}"); } catch (e) { return {}; } })();
+  const asks = [], seen = new Set();
+  Object.keys(byPL).forEach(key => {
+    const ents = byPL[key]; if (!ents || !ents.length) return;
+    const player = ents[0].player, pk = nn(player), home = ents[0].home, away = ents[0].away;
+    if (seen.has(pk) || !mainLine[pk] || mainLine[pk].line !== Number(ents[0].line) || _nhlPsRejected(player)) return;
+    seen.add(pk);
+    const have = PS_SOURCE_KEYS_NHL.filter(src => _nhlModelCsvProj(src, player, home, away) != null);
+    if (!have.length || have.length === PS_SOURCE_KEYS_NHL.length) return;
+    PS_SOURCE_KEYS_NHL.filter(src => !have.includes(src) && srcs[src] && Object.keys(srcs[src]).length).forEach(src => {
+      if (skipped[iso + "|" + src + "|" + pk]) return;
+      const last = nn(String(player).trim().split(/\s+/).slice(-1)[0]);
+      const cands = Object.values(srcs[src]).filter(v => v && v.name && nn(v.name) !== pk).map(v => {
+        const vLast = nn(String(v.name).trim().split(/\s+/).slice(-1)[0]);
+        const teamOk = v.team && (_nhlTeamCanon(v.team) === _nhlTeamCanon(home) || _nhlTeamCanon(v.team) === _nhlTeamCanon(away));
+        const score = (vLast === last ? 0.6 : 0) + _nhlNameSim(nn(v.name), pk) * 0.4 + (teamOk ? 0.2 : 0);
+        return { name: v.name, team: v.team || "", sog: v.sog, score };
+      }).filter(c => c.score >= 0.55).sort((a, b) => b.score - a.score).slice(0, 3);
+      if (cands.length) asks.push({ player, pk, src, iso, game: away + " @ " + home, cands });
+    });
+  });
+  _nhlNameAsk = asks;
+  _nhlPaintNamePopup();
+}
+function _nhlPaintNamePopup() {
+  let el = document.getElementById("nhl-name-popup");
+  if (!_nhlNameAsk.length) { if (el) el.remove(); return; }
+  if (!el) { el = document.createElement("div"); el.id = "nhl-name-popup"; document.body.appendChild(el); }
+  const btn = "border-radius:5px;padding:4px 10px;font-size:12px;font-weight:700;cursor:pointer;";
+  el.style.cssText = "position:fixed;right:18px;bottom:18px;z-index:9999;max-width:460px;max-height:70vh;overflow:auto;background:#0a1628;border:1px solid #eab308;border-radius:10px;padding:12px 14px;box-shadow:0 8px 30px #000a;font-family:'Inter',sans-serif;color:#fff;";
+  el.innerHTML = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;"><b style="color:#eab308;font-size:13px;">Missing sources (${_nhlNameAsk.length})</b><span style="font-size:11px;color:#9fb8d6;">a pick needs all 4 — link the right name if it's the same player</span>
+      <button onclick="_nhlNameAsk=[];_nhlPaintNamePopup()" style="margin-left:auto;background:transparent;border:1px solid #0d2035;color:#fff;${btn}">Close</button></div>
+    ${_nhlNameAsk.map((a, i) => `<div style="border-top:1px solid #0d2035;padding:8px 0;">
+      <div style="font-size:13px;"><b>${escapeHtmlBasic(a.player)}</b> <span style="color:#9fb8d6;font-size:11px;">${escapeHtmlBasic(a.game)}</span> — not in <b style="color:#7dd3fc;">${_NHL_SRC_TAG[a.src]}</b>. Same player as:</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;">
+        ${a.cands.map((c, j) => `<button onclick="_nhlNameLink(${i},${j})" style="background:#00cc6622;border:1px solid #00cc6688;color:#00cc66;${btn}">${escapeHtmlBasic(c.name)}${c.team ? " · " + escapeHtmlBasic(c.team) : ""} · ${Number(c.sog).toFixed(2)}</button>`).join("")}
+        <button onclick="_nhlNameSkip(${i})" style="background:transparent;border:1px solid #0d2035;color:#9fb8d6;${btn}">None of these</button>
+      </div></div>`).join("")}`;
+}
+function _nhlNameLink(i, j) {
+  const a = _nhlNameAsk[i]; if (!a) return;
+  const c = a.cands[j];
+  // Raw key of the source's name (before any alias) → the board player's key.
+  const raw = nn.call(null, c.name);
+  _NHL_NAME_ALIAS[raw] = a.pk;
+  try { localStorage.setItem("nhl_name_alias", JSON.stringify(_NHL_NAME_ALIAS)); } catch (e) {}
+  _nhlNameAsk = _nhlNameAsk.filter(x => !(x.pk === a.pk && x.src === a.src));
+  _nhlPaintNamePopup();
+  showNhlToast(`Linked ${c.name} (${_NHL_SRC_TAG[a.src]}) = ${a.player}`);
+  runNhlModel({ silent: true });
+}
+function _nhlNameSkip(i) {
+  const a = _nhlNameAsk[i]; if (!a) return;
+  try { const s = JSON.parse(localStorage.getItem("nhl_name_skip") || "{}"); s[a.iso + "|" + a.src + "|" + a.pk] = 1; localStorage.setItem("nhl_name_skip", JSON.stringify(s)); } catch (e) {}
+  _nhlNameAsk.splice(i, 1); _nhlPaintNamePopup();
 }
 // Same card as Nick's (agree, sources, best price, books), built from the latest model run and copied
 // to the clipboard as an image (downloads instead if the browser won't allow a clipboard image).
