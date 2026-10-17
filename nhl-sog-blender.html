@@ -583,7 +583,23 @@ async function _nhlRwFetch(feed) {
   throw new Error(tried.length ? tried.join(" | ") : "no RotoWire helper URL — tap ⚙ on the ROTOWIRE slot");
 }
 // First array of objects anywhere in the payload; flattens one level of grouping (games/teams → players).
+// Every object sitting in a "Players"/"Player" list anywhere in the payload, tagged with its parent (team/game).
+function _nhlRwPlayerLists(node, parent, out) {
+  out = out || [];
+  if (Array.isArray(node)) { node.forEach(x => _nhlRwPlayerLists(x, parent, out)); return out; }
+  if (!node || typeof node !== "object") return out;
+  Object.keys(node).forEach(k => {
+    const v = node[k];
+    if (/^players?$/i.test(k)) {
+      const list = Array.isArray(v) ? v : (v && typeof v === "object" ? (Object.values(v).find(Array.isArray) || [v]) : []);
+      list.forEach(x => { if (x && typeof x === "object" && !Array.isArray(x)) out.push({ __parent: node, ...x }); });
+    } else if (v && typeof v === "object") _nhlRwPlayerLists(v, node, out);
+  });
+  return out;
+}
 function _nhlRwRows(data) {
+  const pl = _nhlRwPlayerLists(data);
+  if (pl.length) return pl;
   if (Array.isArray(data)) {
     if (!data.length || typeof data[0] !== "object" || Array.isArray(data[0])) return [];
     const inner = data.map(d => Object.values(d).find(v => Array.isArray(v) && v.length && typeof v[0] === "object")).filter(Boolean);
@@ -680,8 +696,9 @@ async function testNhlRwApi() {
     const rows = _nhlRwRows(data);
     const keys = rows.length ? Object.keys(rows[0]).filter(k => k !== "__parent").join(", ") : "(no rows) top-level: " + Object.keys(data || {}).slice(0, 8).join(", ");
     const read = rows.map(_nhlRwRow).filter(Boolean), first = read[0];
+    let rawP = ""; try { const t = (Array.isArray(data) ? data : Object.values(data || {}).find(Array.isArray) || [])[0] || {}; const pk = Object.keys(t).find(k => /^players?$/i.test(k)); rawP = pk ? `\nraw ${pk}: ${JSON.stringify(t[pk]).slice(0, 400)}` : ""; } catch (e) {}
     const sample = rows.length ? Object.entries(_nhlRwFlat(rows[0])).slice(0, 40).map(([k, v]) => `${k}=${String(v).slice(0, 18)}`).join(", ") : "";
-    msg = `NHLDailyProj: ${rows.length} rows · ${read.length} skaters with shots\nfields: ${keys}\n` + (first ? `read as: ${first.name} ${first.team} ${first.pos || ""} SOG ${first.sog}` : "COULDN'T read a skater with shots — send me this") + (sample ? `\nrow 1: ${sample}` : "");
+    msg = `NHLDailyProj: ${rows.length} rows · ${read.length} skaters with shots\nfields: ${keys}\n` + (first ? `read as: ${first.name} ${first.team} ${first.pos || ""} SOG ${first.sog}` : "COULDN'T read a skater with shots — send me this") + (sample ? `\nrow 1: ${sample}` : "") + rawP;
   } catch (e) { msg = "NHLDailyProj: ERROR " + e.message; }
   alert(msg + "\n\n(No key in here — safe to paste back to Claude.)");
 }
