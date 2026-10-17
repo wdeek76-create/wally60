@@ -2621,13 +2621,23 @@ async function shareNhlModelCard() {
   try {
     // Player's team off the CSVs (one that names a team in this game), so the card shows team + opponent.
     const teamOf = r => { for (const src of PS_SOURCE_KEYS_NHL) { const v = Object.values(srcs[src] || {}).find(x => x && nn(x.name) === nn(r.player) && x.team && (_nhlTeamCanon(x.team) === _nhlTeamCanon(r.home) || _nhlTeamCanon(x.team) === _nhlTeamCanon(r.away))); if (v) return _nhlTeamCanon(v.team); } return ""; };
-    const picks = _nhlModelRows.map((r, i) => ({ id: "m" + i, player: r.player, team: teamOf(r), game: r.game, ou: r.ou, line: r.line, stat: "SOG",
+    // Same "only what's new" rule as the other cards, tracked on the model log entries.
+    const today = _ymdLocal(new Date());
+    const logOf = r => nhlModelLog.find(x => x.key === r.gameDateIso + "|" + nn(r.player) + "|" + r.ou + "|" + r.line);
+    let mrows = _nhlModelRows, newOnly = false;
+    if (mrows.some(r => { const x = logOf(r); return x && x.sentCard === today; })) {
+      const fresh = mrows.filter(r => { const x = logOf(r); return !(x && x.sentCard === today); });
+      if (!fresh.length) { if (!confirm("Nothing new since your last Model card today. Send all model picks again?")) { if (btn) { btn.textContent = orig; btn.disabled = false; } return; } }
+      else { mrows = fresh; newOnly = true; }
+    }
+    const picks = mrows.map((r, i) => ({ id: "m" + i, player: r.player, team: teamOf(r), game: r.game, ou: r.ou, line: r.line, stat: "SOG",
       odds: r.odds, book: r.book, allBooks: r.allBooks || [], date: new Date(r.gameDateIso + "T12:00:00").toISOString(), playTo: r.playTo,
       sourceProjs: r.projs, sourceEvs: r.evs, _modelFed: true }));
     // Same live refresh as the other cards (fresh best price under the model's rule + the full alt-book list).
     let carded = picks;
     try { const rf = await _nhlRefreshPicksForCard(picks); carded = rf.map((b, i) => b._liveNow ? b : picks[i]); } catch (e) { console.warn("[NHL model] card refresh", e && e.message); }
-    holder.innerHTML = await _buildNhlCard(carded, "model");
+    holder.innerHTML = await _buildNhlCard(carded, "model", { newOnly });
+    const markSent = () => { mrows.forEach(r => { const x = logOf(r); if (x) x.sentCard = today; }); _nhlModelSave(); };
     const h2c = await _ensureHtml2CanvasNhl();
     try { await Promise.all(["400 12px Sora", "800 22px Sora", "700 12px 'IBM Plex Mono'"].map(f => document.fonts.load(f))); await document.fonts.ready; } catch (e) {}
     const canvas = await h2c(holder.firstElementChild, { backgroundColor: "#060b14", scale: 2, logging: false, useCORS: true, allowTaint: false });
@@ -2643,6 +2653,7 @@ async function shareNhlModelCard() {
       document.body.appendChild(a); a.click(); document.body.removeChild(a);
       setTimeout(() => URL.revokeObjectURL(url), 1000);
     }
+    markSent();
     if (btn) btn.textContent = copied ? "✓ COPIED" : "✓ SAVED";
     setTimeout(() => { if (btn) { btn.textContent = orig; btn.disabled = false; } }, 1500);
   } catch (e) {
@@ -4911,7 +4922,8 @@ function _nhlSourceRecords() {
   return rec;
 }
 function _nhlRecTxt(r) { return r ? `${r.w}-${r.l}` : "0-0"; }
-async function _buildNhlCard(picks, mode) {
+async function _buildNhlCard(picks, mode, cardOpts) {
+  cardOpts = cardOpts || {};
   const forMe = mode === "me";
   const forModel = mode === "model";
   const forNick = mode === "nick" || forMe || forModel; // "my card" and the model card use the full internal layout
@@ -4994,7 +5006,7 @@ async function _buildNhlCard(picks, mode) {
     const playerGameCell = `<div style="display:flex;align-items:center;gap:10px;">
       ${shotHeadshot(b.player, 38)}
       <div style="min-width:0;">
-        <div style="font-size:14px;font-weight:800;color:#fff;">${b.player}</div>
+        <div style="font-size:14px;font-weight:800;color:#fff;display:flex;align-items:center;gap:7px;">${b.player}${cardOpts.newOnly ? `<span style="font-size:10px;font-weight:800;letter-spacing:.08em;color:#04110a;background:#00cc66;border-radius:999px;padding:2px 7px;">NEW</span>` : ""}</div>
         <div style="font-size:11px;color:#fff;margin-top:2px;display:flex;align-items:center;gap:5px;">${bTeam ? shotLogo(bTeam, 14) : ""}${bTeam || ""}${opp ? ` <span style="color:#fff;">${isHome ? "vs" : "@"}</span> ${shotLogo(opp, 14)}${opp}` : ""}${gTime ? ` <span style="color:#fff;font-weight:700;margin-left:6px;">${gTime}</span>` : ""}</div>
       </div>
     </div>`;
@@ -5113,7 +5125,7 @@ async function _buildNhlCard(picks, mode) {
   return `
     <div style="display:inline-block;min-width:520px;background:${cardBg};padding:14px;font-family:'Sora',sans-serif;box-sizing:border-box;">
       <div style="position:relative;text-align:center;padding:0 110px;margin-bottom:10px;">
-        <div style="font-size:22px;white-space:nowrap;font-weight:800;color:#fff;letter-spacing:.04em;">${new Date().toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" }).toUpperCase()} <span style="font-size:16px;margin-left:8px;">${forMe ? "NHL FD / NOVIG / PX WITHIN 10¢ OF PLAY-TO" : forModel ? "NHL MODEL" : "NHL PROPS"}</span> <span style="font-size:16px;margin-left:14px;">${picks.length} PROP${picks.length === 1 ? "" : "S"}</span></div>
+        <div style="font-size:22px;white-space:nowrap;font-weight:800;color:#fff;letter-spacing:.04em;">${new Date().toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" }).toUpperCase()} <span style="font-size:16px;margin-left:8px;">${forMe ? "NHL FD / NOVIG / PX WITHIN 10¢ OF PLAY-TO" : forModel ? "NHL MODEL" : "NHL PROPS"}</span> <span style="font-size:16px;margin-left:14px;">${picks.length}${cardOpts.newOnly ? " NEW" : ""} PROP${picks.length === 1 ? "" : "S"}</span></div>
         <div style="position:absolute;right:0;top:50%;transform:translateY(-50%);font-size:13px;font-weight:800;color:#fff;letter-spacing:.06em;white-space:nowrap;">${gamesTag}</div>
       </div>
       <table style="width:100%;border-collapse:collapse;border:1px solid #0d2035;border-radius:10px;overflow:hidden;">
@@ -5422,9 +5434,21 @@ function _nhlRecheckHtml() {
 }
 function _nhlPaintRecheck() { const el = document.getElementById("nhl-recheck-box"); if (el) el.innerHTML = _nhlRecheckHtml(); }
 function _nhlPaintCardReport() { const el = document.getElementById("nhl-card-report"); if (el) el.innerHTML = _nhlCardReportHtml(); }
+// Once a card has gone out today, the next send of that same card only carries picks it hasn't sent yet,
+// each with a NEW badge (header says "N NEW PROPS"). Nothing new → offer to resend everything.
+function _nhlSentKey(mode) { return mode; }
 async function sendNhlCard(mode) {
-  const picks = nhlPendingForSend();
-  if (!picks.length) { alert("No pending picks to send."); return; }
+  const all = nhlPendingForSend();
+  if (!all.length) { alert("No pending picks to send."); return; }
+  const today = _ymdLocal(new Date());
+  const sentToday = b => b.sentTo && b.sentTo[_nhlSentKey(mode)] === today;
+  let picks = all, newOnly = false;
+  if (all.some(sentToday)) {
+    const fresh = all.filter(b => !sentToday(b));
+    const label = mode === "nick" ? "Nick" : mode === "me" ? "My" : "Discord";
+    if (!fresh.length) { if (!confirm(`Nothing new since your last ${label} card today. Send all open picks again?`)) return; }
+    else { picks = fresh; newOnly = true; }
+  }
   const btnId = mode === "nick" ? "nick-btn" : mode === "me" ? "me-btn" : "discord-btn";
   const btn = document.getElementById(btnId);
   const orig = btn ? btn.textContent : "";
@@ -5442,8 +5466,10 @@ async function sendNhlCard(mode) {
     if (droppedNeg) console.log("[NHL card] left off " + droppedNeg + " pick(s):", refreshed.filter(b => !freshPicks.some(f => f.id === b.id)).map(b => b.player + " " + b.odds));
     if (!freshPicks.length) { alert(mode === "me" ? "No open bet has FanDuel, Novig or ProphetX within 10 cents of play-to right now." : "No pending pick is still in range at the current price — nothing to send."); if (btn) { btn.textContent = orig; btn.disabled = false; } return; }
     if (btn) btn.textContent = "Building…";
-    holder.innerHTML = await _buildNhlCard(freshPicks, mode);
-    const askDiscord = () => { if (mode === "discord") { _nhlDiscordAsk = freshPicks.map(b => ({ id: b.id, odds: b.odds, book: b.book })); _nhlPaintDiscordBox(); } };
+    holder.innerHTML = await _buildNhlCard(freshPicks, mode, { newOnly });
+    // Mark what this card carried as sent (only once it's actually copied or saved).
+    const markSent = () => { freshPicks.forEach(fp => { const real = bets.find(x => x.id === fp.id); if (real) { real.sentTo = Object.assign({}, real.sentTo, { [_nhlSentKey(mode)]: today }); } }); saveBets(); };
+    const askDiscord = () => { markSent(); if (mode === "discord") { _nhlDiscordAsk = freshPicks.map(b => ({ id: b.id, odds: b.odds, book: b.book })); _nhlPaintDiscordBox(); } };
     const h2c = await _ensureHtml2CanvasNhl();
     // Card fonts (Sora + IBM Plex Mono) have to be loaded before the snapshot or it paints the fallback.
     try { await Promise.all(["400 12px Sora", "800 22px Sora", "700 12px 'IBM Plex Mono'"].map(f => document.fonts.load(f))); await document.fonts.ready; } catch (e) {}
