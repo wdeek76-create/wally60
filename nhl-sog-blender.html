@@ -232,6 +232,11 @@ tr:hover td{background:#0a1628;}
         <div class="sh"><span class="badge b3">ROTOWIRE</span><span style="font-size:11px;color:#7ab3e0;">SOG col</span><span class="wt">1.0×</span></div>
         <label class="drop" for="f-roto">Click to upload CSV<input type="file" id="f-roto" accept=".csv" style="display:none" onchange="loadFile('roto',this)"/></label>
         <div class="ss" id="ss-roto">No file loaded</div>
+        <div style="display:flex;gap:6px;margin-top:6px;">
+          <button class="fb" id="rw-api-btn" onclick="pullNhlRwApi()" title="Pull RotoWire NHL projections through your Vercel /api/rotowire helper — no CSV needed" style="color:#22c55e;border-color:#22c55e55;">⚡ PULL RW API</button>
+          <button class="fb" onclick="testNhlRwApi()" title="Show what the RotoWire feed returns (no key shown)">TEST</button>
+          <button class="fb" onclick="promptNhlRwApi()" title="Set the RotoWire helper URL (normally auto-detected)">⚙</button>
+        </div>
       </div>
       <div class="slot" id="sl-saber">
         <div class="sh"><span class="badge b4">SABER</span><span style="font-size:11px;color:#7ab3e0;">SOG col</span><span class="wt">1.0×</span></div>
@@ -374,6 +379,7 @@ function loadFile(src,inp){
       if (srcs[src]) _nhlNoteCsvMoves(src, srcs[src], d);
       srcs[src]=d;
       _nhlSaveCsvs();
+      if(src==='roto'){ try{ localStorage.removeItem('nhl_rw_api_meta'); }catch(e){} } // an uploaded RW CSV stops the auto-pull from replacing it today
       if(src==='saber'){ try{ const nt=nhltIngestSaber(e.target.result,_ymdLocal(new Date())); if(nt) console.log('[NHL totals] Saber team totals saved for today:',nt,'teams'); }catch(err){ console.warn('[NHL totals] saber ingest',err&&err.message); } }
       document.getElementById('sl-'+src).classList.add('loaded');
       const el=document.getElementById('ss-'+src);
@@ -533,6 +539,145 @@ function _nhlRestoreCsvs() {
 function checkReady(){
   document.getElementById('run-btn').disabled=Object.values(srcs).filter(s=>s!==null).length<2;
 }
+// ── RotoWire API → the ROTOWIRE slot (auto-pull, same as the NBA blender) ────
+// The page calls a Vercel helper (api/rotowire.js, key kept in Vercel's
+// ROTOWIRE_API_KEY) with feed=NHLDailyProj; the helper calls
+// api.rotowire.com/Hockey/NHL/DailyProjections.php. Rows land in srcs.roto in
+// the same shape the RW CSV upload produces, so blend / model / tracking are
+// unchanged. A hand-uploaded RW CSV is never overwritten by the auto-pull —
+// only an empty slot or an earlier API load is (the ⚡ button always pulls).
+const NHL_RW_API_STORAGE = "nhl_rw_api_url";
+const NHL_RW_META_KEY = "nhl_rw_api_meta";
+function _nhlRwCandidates() {
+  const out = [];
+  try { const s = localStorage.getItem(NHL_RW_API_STORAGE); if (s) out.push(s); } catch (e) {}
+  try { if (/^https?:$/.test(location.protocol) && !/^(localhost|127\.)/.test(location.hostname)) out.push(location.origin + "/api/rotowire"); } catch (e) {}
+  const b = getOOBackend();
+  if (/\/api\/odds$/i.test(b)) out.push(b.replace(/\/api\/odds$/i, "/api/rotowire"));
+  return out.filter((u, i) => out.indexOf(u) === i);
+}
+function _nhlRwMeta() { try { return JSON.parse(localStorage.getItem(NHL_RW_META_KEY) || "null"); } catch (e) { return null; } }
+function promptNhlRwApi() {
+  const u = prompt("RotoWire helper URL (your Vercel .../api/rotowire). Leave blank to auto-detect:", (function () { try { return localStorage.getItem(NHL_RW_API_STORAGE) || ""; } catch (e) { return ""; } })());
+  if (u == null) return;
+  try { if (u.trim()) localStorage.setItem(NHL_RW_API_STORAGE, u.trim()); else localStorage.removeItem(NHL_RW_API_STORAGE); } catch (e) {}
+  showNhlToast(u.trim() ? "RotoWire helper saved" : "RotoWire helper: auto-detect");
+}
+async function _nhlRwFetch(feed) {
+  const tried = [];
+  for (const base of _nhlRwCandidates()) {
+    const url = base + (base.includes("?") ? "&" : "?") + "feed=" + encodeURIComponent(feed);
+    try {
+      const r = await fetch(url, { cache: "no-store" });
+      const text = await r.text();
+      let data; try { data = JSON.parse(text); } catch (e) { tried.push(`${base} → not JSON (${r.status})`); continue; }
+      if (!r.ok || (data && !Array.isArray(data) && data.error)) { tried.push(`${base} → ${r.status} ${data && data.error ? data.error : ""}${data && data.body ? " — " + String(data.body).slice(0, 120) : ""}${data && data.feeds ? " (helper has no NHL feeds yet — update api/rotowire.js)" : ""}`); continue; }
+      return data;
+    } catch (e) { tried.push(`${base} → couldn't reach`); }
+  }
+  throw new Error(tried.length ? tried.join(" | ") : "no RotoWire helper URL — tap ⚙ on the ROTOWIRE slot");
+}
+// First array of objects anywhere in the payload; flattens one level of grouping (games/teams → players).
+function _nhlRwRows(data) {
+  if (Array.isArray(data)) {
+    if (!data.length || typeof data[0] !== "object" || Array.isArray(data[0])) return [];
+    const inner = data.map(d => Object.values(d).find(v => Array.isArray(v) && v.length && typeof v[0] === "object")).filter(Boolean);
+    const looksGrouped = inner.length === data.length && !_nhlRwPick(data[0], ["Name", "PlayerName", "FirstName", "Player.Name", "Player.FirstName"]);
+    return looksGrouped ? data.flatMap((d, i) => inner[i].map(x => ({ __parent: d, ...x }))) : data;
+  }
+  if (data && typeof data === "object") for (const v of Object.values(data)) { const r = _nhlRwRows(v); if (r.length) return r; }
+  return [];
+}
+function _nhlRwPick(o, paths) {
+  for (const p of paths) {
+    let cur = o;
+    for (const part of p.split(".")) {
+      if (cur == null || typeof cur !== "object") { cur = undefined; break; }
+      const k = Object.keys(cur).find(x => x.toLowerCase() === part.toLowerCase());
+      cur = k === undefined ? undefined : cur[k];
+    }
+    if (cur != null && cur !== "" && typeof cur !== "object") return cur;
+  }
+  return null;
+}
+function _nhlRwFlat(o, pre, out) {
+  out = out || {}; pre = pre || "";
+  Object.keys(o || {}).forEach(k => {
+    if (k === "__parent") return;
+    const v = o[k], key = (pre ? pre + "." : "") + k;
+    if (v && typeof v === "object" && !Array.isArray(v)) _nhlRwFlat(v, key, out);
+    else if (!Array.isArray(v)) out[key.toLowerCase()] = v;
+  });
+  return out;
+}
+function _nhlRwNum(flat, names) {
+  for (const n of names) for (const k of Object.keys(flat)) {
+    if (k.split(".").pop() === n) { const v = parseFloat(flat[k]); if (!isNaN(v)) return v; }
+  }
+  return null;
+}
+function _nhlRwRow(o) {
+  const full = _nhlRwPick(o, ["Name", "PlayerName", "FullName", "Player.Name", "Player.FullName", "Player"]);
+  const f = _nhlRwPick(o, ["FirstName", "Player.FirstName", "First"]), l = _nhlRwPick(o, ["LastName", "Player.LastName", "Last"]);
+  const name = full ? String(full).trim() : (f && l ? `${f} ${l}`.trim() : null);
+  if (!name) return null;
+  const pos = String(_nhlRwPick(o, ["Position", "Pos", "Player.Position"]) || "").trim();
+  if (/^g$|goal/i.test(pos)) return null;   // goalie "shots" are shots against
+  const flat = _nhlRwFlat(o);
+  const sog = _nhlRwNum(flat, ["shotsongoal", "shots_on_goal", "sog", "shots", "projshots", "projectedshots", "shotsog"]);
+  if (sog == null || !(sog > 0)) return null;
+  const team = String(_nhlRwPick(o, ["Team.Code", "Team.Abbreviation", "Team.Abbr", "TeamCode", "TeamAbbr", "Team.Alias", "Team", "__parent.Team.Code", "__parent.TeamCode", "__parent.Team", "__parent.Code"]) || "").trim().toUpperCase();
+  const e = { name, sog, team };
+  if (pos) e.pos = pos;
+  const g = _nhlRwNum(flat, ["goals", "g"]); if (g != null) e.goals = g;
+  const a = _nhlRwNum(flat, ["assists", "a"]); if (a != null) e.assists = a;
+  const b = _nhlRwNum(flat, ["blockedshots", "blocks", "bs", "blk"]); if (b != null) e.blocks = b;
+  return e;
+}
+async function pullNhlRwApi(auto) {
+  const el = document.getElementById("ss-roto"), btn = document.getElementById("rw-api-btn");
+  if (btn) { btn.disabled = true; btn.textContent = "PULLING…"; }
+  try {
+    const rows = _nhlRwRows(await _nhlRwFetch("NHLDailyProj"));
+    const d = {};
+    rows.map(_nhlRwRow).filter(Boolean).forEach(e => { d[nn(e.name) + (e.team ? "|" + nn(e.team) : "") + (e.pos ? "|" + e.pos.toLowerCase() : "")] = e; });
+    const n = Object.keys(d).length;
+    if (n < 30) throw new Error(`only ${n} skaters with shots read from ${rows.length} rows — RW slot left alone (not posted yet, or tap TEST)`);
+    const meta = _nhlRwMeta(), today = _ymdLocal(new Date());
+    const fromApi = meta && meta.date === today;
+    if (auto && srcs.roto && !fromApi) return;   // a hand-uploaded RW CSV wins over the auto-pull
+    if (srcs.roto) _nhlNoteCsvMoves("roto", srcs.roto, d);
+    srcs.roto = d;
+    _nhlSaveCsvs();
+    try { localStorage.setItem(NHL_RW_META_KEY, JSON.stringify({ date: today, at: Date.now(), n })); } catch (e) {}
+    document.getElementById("sl-roto").classList.add("loaded");
+    if (el) { el.textContent = `✓ ${n} players · RotoWire API ${new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`; el.className = "ss ok"; }
+    checkReady();
+    if (!auto) showNhlToast(`RotoWire: ${n} players pulled`);
+  } catch (e) {
+    console.warn("[NHL RW API]", e);
+    if (!auto) { showNhlToast("RotoWire pull failed — " + e.message); if (el && !srcs.roto) { el.textContent = "RW API: " + e.message; el.className = "ss"; } }
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = "⚡ PULL RW API"; }
+  }
+}
+async function testNhlRwApi() {
+  let msg;
+  try {
+    const data = await _nhlRwFetch("NHLDailyProj");
+    const rows = _nhlRwRows(data);
+    const keys = rows.length ? Object.keys(rows[0]).filter(k => k !== "__parent").join(", ") : "(no rows) top-level: " + Object.keys(data || {}).slice(0, 8).join(", ");
+    const first = rows.map(_nhlRwRow).find(Boolean);
+    msg = `NHLDailyProj: ${rows.length} rows\nfields: ${keys}\n` + (first ? `read as: ${first.name} ${first.team} ${first.pos || ""} SOG ${first.sog}` : "COULDN'T read a skater with shots — send me this");
+  } catch (e) { msg = "NHLDailyProj: ERROR " + e.message; }
+  alert(msg + "\n\n(No key in here — safe to paste back to Claude.)");
+}
+// Pull on load when the slot is empty or came from the API and is 20+ min old, then every 20 min while open.
+(function nhlRwAutoRefresh() {
+  const due = () => { const m = _nhlRwMeta(); return !m || m.date !== _ymdLocal(new Date()) || Date.now() - m.at > 20 * 60 * 1000; };
+  setTimeout(() => { if (due()) pullNhlRwApi(true); }, 2500);
+  setInterval(() => { if (!document.hidden && due()) pullNhlRwApi(true); }, 5 * 60 * 1000);
+})();
 
 // Normal CDF (Horner approximation)
 function normCDF(z) {
