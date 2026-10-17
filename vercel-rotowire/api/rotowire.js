@@ -25,17 +25,19 @@ const PARAM_FEEDS = new Set(["NBACeilFloor", "nba-DFS-dk", "nba-DFS-fd", "NBALin
 // RotoWire's own keyless proxy (they hold the key on their side): …/api/proxy?feed=NBACeilFloor.
 // Serves every feed name RotoWire lists. Override with ROTOWIRE_PROXY_URL if they ever move it.
 const RW_PROXY = (process.env.ROTOWIRE_PROXY_URL || "https://rotowire-secrets-ebgmaeh8ecc4huhf.canadaeast-01.azurewebsites.net/api/proxy").trim();
+let proxyNote = null;   // what RotoWire's proxy last said — shown in errors so a block is visible
 async function viaProxy(feed, date, link) {
   const base = (link && link.proxy) || RW_PROXY;
   const url = `${base}${base.includes("?") ? "&" : "?"}feed=${encodeURIComponent(feed)}${date}`;
   const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 12000);
   try {
-    const r = await fetch(url, { headers: { Accept: "application/json" }, signal: ctl.signal });
+    const r = await fetch(url, { headers: { Accept: "application/json", "User-Agent": "Mozilla/5.0 (compatible; NBA-blender)", Referer: "https://www.rotowire.com/" }, signal: ctl.signal });
     const text = await r.text();
-    let data; try { data = JSON.parse(text); } catch (e) { return null; }
-    if (!r.ok || (data && !Array.isArray(data) && data.error)) return null;
+    let data; try { data = JSON.parse(text); } catch (e) { proxyNote = { status: r.status, body: text.slice(0, 160).replace(/\s+/g, " ") }; return null; }
+    if (!r.ok || (data && !Array.isArray(data) && data.error)) { proxyNote = { status: r.status, body: String((data && data.error) || text).slice(0, 160) }; return null; }
+    proxyNote = null;
     return text;
-  } catch (e) { return null; } finally { clearTimeout(t); }
+  } catch (e) { proxyNote = { status: 0, body: "could not reach RotoWire's proxy from Vercel: " + String(e && e.message || e).slice(0, 80) }; return null; } finally { clearTimeout(t); }
 }
 let feedBase = null;   // remembered between calls while the function stays warm
 async function viaFeedParam(feed, key, date, link) {
@@ -137,5 +139,5 @@ module.exports = async (req, res) => {
     if (text) { res.setHeader("Cache-Control", "s-maxage=120, stale-while-revalidate=300"); res.setHeader("Content-Type", "application/json"); res.status(200).send(text); return; }
   }
   // Never echo the key back.
-  res.status(last ? last.status : 502).json({ error: "RotoWire request failed", ...last });
+  res.status(last ? last.status : 502).json({ error: "RotoWire request failed", ...last, ...(proxyNote ? { rotowireProxy: proxyNote } : {}) });
 };
