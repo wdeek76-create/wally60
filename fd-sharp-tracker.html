@@ -216,7 +216,7 @@ a.bookrow:active{opacity:.75}
       <button id="reload" class="refresh-btn" title="Refresh">↻</button>
     </div>
   </div>
-  <div class="tagline">NFL live player props · FanDuel arb vs 2+ of <b>Caesars · DK · Fliff</b> · Kalshi sharp vs FD/DK/Fliff/PB</div>
+  <div class="tagline">NFL live player props · FanDuel arb vs 2+ of <b>Caesars · DK · Fliff</b> · Exchange sharp (Kalshi · Novig · PX) vs FD/DK/Fliff/PB</div>
 </header>
 
 <div class="ticker-wrap" id="tickerWrap" style="display:none">
@@ -741,18 +741,19 @@ function computeKalshiRows(fxs, byFx) {
       if (!S[bk] || Number(o.price) > Number(S[bk].price)) S[bk] = o;
     });
     Object.entries(pairs).forEach(([bucketKey, P]) => {
-      [['over', 'under'], ['yes', 'no']].forEach(([side, oppSide]) => {
+      // Both directions: Over picks read the exchanges' Under book, Under picks read their Over
+      // book (and Anytime TD Yes reads Kalshi's No).
+      [['over', 'under'], ['under', 'over'], ['yes', 'no']].forEach(([side, oppSide]) => {
         const books = P.sides[side] || {}, oppBooks = P.sides[oppSide] || {};
-        // Opposite-side quotes from every exchange; Kalshi's stays the price reference when it
-        // posts one (the backtested signal), otherwise the best-priced other exchange.
+        // The other side's quotes on every exchange. The hedge you'd actually take is the BEST of
+        // them (highest price on the other side), so that's what the arb is measured against --
+        // not Kalshi by default when Novig or Prophet X is posting better.
         const oppQuotes = LADDER_EXCHANGES.map(b => oppBooks[b]).filter(Boolean);
-        const kalshiOpp = oppBooks[KALSHI_BOOK] || oppQuotes.slice().sort((a, b) => Number(b.price) - Number(a.price))[0]; if (!kalshiOpp) return;
+        const kalshiOpp = oppQuotes.slice().sort((a, b) => Number(b.price) - Number(a.price))[0]; if (!kalshiOpp) return;
         // Anytime TD markets run thinner and swing harder on Kalshi than a yardage line, so it
         // needs the same higher liquidity bar live-now-opticodds.html's KALSHI_PROP_MARKETS uses
         // for 'td' (10000) rather than the general $300 floor.
         const minLiq = P.mkey === 'atd' ? MIN_KALSHI_LIQ_ATD : MIN_KALSHI_LIQ;
-        const mirrorPrice = -Number(kalshiOpp.price);
-        const fairProb = imp(mirrorPrice);
         KALSHI_TARGET_BOOKS.forEach(bk => {
           const bo = books[bk]; if (!bo) return;
           const pr = Number(bo.price);
@@ -764,6 +765,10 @@ function computeKalshiRows(fxs, byFx) {
           // mirrored fair (evPct) alone. evPct still rides along as informational context.
           const arbPct = 1 - (imp(pr) + imp(kalshiOpp.price));
           if (arbPct <= 0 || arbPct > MAX_PLAUSIBLE_EDGE) return;
+          // Fair = the mirror of where the money backing your side actually sits: the size-weighted
+          // average of the counted orders (OddsJam's "Avg"), not one exchange's top order.
+          const mirrorPrice = -Number(L.avg ?? kalshiOpp.price);
+          const fairProb = imp(mirrorPrice);
           const evPct = fairProb * toDec(pr) - 1;
           out.push({
             key: `${bucketKey}|${side}|kalshi|${bk}`, fid: f.id, f, mkey: P.mkey, marketNames: [P.marketName],
