@@ -4941,7 +4941,15 @@ function renderModelBacktest() {
     const cardCtx = cardsByIdBt[b.cardId];
     const wcMlKey = cardCtx ? findMatchKey(cardCtx.ml || {}, b.fighter) : null;
     const resolvedWeightClass = (cardCtx && wcMlKey) ? cardCtx.ml[wcMlKey].weightClass : null;
+    // CLV at the price this row is graded at, vs the card's close
+    // (Pinnacle → Circa → Bookmaker → BetOnline); falls back to the bet's own CLV.
+    let rowClv = null, rowClose = null;
+    const closeK = cardCtx && cardCtx.closing ? findMatchKey(cardCtx.closing, b.fighter) : null;
+    const clvRes = closeK ? computeCLV(cardCtx.closing[closeK], null, rowMl) : null;
+    if (clvRes) { rowClv = clvRes.clv; rowClose = clvRes.closeOdds; }
+    else if (b.clv != null) { rowClv = b.clv; rowClose = b.closingMl != null ? b.closingMl : null; }
     rows.push({
+      clv: rowClv, closingMl: rowClose,
       fighter: b.fighter, opp: b.opponent, ml: rowMl, status: b.status, blended, edge: rowEdge, addIn,
       cardId: b.cardId, cardLabel: b.cardLabel,
       weightClass: resolvedWeightClass,
@@ -4973,12 +4981,17 @@ function renderModelBacktest() {
   const roiColor = roi > 0 ? 'var(--green)' : roi < 0 ? 'var(--red)' : 'var(--muted)';
 
   // Stat strip + skipped sanity check go ABOVE the sliders (their own div).
-  let htmlTop = `<div class="stats" style="display:grid; grid-template-columns:repeat(5, 1fr); gap:12px; margin-bottom:16px;">
+  const clvRows = rows.filter(r => r.clv != null);
+  const avgClvAll = clvRows.length ? clvRows.reduce((a, r) => a + r.clv, 0) / clvRows.length : null;
+  const beatClose = clvRows.filter(r => r.clv > 0).length;
+  const clvColorAll = avgClvAll == null ? 'var(--muted)' : avgClvAll >= 0 ? 'var(--green)' : 'var(--red)';
+  let htmlTop = `<div class="stats" style="display:grid; grid-template-columns:repeat(6, 1fr); gap:12px; margin-bottom:16px;">
     <div class="stat"><div class="label">Flagged bets</div><div class="val">${n}</div><div class="sub2">of ${all.length} graded</div></div>
     <div class="stat"><div class="label">Record</div><div class="val">${wins}-${losses}</div><div class="sub2" style="color:${winColor};">${winPct.toFixed(1)}% win rate</div></div>
     <div class="stat"><div class="label">Units</div><div class="val" style="color:${uColor};">${totalUnits >= 0 ? '+' : ''}${totalUnits.toFixed(2)}u</div><div class="sub2">dogs risk 1u, favs to win 1u</div></div>
     <div class="stat"><div class="label">ROI</div><div class="val" style="color:${roiColor};">${roi >= 0 ? '+' : ''}${roi.toFixed(1)}%</div><div class="sub2">on ${wagered.toFixed(1)}u risked</div></div>
     <div class="stat"><div class="label">Avg edge</div><div class="val">${avgEdge.toFixed(2)}%</div><div class="sub2">on flagged picks</div></div>
+    <div class="stat"><div class="label">Avg CLV</div><div class="val" style="color:${clvColorAll};">${avgClvAll == null ? '—' : (avgClvAll >= 0 ? '+' : '') + avgClvAll.toFixed(2) + '%'}</div><div class="sub2">${clvRows.length ? `beat close ${beatClose}/${clvRows.length} (${(beatClose / clvRows.length * 100).toFixed(0)}%)` : 'no closing lines yet'}</div></div>
   </div>`;
 
   // Line-move add-ins: bets that were ≥1% at the price they were logged at
@@ -5018,12 +5031,14 @@ function renderModelBacktest() {
   // so you can dig into the wins/losses without scrolling the giant table.
   const cardMap = {};
   rows.forEach(r => {
-    if (!cardMap[r.cardLabel]) cardMap[r.cardLabel] = { wins: 0, losses: 0, units: 0, edgeSum: 0, fights: [] };
+    if (!cardMap[r.cardLabel]) cardMap[r.cardLabel] = { wins: 0, losses: 0, units: 0, risked: 0, edgeSum: 0, clvSum: 0, clvN: 0, beat: 0, fights: [] };
     const c = cardMap[r.cardLabel];
     if (r.status === 'win') c.wins++; else c.losses++;
     // unitProfit needs a bet-shape with ml + status; r has both
     c.units += unitProfit({ ml: r.ml, status: r.status });
     c.edgeSum += r.edge;
+    c.risked += unitStake({ ml: r.ml });
+    if (r.clv != null) { c.clvSum += r.clv; c.clvN++; if (r.clv > 0) c.beat++; }
     c.fights.push(r);
   });
   // Build a label → date map from STATE.cards so we can sort by date rather
@@ -5111,10 +5126,15 @@ function renderModelBacktest() {
         <th class="num" style="text-align:center;">Units</th>
         <th class="num" style="text-align:center;">ROI</th>
         <th class="num" style="text-align:center;">Avg edge</th>
+        <th class="num" style="text-align:center;">Avg CLV</th>
       </tr></thead><tbody>`;
     cardEntries.forEach((c, idx) => {
       const wp = c.n ? (c.wins / c.n * 100) : 0;
-      const roi = c.n ? (c.units / c.n * 100) : 0;
+      const roi = c.risked ? (c.units / c.risked * 100) : 0;
+      const avgClv = c.clvN ? c.clvSum / c.clvN : null;
+      const clvCell = avgClv == null
+        ? '<td class="num" style="color:var(--muted);">—</td>'
+        : `<td class="num" style="color:${avgClv >= 0 ? 'var(--green)' : 'var(--red)'}; font-weight:700;">${avgClv >= 0 ? '+' : ''}${avgClv.toFixed(2)}%<div class="meta" style="font-size:10px; font-weight:500;">beat ${c.beat}/${c.clvN}</div></td>`;
       const wpColor = wp >= 50 ? 'var(--green)' : wp > 0 ? 'var(--amber)' : 'var(--red)';
       const uColor = c.units > 0 ? 'var(--green)' : c.units < 0 ? 'var(--red)' : 'var(--muted)';
       const roiColor = roi > 0 ? 'var(--green)' : roi < 0 ? 'var(--red)' : 'var(--muted)';
@@ -5131,8 +5151,9 @@ function renderModelBacktest() {
         <td class="num" style="color:${uColor}; font-weight:600;">${c.units >= 0 ? '+' : ''}${c.units.toFixed(2)}u</td>
         <td class="num" style="color:${roiColor}; font-weight:600;">${roi >= 0 ? '+' : ''}${roi.toFixed(1)}%</td>
         <td class="num">${avgEdge.toFixed(2)}%</td>
+        ${clvCell}
       </tr>
-      <tr id="${rowId}" style="display:none;"><td colspan="8" style="padding:0; background:var(--bg);">
+      <tr id="${rowId}" style="display:none;"><td colspan="9" style="padding:0; background:var(--bg);">
         <div style="padding:8px 12px 14px 36px;">
           <table style="margin:0;"><thead><tr>
             <th>Fighter</th>
@@ -5140,6 +5161,7 @@ function renderModelBacktest() {
             <th class="num" style="text-align:center;">Market</th>
             <th class="num" style="text-align:center;">Model Win %</th>
             <th class="num" style="text-align:center;">Edge</th>
+            <th class="num" style="text-align:center;">CLV</th>
             <th>Result</th>
           </tr></thead><tbody>`;
       sortedFights.forEach(r => {
@@ -5153,6 +5175,7 @@ function renderModelBacktest() {
           <td class="num">${fmtAm(r.ml)}</td>
           <td class="num"><div style="color:var(--text); font-weight:700; font-size:13px;">${fmtAm(blendedAm)}</div><div style="color:var(--muted); font-weight:500; font-size:11px; margin-top:2px;">${fmtPct(r.blended, 1)}</div></td>
           <td class="num" style="color:var(--green); font-weight:600;">+${r.edge.toFixed(1)}%</td>
+          <td class="num">${r.clv == null ? '<span style="color:var(--muted);">—</span>' : `<span style="color:${r.clv >= 0 ? 'var(--green)' : 'var(--red)'}; font-weight:700;">${r.clv >= 0 ? '+' : ''}${r.clv.toFixed(2)}%</span>${r.closingMl != null ? `<div class="meta" style="font-size:10px;">close ${fmtAm(r.closingMl)}</div>` : ''}`}</td>
           <td>${pill}</td>
         </tr>`;
       });
