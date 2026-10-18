@@ -348,8 +348,10 @@ function nn(s){
     // if name starts with full form, keep as is (already canonical)
   }
   // Name links you confirmed in the "missing source" popup (e.g. a source's "Benjamin X" = the books' "Ben X").
+  if (nn._raw) return out;
   return (_NHL_NAME_ALIAS && _NHL_NAME_ALIAS[out]) || out;
 }
+function nnRaw(s) { nn._raw = true; try { return nn(s); } finally { nn._raw = false; } }   // same, without name links
 
 // Same-name collision guard for anything matching AGAINST the blend by name
 // (live OpticOdds rows, PropShop pastes) — the NHL has real players who
@@ -2700,7 +2702,7 @@ function _nhlModelCsvProj(src, name, home, away) {
 // opts.totals (Run SOG Blend): after the props model, scan today's Saber totals too.
 function _nhlModelAuto(opts) {
   opts = opts || {};
-  const totals = () => { if (!opts.totals) return; const iso = _ymdLocal(new Date()); if (!nhltSaber[iso]) return;
+  const totals = () => { if (!opts.totals) return; const iso = _ymdLocal(new Date()); if (!nhltSaber[iso]) { showNhlToast("Totals not scanned — no Saber team totals for today (upload Saber on the Upload tab)"); return; }
     const before = nhltBets.length;
     scanNhlTotals({ silent: true, dateIso: iso }).then(() => { const n = nhltBets.length - before; if (n > 0) showNhlToast(`Totals: ${n} new play${n === 1 ? "" : "s"} logged`); if (currentTab === "totals") renderNhlTotals(); }).catch(e => console.warn("[NHL totals] auto scan", e && e.message)); };
   clearTimeout(window._nhlModelAutoT);
@@ -2820,6 +2822,12 @@ function _nhlFirstCompatible(a, b) {
 }
 function _nhlAutoLinkNames(byPL, mainLine) {
   let linked = 0; const done = new Set();
+  // A link whose source name is itself a player with his own lines (Luke Hughes → Jack Hughes) merges two real
+  // players — drop it.
+  const boardRaw = new Set(Object.values(byPL).filter(e => e && e[0]).map(e => nnRaw(e[0].player)));
+  let dropped = 0;
+  Object.keys(_NHL_NAME_ALIAS).forEach(raw => { if (boardRaw.has(raw) && boardRaw.has(_NHL_NAME_ALIAS[raw]) && raw !== _NHL_NAME_ALIAS[raw]) { console.log(`[NHL names] dropped link ${raw} → ${_NHL_NAME_ALIAS[raw]} (both have their own lines)`); delete _NHL_NAME_ALIAS[raw]; dropped++; } });
+  if (dropped) { try { localStorage.setItem("nhl_name_alias", JSON.stringify(_NHL_NAME_ALIAS)); } catch (e) {} showNhlToast(`Removed ${dropped} name link${dropped === 1 ? "" : "s"} that merged two different players`); }
   Object.keys(byPL).forEach(key => {
     const ents = byPL[key]; if (!ents || !ents.length) return;
     const player = ents[0].player, pk = nn(player), home = ents[0].home, away = ents[0].away;
@@ -2833,7 +2841,7 @@ function _nhlAutoLinkNames(byPL, mainLine) {
         const p2 = _nhlNameParts(v.name);
         if (p2.last !== me.last || !_nhlFirstCompatible(me.first, p2.first)) return false;
         if (v.team && !(_nhlTeamCanon(v.team) === _nhlTeamCanon(home) || _nhlTeamCanon(v.team) === _nhlTeamCanon(away))) return false; // wrong team
-        return !Object.keys(byPL).some(k2 => { const e2 = byPL[k2]; return e2 && e2[0] && nn(e2[0].player) === nn(v.name); }); // he isn't someone else on the board
+        return !boardRaw.has(nnRaw(v.name)); // he isn't someone else on the board
       });
       if (cands.length === 1) {
         _NHL_NAME_ALIAS[nn(cands[0].name)] = pk; linked++;
@@ -2859,6 +2867,12 @@ function _nhlNameSim(a, b) { // Dice coefficient on letter pairs
 function _nhlFindMissingSources(byPL, mainLine, iso) {
   const skipped = (() => { try { return JSON.parse(localStorage.getItem("nhl_name_skip") || "{}"); } catch (e) { return {}; } })();
   const asks = [], seen = new Set();
+  // Everyone with their own lines on the board — never offered as "the same player" as someone else
+  // (Jack vs Luke Hughes: same team, same last name, two real players).
+  const onBoard = new Set(Object.values(byPL).filter(e => e && e[0]).map(e => nnRaw(e[0].player)));
+  // A source with nobody (or almost nobody) on either team simply doesn't cover that game — not a name problem.
+  const covers = (src, home, away) => Object.values(srcs[src] || {}).filter(v => v && v.team && (_nhlTeamCanon(v.team) === _nhlTeamCanon(home) || _nhlTeamCanon(v.team) === _nhlTeamCanon(away))).length >= 6
+    || !Object.values(srcs[src] || {}).some(v => v && v.team);   // no team column (STOK) → can't tell, keep checking
   Object.keys(byPL).forEach(key => {
     const ents = byPL[key]; if (!ents || !ents.length) return;
     const player = ents[0].player, pk = nn(player), home = ents[0].home, away = ents[0].away;
@@ -2867,14 +2881,15 @@ function _nhlFindMissingSources(byPL, mainLine, iso) {
     const have = PS_SOURCE_KEYS_NHL.filter(src => _nhlModelCsvProj(src, player, home, away) != null);
     if (have.length < 2 || have.length === PS_SOURCE_KEYS_NHL.length) return; // nobody/one source = not a name problem
     PS_SOURCE_KEYS_NHL.filter(src => !have.includes(src) && srcs[src] && Object.keys(srcs[src]).length).forEach(src => {
-      if (skipped[iso + "|" + src + "|" + pk]) return;
+      if (skipped[iso + "|" + src + "|" + pk] || !covers(src, home, away)) return;
       const last = nn(String(player).trim().split(/\s+/).slice(-1)[0]);
-      const cands = Object.values(srcs[src]).filter(v => v && v.name && nn(v.name) !== pk).map(v => {
+      const cands = Object.values(srcs[src]).filter(v => v && v.name && nn(v.name) !== pk && !onBoard.has(nnRaw(v.name))).filter(v => !v.team || _nhlTeamCanon(v.team) === _nhlTeamCanon(home) || _nhlTeamCanon(v.team) === _nhlTeamCanon(away)).map(v => {
         const vLast = nn(String(v.name).trim().split(/\s+/).slice(-1)[0]);
         const teamOk = v.team && (_nhlTeamCanon(v.team) === _nhlTeamCanon(home) || _nhlTeamCanon(v.team) === _nhlTeamCanon(away));
         const score = (vLast === last ? 0.6 : 0) + _nhlNameSim(nn(v.name), pk) * 0.4 + (teamOk ? 0.2 : 0);
         return { name: v.name, team: v.team || "", sog: v.sog, score };
       }).filter(c => c.score >= 0.55).sort((a, b) => b.score - a.score).slice(0, 3);
+      if (!cands.length) return;   // no plausible match in that source → nothing to link, don't ask
       asks.push({ player, pk, src, iso, game: away + " @ " + home, home, away, cands });
     });
   });
@@ -2901,6 +2916,24 @@ function _nhlPaintNamePopup() {
         <button onclick="_nhlNameManual(${i})" style="background:transparent;border:1px solid #00aaff;color:#00aaff;${btn}">Use proj</button>
       </div>
       <div id="nhl-name-r-${i}" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;"></div></div>`).join("")}`;
+}
+// Every name link (auto or picked) with an undo — shown on the Model tab.
+function _nhlLinkedNamesHtml() {
+  const ents = Object.entries(_NHL_NAME_ALIAS || {});
+  if (!ents.length) return "";
+  const t = s => s;
+  return `<details style="background:#0a1628;border:1px solid #0d2035;border-radius:8px;padding:8px 14px;margin-bottom:16px;font-size:13px;color:#fff;">
+    <summary style="cursor:pointer;font-size:11px;letter-spacing:.06em;color:#9fb8d6;font-weight:800;text-transform:uppercase;">Linked names (${ents.length}) — tap ✕ to undo a wrong link</summary>
+    <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;">${ents.map(([raw, to]) => `<span style="display:inline-flex;align-items:center;gap:6px;border:1px solid #1e40af99;border-radius:5px;padding:3px 8px;">${escapeHtmlBasic(t(raw))} → <b>${escapeHtmlBasic(t(to))}</b><button onclick="_nhlUnlinkName('${raw.replace(/'/g, "")}')" style="background:transparent;border:none;color:#f87171;font-size:14px;cursor:pointer;padding:0 2px;">✕</button></span>`).join("")}
+    <button onclick="if(confirm('Remove every name link? Auto-matching will relink the safe ones on the next run.')){_NHL_NAME_ALIAS={};try{localStorage.setItem('nhl_name_alias','{}')}catch(e){};renderNhlModelTab();runNhlModel({silent:true,preview:true});}" style="background:transparent;border:1px solid #f8717155;color:#f87171;border-radius:5px;padding:3px 10px;font-size:12px;font-weight:700;cursor:pointer;">Clear all links</button></div></details>`;
+}
+function _nhlUnlinkName(raw) {
+  const to = _NHL_NAME_ALIAS[raw]; if (to == null) return;
+  delete _NHL_NAME_ALIAS[raw];
+  try { localStorage.setItem("nhl_name_alias", JSON.stringify(_NHL_NAME_ALIAS)); } catch (e) {}
+  showNhlToast(`Unlinked ${raw} → ${to}`);
+  renderNhlModelTab();
+  runNhlModel({ silent: true, preview: true });   // re-check today without logging
 }
 function _nhlNameLink(i, j) {
   const a = _nhlNameAsk[i]; if (!a) return;
@@ -3199,7 +3232,7 @@ function renderNhlModelTab() {
       ${_nhlModelRows && _nhlModelRows.length ? `<button id="model-card-btn" onclick="shareNhlModelCard()" style="background:#0a1628;border:1px solid #0d2035;color:#00cc66;${btn}">🖼 Model card</button>` : ""}
     </div>
     <div style="font-size:12px;color:#9fb8d6;margin-bottom:14px;">CSVs loaded: ${loaded.length ? loaded.join(", ") : "none — upload them on the Upload tab"}. Poisson on each projection → EV at the best Pinnacle / Prop Builder / FanDuel / Bet105 price — or Novig / ProphetX / Kalshi when $${NHL_MODEL_EXCH_MIN}+ is available there. Rule: all 4 sources must project the player, 3 at ${NHL_PS_QUAL_EV}%+, none negative. Open picks go straight into the tracker at this price and book. The record below is the same picks, betting to win 1u on favorites and risking 1u on underdogs.</div>
-    ${_nhlCsvMovesHtml()}${matchHtml}${records}${_nhlModelOpenHtml()}${today}${_nhlModelHistoryHtml()}`;
+    ${_nhlCsvMovesHtml()}${_nhlLinkedNamesHtml()}${matchHtml}${records}${_nhlModelOpenHtml()}${today}${_nhlModelHistoryHtml()}`;
 }
 // opts.silent — used by the auto-trigger poll below so it doesn't fight with
 // the Auto Grade tab's own log/UI when nobody's looking at it; a toast is
