@@ -547,8 +547,8 @@ async function loadFixtures() {
   slate = raw.filter(f => { const t = new Date(f.start_date).getTime(); return t >= lower && t <= upper && !/cancelled/i.test(String(f.status || '')); })
     .map(f => { const hc = f.home_competitors?.[0] || {}, ac = f.away_competitors?.[0] || {};
       return { id:f.id, start:f.start_date, status:f.status, is_live:!!f.is_live,
-        home:{ ab: hc.abbreviation || (hc.name||'').slice(0,3).toUpperCase(), name: hc.name || '', logo: hc.logo || '' },
-        away:{ ab: ac.abbreviation || (ac.name||'').slice(0,3).toUpperCase(), name: ac.name || '', logo: ac.logo || '' } }; })
+        home:{ id: hc.id, ab: hc.abbreviation || (hc.name||'').slice(0,3).toUpperCase(), name: hc.name || '', logo: hc.logo || '' },
+        away:{ id: ac.id, ab: ac.abbreviation || (ac.name||'').slice(0,3).toUpperCase(), name: ac.name || '', logo: ac.logo || '' } }; })
     .sort((a, b) => new Date(a.start) - new Date(b.start));
   return out;
 }
@@ -559,11 +559,32 @@ let liveActuals = {};
 let espnPlays = {};
 const teamKey = n => normName(n).split(' ').pop();
 const espnKeyOf = f => [teamKey(f.away?.name), teamKey(f.home?.name)].sort().join('|');
+let espnSched = [];
+// ESPN's scoreboard lists the whole week's slate; any game OpticOdds didn't return (late
+// window, SNF) gets added to the ticker / all-games sheet from it.
+function mergeEspnSlate() {
+  const have = new Set(slate.map(espnKeyOf));
+  const now = Date.now();
+  espnSched.forEach(g => {
+    const t = new Date(g.start).getTime();
+    if (have.has(espnKeyOf(g)) || t < now - 16 * 3600e3 || t > now + 16 * 3600e3) return;
+    slate.push({ id: g.id, start: g.start, status: g.state === 'post' ? 'completed' : g.state === 'in' ? 'live' : 'unplayed', is_live: g.state === 'in', espn: g, home: g.home, away: g.away });
+  });
+  slate.sort((a, b) => new Date(a.start) - new Date(b.start));
+}
 async function loadEspnPlays() {
   try {
     const r = await fetch('https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard', { cache: 'no-store' });
     if (!r.ok) return null;
     const d = await r.json(), out = {};
+    espnSched = (d.events || []).map(e => {
+      const c = e.competitions?.[0]; if (!c) return null;
+      const side = h => (c.competitors || []).find(t => t.homeAway === h) || {};
+      const tm = t => ({ ab: String(t.team?.abbreviation || '').toUpperCase(), name: t.team?.displayName || t.team?.name || '', logo: t.team?.logo || '' });
+      const st = e.status?.type || {}, a = side('away'), h = side('home');
+      return { id: 'espn_' + e.id, start: e.date, state: st.state, detail: st.shortDetail || '', clock: e.status?.displayClock || '', period: e.status?.period || 0,
+        awayScore: Number(a.score), homeScore: Number(h.score), away: tm(a), home: tm(h) };
+    }).filter(Boolean);
     for (const e of d.events || []) {
       const c = e.competitions?.[0], s = c?.situation;
       if (!c || !s || e.status?.type?.state !== 'in') continue;
@@ -723,6 +744,12 @@ function halfLabel(period) {
 }
 // ───────────────────────────── score ticker ─────────────────────────────
 function tickerItemState(f) {
+  if (f.espn) { // ESPN-only game (OpticOdds didn't list it)
+    const g = f.espn;
+    if (g.state === 'post') return { kind:'final', away: g.awayScore, home: g.homeScore };
+    if (g.state === 'in') return { kind:'live', away: g.awayScore, home: g.homeScore, label: [g.period ? 'Q' + g.period : '', g.clock].filter(Boolean).join(' ') || 'LIVE' };
+    return { kind:'scheduled', time: new Date(f.start).toLocaleTimeString([], { hour:'numeric', minute:'2-digit' }) };
+  }
   const R = gameState[f.id] || {};
   const rawStatus = String(R?.fixture?.status || f.status || '').toLowerCase();
   const sc = R.scores || {};
@@ -773,7 +800,8 @@ function renderTicker() {
   wrap.style.display = '';
   const itemHtml = slate.map(f => {
     const st = tickerItemState(f);
-    const teams = `<span class="tk-item-teams">${esc(f.away.ab)} @ ${esc(f.home.ab)}</span>`;
+    const ls = st.kind === 'live' ? stateOf(f) : null;
+    const teams = `<span class="tk-item-teams">${esc(f.away.ab)}${ls ? ballIco(f, ls, 'away') : ''} @ ${esc(f.home.ab)}${ls ? ballIco(f, ls, 'home') : ''}</span>`;
     if (st.kind === 'final') return `<div class="tk-item">${teams}<span class="tk-item-score">${isNaN(st.away)?'–':st.away}-${isNaN(st.home)?'–':st.home}</span><span class="tk-item-tag final">FINAL</span></div>`;
     if (st.kind === 'live') return `<div class="tk-item">${teams}<span class="tk-item-score">${isNaN(st.away)?'–':st.away}-${isNaN(st.home)?'–':st.home}</span><span class="tk-item-tag live">${esc(st.label)}</span></div>`;
     return `<div class="tk-item">${teams}<span class="tk-item-time">${esc(st.time)}</span></div>`;
@@ -2385,7 +2413,7 @@ async function load(force) {
       loadEspnPlays(),
     ]);
     gameState = state;
-    if (espn) espnPlays = espn;
+    if (espn) { espnPlays = espn; mergeEspnSlate(); }
     liveActuals = actuals;
     renderTicker();
     if (!fixtures.length) { rows = []; altRows = []; render(); busy = false; setSync('idle'); $('#reload').classList.remove('spinning'); return; }
