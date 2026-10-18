@@ -1148,16 +1148,10 @@ function computeCLV(closeEntry, closingMap, betOdds) {
 
   // Preferred + fallback book, based on how this close was ingested
   const isAuto = closeEntry.autoFetched === true;
-  const primary   = isAuto ? 'Pinnacle'  : 'BetOnline';
-  const secondary = isAuto ? 'BetOnline' : 'Pinnacle';
-
-  let fOdds = closeEntry.byBook[primary];
-  let usedBook = primary;
-  if (fOdds == null) {
-    fOdds = closeEntry.byBook[secondary];
-    usedBook = secondary;
-  }
-  if (fOdds == null) return null;
+  const order = isAuto ? CLOSE_PRIORITY : ['BetOnline', 'Pinnacle', 'Circa', 'Bookmaker'];
+  const usedBook = order.find(bk => closeEntry.byBook[bk] != null);
+  if (!usedBook) return null;
+  const fOdds = closeEntry.byBook[usedBook];
   const closeImplied = americanToImplied(fOdds);
   if (closeImplied == null) return null;
 
@@ -4318,11 +4312,15 @@ function renderModel() {
       // scan the card's bets for a matching fighter with a stored clv value.
       // If multiple bets exist for the same fighter, take the most recently
       // updated one (createdAt tiebreaker) so recent price improvements win.
-      let clv = null, closingMl = null;
+      let clv = null, closingMl = null, closingBook = null, closeByBook = null;
       const clvBet = (c.bets || [])
         .filter(b => normalizeName(b.fighter) === normalizeName(m.name) && b.clv != null)
         .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))[0];
-      if (clvBet) { clv = clvBet.clv; closingMl = clvBet.closingMl; }
+      if (clvBet) { clv = clvBet.clv; closingMl = clvBet.closingMl; closingBook = clvBet.closingBook || null; }
+      // Card-level close for this fighter (all books) — CLV is recomputed
+      // below against OUR price once sent picks are resolved.
+      const closeK = c.closing ? findMatchKey(c.closing, m.name) : null;
+      if (closeK) closeByBook = c.closing[closeK];
 
       // Graded result (win/loss + method/round if OpticOdds gave one) — same
       // fighter-name lookup as CLV above, most-recently-graded bet wins.
@@ -4366,7 +4364,7 @@ function renderModel() {
         mkt,
         eyeProb: eP, arenaProb: aP, saberProb: sP, actionProb: acP,
         blended, edge,
-        clv, closingMl,
+        clv, closingMl, closingBook, closeByBook,
         resultStatus, resultMethod, resultRound,
         sourceCount: parts.length,
       });
@@ -4390,6 +4388,13 @@ function renderModel() {
     const c = cardsByIdM[r.cardId];
     r.sent = c && c.sentPicks ? c.sentPicks[normalizeName(r.fighter)] || null : null;
     r.isPlay = c && c.sentPicks ? !!r.sent : (r.edge != null && r.edge >= MODEL_SEND_MIN_EDGE);
+    // Our price = what the pick was sent at; else the market price.
+    r.ourPrice = r.sent && r.sent.odds != null ? r.sent.odds : r.ml;
+    // CLV vs close (Pinnacle → Circa → Bookmaker → BetOnline) from our price.
+    if (r.closeByBook && r.ourPrice != null) {
+      const res = computeCLV(r.closeByBook, null, r.ourPrice);
+      if (res) { r.clv = res.clv; r.closingMl = res.closeOdds; r.closingBook = res.closeBook; }
+    }
   });
   // Graded at the price it was sent at; cards exported before sent-pick
   // tracking use the market price (the main price in the Market cell).
@@ -4525,8 +4530,19 @@ function renderModel() {
     const cellTitle = hoverSummary ? hoverSummary + '\n\nClick to edit market odds' : 'Click to edit market odds';
     const cellTitleAttr = `title="${cellTitle.replace(/"/g, '&quot;')}"`;
 
+    // Top = OUR price (sent price, else market). If the market has moved
+    // since, show the current price next to it: green ↓ when the line got
+    // worse after we bet (we beat it), red ↑ when it got better.
+    const ourImp = americanToImplied(r.ourPrice);
+    let moveHtml = '';
+    if (r.sent && r.ml != null && r.ml !== r.ourPrice) {
+      const curImp = americanToImplied(r.ml);
+      const beat = curImp != null && ourImp != null && curImp > ourImp;
+      moveHtml = ` <span style="font-size:11px; font-weight:700; color:${beat ? 'var(--green)' : 'var(--red)'};" title="Market now ${fmtAm(r.ml)}">→ ${fmtAm(r.ml)} ${beat ? '↓' : '↑'}</span>`;
+    }
+    const betTag = r.sent ? `<span style="font-size:9px; color:var(--green); font-weight:700; margin-right:4px;">BET</span>` : '';
     const marketCell = r.mkt != null
-      ? `<td class="num" onclick="editCardMl('${r.cardId}','${fighterAttr}')" style="cursor:pointer;" ${cellTitleAttr}><div style="color:var(--text); font-weight:700;">${fmtAm(r.ml)}</div><div style="color:var(--text); font-weight:700; font-size:11px;">${fmtPct(r.mkt, 1)}</div>${bookLine}${ogBadge}</td>`
+      ? `<td class="num" onclick="editCardMl('${r.cardId}','${fighterAttr}')" style="cursor:pointer;" ${cellTitleAttr}><div style="color:var(--text); font-weight:700;">${betTag}${fmtAm(r.ourPrice)}${moveHtml}</div><div style="color:var(--text); font-weight:700; font-size:11px;">${fmtPct(ourImp, 1)}</div>${bookLine}</td>`
       : `<td class="num" ${mlClickAttr} style="color:var(--text); font-weight:700;">—<div style="font-size:9px; color:var(--muted2); margin-top:2px;">edit</div></td>`;
     const blendedAm = impliedToAmerican(r.blended);
     const blendedCell = `<td class="num"><div style="color:var(--text); font-weight:700; font-size:13px;">${fmtAm(blendedAm)}</div><div style="color:var(--text); font-weight:700; font-size:11px; margin-top:2px;">${fmtPct(r.blended, 1)}</div></td>`;
@@ -4567,9 +4583,19 @@ function renderModel() {
         // this fighter.
         if (r.clv == null) return `<td class="num" style="color:var(--text); font-weight:700;">—</td>`;
         const clvColor = r.clv >= 0 ? 'var(--green)' : 'var(--red)';
+        // Every close book we have, each with its own CLV from our price.
+        const ourImpC = americanToImplied(r.ourPrice);
+        const perBook = (r.closeByBook && r.closeByBook.byBook) ? CLOSE_PRIORITY
+          .filter(bk => r.closeByBook.byBook[bk] != null)
+          .map(bk => {
+            const co = r.closeByBook.byBook[bk];
+            const v = ourImpC != null ? americanToImplied(co) - ourImpC : null;
+            const short = { Pinnacle: 'Pin', Circa: 'Circa', Bookmaker: 'BM', BetOnline: 'BOL' }[bk] || bk;
+            return `<div style="font-size:10px; margin-top:1px; white-space:nowrap;"><span style="color:var(--muted);">${short}</span> <b style="color:var(--text);">${fmtAm(co)}</b>${v != null ? ` <span style="color:${v >= 0 ? 'var(--green)' : 'var(--red)'};">${v >= 0 ? '+' : ''}${v.toFixed(1)}</span>` : ''}</div>`;
+          }).join('') : '';
         return `<td class="num">
           <div style="color:${clvColor}; font-weight:700; font-size:13px;">${r.clv >= 0 ? '+' : ''}${r.clv.toFixed(2)}%</div>
-          ${r.closingMl != null ? `<div style="color:var(--text); font-weight:700; font-size:11px; margin-top:2px;">close ${fmtAm(r.closingMl)}</div>` : ''}
+          ${perBook || (r.closingMl != null ? `<div style="color:var(--text); font-weight:700; font-size:11px; margin-top:2px;">close ${fmtAm(r.closingMl)}</div>` : '')}
         </td>`;
       })()}
       <td><div style="color:var(--text); font-weight:700;">${r.cardLabel}</div></td>
@@ -6987,8 +7013,19 @@ function ooLevels(o) {
   } else if (o.limits?.max) out.push({ price: top, size: Number(o.limits.max) });
   return out.sort((a, b) => b.price - a.price);
 }
-// Books for CLOSING — Pinnacle preferred, BetOnline fallback (computeCLV reads byBook.Pinnacle / byBook.BetOnline).
-const OO_CLOSE_BOOKS = ['Pinnacle','BetOnline'];
+// Books for CLOSING. CLV uses the first of CLOSE_PRIORITY that has a close;
+// every book's close is kept on card.closing[...].byBook for display.
+const OO_CLOSE_BOOKS = ['Pinnacle','Circa Sports','Bookmaker','BetOnline'];
+const CLOSE_PRIORITY = ['Pinnacle','Circa','Bookmaker','BetOnline'];
+// OpticOdds sportsbook name → our short close-book key
+function closeBookName(sb) {
+  const k = String(sb || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (k === 'pinnacle') return 'Pinnacle';
+  if (k === 'betonline' || k === 'betonlineag') return 'BetOnline';
+  if (k.startsWith('circa')) return 'Circa';
+  if (k === 'bookmaker' || k === 'bookmakereu') return 'Bookmaker';
+  return sb;
+}
 const OO_EXCH = new Set(['novig','prophet x','kalshi']);
 
 function getOddsApiKey() {
@@ -7508,11 +7545,15 @@ async function autoFetchClosingLines(cardId, opts = {}) {
   for (const f of fixSet.fixtures) {
     let rows = [];
     try { const r = await ooCall('/fixtures/odds/historical', { fixture_id: f.id, sportsbook: OO_CLOSE_BOOKS, market: ['moneyline'], is_main: true }); rows = r?.data?.[0]?.odds || []; }
-    catch (e) { console.warn('[OpticOdds] historical failed', f.id, e.message); continue; }
+    catch (e) {
+      // If OpticOdds rejects a book name, fall back to the original pair.
+      try { const r = await ooCall('/fixtures/odds/historical', { fixture_id: f.id, sportsbook: ['Pinnacle','BetOnline'], market: ['moneyline'], is_main: true }); rows = r?.data?.[0]?.odds || []; }
+      catch (e2) { console.warn('[OpticOdds] historical failed', f.id, e2.message); continue; }
+    }
     rows.forEach(o => {
       if (!o.clv || o.clv.price == null) return;
       const norm = normalizeName(o.selection || o.name);
-      const book = String(o.sportsbook).toLowerCase() === 'pinnacle' ? 'Pinnacle' : String(o.sportsbook).toLowerCase() === 'betonline' ? 'BetOnline' : o.sportsbook;
+      const book = closeBookName(o.sportsbook);
       if (!closingByFighter[norm]) closingByFighter[norm] = { name: o.selection || o.name, byBook: {}, openByBook: {} };
       closingByFighter[norm].byBook[book] = Number(o.clv.price);
       if (o.olv && o.olv.price != null) closingByFighter[norm].openByBook[book] = Number(o.olv.price);
@@ -7527,7 +7568,7 @@ async function autoFetchClosingLines(cardId, opts = {}) {
     let entry = closingByFighter[norm];
     if (!entry) { const fz = findFuzzyFighter(fighterMl.name, apiNames); if (fz) entry = closingByFighter[normalizeName(fz)]; }
     if (!entry) return;
-    const book = entry.byBook.Pinnacle != null ? 'Pinnacle' : entry.byBook.BetOnline != null ? 'BetOnline' : null;
+    const book = CLOSE_PRIORITY.find(bk => entry.byBook[bk] != null) || null;
     if (!book) { skippedNoBook++; return; }
     card.closing[norm] = { name: fighterMl.name, odds: entry.byBook[book], book, byBook: entry.byBook, openByBook: entry.openByBook, autoFetched: true, fetchedAt: Date.now() };
     updated++;
@@ -7544,7 +7585,7 @@ async function autoFetchClosingLines(cardId, opts = {}) {
   saveState(STATE);
   rerenderCurrentTab();
   if (!silent) {
-    if (updated === 0) { toast(`No Pinnacle/BetOnline closing prices matched this card's fighters${skippedNoBook ? ` (${skippedNoBook} had neither book)` : ''}.`, 'error'); return 0; }
+    if (updated === 0) { toast(`No Pinnacle/Circa/Bookmaker/BetOnline closing prices matched this card's fighters${skippedNoBook ? ` (${skippedNoBook} had neither book)` : ''}.`, 'error'); return 0; }
     toast(`Closing: ${updated} fighter${updated === 1 ? '' : 's'}${clvStamped ? ` · CLV stamped on ${clvStamped} bet${clvStamped === 1 ? '' : 's'}` : ''}`);
   }
   return updated;
