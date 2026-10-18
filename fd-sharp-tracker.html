@@ -1221,6 +1221,17 @@ function rwStamp(entry, mkey, player, line, side) {
   entry.rwProj = x.atd ? +x.prob.toFixed(3) : x.proj; if (x.agree != null) entry.rwAgree = x.agree;
   return entry;
 }
+// Dashboard splits: did RotoWire's projection back the bet, and where did the player actually
+// finish vs that projection. Only bets tracked while projections were loaded have these.
+const hasRw = e => e.rwAgree === true || e.rwAgree === false;
+const rwAgreeLabel = e => e.rwAgree ? 'RotoWire agrees' : 'RotoWire disagrees';
+const rwVsActual = e => `${sideLabelFor(e)} bets · finished ${e.actual > e.rwProj ? 'over' : e.actual < e.rwProj ? 'under' : 'on'} proj`;
+const hasRwActual = e => e.mkey !== 'atd' && e.rwProj != null && e.actual != null && e.status !== 'pending';
+const rwBreakdowns = (prefix, list) =>
+  breakdownHtml(`${prefix}RotoWire Agrees vs Disagrees`, groupRecords(list.filter(hasRw), rwAgreeLabel)) +
+  breakdownHtml(`${prefix}RotoWire + O/U`, groupRecords(list.filter(hasRw), e => `${rwAgreeLabel(e)} · ${sideLabelFor(e)}`)) +
+  breakdownHtml(`${prefix}RotoWire + Prop Type`, groupRecords(list.filter(hasRw), e => `${rwAgreeLabel(e)} · ${e.market}`)) +
+  breakdownHtml(`${prefix}Actual vs RotoWire Proj`, groupRecords(list.filter(hasRwActual), rwVsActual));
 function rwInit() {
   const run = async (quiet) => {
     try { const n = await rwLoad(); if (!quiet) toast(`RotoWire projections loaded · ${n} players${rwWeekNow ? ' · week ' + rwWeekNow : ''}`); rerenderNow(); }
@@ -1541,6 +1552,9 @@ function buildRecapText(includeLadders) {
   pushBreakdown('By Quarter (bet timing)', groupRecords(all, e => periodLabel(e.betPeriod)));
   pushBreakdown('By Half (bet timing)', groupRecords(all, e => halfLabel(e.betPeriod)));
   pushBreakdown('Hot Situation (1 away, 1-2Q left)', groupRecords(all, hotLabel));
+  pushBreakdown('RotoWire Agrees vs Disagrees', groupRecords(all.filter(hasRw), rwAgreeLabel));
+  pushBreakdown('RotoWire + O/U', groupRecords(all.filter(hasRw), e => `${rwAgreeLabel(e)} · ${sideLabelFor(e)}`));
+  pushBreakdown('Actual vs RotoWire Proj', groupRecords(all.filter(hasRwActual), rwVsActual));
 
   if (includeLadders) {
     lines.push('LADDERS (same player, same stat, multiple lines)');
@@ -1562,7 +1576,7 @@ function buildRecapText(includeLadders) {
 // Every graded bet, one row each, so the record can be sliced any way (combo x side, combo x
 // market, odds ranges...) outside the app.
 function buildDataCsv() {
-  const cols = ['type','date','game','market','player','side','line','fd_price','status','units','actual','qual','combo','arb_books','best_arb_pct','ev_pct','fair_prob','period','hot','dk_same','dk_other','fliff_same','fliff_other','caesars_same','caesars_other'];
+  const cols = ['type','date','game','market','player','side','line','fd_price','status','units','actual','qual','combo','arb_books','best_arb_pct','ev_pct','fair_prob','period','hot','dk_same','dk_other','fliff_same','fliff_other','caesars_same','caesars_other','pos','rw_proj','rw_agree'];
   const q = v => { v = v == null ? '' : String(v); return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
   const graded = e => e.status === 'won' || e.status === 'lost' || e.status === 'push';
   const unitsOf = e => e.status === 'won' ? unitsFor(e.fdPrice, e.stakeUnits || 1) : e.status === 'lost' ? -(e.stakeUnits || 1) : 0;
@@ -1571,7 +1585,7 @@ function buildDataCsv() {
   const otherOf = (e, bk) => { const a = (e.arbBooks || []).find(b => b.book === bk); return a ? a.oppPrice : ''; };
   const rowOf = (type, e) => [type, new Date(e.betAt).toISOString().slice(0, 16), e.game, e.market, e.player, e.side, e.line, e.fdPrice, e.status, unitsOf(e).toFixed(3), e.actual ?? '',
     type === 'main' ? qualKindOf(e) : '', type === 'main' ? comboFor(e) : '', e.arbCount ?? '', e.bestArb != null ? (e.bestArb * 100).toFixed(2) : '', e.evPct != null ? (e.evPct * 100).toFixed(2) : '',
-    e.fairProb != null ? e.fairProb.toFixed(4) : '', e.betPeriod ?? '', e.wasHot ? 1 : 0, ...['DraftKings', 'Fliff', 'Caesars'].flatMap(bk => [sameOf(e, bk), otherOf(e, bk)])].map(q).join(',');
+    e.fairProb != null ? e.fairProb.toFixed(4) : '', e.betPeriod ?? '', e.wasHot ? 1 : 0, ...['DraftKings', 'Fliff', 'Caesars'].flatMap(bk => [sameOf(e, bk), otherOf(e, bk)]), posOf(e.player), e.rwProj ?? '', hasRw(e) ? (e.rwAgree ? 1 : 0) : ''].map(q).join(',');
   const lines = [cols.join(',')];
   Object.values(log).filter(graded).forEach(e => lines.push(rowOf('main', e)));
   Object.values(altLog).filter(graded).forEach(e => lines.push(rowOf('alt', e)));
@@ -2226,6 +2240,7 @@ function renderTracker() {
     ${breakdownHtml('By Quarter (bet timing)', groupRecords(bets, e => periodLabel(e.betPeriod)))}
     ${breakdownHtml('By Half (bet timing)', groupRecords(bets, e => halfLabel(e.betPeriod)))}
     ${breakdownHtml('Hot Situation (1 away, 1-2Q left)', groupRecords(bets, hotLabel))}
+    ${rwBreakdowns('', bets)}
   </div>` : '';
   const cardsHtml = bets.length ? '<div class="cards-grid">' + bets.map(card).join('') + '</div>' : '<div class="empty">Nothing tracked yet — auto-tracks the moment an FD prop aligns with consensus.</div>';
 
@@ -2260,6 +2275,7 @@ function renderTracker() {
     ${breakdownHtml('Alt: By Quarter (bet timing)', groupRecords(altBets, e => periodLabel(e.betPeriod)))}
     ${breakdownHtml('Alt: By Half (bet timing)', groupRecords(altBets, e => halfLabel(e.betPeriod)))}
     ${breakdownHtml('Alt: Hot Situation (1 away, 1-2Q left)', groupRecords(altBets, hotLabel))}
+    ${rwBreakdowns('Alt: ', altBets)}
   </div>` : '';
   const altCardsHtml = altBets.length ? '<div class="cards-grid">' + altBets.map(altCard).join('') + '</div>' : '<div class="empty">No alt-line picks yet — auto-tracks when FD is +EV against the devigged fair price from all 3 books.</div>';
   const altSection = sectionLabel('info', 'Alt Line Picks', altBets.length) + altBreakdowns + altCardsHtml;
@@ -2299,6 +2315,7 @@ function renderTracker() {
     ${breakdownHtml('Kalshi: By Arb %', groupRecords(kalshiBets, e => arbBucket(e.arbPct)))}
     ${breakdownHtml('Kalshi: By Quarter (bet timing)', groupRecords(kalshiBets, e => periodLabel(e.betPeriod)))}
     ${breakdownHtml('Kalshi: By Half (bet timing)', groupRecords(kalshiBets, e => halfLabel(e.betPeriod)))}
+    ${rwBreakdowns('Kalshi: ', kalshiBets)}
     ${breakdownHtml('Kalshi: Hot Situation (1 away, 1-2Q left)', groupRecords(kalshiBets, hotLabel))}
   </div>` : '';
   const kalshiCardsHtml = kalshiBets.length ? '<div class="cards-grid">' + kalshiBets.map(kalshiCard).join('') + '</div>' : '<div class="empty">No Kalshi picks yet — auto-tracks when FD/DK/Fliff/Props Builder arbs against Kalshi\'s own opposite-side quote (min $300 liq).</div>';
