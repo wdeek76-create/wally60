@@ -24551,6 +24551,29 @@ function parseMorningPropShop(raw) {
   return { results, errors };
 }
 
+// ── STOK projections CSV (Morning-only; STOK is not a main-blend source) ─────
+// Same parseSource columns (Proj Min, Exp Pts/3P/Reb/Ast/PRA). Feeds the projection-alignment gate and the 3-of-3 relief check.
+const MORNING_STOK_KEY = "nba_morning_stok_v1";
+let morningStok = { at: 0, name: "", players: {} };
+function loadMorningStok() { try { const r = localStorage.getItem(MORNING_STOK_KEY); if (r) morningStok = JSON.parse(r); } catch (e) {} }
+function morningLoadStokCsv(input) {
+  const f = input && input.files && input.files[0]; if (!f) return;
+  const rd = new FileReader();
+  rd.onload = () => {
+    const rows = parseSource(String(rd.result || ""));
+    const players = {};
+    rows.forEach(r => { if (r.pts != null || r.reb != null || r.ast != null) players[r.norm] = { name: r.rawName, team: r.team, pts: r.pts, reb: r.reb, ast: r.ast, threepm: r.threepm, pra: r.pra, min: r.min }; });
+    if (!Object.keys(players).length) { showToast("That doesn't look like a STOK projections CSV"); return; }
+    morningStok = { at: Date.now(), name: f.name, players };
+    try { localStorage.setItem(MORNING_STOK_KEY, JSON.stringify(morningStok)); } catch (e) {}
+    showToast(`STOK CSV: ${Object.keys(players).length} players`);
+    renderMorning();
+  };
+  rd.readAsText(f); input.value = "";
+}
+function morningClearStok() { morningStok = { at: 0, name: "", players: {} }; try { localStorage.removeItem(MORNING_STOK_KEY); } catch (e) {} renderMorning(); }
+loadMorningStok();
+
 // ── Pasted-board store: { srcKey: [ {stat, player, ...} ] } ─────────────────
 let morningPs = { stok: [], roto: [], saber: [], rotowire: [] };
 let morningView = "ensemble";            // "ensemble" | source key
@@ -24601,13 +24624,18 @@ function teamForPlayer(name) {
 function _mTeamFor(name) { return teamForPlayer(name); }
 // A source's uploaded-CSV projection for a stat (used for the 3-of-3 relief check).
 function _mCsvProj(srcKey, name, stat) {
-  const i = SOURCES.findIndex(s => s.key === srcKey);
-  const s = (typeof slots !== "undefined") ? slots[i] : null;
-  if (!s) return null;
   const k = resolveNorm(name);
-  const hits = s.players.filter(x => x.norm === k);
-  if (hits.length !== 1) return null;
-  const p = hits[0], v = f => (p[f] != null && !isNaN(p[f]) ? Number(p[f]) : null);
+  let p;
+  if (srcKey === "stok") { p = morningStok.players[k]; if (!p) return null; }
+  else {
+    const i = SOURCES.findIndex(s => s.key === srcKey);
+    const s = (typeof slots !== "undefined") ? slots[i] : null;
+    if (!s) return null;
+    const hits = s.players.filter(x => x.norm === k);
+    if (hits.length !== 1) return null;
+    p = hits[0];
+  }
+  const v = f => (p[f] != null && !isNaN(p[f]) ? Number(p[f]) : null);
   const sum = (...xs) => xs.every(x => x != null) ? xs.reduce((a, b) => a + b, 0) : null;
   switch (stat) {
     case "PTS": return v("pts");
@@ -24679,7 +24707,9 @@ function computeMorningEnsemble() {
     bump(entry.stat, "qual");
     if (minEv < 0) { miss("worst", `worst source ${minEv.toFixed(1)}%`); return; }
     bump(entry.stat, "worst");
-    const projs = entry.sources.map(x => Number(x.prop.proj));
+    // The board paste no longer carries a projection column, so take each source's own CSV projection (STOK CSV here, RG/RW/Saber from the main blend).
+    const projOf = x => { const pr = Number(x.prop.proj); return pr > 0 ? pr : _mCsvProj(x.src, entry.player, entry.stat); };
+    const projs = entry.sources.map(x => { const v = projOf(x); return v == null ? NaN : v; });
     const missingSrc = requiredQual === 3 ? missing[0] : null;
     const missingProj = missingSrc ? _mCsvProj(missingSrc, entry.player, entry.stat) : null;
     if (!_mProjsAligned(entry.ou, entry.line, projs.concat([missingProj]))) {
@@ -24700,7 +24730,7 @@ function computeMorningEnsemble() {
     const anchor = (sorted[0].prop.ev || 0) >= MORNING_QUAL_EV ? sorted[0] : (sorted[1] || sorted[0]);
     const fairProb = _mFairProb(anchor.prop.odds, anchor.prop.ev);
     const sourceProjs = {}, sourceEvs = {};
-    entry.sources.forEach(({ src, prop }) => { sourceProjs[src] = prop.proj; sourceEvs[src] = prop.ev; });
+    entry.sources.forEach((x) => { sourceProjs[x.src] = projOf(x); sourceEvs[x.src] = x.prop.ev; });
     const pv = projs.filter(v => !isNaN(v));
     cleared.push({
       player: entry.player, team, stat: entry.stat, ou: entry.ou, line: entry.line,
@@ -24901,6 +24931,11 @@ function renderMorning() {
       <label style="font-size:11px;color:#a8b0bb;">Market <select id="morning-stat" style="background:#050507;border:1px solid #1a1d22;color:#e2e8f0;border-radius:5px;padding:4px 6px;">${statOpts}</select></label>
       <button onclick="morningImport()" style="background:#7c3aed;border:none;color:#fff;border-radius:6px;padding:7px 16px;font-size:12px;font-weight:800;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;">IMPORT</button>
       <span id="morning-import-info" style="font-size:11px;color:#a8b0bb;"></span>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:8px;">
+      <label style="background:#050507;border:1px solid ${morningStok.at ? "#22c55e66" : "#f472b666"};color:#f9a8d4;border-radius:6px;padding:6px 12px;font-size:11px;font-weight:800;cursor:pointer;">LOAD STOK CSV<input type="file" accept=".csv,text/csv" style="display:none;" onchange="morningLoadStokCsv(this)"/></label>
+      <span style="font-size:11px;color:#a8b0bb;">${morningStok.at ? `${_mEsc(morningStok.name)} \u00b7 ${Object.keys(morningStok.players).length} players \u00b7 used for the projection gate` : "STOK projections (Proj Min, Exp Pts/3P/Reb/Ast/PRA) \u2014 used for the projection gate"}</span>
+      ${morningStok.at ? `<button onclick="morningClearStok()" style="background:#050507;border:1px solid #1a1d22;color:#f87171;border-radius:6px;padding:4px 10px;font-size:10px;font-weight:700;cursor:pointer;">CLEAR STOK CSV</button>` : ""}
     </div>
     <textarea id="morning-paste" placeholder="Paste the PropShop board here…" spellcheck="false" style="width:100%;min-height:70px;margin-top:8px;background:#050507;border:1px solid #1a1d22;border-radius:6px;padding:8px 10px;color:#e2e8f0;font-family:'JetBrains Mono','Menlo',monospace;font-size:11px;outline:none;resize:vertical;box-sizing:border-box;"></textarea>
   </div>`;
