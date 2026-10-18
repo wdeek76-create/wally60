@@ -68,6 +68,22 @@
 .ls-prog .bar i.g{background:#22c55e}
 .ls-prog .bar i.r{background:#f59e0b}
 .ls-prog .bar em{position:absolute;top:-3px;width:2px;height:12px;background:var(--text);opacity:.7}
+.row[data-key]{touch-action:pan-y;position:relative;user-select:none;-webkit-user-select:none}
+.row[data-key] a,.row[data-key] img{-webkit-user-drag:none;user-drag:none}
+.row.swiping{transition:none}
+.row.sw-hide{box-shadow:inset -6px 0 0 #ef4444, 0 0 0 1px rgba(239,68,68,.5)}
+.row.sw-pin{box-shadow:inset 6px 0 0 #fbbf24, 0 0 0 1px rgba(251,191,36,.5)}
+.row.sw-hide::after,.row.sw-pin::after{position:absolute;top:50%;transform:translateY(-50%);font-size:12px;font-weight:900;letter-spacing:.5px;padding:4px 10px;border-radius:999px;pointer-events:none}
+.row.sw-hide::after{content:'HIDE';right:14px;background:#ef4444;color:#fff}
+.row.sw-pin::after{content:'📌 PIN';left:14px;background:#fbbf24;color:#1a1300}
+.row.pinned{border-color:rgba(251,191,36,.55)!important;box-shadow:0 0 0 1px rgba(251,191,36,.35)}
+.pintag{font-size:9.5px;font-weight:900;letter-spacing:.4px;color:#fbbf24;margin-right:8px}
+.hidbar{margin:0 0 10px;font-size:12px;font-weight:700;color:var(--sub)}
+.hidbar button{background:none;border:none;color:var(--green);font-weight:900;cursor:pointer;padding:0 2px}
+.undobar{position:fixed;left:50%;bottom:calc(20px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);z-index:300;display:flex;gap:14px;align-items:center;padding:10px 16px;border-radius:14px;background:#0f1218;border:1px solid var(--border);color:var(--text);font-size:13px;font-weight:700;box-shadow:0 10px 30px rgba(0,0,0,.45);animation:chipIn .25s ease-out}
+.undobar button{background:none;border:none;color:var(--green);font-weight:900;font-size:13px;cursor:pointer}
+.bn-hot{margin:-2px 14px 10px;display:inline-block;font-size:11px;font-weight:900;letter-spacing:.4px;padding:4px 10px;border-radius:999px;background:rgba(249,115,22,.16);color:#fb923c;border:1px solid rgba(249,115,22,.5);animation:rzPulse 1.6s ease-in-out infinite}
+.bn-hot.warn{background:rgba(239,68,68,.14);color:#f87171;border-color:rgba(239,68,68,.5)}
 </style>
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -1409,7 +1425,78 @@ async function refreshTrackedProgress() {
 let viewMode = 'live';
 let fixtures = [], rows = [], altRows = [];
 function sectionLabel(dot, name, n) { return `<div class="section-label"><span class="section-dot ${dot}"></span><span class="section-name">${esc(name)}</span><span class="section-n">${n}</span></div>`; }
+// ── swipe: left hides a card, right pins it (per device) ──
+let hiddenKeys = (() => { try { return JSON.parse(LS.get('fdst_hidden', '{}')) || {}; } catch(e) { return {}; } })();
+let pinnedKeys = (() => { try { return JSON.parse(LS.get('fdst_pinned', '{}')) || {}; } catch(e) { return {}; } })();
+const saveSwipeState = () => { LS.set('fdst_hidden', JSON.stringify(hiddenKeys)); LS.set('fdst_pinned', JSON.stringify(pinnedKeys)); };
+// Hidden ones dropped, pinned ones first (in pin order), the rest keep their own order.
+function swipeOrder(list) {
+  const vis = list.filter(r => !hiddenKeys[r.key]);
+  const pins = vis.filter(r => pinnedKeys[r.key]).sort((a, b) => pinnedKeys[a.key] - pinnedKeys[b.key]);
+  return [...pins, ...vis.filter(r => !pinnedKeys[r.key])];
+}
+function hiddenBarHtml(list) {
+  const n = list.filter(r => hiddenKeys[r.key]).length;
+  return n ? `<div class="hidbar">${n} hidden · <button id="unhideAll">Show</button></div>` : '';
+}
+const pinTag = r => pinnedKeys[r.key] ? '<span class="pintag">📌 PINNED</span>' : '';
+let swiping = false, swipeRenderPending = false;
+function undoBar(msg, undo) {
+  $('#undoBar')?.remove();
+  const el = document.createElement('div'); el.id = 'undoBar'; el.className = 'undobar';
+  el.innerHTML = `<span>${esc(msg)}</span><button>Undo</button>`;
+  el.querySelector('button').addEventListener('click', () => { undo(); el.remove(); });
+  document.body.appendChild(el); setTimeout(() => el.remove(), 4000);
+}
+function rerenderNow() { const v = $('#view'); if (v) delete v.dataset.lastHtml; render(); }
+(function bindSwipe() {
+  const view = $('#view'); if (!view) return;
+  let card = null, x0 = 0, y0 = 0, dx = 0, mode = null, pid = null, justSwiped = 0;
+  // A swipe that started on the BET button must not also open the bet.
+  view.addEventListener('click', e => { if (Date.now() - justSwiped < 450 && e.target.closest('.row[data-key]')) { e.preventDefault(); e.stopPropagation(); } }, true);
+  view.addEventListener('pointerdown', e => {
+    if (viewMode !== 'live' && viewMode !== 'betnow') return;
+    if (e.target.closest('button,summary')) return;
+    card = e.target.closest('.row[data-key]'); if (!card) return;
+    x0 = e.clientX; y0 = e.clientY; dx = 0; mode = null; pid = e.pointerId;
+  });
+  view.addEventListener('pointermove', e => {
+    if (!card || e.pointerId !== pid) return;
+    const mx = e.clientX - x0, my = e.clientY - y0;
+    if (!mode) { if (Math.abs(mx) < 10 && Math.abs(my) < 10) return; mode = Math.abs(mx) > Math.abs(my) * 1.3 ? 'h' : 'v'; if (mode === 'h') { swiping = true; card.setPointerCapture?.(pid); card.classList.add('swiping'); } }
+    if (mode !== 'h') return;
+    dx = mx; card.style.transform = `translateX(${dx}px) rotate(${dx / 60}deg)`;
+    card.classList.toggle('sw-hide', dx < -40); card.classList.toggle('sw-pin', dx > 40);
+  });
+  const end = () => {
+    if (!card) return;
+    const c = card, key = c.dataset.key, d = dx, wasH = mode === 'h';
+    card = null; mode = null;
+    if (!wasH) return;
+    justSwiped = Date.now();
+    const done = () => { swiping = false; if (swipeRenderPending) { swipeRenderPending = false; } rerenderNow(); };
+    if (d < -90) {
+      c.style.transition = 'transform .25s ease, opacity .25s ease'; c.style.transform = 'translateX(-120%)'; c.style.opacity = '0';
+      hiddenKeys[key] = Date.now(); saveSwipeState();
+      setTimeout(done, 230);
+      undoBar('Hidden', () => { delete hiddenKeys[key]; saveSwipeState(); rerenderNow(); });
+    } else if (d > 90) {
+      if (pinnedKeys[key]) { delete pinnedKeys[key]; toast('Unpinned'); } else { pinnedKeys[key] = Date.now(); toast('📌 Pinned to the top'); }
+      saveSwipeState();
+      c.style.transition = 'transform .25s ease'; c.style.transform = '';
+      setTimeout(done, 230);
+    } else {
+      c.style.transition = 'transform .2s ease'; c.style.transform = '';
+      c.classList.remove('sw-hide', 'sw-pin', 'swiping');
+      setTimeout(() => { c.style.transition = ''; swiping = false; if (swipeRenderPending) { swipeRenderPending = false; rerenderNow(); } }, 200);
+    }
+  };
+  view.addEventListener('pointerup', end); view.addEventListener('pointercancel', end);
+  view.addEventListener('click', e => { if (e.target.closest('#unhideAll')) { hiddenKeys = {}; saveSwipeState(); rerenderNow(); } });
+})();
 function setViewHtml(view, html) {
+  // Mid-swipe, a refresh would yank the card out from under the finger -- redraw after.
+  if (swiping) { swipeRenderPending = true; return false; }
   if (view.dataset.lastHtml === html) return false;
   view.dataset.lastHtml = html;
   const y = window.scrollY;
@@ -1639,8 +1726,9 @@ function renderBetNow() {
   // Bet Now is a "what should I actually bet" list, not a full inventory -- a pick whose matching
   // buckets have lost money so far gets left off entirely rather than shown low with a red score.
   // A fade needs DK or Fliff actually posting the other side -- otherwise there's nothing to bet.
-  const all = [...mainScored, ...altScored].filter(r => r.score > 0 && (!r.fade || (r.hedgeQuotes || []).length)).sort((a, b) => b.score - a.score);
-  if (!all.length) { setViewHtml(view, betNowSourceHtml(stats) + '<div class="empty">Nothing live with a positive track record right now.</div>'); return; }
+  const ranked = [...mainScored, ...altScored].filter(r => r.score > 0 && (!r.fade || (r.hedgeQuotes || []).length)).sort((a, b) => b.score - a.score);
+  const all = swipeOrder(ranked);
+  if (!all.length) { setViewHtml(view, betNowSourceHtml(stats) + hiddenBarHtml(ranked) + '<div class="empty">Nothing live with a positive track record right now.</div>'); return; }
   const card = r => {
     const sideLabel = r.isAlt ? 'Yes' : (r.side === 'over' ? `Over ${r.line}` : r.side === 'under' ? `Under ${r.line}` : 'Yes');
     const hedgeLabel = r.isAlt ? null : (r.side === 'over' ? `Under ${r.line}` : `Over ${r.line}`);
@@ -1663,12 +1751,18 @@ function renderBetNow() {
     const betSide = r.fade ? hedgeLabel : sideLabel;
     const tier = r.score >= 25 ? ['Strong', 'strong'] : r.score >= 10 ? ['Good', 'good'] : ['Lean', 'lean'];
     const backup = r.fade && hq[1] ? `<div class="bn-backup">or ${esc(hq[1].book)} <b>${fmtAm(hq[1].price)}</b></div>` : '';
-    return `<div class="row glass bn-card" data-key="${esc(r.key)}">
+    return `<div class="row glass bn-card${pinnedKeys[r.key] ? ' pinned' : ''}" data-key="${esc(r.key)}">
       <div class="cardhead">
         <div class="chleft"><span class="st live">LIVE</span><span class="bn-gm">${teamLogo(r.f.away.logo)}${esc(r.f.away.ab)} @ ${teamLogo(r.f.home.logo)}${esc(r.f.home.ab)}</span></div>
-        <div class="chleft"><span class="bn-tier ${tier[1]}">${tier[0]}</span></div>
+        <div class="chleft">${pinTag(r)}<span class="bn-tier ${tier[1]}">${tier[0]}</span></div>
       </div>
       <div class="bn-player">${esc(r.player)}</div>
+      ${(() => { // Hot spot: the Over needs exactly 1 more with 1-2 quarters left. Good news when betting
+        // the Over at FD, a warning when fading it (one more and the Under loses).
+        if (r.isAlt || !isHotSitu(r.fid, r.mkey, r.player, r.line, r.side)) return '';
+        const q = periodOf(r.fid);
+        return r.fade ? `<div class="bn-hot warn">⚠ 1 FROM LOSING · Over needs 1 more · Q${q}</div>` : `<div class="bn-hot">🔥 1 AWAY · Q${q}</div>`;
+      })()}
       ${linkTag(top.link, 'bn-bet', `<span class="bn-what">BET ${esc(betSide)} <small>${esc(marketLabel(r.mkey))}</small></span><span class="bn-where">${bookName(top.book)} <b>${livePrice(r.key + '|bn|' + top.book, top.price)}</b></span>`)}
       ${backup}
       ${liveStripHtml(r, r.fade ? (r.side === 'over' ? 'under' : 'over') : r.side, r.line)}
@@ -1678,7 +1772,7 @@ function renderBetNow() {
       </details>
     </div>`;
   };
-  setViewHtml(view, sectionLabel('live', 'Bet Now · ranked by your own graded history', all.length) + betNowSourceHtml(stats) + '<div class="cards-grid">' + all.map(card).join('') + '</div>');
+  setViewHtml(view, sectionLabel('live', 'Bet Now · ranked by your own graded history', all.length) + betNowSourceHtml(stats) + hiddenBarHtml(ranked) + '<div class="cards-grid">' + all.map(card).join('') + '</div>');
 }
 function render() {
   const view = $('#view');
@@ -1725,10 +1819,10 @@ function render() {
       profitHot ? `<span class="alertbadge profit">⚡ PROFITABLE</span>` : '',
     ].join('');
     const alertRow = alertBadges ? `<div class="alertrow">${alertBadges}</div>` : '';
-    return `<div class="row glass${strong ? ' strong' : ''}${hot ? ' hotsitu' : ''}${profitHot ? ' profithot' : ''}" data-key="${esc(r.key)}">
+    return `<div class="row glass${strong ? ' strong' : ''}${hot ? ' hotsitu' : ''}${profitHot ? ' profithot' : ''}${pinnedKeys[r.key] ? ' pinned' : ''}" data-key="${esc(r.key)}">
       <div class="cardhead">
         <div class="chleft"><span class="lg">NFL</span><span class="st live">LIVE</span></div>
-        <div class="chleft"><span class="autobadge${strong ? ' strong' : ''}">${esc(badge)}</span></div>
+        <div class="chleft">${pinTag(r)}<span class="autobadge${strong ? ' strong' : ''}">${esc(badge)}</span></div>
       </div>
       ${alertRow}
       <div class="gm">${teamLogo(r.f.away.logo)}${esc(r.f.away.ab)} <span>${isNaN(st.away)?'':st.away}</span> @ ${teamLogo(r.f.home.logo)}${esc(r.f.home.ab)} <span>${isNaN(st.home)?'':st.home}</span>${st.label ? `<span class="qtr">${esc(st.label)}</span>` : ''}</div>
@@ -1738,7 +1832,8 @@ function render() {
       <div class="sig"><span>${sigText}</span></div>
     </div>`;
   }
-  const html = sectionLabel('live', 'Arbs Now', rows.length) + '<div class="cards-grid">' + rows.map(rowCard).join('') + '</div>';
+  const liveList = swipeOrder(rows);
+  const html = sectionLabel('live', 'Arbs Now', liveList.length) + hiddenBarHtml(rows) + '<div class="cards-grid">' + liveList.map(rowCard).join('') + '</div>';
   setViewHtml(view, html);
   updateRecordBar();
 }
