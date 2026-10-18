@@ -1323,6 +1323,32 @@ function buildRecapText(includeLadders) {
   while (lines.length && lines[lines.length - 1] === '') lines.pop();
   return lines.join('\n');
 }
+// Every graded bet, one row each, so the record can be sliced any way (combo x side, combo x
+// market, odds ranges...) outside the app.
+function buildDataCsv() {
+  const cols = ['type','date','game','market','player','side','line','fd_price','status','units','actual','qual','combo','arb_books','best_arb_pct','ev_pct','fair_prob','period','hot','dk_same','dk_other','fliff_same','fliff_other','caesars_same','caesars_other'];
+  const q = v => { v = v == null ? '' : String(v); return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
+  const graded = e => e.status === 'won' || e.status === 'lost' || e.status === 'push';
+  const unitsOf = e => e.status === 'won' ? unitsFor(e.fdPrice, e.stakeUnits || 1) : e.status === 'lost' ? -(e.stakeUnits || 1) : 0;
+  // Same side as FD's bet (from the devig books) and the other side (from the arb books), kept apart.
+  const sameOf = (e, bk) => { const v = (e.valueBooks || []).find(b => b.book === bk); return v ? v.price : ''; };
+  const otherOf = (e, bk) => { const a = (e.arbBooks || []).find(b => b.book === bk); return a ? a.oppPrice : ''; };
+  const rowOf = (type, e) => [type, new Date(e.betAt).toISOString().slice(0, 16), e.game, e.market, e.player, e.side, e.line, e.fdPrice, e.status, unitsOf(e).toFixed(3), e.actual ?? '',
+    type === 'main' ? qualKindOf(e) : '', type === 'main' ? comboFor(e) : '', e.arbCount ?? '', e.bestArb != null ? (e.bestArb * 100).toFixed(2) : '', e.evPct != null ? (e.evPct * 100).toFixed(2) : '',
+    e.fairProb != null ? e.fairProb.toFixed(4) : '', e.betPeriod ?? '', e.wasHot ? 1 : 0, ...['DraftKings', 'Fliff', 'Caesars'].flatMap(bk => [sameOf(e, bk), otherOf(e, bk)])].map(q).join(',');
+  const lines = [cols.join(',')];
+  Object.values(log).filter(graded).forEach(e => lines.push(rowOf('main', e)));
+  Object.values(altLog).filter(graded).forEach(e => lines.push(rowOf('alt', e)));
+  return lines.join('\n');
+}
+async function copyData() {
+  const text = buildDataCsv();
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) await navigator.clipboard.writeText(text);
+    else { const ta = document.createElement('textarea'); ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0'; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta); }
+    toast(`Copied ${text.split('\n').length - 1} graded bets`);
+  } catch(e) { toast('Copy failed'); }
+}
 async function copyRecap() {
   const text = buildRecapText();
   try {
@@ -2045,6 +2071,7 @@ function renderTracker() {
     <div class="date-toggle" style="margin:0 0 8px">
       <button id="toggleLaddersBtn" class="date-btn${showLadders ? ' active' : ''}">Ladders ${showLadders ? 'ON' : 'OFF'}</button>
       <button id="copyRecapBtn" class="date-btn">Copy Recap</button>
+      <button id="copyDataBtn" class="date-btn">Copy Data</button>
       <button id="trackToggle" class="date-btn${autoTrackOn ? ' active' : ''}" title="Auto-track picks on this device (off = just use Live / Bet Now)">Tracking ${autoTrackOn ? 'ON' : 'OFF'}</button>
     </div>
     <textarea id="recapPreview" readonly style="width:100%;min-height:130px;padding:10px;border-radius:14px;border:1.5px solid var(--border);background:rgba(255,255,255,.03);color:var(--text);font-family:monospace;font-size:10px;line-height:1.5;resize:vertical;box-sizing:border-box">${esc(buildRecapText())}</textarea>
@@ -2054,6 +2081,7 @@ function renderTracker() {
   const html = movementHtml + recapBtn + sectionLabel('info', 'Tracked Picks', bets.length) + breakdowns + cardsHtml + altSection + kalshiSection;
   if (!setViewHtml(view, html)) { updateRecordBar(); return; }
   const recapBtnEl = $('#copyRecapBtn'); if (recapBtnEl) recapBtnEl.addEventListener('click', copyRecap);
+  const dataBtnEl = $('#copyDataBtn'); if (dataBtnEl) dataBtnEl.addEventListener('click', copyData);
   // Per-device: off on a phone that's just using Bet Now, so it doesn't fill up with tracked bets.
   const trackBtnEl = $('#trackToggle'); if (trackBtnEl) trackBtnEl.addEventListener('click', () => {
     autoTrackOn = !autoTrackOn; LS.set('fdst_autotrack', autoTrackOn ? '1' : '0'); renderTracker(); if (autoTrackOn) load(false);
