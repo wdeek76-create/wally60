@@ -731,6 +731,7 @@ function periodLabel(period) {
 // "One away with real time left" — the live stat sits exactly half a point short of the line
 // (e.g. 5 receptions on a 5.5 line) while at least a full quarter remains to get there. Over-only:
 // there's no equivalent "about to clear" signal for Under or Anytime TD ('yes').
+const actualNow = r => { const v = liveActuals[`${r.fid}|${r.mkey}|${normName(r.player)}`]; return v == null || isNaN(v) ? null : Number(v); };
 function isHotSitu(fid, mkey, player, line, side) {
   if (side !== 'over' || line == null) return false;
   const period = periodOf(fid);
@@ -1289,7 +1290,7 @@ function autoTrack(rows) {
       market: marketLabel(r.mkey), mkey: r.mkey, marketNames: r.marketNames, player: r.player, playerKey: normName(r.player),
       side: r.side, line: r.line, fdPrice: r.fdPrice, fdLink: r.fdLink, arbBooks: r.arbBooks, arbCount: r.arbCount, bestArb: r.bestArb,
       valueBooks: r.valueBooks, fairProb: r.fairProb, evPct: r.evPct, qualKind: r.qualKind, betPeriod: periodOf(r.fid),
-      wasHot: isHotSitu(r.fid, r.mkey, r.player, r.line, r.side),
+      wasHot: isHotSitu(r.fid, r.mkey, r.player, r.line, r.side), actualAtBet: actualNow(r),
       favDog: isFav ? 'favorite' : 'underdog', stakeUnits: 1, betAt: Date.now(), status: 'pending',
     };
     rwStamp(log[r.key], r.mkey, r.player, r.line, r.side);
@@ -1310,7 +1311,7 @@ function autoTrackAlt(altRows) {
       awayLogo: r.f.away.logo || '', homeLogo: r.f.home.logo || '',
       market: marketLabel(r.mkey), mkey: r.mkey, marketNames: r.marketNames, player: r.player, playerKey: normName(r.player),
       side: 'over', line: r.line, fdPrice: r.fdPrice, fdLink: r.fdLink, aligned: r.aligned, fairProb: r.fairProb, evPct: r.evPct, betPeriod: periodOf(r.fid),
-      wasHot: isHotSitu(r.fid, r.mkey, r.player, r.line, 'over'),
+      wasHot: isHotSitu(r.fid, r.mkey, r.player, r.line, 'over'), actualAtBet: actualNow(r),
       stakeUnits: 1, betAt: Date.now(), status: 'pending',
     };
     rwStamp(altLog[r.key], r.mkey, r.player, r.line, 'over');
@@ -1338,7 +1339,7 @@ function autoTrackKalshi(kalshiRows) {
       market: marketLabel(r.mkey), mkey: r.mkey, marketNames: r.marketNames, player: r.player, playerKey: normName(r.player),
       side: r.side, line: r.line, book: r.book, fdPrice: r.price, fdLink: r.link, kalshiPrice: r.kalshiPrice, kalshiLiq: r.kalshiLiq, liqAvg: r.liqAvg, liqBooks: r.liqBooks, refExch: r.refExch,
       mirrorPrice: r.mirrorPrice, fairProb: r.fairProb, evPct: r.evPct, arbPct: r.arbPct,
-      betPeriod: periodOf(r.fid), wasHot: isHotSitu(r.fid, r.mkey, r.player, r.line, r.side),
+      betPeriod: periodOf(r.fid), wasHot: isHotSitu(r.fid, r.mkey, r.player, r.line, r.side), actualAtBet: actualNow(r),
       stakeUnits: 1, betAt: Date.now(), status: 'pending',
     };
     rwStamp(kalshiLog[r.key], r.mkey, r.player, r.line, r.side);
@@ -1446,6 +1447,18 @@ function kalshiLiqBucket(liq) {
 // Record specifically for the "1 away, 1-2Q left" live alert (wasHot, frozen at bet time) — the
 // only new trigger introduced alongside bet links; the "profitable" blink reuses arb/EV concepts
 // that already have their own breakdowns (By Arb %, By EV %, Direct Arb vs Value, etc.) above.
+// What the player had when the bet was tracked, and how far the line still was. Count props
+// read as "needs N more"; yardage in yard ranges. Pregame / no live stat = "Pregame".
+const COUNT_MKEYS = new Set(['rec', 'pass_td', 'pass_cmp', 'pass_att', 'rush_att']);
+// Only bets tracked since the count started being saved (older ones don't have the field).
+const hasNeed = e => 'actualAtBet' in e && e.line != null && e.mkey !== 'atd' && (e.side === 'over' || e.side === 'under');
+const needLabel = e => {
+  if (e.actualAtBet == null || e.betPeriod == null) return 'Pregame';
+  const need = Number(e.line) - Number(e.actualAtBet);
+  if (need <= 0) return 'Already over';
+  if (COUNT_MKEYS.has(e.mkey)) { const n = Math.ceil(need); return n >= 3 ? 'Needs 3+ more' : `Needs ${n} more`; }
+  return need <= 10 ? 'Needs ≤10 yds' : need <= 25 ? 'Needs 11-25 yds' : need <= 50 ? 'Needs 26-50 yds' : 'Needs 50+ yds';
+};
 const hotLabel = e => e.wasHot ? 'Hot (1 away, 1-2Q left)' : 'Normal';
 function groupRecords(bets, keyFn) {
   const groups = {};
@@ -1582,6 +1595,7 @@ function buildRecapText(includeLadders) {
   pushBreakdown('By Quarter (bet timing)', groupRecords(all, e => periodLabel(e.betPeriod)));
   pushBreakdown('By Half (bet timing)', groupRecords(all, e => halfLabel(e.betPeriod)));
   pushBreakdown('Hot Situation (1 away, 1-2Q left)', groupRecords(all, hotLabel));
+  pushBreakdown('Needed at Bet (prop + side)', groupRecords(all.filter(hasNeed), e => `${e.market} ${sideLabelFor(e)} - ${needLabel(e)}`));
   pushBreakdown('RotoWire Agrees vs Disagrees', groupRecords(all.filter(hasRw), rwAgreeLabel));
   pushBreakdown('RotoWire + O/U', groupRecords(all.filter(hasRw), e => `${rwAgreeLabel(e)} · ${sideLabelFor(e)}`));
   pushBreakdown('Actual vs RotoWire Proj', groupRecords(all.filter(hasRwActual), rwVsActual));
@@ -1606,7 +1620,7 @@ function buildRecapText(includeLadders) {
 // Every graded bet, one row each, so the record can be sliced any way (combo x side, combo x
 // market, odds ranges...) outside the app.
 function buildDataCsv() {
-  const cols = ['type','date','game','market','player','side','line','fd_price','status','units','actual','qual','combo','arb_books','best_arb_pct','ev_pct','fair_prob','period','hot','dk_same','dk_other','fliff_same','fliff_other','caesars_same','caesars_other','pos','rw_proj','rw_agree'];
+  const cols = ['type','date','game','market','player','side','line','fd_price','status','units','actual','qual','combo','arb_books','best_arb_pct','ev_pct','fair_prob','period','hot','dk_same','dk_other','fliff_same','fliff_other','caesars_same','caesars_other','pos','rw_proj','rw_agree','actual_at_bet','need_at_bet'];
   const q = v => { v = v == null ? '' : String(v); return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
   const graded = e => e.status === 'won' || e.status === 'lost' || e.status === 'push';
   const unitsOf = e => e.status === 'won' ? unitsFor(e.fdPrice, e.stakeUnits || 1) : e.status === 'lost' ? -(e.stakeUnits || 1) : 0;
@@ -1615,7 +1629,7 @@ function buildDataCsv() {
   const otherOf = (e, bk) => { const a = (e.arbBooks || []).find(b => b.book === bk); return a ? a.oppPrice : ''; };
   const rowOf = (type, e) => [type, new Date(e.betAt).toISOString().slice(0, 16), e.game, e.market, e.player, e.side, e.line, e.fdPrice, e.status, unitsOf(e).toFixed(3), e.actual ?? '',
     type === 'main' ? qualKindOf(e) : '', type === 'main' ? comboFor(e) : '', e.arbCount ?? '', e.bestArb != null ? (e.bestArb * 100).toFixed(2) : '', e.evPct != null ? (e.evPct * 100).toFixed(2) : '',
-    e.fairProb != null ? e.fairProb.toFixed(4) : '', e.betPeriod ?? '', e.wasHot ? 1 : 0, ...['DraftKings', 'Fliff', 'Caesars'].flatMap(bk => [sameOf(e, bk), otherOf(e, bk)]), posOf(e.player), e.rwProj ?? '', hasRw(e) ? (e.rwAgree ? 1 : 0) : ''].map(q).join(',');
+    e.fairProb != null ? e.fairProb.toFixed(4) : '', e.betPeriod ?? '', e.wasHot ? 1 : 0, ...['DraftKings', 'Fliff', 'Caesars'].flatMap(bk => [sameOf(e, bk), otherOf(e, bk)]), posOf(e.player), e.rwProj ?? '', hasRw(e) ? (e.rwAgree ? 1 : 0) : '', e.actualAtBet ?? '', e.actualAtBet != null && e.line != null ? +(e.line - e.actualAtBet).toFixed(1) : ''].map(q).join(',');
   const lines = [cols.join(',')];
   Object.values(log).filter(graded).forEach(e => lines.push(rowOf('main', e)));
   Object.values(altLog).filter(graded).forEach(e => lines.push(rowOf('alt', e)));
@@ -2270,6 +2284,8 @@ function renderTracker() {
     ${breakdownHtml('By Quarter (bet timing)', groupRecords(bets, e => periodLabel(e.betPeriod)))}
     ${breakdownHtml('By Half (bet timing)', groupRecords(bets, e => halfLabel(e.betPeriod)))}
     ${breakdownHtml('Hot Situation (1 away, 1-2Q left)', groupRecords(bets, hotLabel))}
+    ${breakdownHtml('Needed at Bet · Prop + Side', groupRecords(bets.filter(hasNeed), e => `${e.market} ${sideLabelFor(e)} · ${needLabel(e)}`))}
+    ${breakdownHtml('Needed at Bet · Quarter', groupRecords(bets.filter(e => hasNeed(e) && e.mkey === 'rec' && e.actualAtBet != null), e => `Rec ${sideLabelFor(e)} · ${needLabel(e)} · ${periodLabel(e.betPeriod)}`))}
     ${rwBreakdowns('', bets)}
   </div>` : '';
   const cardsHtml = bets.length ? '<div class="cards-grid">' + bets.map(card).join('') + '</div>' : '<div class="empty">Nothing tracked yet — auto-tracks the moment an FD prop aligns with consensus.</div>';
