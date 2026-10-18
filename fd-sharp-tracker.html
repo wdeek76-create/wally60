@@ -4,6 +4,22 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <style>* { touch-action: manipulation; }.bnsrc{margin:0 0 12px;padding:9px 12px;border-radius:12px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.04);font-size:12px;font-weight:600}
+.ticker-wrap{cursor:pointer}
+.gs-overlay{position:fixed;inset:0;z-index:200;background:rgba(0,0,0,.55);display:flex;align-items:flex-end;justify-content:center}
+.gs-panel{width:100%;max-width:560px;max-height:80vh;overflow-y:auto;background:var(--bg,#14171c);border:1px solid var(--border);border-bottom:none;border-radius:20px 20px 0 0;padding:14px 16px calc(18px + env(safe-area-inset-bottom,0px))}
+.gs-head{display:flex;align-items:center;justify-content:space-between;font-size:13px;font-weight:900;letter-spacing:.5px;text-transform:uppercase;color:var(--text);margin-bottom:6px}
+.gs-close{background:none;border:1px solid var(--border);color:var(--text);width:30px;height:30px;border-radius:50%;font-size:13px;cursor:pointer}
+.gs-sec{margin:14px 0 6px;font-size:10.5px;font-weight:900;letter-spacing:.6px;text-transform:uppercase;color:var(--sub)}
+.gs-sec span{color:var(--green)}
+.gs-item{display:grid;grid-template-columns:1fr auto;gap:4px 10px;padding:11px 12px;margin-bottom:6px;border-radius:14px;background:rgba(255,255,255,.04);border:1px solid var(--border)}
+.gs-teams{display:flex;align-items:center;gap:6px;font-size:14px;font-weight:900;color:var(--text)}
+.gs-teams img{width:20px;height:20px;object-fit:contain}
+.gs-at{color:var(--sub);font-weight:700;font-size:12px}
+.gs-right{display:flex;align-items:center;gap:8px;justify-content:flex-end}
+.gs-score{font-size:15px;font-weight:900;color:var(--text);font-variant-numeric:tabular-nums}
+.gs-time{font-size:12px;font-weight:700;color:var(--sub)}
+.gs-sub{grid-column:1/-1;font-size:11.5px;font-weight:600;color:var(--sub)}
+.gs-sub b{color:var(--green)}
 </style>
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -223,7 +239,7 @@ a.bookrow:active{opacity:.75}
   <div class="tagline">NFL live player props · FanDuel arb vs 2+ of <b>Caesars · DK · Fliff</b> · Exchange sharp (Kalshi · Novig · PX) vs FD/DK/Fliff/PB</div>
 </header>
 
-<div class="ticker-wrap" id="tickerWrap" style="display:none">
+<div class="ticker-wrap" id="tickerWrap" style="display:none" role="button" title="See all games">
   <div class="ticker-track" id="tickerTrack"></div>
 </div>
 
@@ -438,8 +454,8 @@ async function loadFixtures() {
   slate = raw.filter(f => { const t = new Date(f.start_date).getTime(); return t >= lower && t <= upper && !/cancelled/i.test(String(f.status || '')); })
     .map(f => { const hc = f.home_competitors?.[0] || {}, ac = f.away_competitors?.[0] || {};
       return { id:f.id, start:f.start_date, status:f.status, is_live:!!f.is_live,
-        home:{ ab: hc.abbreviation || (hc.name||'').slice(0,3).toUpperCase() },
-        away:{ ab: ac.abbreviation || (ac.name||'').slice(0,3).toUpperCase() } }; })
+        home:{ ab: hc.abbreviation || (hc.name||'').slice(0,3).toUpperCase(), name: hc.name || '', logo: hc.logo || '' },
+        away:{ ab: ac.abbreviation || (ac.name||'').slice(0,3).toUpperCase(), name: ac.name || '', logo: ac.logo || '' } }; })
     .sort((a, b) => new Date(a.start) - new Date(b.start));
   return out;
 }
@@ -507,6 +523,32 @@ function tickerItemState(f) {
   }
   return { kind:'scheduled', time: new Date(f.start).toLocaleTimeString([], { hour:'numeric', minute:'2-digit' }) };
 }
+// Tapping the ticker opens every game on the slate as a list: live first, then upcoming, then
+// finals, each with its score/clock or start time and how many live picks / tracked bets it has.
+function openGamesSheet() {
+  closeGamesSheet();
+  const groups = { live: [], upcoming: [], final: [] };
+  slate.forEach(f => { const st = tickerItemState(f); groups[st.kind === 'live' ? 'live' : st.kind === 'final' ? 'final' : 'upcoming'].push({ f, st }); });
+  const picksFor = fid => rows.filter(r => r.fid === fid).length + altRows.filter(r => r.fid === fid).length;
+  const trackedFor = fid => [...Object.values(log), ...Object.values(altLog), ...Object.values(kalshiLog)].filter(e => e.fid === fid).length;
+  const team = t => `${t.logo ? `<img src="${esc(t.logo)}" alt="" onerror="this.remove()">` : ''}<span>${esc(t.ab)}</span>`;
+  const item = ({ f, st }) => {
+    const right = st.kind === 'final' ? `<span class="gs-score">${isNaN(st.away)?'–':st.away}-${isNaN(st.home)?'–':st.home}</span><span class="tk-item-tag final">FINAL</span>`
+      : st.kind === 'live' ? `<span class="gs-score">${isNaN(st.away)?'–':st.away}-${isNaN(st.home)?'–':st.home}</span><span class="tk-item-tag live">${esc(st.label)}</span>`
+      : `<span class="gs-time">${esc(new Date(f.start).toLocaleString([], { weekday:'short', hour:'numeric', minute:'2-digit' }))}</span>`;
+    const p = picksFor(f.id), t = trackedFor(f.id);
+    return `<div class="gs-item"><div class="gs-teams">${team(f.away)}<span class="gs-at">@</span>${team(f.home)}</div><div class="gs-right">${right}</div>
+      <div class="gs-sub">${p ? `<b>${p}</b> live pick${p===1?'':'s'}` : 'no live picks'}${t ? ` · <b>${t}</b> tracked` : ''}</div></div>`;
+  };
+  const sec = (title, list) => list.length ? `<div class="gs-sec">${title} <span>${list.length}</span></div>${list.map(item).join('')}` : '';
+  const el = document.createElement('div');
+  el.id = 'gamesSheet'; el.className = 'gs-overlay';
+  el.innerHTML = `<div class="gs-panel"><div class="gs-head"><span>All games · ${slate.length}</span><button class="gs-close" aria-label="Close">✕</button></div>
+    ${sec('Live', groups.live)}${sec('Upcoming', groups.upcoming)}${sec('Final', groups.final)}</div>`;
+  el.addEventListener('click', e => { if (e.target === el || e.target.closest('.gs-close')) closeGamesSheet(); });
+  document.body.appendChild(el);
+}
+function closeGamesSheet() { $('#gamesSheet')?.remove(); }
 function renderTicker() {
   const wrap = $('#tickerWrap'), track = $('#tickerTrack');
   if (!wrap || !track) return;
@@ -515,7 +557,7 @@ function renderTicker() {
   const itemHtml = slate.map(f => {
     const st = tickerItemState(f);
     const teams = `<span class="tk-item-teams">${esc(f.away.ab)} @ ${esc(f.home.ab)}</span>`;
-    if (st.kind === 'final') return `<div class="tk-item">${teams}<span class="tk-item-score">${st.away}-${st.home}</span><span class="tk-item-tag final">FINAL</span></div>`;
+    if (st.kind === 'final') return `<div class="tk-item">${teams}<span class="tk-item-score">${isNaN(st.away)?'–':st.away}-${isNaN(st.home)?'–':st.home}</span><span class="tk-item-tag final">FINAL</span></div>`;
     if (st.kind === 'live') return `<div class="tk-item">${teams}<span class="tk-item-score">${isNaN(st.away)?'–':st.away}-${isNaN(st.home)?'–':st.home}</span><span class="tk-item-tag live">${esc(st.label)}</span></div>`;
     return `<div class="tk-item">${teams}<span class="tk-item-time">${esc(st.time)}</span></div>`;
   }).join('');
@@ -1810,6 +1852,7 @@ $('#vLive').addEventListener('click', () => setView('live'));
 $('#vBetNow').addEventListener('click', () => setView('betnow'));
 $('#vTrack').addEventListener('click', () => setView('tracker'));
 $('#reload').addEventListener('click', () => load(true));
+$('#tickerWrap').addEventListener('click', openGamesSheet);
 const paintTrackToggle = () => { const b = $('#trackToggle'); if (!b) return; b.classList.toggle('on', autoTrackOn); b.textContent = autoTrackOn ? 'Tracking on' : 'Tracking off'; };
 paintTrackToggle();
 $('#trackToggle').addEventListener('click', () => { autoTrackOn = !autoTrackOn; LS.set('fdst_autotrack', autoTrackOn ? '1' : '0'); paintTrackToggle(); if (autoTrackOn) load(false); });
