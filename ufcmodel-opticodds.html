@@ -892,6 +892,7 @@
 // =========================================================================
 const STORAGE_KEY = 'mma_edge_tracker_v1';
 const EDGE_THRESHOLD = 1.0; // percent, hard-coded auto-log threshold for solo bets
+const MODEL_SEND_MIN_EDGE = 2; // percent — picks at/above this go out on the card image
 const CONSENSUS_THRESHOLD = 1.0; // percent, each contributing source must clear this
 const PARTNER_MARGIN_PP = 2.5; // required edge cushion against the anchoring source (hoisted: renderModel runs before the partner block)
 
@@ -4379,14 +4380,21 @@ function renderModel() {
   // edge, clv, cardId, cardLabel, fighter} shape summarize()/renderBreakdowns()
   // expect (built for Consensus/Solo bet streams) so Avg Line + odds buckets
   // etc. work identically here, scoped by the same modelCardFilter selection.
-  // Only fighters the model actually flags (edge ≥ EDGE_THRESHOLD) count as
-  // model bets in the recap — rows below 1% are shown in the table but aren't
-  // plays, so they'd pollute the record / breakdowns.
-  const modelBets = rows.filter(r => r.edge != null && r.edge >= EDGE_THRESHOLD).map(r => ({
-    ml: r.ml,
-    loggedMl: r.originalOdds != null ? r.originalOdds : r.ml,
+  // Only picks that actually went out count in the record: the ones stamped
+  // by the card-image export (at the price / edge they were sent at). Cards
+  // that were never exported fall back to the same ≥2% send threshold.
+  const cardsByIdM = {};
+  cards.forEach(c => { cardsByIdM[c.id] = c; });
+  rows.forEach(r => {
+    const c = cardsByIdM[r.cardId];
+    r.sent = c && c.sentPicks ? c.sentPicks[normalizeName(r.fighter)] || null : null;
+    r.isPlay = c && c.sentPicks ? !!r.sent : (r.edge != null && r.edge >= MODEL_SEND_MIN_EDGE);
+  });
+  const modelBets = rows.filter(r => r.isPlay).map(r => ({
+    ml: r.sent && r.sent.odds != null ? r.sent.odds : r.ml,
+    loggedMl: r.sent && r.sent.odds != null ? r.sent.odds : (r.originalOdds != null ? r.originalOdds : r.ml),
     status: r.resultStatus === 'win' || r.resultStatus === 'loss' ? r.resultStatus : 'pending',
-    edge: r.edge,
+    edge: r.sent && r.sent.edge != null ? r.sent.edge : r.edge,
     clv: r.clv,
     cardId: r.cardId,
     cardLabel: r.cardLabel,
@@ -4522,9 +4530,9 @@ function renderModel() {
     const edgeCell = r.edge == null
       ? `<td class="num" style="color:var(--text); font-weight:700;">—</td>`
       : `<td class="num" style="color:${edgeColor}; font-weight:700;">${r.edge >= 0 ? '+' : ''}${r.edge.toFixed(1)}%</td>`;
-    const rowStyle = (r.edge != null && r.edge >= 1) ? 'box-shadow: inset 3px 0 0 0 var(--green);' : '';
+    const rowStyle = r.isPlay ? 'box-shadow: inset 3px 0 0 0 var(--green);' : '';
     html += `<tr style="${rowStyle}">
-      <td><div style="display:flex; align-items:center; gap:10px;">${renderFighterAvatar(r.fighter, 42)}<div style="min-width:0;"><div style="font-weight:700; line-height:1.15;">${r.fighter}${r.resultStatus ? ` <span class="pill ${r.resultStatus}" style="margin-left:4px;">${r.resultStatus === 'win' ? 'Win' : 'Loss'}</span>` : ''}</div><div style="margin-top:3px; color:var(--muted); font-weight:500; font-size:11px;">${r.sourceCount} sources</div>${(r.resultMethod || r.resultRound != null) ? `<div style="margin-top:2px; color:var(--text); font-weight:600; font-size:10.5px;">${[r.resultMethod, r.resultRound != null ? `R${r.resultRound}` : null].filter(Boolean).join(' · ')}</div>` : ''}</div></div></td>
+      <td><div style="display:flex; align-items:center; gap:10px;">${renderFighterAvatar(r.fighter, 42)}<div style="min-width:0;"><div style="font-weight:700; line-height:1.15;">${r.fighter}${r.sent ? ` <span class="pill" style="margin-left:4px; color:var(--green); border:1px solid var(--green); font-size:9px;" title="Sent ${fmtAm(r.sent.odds)} at +${(r.sent.edge ?? 0).toFixed(1)}% edge">SENT</span>` : ''}${r.resultStatus ? ` <span class="pill ${r.resultStatus}" style="margin-left:4px;">${r.resultStatus === 'win' ? 'Win' : 'Loss'}</span>` : ''}</div><div style="margin-top:3px; color:var(--muted); font-weight:500; font-size:11px;">${r.sourceCount} sources</div>${(r.resultMethod || r.resultRound != null) ? `<div style="margin-top:2px; color:var(--text); font-weight:600; font-size:10.5px;">${[r.resultMethod, r.resultRound != null ? `R${r.resultRound}` : null].filter(Boolean).join(' · ')}</div>` : ''}</div></div></td>
       <td>
         <div style="display:flex; align-items:center; gap:10px;">${renderFighterAvatar(r.opponent, 42)}<div style="min-width:0; line-height:1.15;">
           <div style="color:var(--text); font-weight:700;">${r.opponent || '—'}</div>
@@ -5368,11 +5376,20 @@ async function exportModelCardImage() {
   if (!fights.length) { toast('No fights with 2+ sources on this card', 'error'); return; }
   // Only include picks with ≥2% edge — the partner-facing play threshold.
   // Others get filtered out so partners don't see coin-flip rows.
-  const EXPORT_MIN_EDGE = 2;
+  const EXPORT_MIN_EDGE = MODEL_SEND_MIN_EDGE;
   const rendered = fights.filter(fx => fx.edge != null && fx.edge >= EXPORT_MIN_EDGE);
   if (!rendered.length) { toast(`No fights meet ≥${EXPORT_MIN_EDGE}% edge on this card at current weights`, 'error'); return; }
   // Sort by edge descending so best picks are up top
   rendered.sort((a, b) => (b.edge ?? 0) - (a.edge ?? 0));
+  // Remember exactly what went out (price, model %, edge) so the Model tab's
+  // record only counts picks that were actually sent. Earlier sends are kept
+  // — a pick that went out once stays a sent pick even if it later drops.
+  card.sentPicks = card.sentPicks || {};
+  rendered.forEach(fx => {
+    const k = normalizeName(fx.predictedWinner);
+    if (!card.sentPicks[k]) card.sentPicks[k] = { fighter: fx.predictedWinner, odds: fx.f1Ml, prob: fx.f1Prob, edge: fx.edge, at: Date.now() };
+  });
+  saveState(STATE);
   const topPicks = rendered.filter(fx => fx.edge >= 5).slice(0, 5);
 
   // ---- Canvas drawing ----
