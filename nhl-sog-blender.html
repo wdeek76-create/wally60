@@ -683,6 +683,19 @@ async function pullNhlRwApi(auto) {
     const rows = _nhlRwRows(await _nhlRwFetch("NHLDailyProj"));
     const d = {};
     rows.map(_nhlRwRow).filter(Boolean).forEach(e => { d[nn(e.name) + (e.team ? "|" + nn(e.team) : "") + (e.pos ? "|" + e.pos.toLowerCase() : "")] = e; });
+    // Today's slate check: RotoWire's "daily" feed has no date we can ask for, so compare its teams to
+    // today's NHL schedule (OpticOdds). Mostly other teams → it's another day's slate; leave the slot alone.
+    // Players on teams not playing today are dropped.
+    let slateNote = " · slate not checked (schedule unavailable)";
+    let fx = null; try { fx = (await ooNhlFixtures()).filter(f => f.date === _ymdLocal(new Date())); } catch (e) {}
+    if (fx && fx.length) {
+      const playing = new Set(fx.flatMap(f => [_nhlTeamCanon(f.home), _nhlTeamCanon(f.away)]));
+      const apiTeams = new Set(Object.values(d).map(e => _nhlTeamCanon(e.team)).filter(Boolean));
+      const hit = [...apiTeams].filter(t => playing.has(t)).length;
+      if (apiTeams.size && hit / apiTeams.size < 0.6) throw new Error(`RotoWire's feed looks like a different day — only ${hit} of its ${apiTeams.size} teams play today (${fx.length} games). RW slot left alone; it re-checks every 20 min`);
+      let dropped = 0; Object.keys(d).forEach(k => { const t = _nhlTeamCanon(d[k].team); if (t && !playing.has(t)) { delete d[k]; dropped++; } });
+      slateNote = ` · today's slate ✓ ${hit}/${playing.size} teams${dropped ? ` (${dropped} off-slate dropped)` : ""}`;
+    } else if (fx) slateNote = " · no NHL games today on the schedule";
     const n = Object.keys(d).length;
     if (n < 30) throw new Error(`only ${n} skaters with shots read from ${rows.length} rows — RW slot left alone (not posted yet, or tap TEST)`);
     const meta = _nhlRwMeta(), today = _ymdLocal(new Date());
@@ -693,7 +706,7 @@ async function pullNhlRwApi(auto) {
     _nhlSaveCsvs();
     try { localStorage.setItem(NHL_RW_META_KEY, JSON.stringify({ date: today, at: Date.now(), n })); } catch (e) {}
     document.getElementById("sl-roto").classList.add("loaded");
-    if (el) { el.textContent = `✓ ${n} players · RotoWire API ${new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`; el.className = "ss ok"; }
+    if (el) { el.textContent = `✓ ${n} players · RotoWire API ${new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}${slateNote}`; el.className = "ss ok"; }
     checkReady();
     if (!auto) showNhlToast(`RotoWire: ${n} players pulled`);
   } catch (e) {
@@ -755,6 +768,8 @@ async function testNhlRwApi() {
     let rawP = ""; try { const t = (Array.isArray(data) ? data : Object.values(data || {}).find(Array.isArray) || [])[0] || {}; const pk = Object.keys(t).find(k => /^players?$/i.test(k)); rawP = pk ? `\nraw ${pk}: ${JSON.stringify(t[pk]).slice(0, 400)}` : ""; } catch (e) {}
     const fRow = rows.find(r => _nhlRwRow(r));
     const shotKeys = fRow ? Object.entries(_nhlRwFlat(fRow)).filter(([k]) => /shot|sog/.test(k)).map(([k, v]) => `${k}=${v}`).join(", ") : "";
+    const dateKeys = rows.length ? Object.entries({ ..._nhlRwFlat(rows[0]), ...Object.fromEntries(Object.entries(_nhlRwFlat(rows[0].__parent || {})).map(([k, v]) => ["team." + k, v])) }).filter(([k]) => /date|time|day|week/.test(k)).map(([k, v]) => `${k}=${v}`).join(", ") : "";
+    rawP += `\ndate fields: ${dateKeys || "none (checked against today's schedule instead)"}`;
     rawP += `\nSOG read from: ${_nhlRwSogField || "?"}` + (shotKeys ? `\nall shot fields on that player: ${shotKeys}` : "");
     const sample = rows.length ? Object.entries(_nhlRwFlat(rows[0])).slice(0, 40).map(([k, v]) => `${k}=${String(v).slice(0, 18)}`).join(", ") : "";
     msg = `NHLDailyProj: ${rows.length} rows · ${read.length} skaters with shots\nfields: ${keys}\n` + (first ? `read as: ${first.name} ${first.team} ${first.pos || ""} SOG ${first.sog}` : "COULDN'T read a skater with shots — send me this") + (sample ? `\nrow 1: ${sample}` : "") + rawP;
