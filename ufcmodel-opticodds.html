@@ -762,6 +762,7 @@
       <div style="display:flex; gap:8px; align-items:center;">
         <button onclick="autoOptimizeModelWeights()" class="ghost" style="padding:8px 12px; font-size:13px; white-space:nowrap;" title="Sweep every Saber/Eye weight split and find combinations that maximize units, ROI, or win %">🔍 Auto-optimize</button>
         <button onclick="copyModelPicks()" class="ghost" style="padding:8px 12px; font-size:13px; white-space:nowrap;" title="Copy each fighter with their current-weight model win % to clipboard">📋 Copy picks</button>
+        <button onclick="copyModelRecap()" class="ghost" style="padding:8px 12px; font-size:13px; white-space:nowrap;" title="Copy a results recap of only the picks that were sent out for this card">🧾 Copy recap</button>
         <button onclick="exportModelCardImage()" class="ghost" style="padding:8px 12px; font-size:13px; white-space:nowrap;">📷 Export card image</button>
         <select id="modelCardFilter" style="background:var(--bg2); border:1px solid var(--border); border-radius:6px; padding:7px 10px; color:var(--text); font-size:13px; min-width:280px;"></select>
       </div>
@@ -5222,6 +5223,80 @@ function renderModelBacktest() {
 // Copy a plain-text breakdown of the currently-selected card's model picks
 // to the clipboard. One line per fight: "<Pick Name> <ModelWin%>". Uses the
 // current slider weights so it always matches what the Model tab is showing.
+// Plain-text results recap for the selected card — ONLY the picks that went
+// out (card.sentPicks, stamped by the card-image export) at the price they
+// were sent. Cards exported before sent-pick tracking fall back to every
+// fight's ≥2% side at the current weights, one per fight.
+function modelRecapPicks(card) {
+  if (card.sentPicks && Object.keys(card.sentPicks).length) {
+    return Object.values(card.sentPicks).map(p => ({ name: p.fighter, odds: p.odds, edge: p.edge }));
+  }
+  const wSaber = +document.getElementById('modelWSaber').value;
+  const wEye   = +document.getElementById('modelWEye').value;
+  const ml = card.ml || {};
+  const best = {};
+  Object.values(ml).forEach(m => {
+    const eK = findMatchKey(card.eye || {}, m.name), sK = findMatchKey(card.saber || {}, m.name);
+    const parts = [];
+    if (sK) parts.push({ p: card.saber[sK].prob, w: wSaber });
+    if (eK) parts.push({ p: card.eye[eK].prob, w: wEye });
+    if (parts.length < 2) return;
+    const tw = parts.reduce((a, x) => a + x.w, 0); if (tw <= 0) return;
+    const prob = parts.reduce((a, x) => a + (x.w / tw) * x.p, 0);
+    const mkt = americanToImplied(m.odds); if (mkt == null) return;
+    const edge = prob - mkt; if (edge < MODEL_SEND_MIN_EDGE) return;
+    const oK = m.opponent ? findMatchKey(ml, m.opponent) : null;
+    const key = [normalizeName(m.name), normalizeName(oK ? ml[oK].name : (m.opponent || ''))].sort().join('|');
+    if (!best[key] || edge > best[key].edge) best[key] = { name: m.name, odds: m.originalOdds != null ? m.originalOdds : m.odds, edge };
+  });
+  return Object.values(best);
+}
+
+// Win / loss for a fighter on a card: their own graded bet, else the
+// opponent's graded bet flipped (picks don't always have a bet logged).
+function modelRecapResult(card, name) {
+  const graded = (n) => (card.bets || [])
+    .filter(b => normalizeName(b.fighter) === normalizeName(n) && (b.status === 'win' || b.status === 'loss'))
+    .sort((a, b) => (b.gradedAt || b.createdAt || 0) - (a.gradedAt || a.createdAt || 0))[0];
+  const own = graded(name);
+  if (own) return { status: own.status, method: own.resultMethod || null, round: own.resultRound != null ? own.resultRound : null };
+  const k = findMatchKey(card.ml || {}, name);
+  const opp = k ? card.ml[k].opponent : null;
+  const ob = opp ? graded(opp) : null;
+  if (ob) return { status: ob.status === 'win' ? 'loss' : 'win', method: ob.resultMethod || null, round: ob.resultRound != null ? ob.resultRound : null };
+  return { status: 'pending' };
+}
+
+async function copyModelRecap() {
+  const cardSel = document.getElementById('modelCardFilter');
+  const card = STATE.cards.find(c => c.id === (cardSel ? cardSel.value : ''));
+  if (!card) { toast('Pick a card first', 'error'); return; }
+  const picks = modelRecapPicks(card);
+  if (!picks.length) { toast('No sent picks on this card', 'error'); return; }
+  let w = 0, l = 0, units = 0, risked = 0;
+  const lines = picks.map(p => ({ ...p, res: modelRecapResult(card, p.name) }))
+    .sort((a, b) => (b.edge ?? 0) - (a.edge ?? 0))
+    .map(p => {
+      const st = p.res.status;
+      if (st === 'win' || st === 'loss') {
+        const u = unitProfit({ ml: p.odds, status: st });
+        units += u; risked += unitStake({ ml: p.odds });
+        if (st === 'win') w++; else l++;
+      }
+      const icon = st === 'win' ? '✅' : st === 'loss' ? '❌' : '⏳';
+      const how = [p.res.method, p.res.round != null ? `R${p.res.round}` : null].filter(Boolean).join(' ');
+      return `${icon} ${p.name} ${fmtAm(p.odds)}${how ? ` (${how})` : ''}`;
+    });
+  const title = (card.label || '').replace(/[•·|]/g, ' ').replace(/\s+/g, ' ').trim();
+  const roi = risked ? (units / risked) * 100 : 0;
+  const summary = (w + l)
+    ? `${w}-${l}  ${units >= 0 ? '+' : ''}${units.toFixed(2)}u  ROI ${roi >= 0 ? '+' : ''}${roi.toFixed(1)}%`
+    : 'No results yet';
+  const pending = picks.length - w - l;
+  const text = `${title}\n${summary}${pending && (w + l) ? `  (${pending} pending)` : ''}\n\n${lines.join('\n')}`;
+  await copyText(text, 'recap');
+}
+
 async function copyModelPicks() {
   const cardSel = document.getElementById('modelCardFilter');
   const cardId = cardSel ? cardSel.value : '';
