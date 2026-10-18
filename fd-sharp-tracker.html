@@ -56,6 +56,14 @@
 @keyframes ballBob{0%,100%{transform:translateY(0) rotate(-12deg)}50%{transform:translateY(-2px) rotate(12deg)}}
 .ls-score b{font-size:13px;font-weight:900}
 .ls-clock{color:#ef4444;font-weight:900}
+.ls-field{margin-top:8px;display:flex;flex-direction:column;gap:6px}
+.lf-txt{font-size:12px;font-weight:800;color:var(--sub);letter-spacing:.2px}
+.lf-txt b{color:var(--text)}
+.lf-bar{position:relative;height:4px;border-radius:2px;margin:4px 6px 4px 2px;background:linear-gradient(90deg,rgba(255,255,255,.18) 0 80%,rgba(255,255,255,.18) 80%);border-right:3px solid rgba(255,255,255,.55)}
+.lf-bar.rz{background:linear-gradient(90deg,rgba(255,255,255,.18) 0 80%,rgba(220,38,38,.55) 80%)}
+.lf-mid{position:absolute;left:50%;top:-3px;width:1px;height:10px;background:rgba(255,255,255,.22)}
+.lf-gain{position:absolute;top:-4px;width:2px;height:12px;margin-left:-1px;background:#facc15;border-radius:1px}
+.lf-ball{position:absolute;top:50%;width:11px;height:11px;margin:-5.5px 0 0 -5.5px;border-radius:50%;background:#fff;box-shadow:0 0 0 3px rgba(255,255,255,.15),0 0 10px rgba(255,255,255,.5)}
 .ls-situ{color:var(--text);background:rgba(96,165,250,.14);border-radius:6px;padding:1px 7px;font-weight:800}
 .ls-rz{color:#fff;background:#dc2626;border-radius:6px;padding:1px 7px;font-weight:900;font-size:10px;letter-spacing:.4px;animation:rzPulse 1.4s ease-in-out infinite}
 @keyframes rzPulse{0%,100%{box-shadow:0 0 0 0 rgba(220,38,38,.6)}50%{box-shadow:0 0 0 5px rgba(220,38,38,0)}}
@@ -559,7 +567,7 @@ async function loadEspnPlays() {
       if (!c || !s || e.status?.type?.state !== 'in') continue;
       const key = (c.competitors || []).map(t => teamKey(t.team?.displayName || t.team?.name)).sort().join('|');
       const byId = Object.fromEntries((c.competitors || []).map(t => [String(t.team?.id), teamKey(t.team?.displayName || t.team?.name)]));
-      out[key] = { text: String(s.lastPlay?.text || '').trim(), dd: s.downDistanceText || s.shortDownDistanceText || '', short: s.shortDownDistanceText || '', rz: !!s.isRedZone, pos: byId[String(s.possession)] || null };
+      out[key] = { text: String(s.lastPlay?.text || '').trim(), dd: s.downDistanceText || s.shortDownDistanceText || '', short: s.shortDownDistanceText || '', rz: !!s.isRedZone, pos: byId[String(s.possession)] || null, ytg: s.yardsToEndzone, dist: s.distance };
     }
     return out;
   } catch (e) { return null; }
@@ -596,6 +604,9 @@ function stateOf(f) {
   }
   if (raw.is_red_zone || raw.red_zone || raw.redzone) redZone = true;
   let possession = raw.possession ?? raw.possession_team ?? raw.team_with_possession ?? null;
+  let ytg = raw.yards_to_endzone ?? raw.yards_to_goal ?? null, dist = raw.distance ?? raw.yards_to_go ?? null;
+  ytg = ytg != null && !isNaN(Number(ytg)) ? Number(ytg) : null;
+  dist = dist != null && !isNaN(Number(dist)) ? Number(dist) : null;
   // ESPN fills in whatever the odds feed left blank, as one line: "Penix pass incomplete. 4th & 5."
   let play = lastPlay;
   const es = espnPlays[espnKeyOf(f)];
@@ -604,9 +615,11 @@ function stateOf(f) {
     if (es.dd) situ = es.dd;
     if (es.rz) redZone = true;
     if (es.pos) possession = es.pos;
-    if (play && es.short && !play.toLowerCase().includes(es.short.toLowerCase())) play = `${play.replace(/\.?\s*$/, '.')} ${es.short}.`;
+    if (es.ytg != null && !isNaN(Number(es.ytg))) ytg = Number(es.ytg);
+    if (es.dist != null && !isNaN(Number(es.dist))) dist = Number(es.dist);
+    if (play && es.short && ytg == null && !play.toLowerCase().includes(es.short.toLowerCase())) play = `${play.replace(/\.?\s*$/, '.')} ${es.short}.`;
   }
-  return { away, home, period, clock, label: [pLabel, clock].filter(Boolean).join(' '), lastPlay: play, situ, redZone, possession };
+  return { away, home, period, clock, label: [pLabel, clock].filter(Boolean).join(' '), lastPlay: play, situ, redZone, possession, ytg, dist };
 }
 // Which team has the ball ('away' / 'home' / null): the feed may name it by id, abbreviation,
 // full name, nickname (ESPN) or just "home"/"away".
@@ -621,6 +634,15 @@ function ballSide(f, st) {
   return null;
 }
 const ballIco = (f, st, side) => ballSide(f, st) === side ? '<span class="ball" title="Has the ball">🏈</span>' : '';
+// Where the ball is: offense always drives left → right toward the end zone mark, with the
+// line to gain as a yellow tick. Needs yards-to-end-zone (ESPN), else nothing is drawn.
+function fieldHtml(f, st) {
+  if (st.ytg == null || st.ytg < 0 || st.ytg > 100) return '';
+  const pos = 100 - st.ytg, gain = st.dist != null && st.dist < st.ytg ? pos + st.dist : null;
+  const side = ballSide(f, st), team = side ? f[side].ab : '';
+  const txt = String(st.situ || '').replace(/\s+at\s+/i, ' · ');
+  return `<div class="ls-field"><span class="lf-txt">${team ? `<b>${esc(team)}</b> ` : ''}${esc(txt)}</span><div class="lf-bar${st.ytg <= 20 ? ' rz' : ''}"><i class="lf-mid"></i>${gain != null ? `<i class="lf-gain" style="left:${gain}%"></i>` : ''}<b class="lf-ball" style="left:${pos}%"></b></div></div>`;
+}
 // ── live feel: price moves and new plays, remembered between refreshes ──
 // A price that changed flashes once (green = better for you, red = worse) and keeps a small
 // "▲ 8¢" chip for a minute; a new last-play line slides in when it changes.
@@ -642,7 +664,8 @@ function livePrice(key, price) {
 // player's live stat against the line.
 function liveStripHtml(r, sideKey, line) {
   const st = stateOf(r.f), now = Date.now();
-  const scoreBits = `<span class="ls-score">${ballIco(r.f, st, 'away')}${esc(r.f.away.ab)} <b>${isNaN(st.away) ? '–' : st.away}</b> · ${ballIco(r.f, st, 'home')}${esc(r.f.home.ab)} <b>${isNaN(st.home) ? '–' : st.home}</b></span>${st.label ? `<span class="ls-clock">${esc(st.label)}</span>` : ''}${st.situ ? `<span class="ls-situ">${esc(st.situ)}</span>` : ''}${st.redZone ? '<span class="ls-rz">RED ZONE</span>' : ''}`;
+  const scoreBits = `<span class="ls-score">${ballIco(r.f, st, 'away')}${esc(r.f.away.ab)} <b>${isNaN(st.away) ? '–' : st.away}</b> · ${ballIco(r.f, st, 'home')}${esc(r.f.home.ab)} <b>${isNaN(st.home) ? '–' : st.home}</b></span>${st.label ? `<span class="ls-clock">${esc(st.label)}</span>` : ''}${st.situ && st.ytg == null ? `<span class="ls-situ">${esc(st.situ)}</span>` : ''}${st.redZone ? '<span class="ls-rz">RED ZONE</span>' : ''}`;
+  const field = fieldHtml(r.f, st);
   let play = '';
   if (st.lastPlay) {
     const ps = playSeen[r.fid];
@@ -650,7 +673,7 @@ function liveStripHtml(r, sideKey, line) {
     const fresh = now - playSeen[r.fid].at < 6000;
     play = `<div class="ls-play${fresh ? ' fresh' : ''}">${esc(st.lastPlay.length > 140 ? st.lastPlay.slice(0, 138) + '…' : st.lastPlay)}</div>`;
   }
-  return `<div class="livestrip"><div class="ls-row">${scoreBits}</div>${play}</div>`;
+  return `<div class="livestrip"><div class="ls-row">${scoreBits}</div>${field}${play}</div>`;
 }
 // The quarter a fixture is in RIGHT NOW — captured at auto-track time and frozen onto the pick,
 // so "was FD softer in the 4th quarter" can be measured later regardless of how the game state
