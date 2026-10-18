@@ -287,12 +287,13 @@ tr:hover td{background:#0a1628;}
       <div id="ps-panel-note" style="font-size:11px;color:#9fb8d6;margin-top:8px;"></div>
       <div id="ps-panel" style="margin-top:6px;"></div>
     </div>
+    <div id="model-summary" style="background:#0a1628;border:1px solid #0d2035;border-radius:8px;padding:8px 12px;margin:12px 0 0;font-size:13px;line-height:1.9;"></div>
     <div class="tw">
       <table class="compact">
         <thead><tr>
           <th>PLAYER</th><th>BLEND</th><th>SRC</th><th></th>
           <th>PROJECTIONS</th>
-          <th>FAIR UNDER</th><th>FAIR OVER</th><th>SPREAD</th>
+          <th>FAIR UNDER</th><th>FAIR OVER</th><th>SPREAD</th><th>MODEL (LIVE PRICE · EV BY SOURCE)</th>
         </tr></thead>
         <tbody id="tbody"></tbody>
       </table>
@@ -1018,6 +1019,7 @@ function reRender(){
       <td style="color:#fff;font-weight:600;">${fuStr} <span style="font-size:10px;color:#7dd3fc;">u${halfLine}</span></td>
       <td style="color:#00aaff;font-weight:600;">${foStr} <span style="font-size:10px;color:#7dd3fc;">o${halfLine}</span></td>
       <td style="font-size:12px;color:${p.spreadPct<=tol?'#00cc66':'#ff8844'};">${p.spread.toFixed(2)} (${p.spreadPct.toFixed(0)}%)</td>
+      ${_nhlModelCellHtml(p.name)}
     </tr>`;
   }).join('');
 }
@@ -1194,7 +1196,7 @@ function switchTab(t){
   if(t==='totals') renderNhlTotals();
   if(t==='tracker') renderTracker();
   if(t==='ag') renderAutoGrade();
-  if(t==='res') renderNhlPsPanel();
+  if(t==='res') { renderNhlPsPanel(); _nhlPaintModelSummary(); }
 }
 
 let bets = [];
@@ -2582,6 +2584,14 @@ const NHL_SOLO_BUCKETS = [["1-3%", 1, 3], ["3-5%", 3, 5], ["5-10%", 5, 10], ["10
 let nhlSoloLog = [];
 try { nhlSoloLog = JSON.parse(localStorage.getItem("nhl_solo_src_log") || "[]") || []; } catch (e) { nhlSoloLog = []; }
 let _nhlSoloGrading = false;
+function _nhlSoloClearOpen() {
+  const n = nhlSoloLog.filter(x => x.result === "pending").length;
+  if (!n) { showNhlToast("No open solo lines"); return; }
+  if (!confirm(`Clear ${n} open solo line${n === 1 ? "" : "s"}? Graded lines and their record stay.`)) return;
+  nhlSoloLog = nhlSoloLog.filter(x => x.result !== "pending");
+  _nhlSoloSave(); renderNhlSoloTab();
+  showNhlToast(`Cleared ${n} open solo line${n === 1 ? "" : "s"}`);
+}
 function _nhlSoloSave() { try { localStorage.setItem("nhl_solo_src_log", JSON.stringify(nhlSoloLog)); } catch (e) { console.warn("[NHL solo] save failed", e); } }
 function _nhlSoloCapture(src, results) {
   let added = 0;
@@ -2690,6 +2700,7 @@ function renderNhlSoloTab() {
   el.innerHTML = `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:6px;">
       <span style="font-size:15px;font-weight:800;color:#fff;">Solo sources — every ${NHL_SOLO_MIN_EV}%+ line for each source, 1u flat</span>
       <button onclick="gradeNhlSoloLog(true)" style="background:#0066cc;border:none;color:#fff;border-radius:5px;padding:4px 10px;font-size:12px;font-weight:700;cursor:pointer;">Grade now</button>
+      <button onclick="_nhlSoloClearOpen()" style="background:transparent;border:1px solid #f8717155;color:#f87171;border-radius:5px;padding:4px 10px;font-size:12px;font-weight:700;cursor:pointer;">Clear open</button>
     </div>
     <div style="font-size:12px;color:#9fb8d6;margin-bottom:14px;">Logged on every model run: each source's projection on every line and side, at the best Pinnacle / Prop Builder / FanDuel / Bet105 price then (earlier rows came from PropShop pastes). Bet or not, separate from the tracker; pushes and DNPs don't count.</div>
     ${nhlSoloLog.length ? tables : `<div style="color:#9fb8d6;font-size:13px;">Nothing logged yet — paste a source on the Results tab and its ${NHL_SOLO_MIN_EV}%+ lines start showing up here.</div>`}`;
@@ -2714,6 +2725,33 @@ function _nhlModelCsvProj(src, name, home, away) {
 }
 // Runs the model in the background alongside the normal flow (after a blend run and after every
 // PropShop paste), while it's being compared against the PropShop ensemble.
+let _nhlModelEval = {};
+// Results tab: what the model saw on its last run (RUN SOG BLEND, or Run now).
+function _nhlPaintModelSummary() {
+  const el = document.getElementById("model-summary"); if (!el) return;
+  const loaded = PS_SOURCE_KEYS_NHL.filter(k => srcs[k] && Object.keys(srcs[k]).length);
+  if (!_nhlModelRunAt) { el.innerHTML = `<span style="color:#9fb8d6;">Model hasn't run yet — hit RUN SOG BLEND (${loaded.length}/4 sources loaded).</span>`; return; }
+  const rows = _nhlModelRows || [];
+  const t = _nhlModelRunAt.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  el.innerHTML = `<b style="color:#fff;">Model</b> <span style="color:#9fb8d6;">· live prices · last run ${t}${_nhlModelBusy ? " · running…" : ""}</span>
+    <b style="color:${rows.length ? "#22c55e" : "#9fb8d6"};margin-left:8px;">${rows.length} play${rows.length === 1 ? "" : "s"}</b>
+    ${rows.map(r => `<span style="display:inline-block;margin:2px 4px;padding:2px 8px;border:1px solid #22c55e66;background:#22c55e14;border-radius:5px;color:#fff;font-size:12px;"><b>${escapeHtmlBasic(r.player)}</b> ${r.ou === "over" ? "O" : "U"}${r.line} ${Number(r.odds) > 0 ? "+" : ""}${r.odds} ${escapeHtmlBasic(r.book || "")} <span style="color:#22c55e;font-weight:800;">+${r.anchorEv}%</span></span>`).join("")}
+    <button onclick="runNhlModel({silent:false})" style="margin-left:8px;background:transparent;border:1px solid #0066cc;color:#00aaff;border-radius:5px;padding:2px 10px;font-size:12px;font-weight:700;cursor:pointer;">Run now</button>`;
+}
+function _nhlModelCellHtml(name) {
+  const e = _nhlModelEval[nn(name)];
+  if (!e) return `<td style="font-size:11px;color:#3b4b63;">${_nhlModelRunAt ? "no line" : "—"}</td>`;
+  const sides = ["over", "under"].map(k => e.sides[k] ? { k, ...e.sides[k] } : null).filter(Boolean);
+  if (!sides.length) return `<td style="font-size:11px;color:#3b4b63;">no trusted price</td>`;
+  const best = sides.find(x => x.ok) || sides.sort((a, b) => b.third - a.third)[0];
+  const fmtP = v => (Number(v) > 0 ? "+" : "") + v;
+  const chips = Object.keys(best.evs).sort((a, b) => best.evs[b] - best.evs[a]).map(src => { const v = best.evs[src]; const c = v >= NHL_PS_QUAL_EV ? "#22c55e" : v >= 0 ? "#eab308" : "#f87171";
+    return `<span style="white-space:nowrap;margin-right:6px;"><span style="color:#7dd3fc;font-size:10px;font-weight:700;">${_NHL_SRC_TAG[src]}</span> <span style="color:${c};font-weight:700;">${v >= 0 ? "+" : ""}${v}%</span></span>`; }).join("");
+  return `<td style="font-size:12px;min-width:230px;">
+    <div style="white-space:nowrap;"><span style="font-weight:800;color:${best.k === "over" ? "#fb923c" : "#38bdf8"};">${best.k === "over" ? "O" : "U"}${e.line}</span> <span style="color:#fff;font-weight:700;">${fmtP(best.price)}</span> <span style="color:#9fb8d6;font-size:11px;">${escapeHtmlBasic(best.book || "")}</span>
+      ${best.ok ? `<span style="margin-left:4px;background:#22c55e22;border:1px solid #22c55e88;color:#22c55e;border-radius:4px;padding:0 6px;font-size:10px;font-weight:800;">PLAY</span>` : `<span style="margin-left:4px;color:#9fb8d6;font-size:11px;">${escapeHtmlBasic(best.why)}</span>`}</div>
+    <div style="margin-top:2px;">${chips}</div></td>`;
+}
 // opts.totals (Run SOG Blend): after the props model, scan today's Saber totals too.
 function _nhlModelAuto(opts) {
   opts = opts || {};
@@ -2735,6 +2773,7 @@ async function runNhlModel(opts) {
     delete _nhlLiveLineCache[iso]; // fresh prices
     const byPL = await _nhlGetLiveLinesForDate(iso);
     const rows = [], soloHits = [];
+    const evalMap = {};   // every main-line player: each side's best price + each source's EV (Results tab "MODEL" column)
     // Each player's main line only = the line the most books quote (alt rows don't count; ties go to the
     // line Pinnacle has, then the lower line). Alt / ladder lines are skipped for the model and solo sources.
     const mainLine = {};
@@ -2772,6 +2811,21 @@ async function runNhlModel(opts) {
           if (ev >= NHL_SOLO_MIN_EV) soloHits.push({ src, player, game: away + " @ " + home, gameDateIso: iso, ou, line, odds: four.price, book: four.book, ev, proj: projs[src] });
         });
       }
+      {
+        const ev = { line, have, sides: {} };
+        for (const ou of ["over", "under"]) {
+          const live = await _nhlLiveBookFor(player, line, ou, iso, [home, away], { exch500: true });
+          const d = live ? oddsToDecimal(live.price) : null; if (d == null) continue;
+          const evs = {}; have.forEach(src => { evs[src] = Math.round((_nhlPoissonHit(ou, line, projs[src]) * d - 1) * 1000) / 10; });
+          const vals = have.map(x => evs[x]), qual = vals.filter(e => e >= NHL_PS_QUAL_EV).length, neg = have.filter(x => evs[x] < 0);
+          const missing = PS_SOURCE_KEYS_NHL.filter(x => !have.includes(x));
+          const ok = !missing.length && qual >= 3 && !neg.length;
+          const why = ok ? "" : missing.length ? `no ${missing.map(x => _NHL_SRC_TAG[x]).join("/")}` : qual < 3 ? `${qual}/4 at ${NHL_PS_QUAL_EV}%+` : `${neg.map(x => _NHL_SRC_TAG[x]).join("/")} negative`;
+          const third = vals.slice().sort((a, b) => b - a)[Math.min(2, vals.length - 1)];
+          ev.sides[ou] = { price: live.price, book: live.book, evs, qual, ok, why, third };
+        }
+        evalMap[nn(player)] = ev;
+      }
       // All 4 sources have to project him — a missing source (scratch, or a name that didn't match like
       // "Benjamin" vs "Ben") means no pick, never a 3-of-3.
       if (have.length < PS_SOURCE_KEYS_NHL.length) continue;
@@ -2793,7 +2847,8 @@ async function runNhlModel(opts) {
       }
     }
     rows.sort((a, b) => b.anchorEv - a.anchorEv);
-    _nhlModelRows = rows; _nhlModelRunAt = new Date();
+    _nhlModelRows = rows; _nhlModelRunAt = new Date(); _nhlModelEval = evalMap;
+    try { reRender(); _nhlPaintModelSummary(); } catch (e) {}
     try { _nhlFindMissingSources(byPL, mainLine, iso); } catch (e) { console.warn("[NHL names] check failed", e && e.message); }
     // Check-only run: show what the model sees right now, log nothing (model log, tracker and solo untouched).
     if (opts.preview) { _nhlModelPreview = true; showNhlToast(`Check: ${rows.length} play${rows.length === 1 ? "" : "s"} at current prices — nothing logged`); return; }
@@ -2814,7 +2869,7 @@ async function runNhlModel(opts) {
     try { tracked.logged = await _nhlCarryModelPicks(); } catch (e) {}
     if (!opts.silent || newCount || tracked.logged) showNhlToast(`Ensemble: ${rows.length} pick${rows.length === 1 ? "" : "s"}${tracked.logged ? ` · ${tracked.logged} logged to tracker` : ""}${tracked.waiting ? ` · waiting on ${tracked.waiting} (load all 4 sources)` : ""}`);
   } catch (e) { console.error("[NHL model] run failed", e); showNhlToast("Model run failed: " + (e && e.message)); }
-  finally { _nhlModelBusy = false; renderNhlModelTab(); }
+  finally { _nhlModelBusy = false; renderNhlModelTab(); try { _nhlPaintModelSummary(); } catch (e) {} }
 }
 // ── Automatic name matching ───────────────────────────────────────────────
 // Before the model prices anything: for every board player a source doesn't have under the same name, look in
@@ -2960,7 +3015,7 @@ function _nhlNameLink(i, j) {
   _nhlNameAsk = _nhlNameAsk.filter(x => !(x.pk === a.pk && x.src === a.src));
   _nhlPaintNamePopup();
   showNhlToast(`Linked ${c.name} (${_NHL_SRC_TAG[a.src]}) = ${a.player}`);
-  runNhlModel({ silent: true });
+  runNhlModel({ silent: true, preview: true });   // refresh the view only — picks log when you run the model
 }
 // Search the missing source's CSV by any typed name (for when the suggestions don't have him).
 function _nhlNameSearch(i) {
@@ -2987,7 +3042,7 @@ function _nhlNameManual(i) {
   _nhlNameAsk = _nhlNameAsk.filter(x => !(x.pk === a.pk && x.src === a.src));
   _nhlPaintNamePopup();
   showNhlToast(`${_NHL_SRC_TAG[a.src]} ${v.toFixed(2)} added for ${a.player}`);
-  runNhlModel({ silent: true });
+  runNhlModel({ silent: true, preview: true });   // refresh the view only — picks log when you run the model
 }
 function _nhlNameSkip(i) {
   const a = _nhlNameAsk[i]; if (!a) return;
@@ -4563,7 +4618,6 @@ async function importPropShopNhl() {
   // already been absorbed into this source's staging list, so leaving the
   // old text sitting there just invites a stale double-paste next time.
   document.getElementById('propshop-paste-area').value = '';
-  _nhlModelAuto();
 }
 function setNhlPsTab(tab) {
   nhlPsTab = tab;
@@ -4771,7 +4825,7 @@ function renderNhlPsPanel() {
   }
   if (nhlPsTab === 'ensemble') {
     const rows = computeNhlPsEnsemble();
-    if (!rows.length) { panel.innerHTML = `<div style="color:#1e3a5f;font-size:13px;padding:10px 0;">No 3-of-4+ agreement yet — paste all 4 projection sets (Stok, RotoGrinders, Rotowire, Saber). Needs 3 sources at ${NHL_PS_QUAL_EV}%+ EV and the 4th can't be negative.</div>`; return; }
+    if (!rows.length) { panel.innerHTML = `<div style="color:#1e3a5f;font-size:13px;padding:10px 0;">No PropShop paste ensemble (optional now — the model above finds plays from your CSVs + live prices). Paste sets need 3 sources at ${NHL_PS_QUAL_EV}%+ EV and the 4th can't be negative.</div>`; return; }
     _nhlWantHeadshots(rows.map(r => r.player));
     panel.innerHTML = `<table style="width:auto;border-collapse:collapse;"><thead><tr>
       ${['PLAYER','SIDE','LINE','PROJ','SOURCES · PROJ · EV','BEST ODDS','BOOK','EV','MIN EV',''].map(h => `<th style="padding:6px 8px;font-size:10px;color:#fff;text-align:left;">${h}</th>`).join('')}
