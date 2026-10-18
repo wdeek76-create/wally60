@@ -4957,7 +4957,8 @@ function renderModelBacktest() {
 
   const n = wins + losses;
   const winPct = n ? (wins / n * 100) : 0;
-  const wagered = n;  // 1u per bet (unitProfit already handles fav/dog math)
+  // Actually risked: dogs risk 1u, favs risk enough to win 1u (unitStake).
+  const wagered = rows.reduce((a, r) => a + unitStake({ ml: r.ml }), 0);
   const roi = wagered ? (totalUnits / wagered * 100) : 0;
   const avgEdge = n ? (flaggedEdgeSum / n) : 0;
 
@@ -4975,8 +4976,8 @@ function renderModelBacktest() {
   let htmlTop = `<div class="stats" style="display:grid; grid-template-columns:repeat(5, 1fr); gap:12px; margin-bottom:16px;">
     <div class="stat"><div class="label">Flagged bets</div><div class="val">${n}</div><div class="sub2">of ${all.length} graded</div></div>
     <div class="stat"><div class="label">Record</div><div class="val">${wins}-${losses}</div><div class="sub2" style="color:${winColor};">${winPct.toFixed(1)}% win rate</div></div>
-    <div class="stat"><div class="label">Units</div><div class="val" style="color:${uColor};">${totalUnits >= 0 ? '+' : ''}${totalUnits.toFixed(2)}u</div><div class="sub2">1u per bet</div></div>
-    <div class="stat"><div class="label">ROI</div><div class="val" style="color:${roiColor};">${roi >= 0 ? '+' : ''}${roi.toFixed(1)}%</div><div class="sub2">on ${wagered.toFixed(0)}u risked</div></div>
+    <div class="stat"><div class="label">Units</div><div class="val" style="color:${uColor};">${totalUnits >= 0 ? '+' : ''}${totalUnits.toFixed(2)}u</div><div class="sub2">dogs risk 1u, favs to win 1u</div></div>
+    <div class="stat"><div class="label">ROI</div><div class="val" style="color:${roiColor};">${roi >= 0 ? '+' : ''}${roi.toFixed(1)}%</div><div class="sub2">on ${wagered.toFixed(1)}u risked</div></div>
     <div class="stat"><div class="label">Avg edge</div><div class="val">${avgEdge.toFixed(2)}%</div><div class="sub2">on flagged picks</div></div>
   </div>`;
 
@@ -5336,19 +5337,27 @@ async function copyModelRecap() {
     ? `${w}-${l}  ${units >= 0 ? '+' : ''}${units.toFixed(2)}u  ROI ${roi >= 0 ? '+' : ''}${roi.toFixed(1)}%`
     : 'No results yet';
   const pending = picks.length - w - l;
-  // All-time model profit: every card's sent picks (same pricing/grading).
-  // Counts every ≥1% model side on every card (the card list above only
-  // shows what was sent, at ≥2%). Sent picks use their sent price.
+  // All-time model profit = the Weight backtest's ≥1% plays at the current
+  // weights (same pool, same flagging, same units), so the two always match.
+  // ROI here is on what was actually risked (favs risk more than 1u).
   let aw = 0, al = 0, au = 0, ar = 0;
-  (STATE.cards || []).forEach(c => {
-    modelRecapPicks(c, EDGE_THRESHOLD, { allPlays: true }).forEach(p => {
-      const st = modelRecapResult(c, p.name).status;
-      if (st !== 'win' && st !== 'loss') return;
-      au += unitProfit({ ml: p.odds, status: st });
-      ar += unitStake({ ml: p.odds });
-      if (st === 'win') aw++; else al++;
+  {
+    const wS = +document.getElementById('modelWSaber').value;
+    const wE = +document.getElementById('modelWEye').value;
+    buildBacktestPool().forEach(b => {
+      const mkt = b.mlImpliedFair; if (mkt == null) return;
+      const parts = [];
+      if (b.saberProb != null) parts.push({ p: b.saberProb, w: wS });
+      if (b.eyeProb   != null) parts.push({ p: b.eyeProb,   w: wE });
+      if (b.stokProb  != null) parts.push({ p: b.stokProb,  w: 0 });
+      if (parts.length < 2) return;
+      const tw = parts.reduce((x, q) => x + q.w, 0); if (tw <= 0) return;
+      const blended = parts.reduce((x, q) => x + (q.w / tw) * q.p, 0);
+      if (blended - mkt < EDGE_THRESHOLD) return;
+      au += unitProfit(b); ar += unitStake(b);
+      if (b.status === 'win') aw++; else al++;
     });
-  });
+  }
   const aroi = ar ? (au / ar) * 100 : 0;
   const allTime = (aw + al)
     ? `All-time: ${aw}-${al}  ${au >= 0 ? '+' : ''}${au.toFixed(2)}u  ROI ${aroi >= 0 ? '+' : ''}${aroi.toFixed(1)}%`
