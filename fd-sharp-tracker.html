@@ -51,9 +51,8 @@
 .livestrip{margin:10px 14px 0;padding:9px 11px;border-radius:12px;background:rgba(255,255,255,.035);border:1px solid var(--border)}
 .ls-row{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;font-size:11.5px;font-weight:700;color:var(--sub)}
 .ls-score{color:var(--text)}
-.bn-act{color:var(--sub);font-weight:800}
-.ball{display:inline-block;font-size:.85em;margin:0 3px;animation:ballBob 1.6s ease-in-out infinite}
-@keyframes ballBob{0%,100%{transform:translateY(0) rotate(-12deg)}50%{transform:translateY(-2px) rotate(12deg)}}
+.actpill{display:inline-flex;align-items:center;justify-content:center;min-width:1.7em;height:1.35em;padding:0 .45em;margin-left:.35em;border-radius:999px;background:rgba(96,165,250,.16);border:1px solid rgba(96,165,250,.45);color:#93c5fd;font-size:.72em;font-weight:900;vertical-align:.12em;line-height:1}
+.ball{display:inline-block;font-size:.85em;margin:0 3px}
 .ls-score b{font-size:13px;font-weight:900}
 .ls-clock{color:#ef4444;font-weight:900}
 .ls-field{margin-top:8px;display:flex;flex-direction:column;gap:6px}
@@ -567,7 +566,9 @@ async function loadEspnPlays() {
       if (!c || !s || e.status?.type?.state !== 'in') continue;
       const key = (c.competitors || []).map(t => teamKey(t.team?.displayName || t.team?.name)).sort().join('|');
       const byId = Object.fromEntries((c.competitors || []).map(t => [String(t.team?.id), teamKey(t.team?.displayName || t.team?.name)]));
-      out[key] = { text: String(s.lastPlay?.text || '').trim(), dd: s.downDistanceText || s.shortDownDistanceText || '', short: s.shortDownDistanceText || '', rz: !!s.isRedZone, pos: byId[String(s.possession)] || null, ytg: s.yardsToEndzone, dist: s.distance };
+      const abById = Object.fromEntries((c.competitors || []).map(t => [String(t.team?.id), String(t.team?.abbreviation || '').toUpperCase()]));
+      if (!window._espnLogged) { window._espnLogged = true; console.log('[espn] situation sample:', JSON.stringify(s)); }
+      out[key] = { text: String(s.lastPlay?.text || '').trim(), dd: s.downDistanceText || s.shortDownDistanceText || '', short: s.shortDownDistanceText || '', rz: !!s.isRedZone, pos: byId[String(s.possession)] || null, ytg: s.yardsToEndzone ?? null, dist: s.distance, spot: s.possessionText || '', posAb: abById[String(s.possession)] || null };
     }
     return out;
   } catch (e) { return null; }
@@ -617,6 +618,7 @@ function stateOf(f) {
     if (es.pos) possession = es.pos;
     if (es.ytg != null && !isNaN(Number(es.ytg))) ytg = Number(es.ytg);
     if (es.dist != null && !isNaN(Number(es.dist))) dist = Number(es.dist);
+    if (ytg == null) ytg = ytgFromSpot(es.spot || es.dd, [es.posAb]);
     if (play && es.short && ytg == null && !play.toLowerCase().includes(es.short.toLowerCase())) play = `${play.replace(/\.?\s*$/, '.')} ${es.short}.`;
   }
   return { away, home, period, clock, label: [pLabel, clock].filter(Boolean).join(' '), lastPlay: play, situ, redZone, possession, ytg, dist };
@@ -636,13 +638,25 @@ function ballSide(f, st) {
 const ballIco = (f, st, side) => ballSide(f, st) === side ? '<span class="ball" title="Has the ball">🏈</span>' : '';
 // Where the ball is: offense always drives left → right toward the end zone mark, with the
 // line to gain as a yellow tick. Needs yards-to-end-zone (ESPN), else nothing is drawn.
+// "ATL 46" + who has the ball → yards to the end zone (own side = 100 - n, their side = n).
+function ytgFromSpot(text, offenseAbs) {
+  const t = String(text || '');
+  const m = t.match(/\b([A-Z]{2,4})\s+(\d{1,2})\b/);
+  if (!m) return /\b50\b/.test(t) ? 50 : null;
+  const n = Number(m[2]), offs = offenseAbs.filter(Boolean).map(a => String(a).toUpperCase());
+  if (n === 50) return 50;
+  if (!offs.length) return null;
+  return offs.includes(m[1].toUpperCase()) ? 100 - n : n;
+}
 function fieldHtml(f, st) {
+  if (st.ytg == null) { const side = ballSide(f, st); if (side) st = { ...st, ytg: ytgFromSpot(st.situ, [f[side].ab]) }; }
   if (st.ytg == null || st.ytg < 0 || st.ytg > 100) return '';
   const pos = 100 - st.ytg, gain = st.dist != null && st.dist < st.ytg ? pos + st.dist : null;
   const side = ballSide(f, st), team = side ? f[side].ab : '';
   const txt = String(st.situ || '').replace(/\s+at\s+/i, ' · ');
   return `<div class="ls-field"><span class="lf-txt">${team ? `<b>${esc(team)}</b> ` : ''}${esc(txt)}</span><div class="lf-bar${st.ytg <= 20 ? ' rz' : ''}"><i class="lf-mid"></i>${gain != null ? `<i class="lf-gain" style="left:${gain}%"></i>` : ''}<b class="lf-ball" style="left:${pos}%"></b></div></div>`;
 }
+const actPill = v => v != null ? `<span class="actpill" title="Live count">${esc(v)}</span>` : '';
 // ── live feel: price moves and new plays, remembered between refreshes ──
 // A price that changed flashes once (green = better for you, red = worse) and keeps a small
 // "▲ 8¢" chip for a minute; a new last-play line slides in when it changes.
@@ -1907,7 +1921,7 @@ function renderBetNow() {
         <div class="chleft"><span class="st live">LIVE</span><span class="bn-gm">${teamLogo(r.f.away.logo)}${esc(r.f.away.ab)}${ballIco(r.f, stateOf(r.f), 'away')} @ ${teamLogo(r.f.home.logo)}${esc(r.f.home.ab)}${ballIco(r.f, stateOf(r.f), 'home')}</span></div>
         <div class="chleft">${pinTag(r)}<span class="bn-tier ${tier[1]}">${tier[0]}</span></div>
       </div>
-      <div class="bn-player">${esc(r.player)}${liveActuals[`${r.fid}|${r.mkey}|${normName(r.player)}`] != null ? ` <span class="bn-act">(${liveActuals[`${r.fid}|${r.mkey}|${normName(r.player)}`]})</span>` : ''}</div>
+      <div class="bn-player">${esc(r.player)}${actPill(liveActuals[`${r.fid}|${r.mkey}|${normName(r.player)}`])}</div>
       ${(() => { // Hot spot: the Over needs exactly 1 more with 1-2 quarters left. Good news when betting
         // the Over at FD, a warning when fading it (one more and the Under loses).
         if (r.isAlt || !isHotSitu(r.fid, r.mkey, r.player, r.line, r.side)) return '';
@@ -1964,7 +1978,6 @@ function render() {
     const valuePart = hasValueInfo ? `+${(r.evPct*100).toFixed(2)}% EV vs devigged fair (${fmtAm(probToAm(r.fairProb))})` : null;
     const sigText = `✓ auto-tracked · ${[arbPart, valuePart].filter(Boolean).join(' · ')}`;
     const liveActual = liveActuals[`${r.fid}|${r.mkey}|${normName(r.player)}`];
-    const sideLabelNow = liveActual != null ? `${sideLabel} (${liveActual})` : sideLabel;
     const alertBadges = [
       hot ? `<span class="alertbadge hot">🔥 1 AWAY · ${st.period ? `Q${st.period}` : 'LIVE'}</span>` : '',
       profitHot ? `<span class="alertbadge profit">⚡ PROFITABLE</span>` : '',
@@ -1977,7 +1990,7 @@ function render() {
       </div>
       ${alertRow}
       <div class="gm">${teamLogo(r.f.away.logo)}${esc(r.f.away.ab)} <span>${isNaN(st.away)?'':st.away}</span>${ballIco(r.f, st, 'away')} @ ${teamLogo(r.f.home.logo)}${esc(r.f.home.ab)} <span>${isNaN(st.home)?'':st.home}</span>${ballIco(r.f, st, 'home')}${st.label ? `<span class="qtr">${esc(st.label)}</span>` : ''}</div>
-      <div class="pick"><div class="m">${esc(marketLabel(r.mkey))}</div><div class="s">${esc(r.player)} — ${esc(sideLabelNow)}</div><div class="rawmkt">source: "${esc(r.marketNames[0])}"</div></div>
+      <div class="pick"><div class="m">${esc(marketLabel(r.mkey))}</div><div class="s">${esc(r.player)}${actPill(liveActual)} — ${esc(sideLabel)}</div><div class="rawmkt">source: "${esc(r.marketNames[0])}"</div></div>
       <div class="booklist">${fdRow}${detailRows}</div>
       ${liveStripHtml(r, r.side, r.line)}
       <div class="sig"><span>${sigText}</span></div>
