@@ -650,7 +650,10 @@ function computeRows(fxs, byFx) {
         if (!hasArb && !hasValue) return;
         // A pick can satisfy both rules at once — surface that instead of picking just one label.
         const qualKind = hasArb && hasValue ? 'both' : hasArb ? 'arb' : 'value';
-        candidates.push({ side, fd, arbBooks, bestArb: arbBooks[0]?.arbPct ?? null, valueBooks, fairProb, evPct, qualKind });
+        // DraftKings/Fliff's own price on the OTHER side, arb or not -- what Bet Now bets when it
+        // fades FD's side (e.g. receptions).
+        const hedgeQuotes = ['DraftKings', 'Fliff'].map(bk => oppBooks[bk] ? { book: bk, price: Number(oppBooks[bk].price), link: deepLink(oppBooks[bk]) } : null).filter(Boolean);
+        candidates.push({ side, fd, arbBooks, bestArb: arbBooks[0]?.arbPct ?? null, valueBooks, fairProb, evPct, qualKind, hedgeQuotes });
       });
       if (!candidates.length) return;
       // Over and under can both qualify against each other — that's a counter bet, not a signal.
@@ -661,7 +664,7 @@ function computeRows(fxs, byFx) {
       out.push({
         key, fid: f.id, f, mkey: P.mkey, marketNames: [P.marketName], player: P.player, line: P.line, side: chosen.side,
         fdPrice: Number(chosen.fd.price), fdLink: deepLink(chosen.fd), arbBooks: chosen.arbBooks, arbCount: chosen.arbBooks.length, bestArb: chosen.bestArb,
-        valueBooks: chosen.valueBooks, fairProb: chosen.fairProb, evPct: chosen.evPct, qualKind: chosen.qualKind,
+        valueBooks: chosen.valueBooks, fairProb: chosen.fairProb, evPct: chosen.evPct, qualKind: chosen.qualKind, hedgeQuotes: chosen.hedgeQuotes,
       });
     });
   });
@@ -1299,7 +1302,7 @@ const BETTABLE_HEDGE_BOOKS = ['DraftKings', 'Fliff'];
 // browser: the graded recap pasted in from the main device (update by replacing the text below with
 // a newer "Copy recap"). Bet Now uses it until this device's own graded history is at least as big.
 const BASELINE_RECAP = `FD SHARP TRACKER - GRADED RECAP
-Generated 10/18/2026 12:39 PM
+Generated 10/18/2026 12:45 PM
 
 OVERALL: 339-392-0, +7.80u (731 graded)
 
@@ -1437,11 +1440,21 @@ function buildBetNowStats() {
 // matched buckets' own units into a single score. Alt rows have no opposite side at all (single-
 // sided value only, same as buildRecapText treats them: forced to 'over', no arb/combo/vs-book
 // fields exist on them), so those sections are skipped rather than guessed at.
+// Markets where your record says FanDuel's side loses (Receptions Over: 155-230, -31.93u), so Bet
+// Now FADES it: the bet is the other side at DraftKings/Fliff, not FD's side.
+const FADE_MARKETS = new Set(['rec']);
+// Scores a live row by the record of the bet you'd actually place:
+//  - FD side: your FD-side groups as they are.
+//  - Fade (FADE_MARKETS): the same groups with the sign flipped (FD's side losing = the other side
+//    winning; a proxy, since the other side is bet at DK/Fliff's price) plus your real DK/Fliff
+//    hedge results ("FD vs DraftKings · Under" etc).
 function scoreLiveRow(r, stats, isAlt) {
   const marketName = marketLabel(r.mkey);
   const sideLbl = isAlt ? 'Over' : sideLabelFor(r);
+  const fade = !isAlt && FADE_MARKETS.has(r.mkey);
+  const sign = fade ? -1 : 1;
   const matches = [];
-  const add = (label, key, map) => { if (map[key] != null) matches.push({ label, key, units: map[key] }); };
+  const add = (label, key, map, s2) => { if (map && map[key] != null) matches.push({ label: (s2 ?? sign) < 0 ? `Fade ${label}` : label, key, units: (s2 ?? sign) * map[key] }); };
   add('Market', marketName, stats.market);
   add('Side', sideLbl, stats.side);
   add('Prop+Side', `${marketName} ${sideLbl}`, stats.propSide);
@@ -1455,15 +1468,15 @@ function scoreLiveRow(r, stats, isAlt) {
     add('EV %', arbBucket(r.evPct), stats.evPct);
     add('EV %+Side', `${arbBucket(r.evPct)} · ${sideLbl}`, stats.evSide);
   }
-  if (!isAlt) {
-    add('Consensus', comboFor(r), stats.combo);
+  if (!isAlt) add('Consensus', comboFor(r), stats.combo);
+  if (fade) {
     const hedgeSide = sideLbl === 'Over' ? 'Under' : 'Over';
-    (r.arbBooks || []).filter(b => BETTABLE_HEDGE_BOOKS.includes(b.book)).forEach(b => {
-      add(`FD vs ${b.book}`, `FD vs ${b.book}`, stats.vsBook);
-      add(`FD vs ${b.book}+Side`, `FD vs ${b.book} · ${hedgeSide}`, stats.vsBookSide);
+    (r.hedgeQuotes || []).forEach(q => {
+      add(`FD vs ${q.book}`, `FD vs ${q.book}`, stats.vsBook, 1);
+      add(`FD vs ${q.book}+Side`, `FD vs ${q.book} · ${hedgeSide}`, stats.vsBookSide, 1);
     });
   }
-  return { score: matches.reduce((a, m) => a + m.units, 0), matches };
+  return { score: matches.reduce((a, m) => a + m.units, 0), matches, fade };
 }
 const betNowSourceHtml = st => `<div class="bnsrc">${st.source === 'baseline'
   ? `Using the built-in record: <b>${st.graded} graded</b>${st.generated ? ` (as of ${esc(st.generated)})` : ''} -- this device doesn't have that much history yet`
@@ -1478,7 +1491,8 @@ function renderBetNow() {
   const altScored = altRows.map(r => Object.assign({}, r, scoreLiveRow(r, stats, true), { isAlt: true }));
   // Bet Now is a "what should I actually bet" list, not a full inventory -- a pick whose matching
   // buckets have lost money so far gets left off entirely rather than shown low with a red score.
-  const all = [...mainScored, ...altScored].filter(r => r.score > 0).sort((a, b) => b.score - a.score);
+  // A fade needs DK or Fliff actually posting the other side -- otherwise there's nothing to bet.
+  const all = [...mainScored, ...altScored].filter(r => r.score > 0 && (!r.fade || (r.hedgeQuotes || []).length)).sort((a, b) => b.score - a.score);
   if (!all.length) { setViewHtml(view, betNowSourceHtml(stats) + '<div class="empty">Nothing live with a positive track record right now.</div>'); return; }
   const card = r => {
     const sideLabel = r.isAlt ? 'Yes' : (r.side === 'over' ? `Over ${r.line}` : r.side === 'under' ? `Under ${r.line}` : 'Yes');
@@ -1486,13 +1500,14 @@ function renderBetNow() {
     // The real bet: FD's own side when there's no hedge (value-only, or an alt line), the HEDGE
     // side at whichever consensus book actually arbs when there is one -- that's the trade this
     // whole tracker is built around (see groupByBook's note), not FD's own leg.
-    const fdRow = linkTag(r.fdLink, 'bookrow', `<span class="bkname">${bookName('FanDuel')}</span><span class="bkprice">${fmtAm(r.fdPrice)}</span><span class="bkmeta">${esc(sideLabel)} · reference</span>`);
+    const fdRow = r.fade ? linkTag(r.fdLink, 'bookrow', `<span class="bkname">${bookName('FanDuel')}</span><span class="bkprice">${fmtAm(r.fdPrice)}</span><span class="bkmeta">${esc(sideLabel)} · FD's side (fading it)</span>`) : '';
     // Caesars can be the book that makes a pick arb-qualified, but it's never the book we actually
     // place the hedge at -- only a DraftKings/Fliff leg turns into a real "BET" row here; a
     // Caesars-only arb falls back to FD's own side same as a value-only pick.
-    const hedgeBooks = (r.arbBooks || []).filter(b => BETTABLE_HEDGE_BOOKS.includes(b.book));
-    const betRows = !r.isAlt && hedgeBooks.length
-      ? hedgeBooks.map(b => linkTag(b.link, 'bookrow best', `<span class="bkname">${bookName(b.book)}</span><span class="bkprice">${fmtAm(b.oppPrice)}</span><span class="bkmeta">BET · ${esc(hedgeLabel)} · ${(b.arbPct*100).toFixed(2)}% arb</span>`)).join('')
+    // Fade: bet the other side at DK/Fliff, best price first. Otherwise bet FD's own side.
+    const hq = (r.hedgeQuotes || []).slice().sort((a, b) => b.price - a.price);
+    const betRows = r.fade
+      ? hq.map((q, i) => linkTag(q.link, i === 0 ? 'bookrow best' : 'bookrow', `<span class="bkname">${bookName(q.book)}</span><span class="bkprice">${fmtAm(q.price)}</span><span class="bkmeta">${i === 0 ? 'BET' : 'or'} · ${esc(hedgeLabel)} · fade FD</span>`)).join('')
       : linkTag(r.fdLink, 'bookrow best', `<span class="bkname">${bookName('FanDuel')}</span><span class="bkprice">${fmtAm(r.fdPrice)}</span><span class="bkmeta">BET · ${esc(sideLabel)}</span>`);
     return `<div class="row glass" data-key="${esc(r.key)}">
       <div class="cardhead">
@@ -1500,7 +1515,7 @@ function renderBetNow() {
         <div class="chleft"><span class="autobadge">score +${r.score.toFixed(2)}u</span></div>
       </div>
       <div class="gm">${teamLogo(r.f.away.logo)}${esc(r.f.away.ab)} @ ${teamLogo(r.f.home.logo)}${esc(r.f.home.ab)}</div>
-      <div class="pick"><div class="m">${esc(marketLabel(r.mkey))}</div><div class="s">${esc(r.player)} — ${esc(sideLabel)}</div></div>
+      <div class="pick"><div class="m">${esc(marketLabel(r.mkey))}${r.fade ? ' · FADE FD' : ''}</div><div class="s">${esc(r.player)} — ${esc(r.fade ? hedgeLabel : sideLabel)}</div></div>
       <div class="booklist">${fdRow}${betRows}</div>
       <div class="lochips">${betNowChipsHtml(r.matches)}</div>
     </div>`;
