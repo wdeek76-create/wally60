@@ -721,6 +721,12 @@ a.plbk{color:var(--cyan)}
 .ttsumh{cursor:pointer}
 .tkcaret{margin-left:auto;padding-left:8px;color:var(--dim);font-size:11px}
 .ttsumh button + .tkcaret{margin-left:8px}
+.clvrow{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:6px 0 2px;font-family:var(--mono);font-size:10.5px}
+.clvl{font-family:var(--sans);font-size:9.5px;font-weight:900;letter-spacing:.5px;color:var(--dim)}
+.clvb{padding:2px 7px;border-radius:7px;border:1px solid var(--line2);background:var(--bg2);color:var(--text)}
+.clvb i{font-style:normal;opacity:.6;font-size:9px}
+.clvb b.pos{color:var(--green)} .clvb b.neg{color:var(--red)}
+.clvb.all{border-color:rgba(34,197,94,.45)}
 .tksport{display:flex;align-items:center;gap:8px;margin:14px 0 8px;font-size:11px;font-weight:900;letter-spacing:.6px;text-transform:uppercase;color:var(--dim)}
 .tksport b{font-size:10px;padding:1px 7px;border-radius:999px;background:var(--bg2);border:1px solid var(--line2);color:var(--text)}
 .tkpop{position:fixed;left:10px;right:10px;bottom:calc(var(--ftrh,70px) + 12px);z-index:9500;padding:12px;border-radius:16px;background:rgba(17,24,39,.98);border:1px solid rgba(34,197,94,.55);box-shadow:0 10px 30px rgba(0,0,0,.5);animation:spIn .3s}
@@ -3913,6 +3919,38 @@ function statFor(r, mkey, sportKey, marketNames){
 // Regulation-only score for one side: the first three periods off the feed's period breakdown, or
 // null when there isn't one (never silently falls back to the full-game total, which includes OT).
 function regTotalOf(R, side, partial){ const s=R?.scores?.[side]; const per=Array.isArray(s?.periods)?s.periods:null; return per&&(per.length>=3||(partial&&per.length)) ? per.slice(0,3).reduce((a,p)=>a+(Number(p?.total??p?.score??p)||0),0) : null; }
+// ── Basketball CLV (FanDuel / Pinnacle / Props Builder closing prices) ──
+const CLV_BOOKS = ['fanduel','pinnacle','props builder'];
+const isHoopsBet = t => ['nba','wnba','ncaab'].includes(t.sportKey) && !t.isTeam && !t.isGame && (t.side==='over'||t.side==='under');
+// CLV % per book: your price vs that book's close (price ratio); Pinnacle vs its no-vig close when
+// both sides closed (that's your edge at Pinnacle's closing fair). Overall = average of the three.
+function clvOf(t){
+  const cb=t.closeByBook||{}; const out=[]; const dec=toDec(Number(t.price));
+  CLV_BOOKS.forEach(bk=>{
+    const c=cb[bk]; if(c==null || t.price==null) return;
+    let clv, nv=false;
+    if(bk==='pinnacle' && t.closePinOpp!=null){ const a=toImplied(c), b=toImplied(t.closePinOpp); clv=((a/(a+b))*dec-1)*100; nv=true; }
+    else clv=(dec/toDec(Number(c))-1)*100;
+    out.push({ bk, close:Number(c), clv, nv });
+  });
+  return { books:out, avg: out.length ? out.reduce((a,x)=>a+x.clv,0)/out.length : null };
+}
+// Average CLV per book (and overall) across bets that have closes, plus how often the close was beaten.
+function clvSummaryHtml(list){
+  const withC=list.map(t=>({t,c:clvOf(t)})).filter(x=>x.c.books.length); if(!withC.length) return '';
+  const line=(label, vals)=>{ if(!vals.length) return ''; const avg=vals.reduce((a,v)=>a+v,0)/vals.length, beat=Math.round(vals.filter(v=>v>0).length/vals.length*100);
+    return `<div class="ttrow"><span>${esc(label)} <span class="dim">(${vals.length})</span></span><span></span><span class="${avg>0?'pos':avg<0?'neg':''}">${clvPct(avg)}</span><span class="dim">beat ${beat}%</span></div>`; };
+  return `<div class="dim" style="font-size:9.5px;font-weight:800;letter-spacing:.5px;text-transform:uppercase;margin:8px 0 2px">Closing line value</div>`
+    + line('Overall', withC.map(x=>x.c.avg))
+    + CLV_BOOKS.map(bk=>line(bookLabel(bk)+(bk==='pinnacle'?' (no-vig)':''), withC.map(x=>x.c.books.find(b=>b.bk===bk)?.clv).filter(v=>v!=null))).join('');
+}
+const clvPct = v => `${v>=0?'+':''}${v.toFixed(1)}%`;
+function clvRowHtml(t){
+  if(!isHoopsBet(t)) return '';
+  const c=clvOf(t);
+  if(!c.books.length) return `<div class="clvrow"><span class="clvl">CLV</span><span class="dim">FD · Pin · PB closing prices show once the game starts</span></div>`;
+  return `<div class="clvrow"><span class="clvl">CLV</span>${c.books.map(x=>`<span class="clvb">${esc(bookShort(x.bk))} ${fmtAm(x.close)}${x.nv?' <i>nv</i>':''} <b class="${x.clv>0?'pos':x.clv<0?'neg':''}">${clvPct(x.clv)}</b></span>`).join('')}<span class="clvb all">Overall <b class="${c.avg>0?'pos':c.avg<0?'neg':''}">${clvPct(c.avg)}</b></span></div>`;
+}
 function gradeTracked(t){
   if(t.actual==null || !t.final) return null;
   if(t.side==='Yes'||t.side==='No'){ const yn=gradeYesNo(t); if(yn) return yn; }
@@ -3981,7 +4019,17 @@ async function refreshTracker(){
         // whatever book the bet itself was placed at. Pinnacle's own closing number, not
         // best-available across books (that's what t.close already is).
         const pinMine=allMine.filter(o=>canonBook(o.sportsbook)==='pinnacle');
-        t.openPin=pick(pinMine,'olv'); if(st&&st!=='unplayed') t.closePin=pick(pinMine,'clv'); });
+        t.openPin=pick(pinMine,'olv'); if(st&&st!=='unplayed') t.closePin=pick(pinMine,'clv');
+        // Basketball CLV: each of FanDuel / Pinnacle / Props Builder's own closing price at this line,
+        // plus Pinnacle's other side so its close can be devigged.
+        if(isHoopsBet(t) && st && st!=='unplayed'){
+          const cb={...(t.closeByBook||{})};
+          CLV_BOOKS.forEach(bk=>{ const v=pick(allMine.filter(o=>canonBook(o.sportsbook)===bk),'clv'); if(v!=null) cb[bk]=v; });
+          t.closeByBook=cb;
+          const opp=t.side==='over'?'under':t.side==='under'?'over':null;
+          if(opp){ const pinOpp=rows.filter(o=>canonBook(o.sportsbook)==='pinnacle' && normName(cleanSel(o.selection||o.name))===t.playerKey && sideOf(o)===opp && (t.line==null||Number(o.clv?.points??o.olv?.points??o.points)===Number(t.line)));
+            const v=pick(pinOpp,'clv'); if(v!=null) t.closePinOpp=v; }
+        } });
     }
     // 5) live stats + grade
     open.forEach(t=>{
@@ -4104,7 +4152,7 @@ const byPropSplits = list => [...new Set(list.map(t=>t.mkey))]
 function teamTotalsSummaryHtml(){
   const all=tracked.filter(isNbaProp26); const tts=all.filter(t=>t.result); const openN=all.length-tts.length;
   const row=(label,r)=>`<div class="ttrow"><span>${esc(label)} <span class="dim">(${r.n})</span></span><span>${r.w}-${r.l}-${r.p}</span><span class="${r.u>0?'pos':r.u<0?'neg':''}">${r.u>=0?'+':''}${r.u.toFixed(2)}u</span><span class="dim">${r.roi!=null?r.roi.toFixed(1)+'% ROI':'—'}</span></div>`;
-  const summary = all.length ? `${row('Overall', ttRecord(tts))}${openN?`<div class="ttrow dim" style="font-size:10.5px">${openN} open / ungraded not counted</div>`:''}${row('Favorites', ttRecord(tts.filter(t=>favOf(t)==='favorite')))}${row('Underdogs', ttRecord(tts.filter(t=>favOf(t)==='underdog')))}${row('Over bets', ttRecord(tts.filter(t=>t.side==='over')))}${row('Under bets', ttRecord(tts.filter(t=>t.side==='under')))}${byPropSplits(tts).map(([m,l])=>row(m, ttRecord(l))).join('')}${tts.length?'<div class="dim" style="font-size:9.5px;font-weight:800;letter-spacing:.5px;text-transform:uppercase;margin:8px 0 2px">By prop + side</div>':''}${byPropSideSplits(tts).map(([m,l])=>row(m, ttRecord(l))).join('')}` : `<div class="dim" style="font-size:11px;padding:4px 0">No NBA props tracked yet — open a player and tap Track.</div>`;
+  const summary = all.length ? `${row('Overall', ttRecord(tts))}${openN?`<div class="ttrow dim" style="font-size:10.5px">${openN} open / ungraded not counted</div>`:''}${row('Favorites', ttRecord(tts.filter(t=>favOf(t)==='favorite')))}${row('Underdogs', ttRecord(tts.filter(t=>favOf(t)==='underdog')))}${row('Over bets', ttRecord(tts.filter(t=>t.side==='over')))}${row('Under bets', ttRecord(tts.filter(t=>t.side==='under')))}${byPropSplits(tts).map(([m,l])=>row(m, ttRecord(l))).join('')}${tts.length?'<div class="dim" style="font-size:9.5px;font-weight:800;letter-spacing:.5px;text-transform:uppercase;margin:8px 0 2px">By prop + side</div>':''}${byPropSideSplits(tts).map(([m,l])=>row(m, ttRecord(l))).join('')}${clvSummaryHtml(all)}` : `<div class="dim" style="font-size:11px;padding:4px 0">No NBA props tracked yet — open a player and tap Track.</div>`;
   return `<div class="ttsum"><div class="ttsumh"><span>NBA Props 2026</span><button id="ttcopy" class="rm" style="background:var(--bg2)">Share</button></div>
     ${summary}</div>`;
 }
@@ -4222,7 +4270,7 @@ function trackCardHtml(t){
   const snaps = t.snapshots.length>1 ? snapsHtml(t) : '';
   return `<div class="tk ${t.result||''}">
     <div class="tkh"${t.final?'':` data-open="${t.id}"`}>${hs}<div class="who"><div class="nm">${teamLogo?`<img class="tl" src="${esc(teamLogo)}" alt="">`:''}${esc(t.playerName)} ${res}</div><div class="bet">${betStr}</div></div><div class="st">${st}<br><span class="dim">${esc(S.label)} · ${esc(t.away)}@${esc(t.home)}</span></div></div>
-    ${prog}${mv}<div class="tkbooks">${books}</div>${snaps}
+    ${prog}${mv}${clvRowHtml(t)}<div class="tkbooks">${books}</div>${snaps}
     <div class="tkf"><span class="dim" style="font-size:10px;font-family:var(--mono)">tracked ${new Date(t.trackedAt).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})}${t.edited?' · edited':''}${t.manualGrade?' · manually graded':''}</span><span><button class="ed" data-share="${t.id}">Share</button><button class="ed" data-edit="${t.id}">Edit</button><button class="rm" data-rm="${t.id}">Remove</button></span></div>
     ${editHtml(t)}
   </div>`;
