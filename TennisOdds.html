@@ -526,10 +526,10 @@ const {
 const IS_ANDROID = /Android/i.test(navigator.userAgent);
 const BOOKMAKERS = ['fanduel', 'pinnacle', 'novig', 'prophetx', 'betonline'];
 const EXCHANGES = ['novig', 'prophetx'];
-// Order books show up in: Pinnacle first, FanDuel second, then the exchanges.
-const BOOK_ORDER = ['pinnacle', 'fanduel', 'novig', 'prophetx', 'betonline'];
+// Order books show up in: FanDuel first (main priority), then the exchanges.
+const BOOK_ORDER = ['fanduel', 'novig', 'prophetx', 'pinnacle', 'betonline'];
 // Books that make it into the copied pick / bet links.
-const COPY_BOOKS = ['pinnacle', 'fanduel', 'novig', 'prophetx'];
+const COPY_BOOKS = ['fanduel', 'novig', 'prophetx'];
 // An exchange only counts if it has at least this much liquidity at or better than the play-to price.
 const MIN_EXCH_LIQ = 100;
 const bucketMarket = mt => {
@@ -722,11 +722,10 @@ const resolveShareLink = (deepLink, backendUrl, bookLabel) => {
   ].filter(Boolean).join('&');
   return `${ooRedirectBase(backendUrl)}?${qs}`;
 };
-// Which books are playable for a row: Pinnacle always (it's the reference line); FanDuel only at or
-// better than the play-to; Novig/ProphetX only with at least MIN_EXCH_LIQ available to the play-to.
+// Which books are playable for a row: FanDuel only at or better than the play-to;
+// Novig/ProphetX only with at least MIN_EXCH_LIQ available to the play-to.
 const playableBooks = row => (row.books || []).filter(b => {
   if (!COPY_BOOKS.includes(b.book)) return false;
-  if (b.book === 'pinnacle') return true;
   if (row.playTo != null && b.odds < row.playTo) return false;
   if (b.isExch) return (b.liqPlay || 0) >= MIN_EXCH_LIQ;
   return true;
@@ -970,7 +969,7 @@ const TennisSportsbookScreen = () => {
   const [pasteCopied, setPasteCopied] = useState(null);
   const [pastedOpponent, setPastedOpponent] = useState(null);
   const [pasteWarning, setPasteWarning] = useState(null);
-  const STARTUP_MESSAGES = ['Scanning Pinnacle markets…', 'Comparing sportsbook prices…', 'Calculating fair lines…', 'Building the board…'];
+  const STARTUP_MESSAGES = ['Scanning FanDuel markets…', 'Comparing sportsbook prices…', 'Calculating fair lines…', 'Building the board…'];
   const [startupMsgIdx, setStartupMsgIdx] = useState(0);
   useEffect(() => {
     if (matches.length > 0) return;
@@ -1051,7 +1050,7 @@ const TennisSportsbookScreen = () => {
   }, [bets]);
   const buildRow = (match, name, playTo) => {
     const rows = prices.filter(p => p.selection === name && p.market_type === 'moneyline' && p.event_id === match.eventId);
-    const pin = rows.find(p => p.sportsbook === 'pinnacle');
+    const fd = rows.find(p => p.sportsbook === 'fanduel');
     const bestOdds = rows.length > 0 ? Math.max(...rows.map(o => o.odds_american)) : null;
     const opponent = match.home === name ? match.away : match.home;
     const books = BOOKMAKERS.map(b => {
@@ -1078,8 +1077,7 @@ const TennisSportsbookScreen = () => {
       opponent,
       eventId: match.eventId,
       commence: match.commence,
-      pinnacleOdds: pin ? pin.odds_american : null,
-      pinnacleLimit: pin && pin.limit != null && Number(pin.limit) > 0 ? Number(pin.limit) : null,
+      fanduelOdds: fd ? fd.odds_american : null,
       bestOdds,
       books,
       depth,
@@ -1096,17 +1094,18 @@ const TennisSportsbookScreen = () => {
     });
     return out.sort((a, b) => new Date(a.commence) - new Date(b.commence));
   };
-  // Copied pick: Pinnacle, then FanDuel, then Novig/ProphetX with >= MIN_EXCH_LIQ to the play-to.
+  // Copied pick: FanDuel, then Novig/ProphetX with >= MIN_EXCH_LIQ to the play-to; start time on the first line.
   // <angle brackets> around each URL keep the masked link clickable but suppress Discord's
   // auto-embed preview card, so pasted picks don't turn into a wall of unfurled link cards.
   const copyLineFor = row => {
-    if (row.pinnacleOdds == null) return null;
+    const books = playableBooks(row);
+    if (!books.length) return null;
     const countdown = startsInCopy(row.commence);
     const linked = b => b.shareLink ? `[${BOOK_FULL_NAMES[b.book]}](<${b.shareLink}>)` : BOOK_FULL_NAMES[b.book];
-    return playableBooks(row).map(b => {
-      if (b.isExch) return `${linked(b)} ${fmtAm(b.odds)} (${b.winPct}%) Liq ${formatMoney(b.liqPlay)}${row.playTo != null ? ' to ' + fmtAm(row.playTo) : ''}`;
+    return books.map((b, i) => {
+      const starts = i === 0 && countdown ? ` starts ${countdown}` : '';
+      if (b.isExch) return `${linked(b)} ${fmtAm(b.odds)} (${b.winPct}%) Liq ${formatMoney(b.liqPlay)}${row.playTo != null ? ' to ' + fmtAm(row.playTo) : ''}${starts}`;
       const max = b.limit != null ? ` (${formatMoney(b.limit)} max)` : '';
-      const starts = b.book === 'pinnacle' && countdown ? ` starts ${countdown}` : '';
       return `${linked(b)} ${fmtAm(b.odds)}${max}${starts}`;
     }).join('\n');
   };
@@ -1853,7 +1852,7 @@ const TennisSportsbookScreen = () => {
         fontWeight: 700,
         fontFamily: "'Outfit', monospace"
       }
-    }, suggestion.books.length === 0 ? '—' : suggestion.books.map((b, i) => {
+    }, suggestion.books.filter(b => COPY_BOOKS.includes(b.book)).length === 0 ? '—' : suggestion.books.filter(b => COPY_BOOKS.includes(b.book)).map((b, i) => {
       const thinExch = b.isExch && (b.liqPlay || 0) < MIN_EXCH_LIQ;
       return React.createElement("span", {
         key: b.book,
@@ -1885,11 +1884,11 @@ const TennisSportsbookScreen = () => {
         color: 'var(--text-dim)',
         fontFamily: "'Outfit', monospace"
       }
-    }, startsInCopy(suggestion.commence)), worstPrice != null && suggestion.pinnacleOdds != null && (() => {
-      const out = suggestion.pinnacleOdds < worstPrice;
+    }, startsInCopy(suggestion.commence)), worstPrice != null && suggestion.fanduelOdds != null && (() => {
+      const out = suggestion.fanduelOdds < worstPrice;
       const f = v => (v > 0 ? '+' : '') + v;
       const cents = v => v >= 100 ? v - 200 : v;
-      const room = cents(suggestion.pinnacleOdds) - cents(worstPrice);
+      const room = cents(suggestion.fanduelOdds) - cents(worstPrice);
       return React.createElement("span", {
         style: {
           flexBasis: '100%',
@@ -1898,7 +1897,7 @@ const TennisSportsbookScreen = () => {
           color: out ? '#ff5c5c' : '#4ade80',
           fontWeight: 700
         }
-      }, f(suggestion.pinnacleOdds), " vs ", f(worstPrice), " ", React.createElement("span", {
+      }, "FD ", f(suggestion.fanduelOdds), " vs ", f(worstPrice), " ", React.createElement("span", {
         style: {
           opacity: 0.85
         }
