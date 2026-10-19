@@ -168,6 +168,10 @@ main{flex:1;padding:12px calc(var(--sar) + 12px) max(160px, calc(var(--ftrh,76px
 .qarbbk .qarblbl{text-transform:none;opacity:1;font-weight:700;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .qarbarrow{font-size:11px;color:var(--text);flex:0 0 auto}
 .qarbpostwrap{display:flex;align-items:baseline;gap:4px;flex:0 0 auto}
+.qarbliq{font-family:var(--mono);font-size:9px;font-weight:700;color:var(--sub);display:flex;gap:4px;align-items:center}
+.liqd{font-family:var(--mono);font-size:8.5px;font-weight:800;padding:0 4px;border-radius:999px;margin-left:3px;white-space:nowrap}
+.liqd.in{color:#22c55e;background:rgba(34,197,94,.15)}
+.liqd.out{color:#f87171;background:rgba(248,113,113,.15)}
 .qarbpost{font-family:var(--mono);font-size:14px;font-weight:800;color:var(--green)}
 .qarbpostpct{font-family:var(--mono);font-size:9.5px;font-weight:700;color:var(--text)}
 .bhead.single{display:flex;justify-content:center;align-items:center;gap:6px;padding:0 2px 4px;font-size:10px;font-weight:800;letter-spacing:.6px;text-transform:uppercase;color:var(--text);text-align:center}
@@ -738,14 +742,14 @@ const BOOK_REQ = [...BOOKS,'Courtside','Onyx Odds'];
 // NOT part of the main bulk load (BOOK_REQ) -- these are fetched separately, narrowly, only for
 // quick arb's own reference list (see ensureQarbExtras), so they never show up anywhere else:
 // not the regular board/boxes, not the grid, not the parlay tool, not the Target shop picker.
-const EXTRA_BOOK_REQ = ['Caesars','Hard Rock Bet','Kambi'];
+const EXTRA_BOOK_REQ = ['Caesars','Hard Rock Bet','Kambi','BetMGM'];
 // BookMaker is NHL main lines + team totals only: requested for NHL, and any row it returns for a
 // player prop is dropped (mainBookRow) so it never shows outside those markets.
 const bookReqFor = sk => sk==='nhl' ? [...BOOK_REQ,'BookMaker'] : BOOK_REQ;
 const mainBookRow = (sk,o) => canonBook(o.sportsbook)!=='bookmaker' || (()=>{ const mk=marketKeyFor(sk,o.market); return !!mk && (TEAM_MKS.has(mk)||GAME_MKS.has(mk)); })();
 const EXCH = new Set(['novig','prophet x','kalshi']);
 const SHOW_MAX = new Set(['pinnacle','bet105']); // flat-limit books whose max we show under the odds too
-const SHORT = { 'props builder':'PB','fanduel':'FD','novig':'Novig','prophet x':'PX','kalshi':'Kalshi','pinnacle':'Pin','bet105':'b105','draftkings':'DK','fliff':'Fliff','betonline':'BOL','caesars':'Caes','hard rock bet':'HR','kambi':'Kambi','bookmaker':'BKM','circa':'Circa' };
+const SHORT = { 'props builder':'PB','fanduel':'FD','novig':'Novig','prophet x':'PX','kalshi':'Kalshi','pinnacle':'Pin','bet105':'b105','draftkings':'DK','fliff':'Fliff','betonline':'BOL','caesars':'Caes','hard rock bet':'HR','betmgm':'MGM','kambi':'Kambi','bookmaker':'BKM','circa':'Circa' };
 const canonBook = n => { const k=String(n||'').toLowerCase(); if(k==='courtside'||k==='onyx odds') return 'draftkings'; return k; };
 const bookLabel = n => { const k=canonBook(n); return BOOKS.find(b=>b.toLowerCase()===k) || n; };
 const bookShort = n => SHORT[canonBook(n)] || n;
@@ -904,9 +908,12 @@ const usd = n => n>=1000 ? '$'+(n/1000).toFixed(1).replace(/\.0$/,'')+'k' : '$'+
 // (same side in, same side out -- no cross-side mirroring, that was the wrong math for "I'm
 // posting an order," which isn't a two-leg arb against the opposite side at all).
 const toImplied = o => { o=Number(o); return o>0 ? 100/(o+100) : Math.abs(o)/(Math.abs(o)+100); };
+// Exact probability to post at (not re-derived from the rounded American price), so the ¢/%
+// shown is the real number to type in: 50.6¢, not "51¢".
+const postImpFor = (refPrice, threshPct) => toImplied(Number(refPrice)) + (Number(threshPct)||0)/100;
+const pct1 = imp => `${(imp*100).toFixed(1)}${exPctMode==='cents'?'¢':'%'}`;
 function calcPostPrice(refPrice, threshPct){
-  const myImp = toImplied(Number(refPrice));
-  const postImp = myImp + (Number(threshPct)||0)/100;
+  const postImp = postImpFor(refPrice, threshPct);
   if(postImp<=0 || postImp>=1) return null;
   const am = postImp<0.5 ? Math.round(100/postImp-100) : Math.round(-postImp/(1-postImp)*100);
   return am>0?'+'+am:String(am);
@@ -1778,6 +1785,18 @@ function depthSummary(o){
 // whether a price/liquidity number actually moved, and flash it green (up) or red (down)
 // if so. First sighting of a slot never flashes.
 const flashSeen = {};
+// Liquidity in / out: when the $ behind a price changes, a small ▲ +$X / ▼ -$X chip stays for a
+// minute (the flash alone is gone in a second), so money coming in or pulling out is visible.
+const liqSeen = {}, LIQ_CHIP_MS = 60000;
+function liqDelta(key, val){
+  if(val==null || isNaN(val)) return '';
+  const now=Date.now(), v=Number(val), prev=liqSeen[key];
+  if(!prev) liqSeen[key]={ val:v, d:0, at:0 };
+  else if(prev.val!==v) liqSeen[key]={ val:v, d:v-prev.val, at:now };
+  const e=liqSeen[key];
+  if(!e.d || now-e.at>LIQ_CHIP_MS) return '';
+  return `<span class="liqd ${e.d>0?'in':'out'}">${e.d>0?'▲ +':'▼ -'}${usd(Math.abs(e.d))}</span>`;
+}
 function flashCls(key, val, isPrice){
   if(val==null) return '';
   const prev = flashSeen[key];
@@ -1840,7 +1859,7 @@ function sideCellHtml(b, sd, o, pt, ctxKey, ro){
   // Pinnacle moving its own LIMIT up (not just price) is a real signal — sharp books raise limits
   // when they're confident, so it's worth calling out harder than the usual brief flash.
   const pinLimitUp = b.key==='pinnacle' && liqFlashCls==='flash-up';
-  const liq = showMax && atTop!=null ? `<span class="${liqFlashCls}">${usd(atTop)}</span>${pinLimitUp?'<span class="limitup">⚡ Limit up</span>':''}` : '';
+  const liq = showMax && atTop!=null ? `<span class="${liqFlashCls}">${usd(atTop)}</span>${liqDelta(base+'|liqd', atTop)}${pinLimitUp?'<span class="limitup">⚡ Limit up</span>':''}` : '';
   const liqSummary = (cp.weighted && cp.size) ? `<div class="rliqsum${flashCls(base+'|liqsum', cp.size)}">${usd(cp.size)} at ${fmtAm(cp.price)}</div>` : '';
   const priceCls = flashCls(base+'|price', Number(displayPrice), true);
   const key=`${sd}|${b.key}`;
@@ -2072,20 +2091,22 @@ function boardHtml(rows, p, mkey, ctxKey, mainLine, pt, ro){
   // fired below and re-renders this card once it resolves), so they simply aren't there yet.
   const qarbExtraKey=`${p.fixtureId}|${marketNamesFor(p,mkey).join(',')}`;
   const qarbExtraRows=qarbExtraCache[qarbExtraKey]||[];
-  if(!qarbExtraCache[qarbExtraKey]) ensureQarbExtras(p,mkey).then(rows=>{ if(rows.length) rerenderCard(p,ctxKey); });
+  if(!qarbExtraCache[qarbExtraKey] || (qarbOpen && Date.now()-(qarbExtraAt[qarbExtraKey]||0)>QARB_EXTRA_TTL)) ensureQarbExtras(p,mkey).then(rows=>{ if(rows.length) rerenderCard(p,ctxKey); });
   const qarbList = qarbExtraRows.length ? bookBoard([...rows,...qarbExtraRows]) : list;
   const qarbActiveSorted = (activeSide==='under'?qarbList.filter(b=>b.under).sort((a,b)=>toDec(b.under.price)-toDec(a.under.price))
     : qarbList.filter(b=>b.over).sort((a,b)=>toDec(b.over.price)-toDec(a.over.price)));
   const sameBooks=qarbActiveSorted.filter(b=>!b.ex);
   const QARB_PRESETS=[0.3,0.5,1,2];
   const qarbRows=sameBooks.map(b=>{
-    const o=b[activeSide]; const refPct=`${Math.round(Number(winPct(o.price)))}${exPctMode==='cents'?'¢':'%'}`;
+    const o=b[activeSide]; const refPct=pct1(toImplied(o.price));
     const post=calcPostPrice(o.price,qarbThresh);
-    const postPct=post!=null?`${Math.round(Number(winPct(post)))}${exPctMode==='cents'?'¢':'%'}`:'';
+    const postPct=post!=null?pct1(postImpFor(o.price,qarbThresh)):'';
+    const qliq=cellPrice(b,o).size;
+    const qliqHtml=qliq!=null?`<span class="qarbliq">${usd(qliq)}${liqDelta(`${ctxKey}|qarb|${activeSide}|${b.key}|${o.points??''}`, qliq)}</span>`:'';
     const lg=bookLogo(b.key);
     return `<div class="qarbrow qarbline">
       <span class="qarbbk">${lg?`<img src="${esc(lg)}" alt="">`:`<span class="rlogotxt">${esc(bookShort(b.key))}</span>`}<span class="qarblbl">${esc(bookShort(b.key))}</span></span>
-      <span class="qarbvalwrap"><span class="qarbval" data-price="${o.price}">${fmtAm(o.price)}</span><span class="qarbvalpct">${refPct}</span></span>
+      <span class="qarbvalwrap"><span class="qarbval" data-price="${o.price}">${fmtAm(o.price)}</span><span class="qarbvalpct">${refPct}</span>${qliqHtml}</span>
       <span class="qarbarrow">→</span>
       <span class="qarbpostwrap"><span class="qarbpost">${post??'—'}</span>${post!=null?`<span class="qarbpostpct">${postPct}</span>`:''}</span>
     </div>`;
@@ -2542,18 +2563,19 @@ const marketNamesFor = (p,mkey) => [...new Set(rowsFor(p,mkey,mainRows).map(o=>o
 // narrow fetch (just this fixture+market, never the whole slate) per market card, cached so
 // swiping back to a market already seen doesn't refetch. boardHtml merges whatever comes back
 // into quick arb's own book list alone; nothing else on the card reads this cache.
-const qarbExtraCache = {};
+const qarbExtraCache = {}, qarbExtraAt = {};
+const QARB_EXTRA_TTL = 30000; // refetch Caesars/HR/Kambi/MGM while quick arb is open, so their prices + liq stay live
 const qarbExtraPending = {};
 async function ensureQarbExtras(p, mkey){
   const marketNames=marketNamesFor(p,mkey);
   const ck=`${p.fixtureId}|${marketNames.join(',')}`;
-  if(qarbExtraCache[ck]) return qarbExtraCache[ck];
+  if(qarbExtraCache[ck] && Date.now()-(qarbExtraAt[ck]||0)<=QARB_EXTRA_TTL) return qarbExtraCache[ck];
   if(qarbExtraPending[ck]) return qarbExtraPending[ck];
   if(!marketNames.length){ qarbExtraCache[ck]=[]; return []; }
   qarbExtraPending[ck]=(async()=>{
     const rows=[];
     try{ const r=await oo('/fixtures/odds',{fixture_id:[p.fixtureId],sportsbook:EXTRA_BOOK_REQ,market:marketNames}); (r?.data?.[0]?.odds||[]).forEach(o=>{ o._fx=p.fixtureId; rows.push(o); }); }catch(e){}
-    qarbExtraCache[ck]=rows; delete qarbExtraPending[ck]; return rows;
+    qarbExtraCache[ck]=rows; qarbExtraAt[ck]=Date.now(); delete qarbExtraPending[ck]; return rows;
   })();
   return qarbExtraPending[ck];
 }
@@ -2742,7 +2764,7 @@ const EXCH_HOME = {novig:'https://novig.us','prophet x':'https://prophetx.co',ka
 const BOOK_HOME = {...EXCH_HOME, fanduel:'https://sportsbook.fanduel.com', draftkings:'https://sportsbook.draftkings.com', bookmaker:'https://www.bookmaker.eu',
   betonline:'https://www.betonline.ag', bet105:'https://www.bet105.com', fliff:'https://www.getfliff.com',
   'props builder':'https://propsbuilder.com', pinnacle:'https://www.pinnacle.com', caesars:'https://sportsbook.caesars.com',
-  'hard rock bet':'https://app.hardrock.bet'};
+  'hard rock bet':'https://app.hardrock.bet', betmgm:'https://sports.betmgm.com'};
 function shopLinkHtml(bookKey, label, o, urlOverride){
   const url = urlOverride || (o && deepLinkFor(o)) || BOOK_HOME[bookKey];
   const lg=bookLogo(bookKey); const logoEl = lg ? `<img class="plbklogo" src="${esc(lg)}" alt="">` : '';
