@@ -691,6 +691,18 @@ const nameMatches = (name, query) => {
   if (!queryWords.length) return false;
   return queryWords.every(qw => nameWords.some(nw => wordsClose(nw, qw)));
 };
+// Which side of a fixture an odds row's selection is, by name similarity -- books spell players
+// differently ("Kenny De Schepper" / "Kenny de Schepper", "Zeuch, Tom", "T. Zeuch"), so an exact
+// string match silently drops whole books from a match.
+const nameTokens = n => String(n || '').split(/[\s,.]+/).map(normWord).filter(w => w.length > 1);
+const sideFor = (sel, home, away) => {
+  const S = nameTokens(sel);
+  const score = T => S.filter(w => T.some(t => wordsClose(t, w))).length;
+  const h = score(nameTokens(home)),
+    a = score(nameTokens(away));
+  if (h === a) return null;
+  return h > a ? 'home' : 'away';
+};
 const normalizePickText = text => String(text || '').replace(/\u00a0/g, ' ').replace(/\r\n?|\u2028|\u2029|\u000b|\u000c/g, '\n');
 // Bet links work the same as the props screen: the device's own deep link (iOS / Android app link,
 // else the web link), opened with a plain target="_blank" anchor, falling back to the book's site.
@@ -1304,13 +1316,21 @@ const TennisSportsbookScreen = () => {
           (fx.odds || []).forEach(o => {
             const mk = String(o.market_id || o.market || '').toLowerCase().replace(/[^a-z]/g, '');
             if (mk !== 'moneyline') return;
+            const rawSel = o.selection || o.name;
+            // Label every book's row with the fixture's own player name so all books line up.
+            const side = home && away ? sideFor(rawSel, home, away) : null;
+            if (home && away && !side) {
+              console.log('[OpticOdds] could not place selection', JSON.stringify(rawSel), 'in', home, 'vs', away, '·', o.sportsbook);
+              return;
+            }
             allOdds.push({
               event_id: fx.id,
               event_start_time: fx.start_date,
               league: fx.league?.name || 'TENNIS',
               sportsbook: canonicalBook(o.sportsbook),
               market_type: 'moneyline',
-              selection: o.selection || o.name,
+              selection: side === 'home' ? home : side === 'away' ? away : rawSel,
+              raw_selection: rawSel,
               odds_american: Number(o.price),
               line: null,
               is_main_line: true,
@@ -1833,7 +1853,13 @@ const TennisSportsbookScreen = () => {
         fontWeight: 700,
         fontFamily: "'Outfit', monospace"
       }
-    }, suggestion.books.filter(b => COPY_BOOKS.includes(b.book)).length === 0 ? '—' : suggestion.books.filter(b => COPY_BOOKS.includes(b.book)).map((b, i) => {
+    }, suggestion.books.filter(b => COPY_BOOKS.includes(b.book)).length === 0 ? React.createElement("span", {
+      style: {
+        color: 'var(--text-dim)',
+        fontWeight: 600,
+        fontSize: '11px'
+      }
+    }, "No FanDuel / Novig / ProphetX price from OpticOdds", suggestion.books.length ? ' · has ' + suggestion.books.map(b => `${BOOK_FULL_NAMES[b.book] || b.book} ${fmtAm(b.odds)}`).join(', ') : '') : suggestion.books.filter(b => COPY_BOOKS.includes(b.book)).map((b, i) => {
       const thinExch = b.isExch && (b.liqPlay || 0) < MIN_EXCH_LIQ;
       return React.createElement("span", {
         key: b.book,
