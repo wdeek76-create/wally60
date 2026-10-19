@@ -443,7 +443,8 @@ a.p{color:var(--text);text-decoration:none;border-color:rgba(34,197,94,.55)!impo
 .shcard{border:1px solid var(--line2);border-radius:14px;background:var(--bg2);padding:10px 12px;cursor:pointer}
 .shhd{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
 .shpl{font-weight:800;font-size:15px;color:var(--text)}
-.shgm{font-size:10.5px;color:var(--sub);white-space:nowrap}
+.shgm{font-size:10.5px;color:var(--sub);white-space:nowrap} .shgm b,.sswhen b{color:var(--text)}
+.sswhen{text-align:right}
 .shside{margin:4px 0 6px;font-size:12px;font-weight:700;color:var(--text)}
 .shside b{color:var(--green)}
 .shfair{font-family:var(--mono);font-size:10.5px;color:var(--sub);margin-left:4px}
@@ -4934,6 +4935,8 @@ function sharpRecord(sk, scan, at, fxList){
   Object.entries(sharpTape).forEach(([k,e])=>{ if(e.sk!==sk || seen.has(k)) return; const last=e.hist[e.hist.length-1]; if(last && last.total!==0) e.hist.push({ t:at, total:0 }); e.L={...e.L, total:0, rows:[]}; e.at=at; });
 }
 const sharpFlow = e => { const first=e.hist[0]?.total||0; return { d: e.L.total-first, since: e.hist[0]?.t||e.at }; };
+// "in 2h 15m" until the game starts
+const tillGame = iso => { const m=Math.round((new Date(iso).getTime()-Date.now())/60000); if(isNaN(m)) return ''; if(m<=0) return 'starting'; return m<60?`in ${m}m`:m<1440?`in ${Math.floor(m/60)}h ${m%60}m`:`in ${Math.floor(m/1440)}d ${Math.floor(m%1440/60)}h`; };
 const sharpLive = e => e.f ? (e.f.live || new Date(e.f.start).getTime() <= Date.now()) : false;
 function sharpList(){
   return Object.values(sharpTape).filter(e=>e.L.total>=sharpMin && !sharpLive(e) && (sharpSportF==='all'||e.sk===sharpSportF));
@@ -4953,7 +4956,7 @@ function sharpCardHtml(e){
   const lineTxt = e.line!=null ? ' '+e.line : '';
   const best = e.L.rows[0];
   return `<div class="shcard" data-k="${esc(e.k)}">
-    <div class="shhd"><span class="shpl"><span class="shsp">${esc(SPORTS[sk]?.label||sk)}</span>${esc(titleCase(e.player))}</span><span class="shgm">${f?`${esc(f.away.ab||f.away.name)} @ ${esc(f.home.ab||f.home.name)} · ${etDay(f.start)} ${etTime(f.start)}`:''}</span></div>
+    <div class="shhd"><span class="shpl"><span class="shsp">${esc(SPORTS[sk]?.label||sk)}</span>${esc(titleCase(e.player))}</span><span class="shgm">${f?`${esc(f.away.ab||f.away.name)} @ ${esc(f.home.ab||f.home.name)} · ${etDay(f.start)} ${etTime(f.start)} · <b>${tillGame(f.start)}</b>`:''}</span></div>
     <div class="shside ${e.side}"><b>${sharpSideLabel(e.side)}${lineTxt}</b> ${esc(marketLabel(sk,e.mk))} <span class="shedge ${e.soft[0]._edge>1e-7?'arb':'match'}">${edgeTxt(e.soft[0]._edge)}</span></div>
     <div class="shmoney"><span class="shbig">${usd(e.L.total)}</span><span class="shlbl">arb money</span>${flow}${best?`<span class="shfair">sharp fair ${esc(bookShort([...best.books][0]))} ${fmtAm(best.opp)}</span>`:''}</div>
     <div class="shsub">${oppName} book on the exchanges · <b>${usd(e.L.total)}</b> at 0.0% arb or better · <b>${usd(e.L.band||0)}</b> around target (within ${LIQ_BAND_CENTS}¢ of FD ${fmtAm(e.ref.price)})</div>
@@ -4985,12 +4988,54 @@ async function discordPost(payload){
   if(!discordHook) return false;
   try{ const r=await fetch(discordHook,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}); return r.ok; }catch(e){ console.warn('[sharp] discord post failed', e.message); return false; }
 }
-function sharpDiscord(e){
+// Discord post laid out like the sharp-money alerts already in the channel: sent as the book
+// (name + logo), title "🏀 NBA ARB · Edge +0.4% · -110 — Player Under 26.5 — Player Points",
+// the game + bet, an Edge Analysis block and an Exchange Depth table (best price + liquidity per
+// exchange on the other side). Green bar = arb, yellow = direct match.
+const SPORT_EMOJI = { nfl:'🏈', nba:'🏀', wnba:'🏀', nhl:'🏒', mlb:'⚾' };
+const httpsLogo = k => [bookLogos[k], bookLogos[String(k).replace(/\s+/g,'')]].find(u=>u && /^https:\/\//i.test(u)) || undefined;
+function sharpDiscord(e){ discordPost(sharpDiscordPayload(e)); }
+function sharpDiscordPayload(e, example){
   const o=e.soft[0], bk=canonBook(o.sportsbook), url=sharpLink(o), f=e.f, sk=e.sk;
-  discordPost({ username:'PocketMarket', embeds:[{
-    title:`${SPORTS[sk]?.label||sk} ${edgeTxt(o._edge)} · ${titleCase(e.player)} ${sharpSideLabel(e.side)}${e.line!=null?' '+e.line:''} ${marketLabel(sk,e.mk)}`, url:url||undefined, color:o._edge>1e-7?0x22c55e:0xeab308,
-    description:`**${usd(e.L.total)}** exchange money at 0.0% arb or better · ${usd(e.L.band||0)} around target\n${e.soft.map(x=>`${bookShort(canonBook(x.sportsbook))} **${fmtAm(x.price)}**${x._arb$?` · ${usd(x._arb$)} · ${edgeTxt(x._edge)}`:''}`).join('\n')}`,
-    footer:{ text:`${f?`${f.away.ab||f.away.name} @ ${f.home.ab||f.home.name} · ${etTime(f.start)}`:''}` } }] });
+  const edge=o._edge??0, isArb=edge>1e-7, book=bookLabel(o.sportsbook);
+  const mktName=(e.own.find(x=>x._sd===e.side)||e.own[0])?.market || marketLabel(sk,e.mk);
+  const bet=`${titleCase(e.player)} ${sharpSideLabel(e.side)}${e.line!=null?' '+e.line:''}`;
+  // one row per exchange on the other side: its arb money (orders at 0.0% or better) at its price
+  // closest to the arb line (the worst one still counted); an exchange with nothing at 0.0% shows
+  // its own best price and size instead
+  const ex={}; const lv=(e.L.all||e.L.rows);
+  lv.filter(l=>l.zero).forEach(l=>[...l.books].forEach(k=>{ const x=ex[k]=ex[k]||{opp:l.opp, size:0, arb:true}; x.size+=l.size; if(l.opp<x.opp) x.opp=l.opp; }));
+  lv.filter(l=>!l.zero).forEach(l=>[...l.books].forEach(k=>{ if(!ex[k] || (!ex[k].arb && l.opp>ex[k].opp)) ex[k]={opp:l.opp, size:l.size, arb:false}; }));
+  const exRows=Object.entries(ex).sort((a,b)=>(b[1].arb-a[1].arb) || b[1].size-a[1].size);
+  // sharp fair: the counted price closest to the arb line (lowest price still at 0.0% or better)
+  const near=lv.filter(l=>l.zero).sort((a,b)=>a.opp-b.opp)[0];
+  const best=near ? [[...near.books][0], near] : exRows[0];
+  const fairEdge = best ? -((toImplied(o.price)+toImplied(best[1].opp)-1)*100) : null;
+  const table=['Book          Odds   Liquidity', ...exRows.map(([k,v])=>`${bookLabel(k).padEnd(13)} ${fmtAm(v.opp).padStart(5)}  ${('$'+Math.round(v.size).toLocaleString()).padStart(9)}`)].join('\n');
+  // day + time (ET), then Discord's live countdown tag ("starts in 2 hours", keeps updating itself)
+  const when=f?`${new Date(f.start).toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric',timeZone:'America/New_York'})} · ${new Date(f.start).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',timeZone:'America/New_York'})} ET · starts <t:${Math.floor(new Date(f.start).getTime()/1000)}:R>`:'';
+  return { username:book, avatar_url:httpsLogo(bk), content: example ? '🧪 **Example alert** — this is what sharp money pings will look like (not a real bet).' : undefined, embeds:[{
+    title:`${example?'[EXAMPLE] ':''}${SPORT_EMOJI[sk]||''} ${SPORTS[sk]?.label||sk} ${isArb?'ARB':'DIRECT MATCH'} · Edge +${edge.toFixed(1)}% · ${fmtAm(o.price)} — ${bet} — ${mktName}`.trim().slice(0,256),
+    url:url||undefined, color:isArb?0x22c55e:0xeab308,
+    thumbnail: httpsLogo(bk) ? { url:httpsLogo(bk) } : undefined,
+    description:`${f?`${f.away.name||f.away.ab} @ ${f.home.name||f.home.ab} · ${when}\n`:''}**${bet}**\n*${mktName}*`,
+    fields:[
+      { name:'Edge Analysis', value:`${book}: ${sharpSideLabel(e.side)} **${fmtAm(o.price)}**\nSharp Fair: ${best?`${bookLabel(best[0])} **${fmtAm(best[1].opp)}**`:'—'}\nEdge: **${Math.max(0,fairEdge??0).toFixed(1)}%** at sharp fair${edge-(fairEdge??0)>0.05?` · up to ${edge.toFixed(1)}%`:''}\n**${usd(e.L.total)}** at 0.0% arb or better` },
+      { name:'Exchange Depth', value:'```\n'+table+'\n```' },
+    ],
+    footer:{ text:SPORTS[sk]?.label||sk } }] };
+}
+// A made-up alert sent when Discord gets connected, so the channel shows what real ones look like.
+function sharpExampleEntry(){
+  const L={ total:1023, avgOpp:122, bestHold:0, all:[
+    { opp:122, size:1023, books:new Set(['novig']), zero:true, hold:0 },
+    { opp:120, size:81, books:new Set(['novig']), zero:false, hold:0.4 },
+    { opp:111, size:633, books:new Set(['prophet x']), zero:false, hold:2.6 } ] };
+  L.rows=L.all.filter(l=>l.zero);
+  return { sk:'nba', player:'Reed Sheppard', side:'under', line:14.5, mk:'pra',
+    own:[{ market:'Player Points + Rebounds + Assists', _sd:'under' }],
+    soft:[{ sportsbook:'FanDuel', price:-122, _edge:0, _arb$:1023 }], L,
+    f:{ start:new Date(Date.now()+5*3600e3).toISOString(), away:{name:'Dallas Mavericks', ab:'DAL'}, home:{name:'Houston Rockets', ab:'HOU'} } };
 }
 // Tracked as Sharp Money (src:'sharp'): its own record in the Tracker, kept out of NBA Props 2026.
 // Built straight from the scan (works for any sport, not only the one on screen) with the fields
@@ -5079,7 +5124,7 @@ function renderSharp(){
     const v=prompt('Paste your Discord webhook URL (Server Settings → Integrations → Webhooks → New Webhook → Copy Webhook URL). Leave empty to turn Discord off.', discordHook);
     if(v==null) return;
     discordHook=v.trim(); LS.set('props_discord_hook', discordHook); renderSharp();
-    if(discordHook){ const ok=await discordPost({ username:'PocketMarket', content:'✅ PocketMarket sharp money pings connected.' }); toast(ok?'Discord connected':'Discord test failed — check the URL'); }
+    if(discordHook){ const ok=await discordPost({ username:'PocketMarket', content:'✅ PocketMarket sharp money pings connected.' }); toast(ok?'Discord connected':'Discord test failed — check the URL'); if(ok){ await new Promise(r=>setTimeout(r,600)); discordPost(sharpDiscordPayload(sharpExampleEntry(), true)); } }
   });
   view.querySelectorAll('.shcard').forEach(el=>el.addEventListener('click',ev=>{
     if(ev.target.closest('a')) return;
@@ -5114,7 +5159,7 @@ function openSharpSheet(e){
   const nm=esc(titleCase(e.player));
   const el=document.createElement('div'); el.id='shSheet'; el.className='ssov';
   el.innerHTML=`<div class="sspanel"><div class="ssgrab"></div>
-    <div class="sshead"><span class="ssbig">${usd(e.L.total)}</span><span class="sswhen">${f?`${etDay(f.start)}, ${etTime(f.start)}`:''}</span></div>
+    <div class="sshead"><span class="ssbig">${usd(e.L.total)}</span><span class="sswhen">${f?`${etDay(f.start)}, ${etTime(f.start)}<br><b>${tillGame(f.start)}</b>`:''}</span></div>
     <div class="ssmeta">${esc(SPORTS[sk]?.label||sk)}${f?`<br><b>${esc(f.away.name||f.away.ab)} vs ${esc(f.home.name||f.home.ab)}</b>`:''}<br><span class="ssmk">${esc(marketLabel(sk,e.mk))}</span></div>
     <div class="sstgt"><div class="sstgtn"><b>${nm}</b> ${sharpSideLabel(e.side)}${lineTxt}</div>
       <div class="sstgtr"><span class="sstgtlg">${lg(bk)}</span><span class="sstgtv"><b>${fmtAm(o.price)}</b><span>Odds</span></span><span class="sstgtv"><b class="${(o._edge??0)>1e-7?'pos':''}">${edgeTxt(o._edge)}</b><span>Edge</span></span>
