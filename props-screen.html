@@ -445,7 +445,7 @@ a.p{color:var(--text);text-decoration:none;border-color:rgba(34,197,94,.55)!impo
 .shpl{font-weight:800;font-size:15px;color:var(--text)}
 .shgm{font-size:10.5px;color:var(--sub);white-space:nowrap}
 .shside{margin:4px 0 6px;font-size:12px;font-weight:700;color:var(--text)}
-.shside.over b,.shside.under b{color:var(--green)}
+.shside b{color:var(--green)}
 .shfair{font-family:var(--mono);font-size:10.5px;color:var(--sub);margin-left:4px}
 .shsig{display:flex;align-items:center;gap:7px;padding:3px 0;font-size:11.5px}
 .shbk{flex:0 0 22px;display:flex;justify-content:center;font-size:8px;font-weight:800;color:var(--text)}
@@ -891,6 +891,7 @@ const SPORTS = {
           ['pts','Points',  m=>!m.includes('+')&&has(m,'point')&&!has(m,'power')&&!has(m,'most')],
           ['g','Goals',     m=>!m.includes('+')&&has(m,'goal')&&!has(m,'shots')&&!has(m,'total goals')&&!has(m,'team total')&&!has(m,'power')&&!has(m,'anytime')&&!has(m,'most')],
           ['a','Assists',   m=>!m.includes('+')&&has(m,'assist')&&!has(m,'most')],
+          ['ag','Anytime Goal', m=>has(m,'anytime')&&has(m,'goal')&&!has(m,'assist')&&!has(m,'first')&&!has(m,'last')],
           ['sv','Saves',    m=>!m.includes('+')&&has(m,'save')&&!has(m,'most')],
           ['ml','Moneyline',    mlMatch],
           ['ml60','60 Min ML',  ml60Match],
@@ -3803,7 +3804,7 @@ function statFor(r, mkey, sportKey, marketNames){
   const sum=(...ks)=>{ const v=ks.map(get); return v.some(x=>x==null)?null:v.reduce((a,b)=>a+b,0); };
   const base=SPORTS[sportKey]?.base||sportKey;
   if(base==='nfl'){ if(mkey==='atd'){ const t=sum('rushing_touchdowns','receiving_touchdowns'); return t; } return get(mkey); }
-  if(base==='nhl'){ if(mkey==='pts') return get('points'); return get(mkey); }
+  if(base==='nhl'){ if(mkey==='pts') return get('points'); if(mkey==='ag') return get('g'); return get(mkey); }
   if(mkey==='pra') return sum('pts','reb','ast'); if(mkey==='pr') return sum('pts','reb'); if(mkey==='pa') return sum('pts','ast'); if(mkey==='ra') return sum('reb','ast');
   return get(mkey);
 }
@@ -3812,10 +3813,19 @@ function statFor(r, mkey, sportKey, marketNames){
 function regTotalOf(R, side, partial){ const s=R?.scores?.[side]; const per=Array.isArray(s?.periods)?s.periods:null; return per&&(per.length>=3||(partial&&per.length)) ? per.slice(0,3).reduce((a,p)=>a+(Number(p?.total??p?.score??p)||0),0) : null; }
 function gradeTracked(t){
   if(t.actual==null || !t.final) return null;
+  if(t.side==='Yes'||t.side==='No'){ const yn=gradeYesNo(t); if(yn) return yn; }
   const a=Number(t.actual), L=Number(t.line); if(isNaN(a)||isNaN(L)) return null;
   if(t.side==='over') return a>L?'win':a===L?'push':'loss';
   if(t.side==='under') return a<L?'win':a===L?'push':'loss';
   return t.result||null;
+}
+// Anytime TD / goal: any at all wins Yes, none wins No (no line to compare against).
+function gradeYesNo(t){
+  if(t.actual==null || !t.final || (t.mkey!=='atd' && t.mkey!=='ag')) return null;
+  const a=Number(t.actual); if(isNaN(a)) return null;
+  if(t.side==='Yes') return a>0?'win':'loss';
+  if(t.side==='No') return a>0?'loss':'win';
+  return null;
 }
 let trackerBusy=false;
 async function refreshTracker(){
@@ -3994,7 +4004,7 @@ function sharpSummaryHtml(){
   const liqB=t=>{ const v=t.sharpLiq||0; return v>=5000?'$5k+ arb money':v>=2500?'$2.5k–5k arb money':'Under $2.5k arb money'; };
   const split=(fn)=>{ const m={}; g.forEach(t=>{ const k=fn(t); (m[k]=m[k]||[]).push(t); }); return Object.entries(m).map(([k,l])=>row(k, ttRecord(l))).join(''); };
   return `<div class="ttsum"><div class="ttsumh"><span>Sharp Money</span></div>${row('Overall', ttRecord(g))}${openN?`<div class="ttrow dim" style="font-size:10.5px">${openN} open / ungraded not counted</div>`:''}
-    ${row('Over bets', ttRecord(g.filter(t=>t.side==='over')))}${row('Under bets', ttRecord(g.filter(t=>t.side==='under')))}
+    ${[['under','Unders'],['Yes','Anytime Yes'],['No','Anytime No'],['over','Overs']].map(([k,l])=>{ const L=g.filter(t=>t.side===k); return L.length?row(l, ttRecord(L)):''; }).join('')}
     ${split(t=>`${(SPORTS[t.sportKey]?.label)||t.sportKey} · ${t.marketLabel||t.mkey}`)}${split(t=>t.book||'—')}${split(liqB)}</div>`;
 }
 function teamTotalsSummaryHtml(){
@@ -4772,18 +4782,26 @@ async function loadSportGameCounts(){
 // Exchange money backing a side, same exchange rule as the parlay tool: a side's real backing is
 // the OPPOSITE side's exchange order book (addExMirrors marks those rows), and only the orders that
 // make a 0.0% arbitrage or better against the TARGET -- the soft-book price you'd actually bet --
-// count. One scanner runs the whole time the page is open, across every player-prop sport (not
-// just the tab on screen): every 15s it re-pulls the next sport in rotation (exchanges + soft books
-// only, games in the next 36h). A side newly at/above the minimum pings at the top of the screen
-// wherever you are and is tracked as Sharp Money. Unders by default (Overs / Both on the tab).
-const SOFT_BOOKS = ['fanduel','draftkings','props builder','fliff','betonline'];
-const SHARP_REQ_BOOKS = ['Novig','Prophet X','Kalshi','FanDuel','DraftKings','Props Builder','Fliff','BetOnline'];
+// count. The target is FanDuel; the exchanges are ProphetX, Novig and Kalshi. One scanner runs
+// the whole time the page is open, across NFL / NBA / WNBA / NHL (not just the tab on screen):
+// every 15s it re-pulls the next sport in rotation (games in the next 36h). Only these markets:
+//   NFL  anytime TD, rec yds, rush yds, receptions, completions, pass attempts
+//   NBA/WNBA  points, PRA, 3PM, rebounds, assists      NHL  shots on goal, anytime goal
+// Over/under props: Unders only. Anytime TD / goal: Yes and No. A side newly at/above the minimum
+// ($350 default, summed across exchanges) pings at the top of the screen wherever you are and is
+// tracked as Sharp Money.
+const SOFT_BOOKS = ['fanduel'];
+const SHARP_REQ_BOOKS = ['Novig','Prophet X','Kalshi','FanDuel'];
+const SHARP_MARKETS = { nfl:['atd','rec_yds','rush_yds','rec','pass_cmp','pass_att'], nba:['pts','pra','3pm','reb','ast'], wnba:['pts','pra','3pm','reb','ast'], nhl:['sog','ag'] };
+const SHARP_YESNO = new Set(['atd','ag']);
+// Which side a row is: over/under for line props, yes/no for anytime TD / goal.
+const sharpSideOf = (o, mk) => { if(SHARP_YESNO.has(mk)) return String(o.selection_line||'').toLowerCase()==='no' ? 'no' : 'yes'; const s=sideOf(o); return s==='over'||s==='under' ? s : null; };
+const SHARP_OPP = { over:'under', under:'over', yes:'no', no:'yes' };
+const sharpSideLabel = side => side==='yes'?'Yes':side==='no'?'No':side==='over'?'Over':'Under';
 const SHARP_TICK_MS = 15000, SHARP_HIST_MS = 3*3600e3, SHARP_PING_STEP = 1000, SHARP_FX_TTL = 20*60e3;
-const SHARP_SKIP = new Set(['ncaab','cfb']); // college left out on purpose
-const SHARP_SPORTS = () => Object.entries(SPORTS).filter(([k,s])=>!s.parlayOnly && !s.ml && !SHARP_SKIP.has(k)).map(([k])=>k);
-let sharpMin = Number(LS.get('props_sharpmin','1000')) || 1000;
+const SHARP_SPORTS = () => Object.keys(SHARP_MARKETS).filter(k=>SPORTS[k]);
+let sharpMin = Number(LS.get('props_sharpmin2','350')) || 350;
 let sharpPingsOn = LS.get('props_sharppings','1')==='1';
-let sharpSideF = LS.get('props_sharpside','under');   // 'under' | 'over' | 'both'
 let sharpSportF = 'all';
 let sharpTimer = null, sharpBusy = false, sharpRR = 0;
 const sharpStarted = Date.now();
@@ -4792,27 +4810,27 @@ const sharpPinged = {};        // key -> arb $ at last ping
 const sharpPrimed = {};        // sk -> first pass done (sides already there are marked, not pinged)
 const sharpFxCache = {};       // sk -> { at, list }
 const sharpLastScan = {};      // sk -> time
-const sideOk = side => sharpSideF==='both' || side===sharpSideF;
-// Opposite-side exchange orders (mirrored rows) at 0.0% hold or better vs the target price.
-function arbLadder(mine, targetPrice){
-  const levels={}, seen=new Set(), tImp=toImplied(Number(targetPrice));
-  (mine||[]).forEach(o=>{
-    const k=canonBook(o.sportsbook); if(!EXCH.has(k) || !o._mirroredFrom) return;
-    const base=o._mirroredFrom;
-    const id=`${k}|${base.id||''}|${base.points??''}|${base.price}`; if(seen.has(id)) return; seen.add(id);
-    levelsOf(base).forEach(l=>{
+// The opposite side's real exchange order book vs the target price: orders at 0.0% hold or better
+// (the arb money) and, for context, everything within LIQ_BAND_CENTS of the target ("around target").
+function arbLadder(oppRows, targetPrice){
+  const levels={}, seen=new Set(), tImp=toImplied(Number(targetPrice)), tC=cents(Number(targetPrice));
+  let band=0;
+  (oppRows||[]).forEach(o=>{
+    const k=canonBook(o.sportsbook); if(!EXCH.has(k)) return;
+    const id=`${k}|${o.id||''}|${o.points??''}|${o.price}`; if(seen.has(id)) return; seen.add(id);
+    levelsOf(o).forEach(l=>{
       const opp=Number(l.price), hold=(tImp+toImplied(opp)-1)*100;
-      if(hold>1e-7) return;
-      const lv=levels[opp]||(levels[opp]={opp, size:0, books:new Set(), zero:true, hold});
+      if(Math.abs(cents(-opp)-tC) <= LIQ_BAND_CENTS) band+=l.size;
+      const lv=levels[opp]||(levels[opp]={opp, size:0, books:new Set(), zero:hold<=1e-7, hold});
       lv.size+=l.size; lv.books.add(k);
     });
   });
-  const rows=Object.values(levels).sort((a,b)=>b.opp-a.opp);
+  const all=Object.values(levels).sort((a,b)=>b.opp-a.opp);
+  const rows=all.filter(l=>l.zero);
   const total=rows.reduce((a,l)=>a+l.size,0);
   const avgDec=total?rows.reduce((a,l)=>a+toDec(l.opp)*l.size,0)/total:null;
-  return { rows, total, zeroTotal:total, avgOpp:avgDec?toAm(avgDec):null, bestHold:rows.length?Math.min(...rows.map(l=>l.hold)):null };
+  return { rows, all, total, band, avgOpp:avgDec?toAm(avgDec):null, bestHold:rows.length?Math.min(...rows.map(l=>l.hold)):null };
 }
-
 // Games in the next 36h for a sport: the loaded slate when it's the sport on screen, else a light
 // fixtures-only fetch cached 20 min.
 async function sharpFixtures(sk){
@@ -4827,12 +4845,13 @@ async function sharpFixtures(sk){
     sharpFxCache[sk]={ at:Date.now(), list }; return list;
   }catch(e){ console.warn('[sharp] fixtures failed', sk, e.message); return c?.list||[]; }
 }
-// Every player-prop side/line in the rows with 0.0%-arb exchange money vs the best soft-book price.
+// Every allowed market's target side/line with 0.0%-arb exchange money vs FanDuel's price.
 function sharpScan(sk, rows){
+  const allowed=new Set(SHARP_MARKETS[sk]||[]);
   const groups = {};
   rows.forEach(o=>{
-    if(!o.player_id) return; const mk=marketKeyFor(sk,o.market); if(!mk) return;
-    const s=sideOf(o); if(s!=='over'&&s!=='under') return;
+    if(!o.player_id) return; const mk=marketKeyFor(sk,o.market); if(!mk || !allowed.has(mk)) return;
+    const s=sharpSideOf(o, mk); if(!s) return; o._sd=s;
     const g=`${o._fx}|${mk}|${normName(cleanSel(o.selection||o.name))}`;
     (groups[g]=groups[g]||[]).push(o);
   });
@@ -4840,15 +4859,16 @@ function sharpScan(sk, rows){
   Object.entries(groups).forEach(([g, own])=>{
     if(!own.some(o=>EXCH.has(canonBook(o.sportsbook)))) return;
     const [fx, mk, key] = g.split('|');
-    const all = addExMirrors(own);
-    const lines = [...new Set(all.map(o=>o.points))];
-    ['over','under'].forEach(side=>lines.forEach(line=>{
-      const mine = all.filter(o=>sideOf(o)===side && o.points===line);
-      const soft = mine.filter(o=>SOFT_BOOKS.includes(canonBook(o.sportsbook))).sort((a,b)=>toDec(b.price)-toDec(a.price));
+    const sides = SHARP_YESNO.has(mk) ? ['yes','no'] : ['under'];
+    const lines = [...new Set(own.map(o=>o.points??null))];
+    sides.forEach(side=>lines.forEach(line=>{
+      const at = o => (o.points??null)===line;
+      const soft = own.filter(o=>o._sd===side && at(o) && SOFT_BOOKS.includes(canonBook(o.sportsbook))).sort((a,b)=>toDec(b.price)-toDec(a.price));
       if(!soft.length) return;
-      const L = arbLadder(mine, soft[0].price);
+      const opp = own.filter(o=>o._sd===SHARP_OPP[side] && at(o) && EXCH.has(canonBook(o.sportsbook)));
+      const L = arbLadder(opp, soft[0].price);
       if(!L.total) return;
-      soft.forEach(o=>{ const a=arbLadder(mine, o.price); o._arb$=a.total; o._edge=a.bestHold!=null?-a.bestHold:null; });
+      soft.forEach(o=>{ const a=arbLadder(opp, o.price); o._arb$=a.total; o._edge=a.bestHold!=null?-a.bestHold:null; });
       out.push({ k:`${sk}|${g}|${side}|${line}`, sk, fx, mk, key, pid:own.find(o=>o.player_id)?.player_id||null, player:cleanSel(own[0].selection||own[0].name), side, line, ref:soft[0], soft, L, own });
     }));
   });
@@ -4870,25 +4890,27 @@ function sharpRecord(sk, scan, at, fxList){
 const sharpFlow = e => { const first=e.hist[0]?.total||0; return { d: e.L.total-first, since: e.hist[0]?.t||e.at }; };
 const sharpLive = e => e.f ? (e.f.live || new Date(e.f.start).getTime() <= Date.now()) : false;
 function sharpList(){
-  return Object.values(sharpTape).filter(e=>e.L.total>=sharpMin && !sharpLive(e) && sideOk(e.side) && (sharpSportF==='all'||e.sk===sharpSportF));
+  return Object.values(sharpTape).filter(e=>e.L.total>=sharpMin && !sharpLive(e) && (sharpSportF==='all'||e.sk===sharpSportF));
 }
 const edgeTxt = e => e==null ? '' : e>1e-7 ? `ARB +${e.toFixed(1)}%` : 'DIRECT MATCH';
 function sharpCardHtml(e){
   const f=e.f; const fl=sharpFlow(e); const sk=e.sk;
   const ago = t => { const m=Math.max(0,Math.round((Date.now()-t)/60000)); return m<1?'just now':m<60?m+'m':Math.floor(m/60)+'h '+(m%60)+'m'; };
   const flow = fl.d ? `<span class="liqd ${fl.d>0?'in':'out'}">${fl.d>0?'▲ +':'▼ -'}${usd(Math.abs(fl.d))}</span><span class="shago">in ${ago(fl.since)}</span>` : `<span class="shago">steady · seen ${ago(fl.since)}</span>`;
-  const max=Math.max(...e.L.rows.map(l=>l.size),1);
-  const lad = e.L.rows.slice(0,4).map(l=>`<div class="pllv"><span class="pllvbk">${[...l.books].map(k=>{ const lg=bookLogo(k); return lg?`<img src="${esc(lg)}" alt="">`:`<span class="rlogotxt">${esc(bookShort(k))}</span>`; }).join('')}</span><span class="pllvp">${fmtAm(l.opp)}</span><span class="pllvbar"><i style="width:${Math.max(4,Math.round(l.size/max*100))}%"></i></span><span class="pllvs">${usd(l.size)}</span></div>`).join('');
+  const ladRows = (e.L.all||e.L.rows).filter(l=>l.zero || Math.abs(cents(-l.opp)-cents(Number(e.ref.price)))<=LIQ_BAND_CENTS).slice(0,6);
+  const max=Math.max(...ladRows.map(l=>l.size),1);
+  const lad = ladRows.map(l=>`<div class="pllv${l.zero?'':' off'}"><span class="pllvbk">${[...l.books].map(k=>{ const lg=bookLogo(k); return lg?`<img src="${esc(lg)}" alt="">`:`<span class="rlogotxt">${esc(bookShort(k))}</span>`; }).join('')}</span><span class="pllvp">${fmtAm(l.opp)}</span><span class="pllvbar"><i style="width:${Math.max(4,Math.round(l.size/max*100))}%"></i></span><span class="pllvs">${usd(l.size)}</span></div>`).join('');
   const soft = e.soft.map(o=>{ const bk=canonBook(o.sportsbook), lg=bookLogo(bk), a=o._arb$||0, url=deepLinkFor(o)||BOOK_HOME[bk]||'';
     const inner=`<span class="shbk">${lg?`<img src="${esc(lg)}" alt="">`:esc(bookShort(bk))}</span><b>${fmtAm(o.price)}</b><span class="shev">${a?`${usd(a)} · ${edgeTxt(o._edge)}`:'no arb'}</span>`;
     return url?`<a class="shst${a?(o._edge>1e-7?' good':' match'):''}" href="${esc(url)}" target="_blank" rel="noopener" data-betlink>${inner}</a>`:`<span class="shst">${inner}</span>`; }).join('');
-  const oppName = e.side==='over'?'Under':'Over';
+  const oppName = sharpSideLabel(SHARP_OPP[e.side]);
+  const lineTxt = e.line!=null ? ' '+e.line : '';
   const best = e.L.rows[0];
   return `<div class="shcard" data-k="${esc(e.k)}">
     <div class="shhd"><span class="shpl"><span class="shsp">${esc(SPORTS[sk]?.label||sk)}</span>${esc(titleCase(e.player))}</span><span class="shgm">${f?`${esc(f.away.ab||f.away.name)} @ ${esc(f.home.ab||f.home.name)} · ${etDay(f.start)} ${etTime(f.start)}`:''}</span></div>
-    <div class="shside ${e.side}"><b>${e.side==='over'?'Over':'Under'} ${e.line}</b> ${esc(marketLabel(sk,e.mk))} <span class="shedge ${e.soft[0]._edge>1e-7?'arb':'match'}">${edgeTxt(e.soft[0]._edge)}</span></div>
+    <div class="shside ${e.side}"><b>${sharpSideLabel(e.side)}${lineTxt}</b> ${esc(marketLabel(sk,e.mk))} <span class="shedge ${e.soft[0]._edge>1e-7?'arb':'match'}">${edgeTxt(e.soft[0]._edge)}</span></div>
     <div class="shmoney"><span class="shbig">${usd(e.L.total)}</span><span class="shlbl">arb money</span>${flow}${best?`<span class="shfair">sharp fair ${esc(bookShort([...best.books][0]))} ${fmtAm(best.opp)}</span>`:''}</div>
-    <div class="shsub">${oppName} book on the exchanges at 0.0% arb or better vs ${esc(bookShort(canonBook(e.ref.sportsbook)))} ${fmtAm(e.ref.price)}</div>
+    <div class="shsub">${oppName} book on the exchanges · <b>${usd(e.L.total)}</b> at 0.0% arb or better · <b>${usd(e.L.band||0)}</b> around target (within ${LIQ_BAND_CENTS}¢ of FD ${fmtAm(e.ref.price)})</div>
     <div class="pllad">${lad}</div>
     <div class="shstale"><span class="shlbl">Bet at</span>${soft}</div>
   </div>`;
@@ -4900,13 +4922,13 @@ function sharpPing(e){
   let wrap=$('#sharpPings'); if(!wrap){ wrap=document.createElement('div'); wrap.id='sharpPings'; document.body.appendChild(wrap); }
   const el=document.createElement(url?'a':'div'); el.className='sping';
   if(url){ el.href=url; el.target='_blank'; el.rel='noopener'; }
-  el.innerHTML=`${lg?`<img src="${esc(lg)}" alt="">`:''}<div class="spbody"><div class="sptop"><b>SHARP MONEY</b> · ${esc(SPORTS[sk]?.label||sk)} · ${usd(e.L.total)} · ${edgeTxt(o._edge)}</div><div class="spmain">${esc(titleCase(e.player))} ${e.side==='over'?'Over':'Under'} ${e.line} ${esc(marketLabel(sk,e.mk))}</div><div class="spsub">${esc(bookShort(bk))} ${fmtAm(o.price)} · tap to bet</div></div><span class="spx" data-spx>✕</span>`;
+  el.innerHTML=`${lg?`<img src="${esc(lg)}" alt="">`:''}<div class="spbody"><div class="sptop"><b>SHARP MONEY</b> · ${esc(SPORTS[sk]?.label||sk)} · ${usd(e.L.total)} · ${edgeTxt(o._edge)}</div><div class="spmain">${esc(titleCase(e.player))} ${sharpSideLabel(e.side)}${e.line!=null?' '+e.line:''} ${esc(marketLabel(sk,e.mk))}</div><div class="spsub">${esc(bookShort(bk))} ${fmtAm(o.price)} · tap to bet</div></div><span class="spx" data-spx>✕</span>`;
   el.addEventListener('click',ev=>{ if(ev.target.closest('[data-spx]')){ ev.preventDefault(); el.remove(); return; } setTimeout(()=>el.remove(),300); });
   wrap.prepend(el); while(wrap.children.length>3) wrap.lastChild.remove();
   setTimeout(()=>el.remove(), 30000);
   sharpBeep(); try{ navigator.vibrate&&navigator.vibrate(150); }catch(err){}
   try{ if(document.hidden && window.Notification && Notification.permission==='granted'){
-    const n=new Notification(`Sharp money · ${titleCase(e.player)} ${e.side==='over'?'o':'u'}${e.line} ${marketLabel(sk,e.mk)}`, { body:`${usd(e.L.total)} · ${edgeTxt(o._edge)} · ${bookShort(bk)} ${fmtAm(o.price)}`, tag:e.k });
+    const n=new Notification(`Sharp money · ${titleCase(e.player)} ${sharpSideLabel(e.side)}${e.line!=null?' '+e.line:''} ${marketLabel(sk,e.mk)}`, { body:`${usd(e.L.total)} · ${edgeTxt(o._edge)} · ${bookShort(bk)} ${fmtAm(o.price)}`, tag:e.k });
     n.onclick=()=>{ window.focus(); if(url) window.open(url,'_blank'); n.close(); };
   } }catch(err){}
 }
@@ -4920,8 +4942,8 @@ async function discordPost(payload){
 function sharpDiscord(e){
   const o=e.soft[0], bk=canonBook(o.sportsbook), url=deepLinkFor(o)||BOOK_HOME[bk]||'', f=e.f, sk=e.sk;
   discordPost({ username:'PocketMarket', embeds:[{
-    title:`${SPORTS[sk]?.label||sk} ${edgeTxt(o._edge)} · ${titleCase(e.player)} ${e.side==='over'?'Over':'Under'} ${e.line} ${marketLabel(sk,e.mk)}`, url:url||undefined, color:o._edge>1e-7?0x22c55e:0xeab308,
-    description:`**${usd(e.L.total)}** exchange money at 0.0% arb or better\n${e.soft.map(x=>`${bookShort(canonBook(x.sportsbook))} **${fmtAm(x.price)}**${x._arb$?` · ${usd(x._arb$)} · ${edgeTxt(x._edge)}`:''}`).join('\n')}`,
+    title:`${SPORTS[sk]?.label||sk} ${edgeTxt(o._edge)} · ${titleCase(e.player)} ${sharpSideLabel(e.side)}${e.line!=null?' '+e.line:''} ${marketLabel(sk,e.mk)}`, url:url||undefined, color:o._edge>1e-7?0x22c55e:0xeab308,
+    description:`**${usd(e.L.total)}** exchange money at 0.0% arb or better · ${usd(e.L.band||0)} around target\n${e.soft.map(x=>`${bookShort(canonBook(x.sportsbook))} **${fmtAm(x.price)}**${x._arb$?` · ${usd(x._arb$)} · ${edgeTxt(x._edge)}`:''}`).join('\n')}`,
     footer:{ text:`${f?`${f.away.ab||f.away.name} @ ${f.home.ab||f.home.name} · ${etTime(f.start)}`:''}` } }] });
 }
 // Tracked as Sharp Money (src:'sharp'): its own record in the Tracker, kept out of NBA Props 2026.
@@ -4929,11 +4951,12 @@ function sharpDiscord(e){
 // the tracker's grading/refresh reads.
 function sharpAutoTrack(e){
   const o=e.soft[0], bk=canonBook(o.sportsbook), f=e.f;
-  if(tracked.some(t=>t.src==='sharp' && t.playerKey===e.key && t.fixtureId===e.fx && t.mkey===e.mk && t.side===e.side && Number(t.line)===Number(e.line))) return;
-  const snap=snapshotFrom(e.own, e.side, e.line);
+  const tSide = e.side==='yes'?'Yes':e.side==='no'?'No':e.side;
+  if(tracked.some(t=>t.src==='sharp' && t.playerKey===e.key && t.fixtureId===e.fx && t.mkey===e.mk && t.side===tSide && (t.line??null)===(e.line??null))) return;
+  const snap=snapshotFrom(e.own.filter(x=>x._sd===e.side), tSide, e.line);
   tracked.unshift({ id:Date.now()+Math.random().toString(36).slice(2,6), src:'sharp', sportKey:e.sk, fixtureId:e.fx, start:f?.start||null, away:f?.away.ab||f?.away.name||'', home:f?.home.ab||f?.home.name||'', card:null,
     playerKey:e.key, playerName:e.player, pid:e.pid, headshot:'', teamAb:'', teamLogo:'',
-    mkey:e.mk, marketLabel:marketLabel(e.sk,e.mk), marketNames:[...new Set(e.own.map(x=>x.market))], side:e.side, line:e.line??null,
+    mkey:e.mk, marketLabel:marketLabel(e.sk,e.mk), marketNames:[...new Set(e.own.map(x=>x.market))], side:tSide, line:e.line??null,
     price:Number(o.price), book:bookLabel(o.sportsbook), bookKey:bk, pinned:true, trackedAt:Date.now(), mainLineAtTrack:mainLineOf(e.own, e.side),
     isTeam:false, teamSide:null, favDog:null, stakeUnits:null, isGame:false, sharpLiq:e.L.total, sharpEdge:o._edge,
     snapshots:[snap], live:null, actual:null, result:null, open:null, close:null });
@@ -4943,7 +4966,7 @@ function sharpCheckPings(sk){
   const first = !sharpPrimed[sk]; sharpPrimed[sk]=true;
   Object.values(sharpTape).filter(e=>e.sk===sk && e.L.total>=sharpMin && !sharpLive(e)).forEach(e=>{
     const prev=sharpPinged[e.k];
-    const fire = sharpPingsOn && sideOk(e.side);
+    const fire = sharpPingsOn;
     if(prev==null){ sharpPinged[e.k]=e.L.total; if(!first && fire){ sharpPing(e); sharpDiscord(e); sharpAutoTrack(e); } return; }
     if(e.L.total - prev >= SHARP_PING_STEP){ sharpPinged[e.k]=e.L.total; if(fire){ sharpPing(e); sharpDiscord(e); sharpAutoTrack(e); } }
   });
@@ -4992,15 +5015,14 @@ function renderSharp(){
   const view=$('#view');
   const list = sharpList().sort((a,b)=>{ const fa=sharpFlow(a).d, fb=sharpFlow(b).d; return (fb>0)-(fa>0) || b.L.total-a.L.total; });
   const sports = SHARP_SPORTS();
-  const counts = {}; Object.values(sharpTape).filter(e=>e.L.total>=sharpMin && !sharpLive(e) && sideOk(e.side)).forEach(e=>{ counts[e.sk]=(counts[e.sk]||0)+1; });
+  const counts = {}; Object.values(sharpTape).filter(e=>e.L.total>=sharpMin && !sharpLive(e)).forEach(e=>{ counts[e.sk]=(counts[e.sk]||0)+1; });
   const chips = `<div class="mnav" style="position:static"><button class="mchip${sharpSportF==='all'?' on':''}" data-shs="all">All</button>${sports.map(k=>`<button class="mchip${sharpSportF===k?' on':''}" data-shs="${k}">${esc(SPORTS[k].label)}${counts[k]?` <span class="tcount">${counts[k]}</span>`:''}</button>`).join('')}</div>
-    <div class="mnav" style="position:static">${[['under','Unders'],['over','Overs'],['both','Both']].map(([k,l])=>`<button class="mchip${sharpSideF===k?' on':''}" data-shside="${k}">${l}</button>`).join('')}${[500,1000,2500,5000].map(v=>`<button class="mchip${sharpMin===v?' on':''}" data-shmin="${v}">${usd(v)}+</button>`).join('')}</div>
+    <div class="mnav" style="position:static">${[250,350,500,1000,2500].map(v=>`<button class="mchip${sharpMin===v?' on':''}" data-shmin="${v}">${usd(v)}+</button>`).join('')}</div>
     <div class="mnav" style="position:static"><button class="mchip${sharpPingsOn?' on':''}" data-shping>${sharpPingsOn?'🔔 Pings on':'🔕 Pings off'}</button><button class="mchip${discordHook?' on':''}" data-shdc>${discordHook?'Discord ✓':'Discord'}</button></div>`;
   const scanned = sports.filter(k=>sharpLastScan[k]).length;
-  const body = list.length ? list.map(sharpCardHtml).join('') : `<div class="empty">${scanned?`Nothing with ${usd(sharpMin)}+ of 0% arb exchange money right now (${sharpSideF==='both'?'overs + unders':sharpSideF+'s'}). Scanning ${sports.length} sports nonstop.`:'Scanning…'}</div>`;
+  const body = list.length ? list.map(sharpCardHtml).join('') : `<div class="empty">${scanned?`Nothing with ${usd(sharpMin)}+ of 0% arb exchange money vs FanDuel right now. Scanning ${sports.length} sports nonstop.`:'Scanning…'}</div>`;
   view.innerHTML = `<div class="sh"><span class="t">Sharp Money</span><span class="dim" style="font-size:10.5px">scanning ${scanned}/${sports.length} sports · since ${new Date(sharpStarted).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})}</span></div>${chips}<div class="shlist">${body}</div>`;
-  view.querySelectorAll('[data-shmin]').forEach(b=>b.addEventListener('click',()=>{ sharpMin=Number(b.dataset.shmin); LS.set('props_sharpmin',String(sharpMin)); renderSharp(); }));
-  view.querySelectorAll('[data-shside]').forEach(b=>b.addEventListener('click',()=>{ sharpSideF=b.dataset.shside; LS.set('props_sharpside',sharpSideF); renderSharp(); }));
+  view.querySelectorAll('[data-shmin]').forEach(b=>b.addEventListener('click',()=>{ sharpMin=Number(b.dataset.shmin); LS.set('props_sharpmin2',String(sharpMin)); renderSharp(); }));
   view.querySelectorAll('[data-shs]').forEach(b=>b.addEventListener('click',()=>{ sharpSportF=b.dataset.shs; renderSharp(); if(sharpSportF!=='all' && !sharpLastScan[sharpSportF]) sharpScanSport(sharpSportF).then(()=>{ if(viewMode==='sharp') renderSharp(); }); }));
   view.querySelector('[data-shping]')?.addEventListener('click',()=>{
     sharpPingsOn=!sharpPingsOn; LS.set('props_sharppings',sharpPingsOn?'1':'0');
