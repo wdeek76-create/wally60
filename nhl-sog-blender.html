@@ -1899,6 +1899,7 @@ function renderTracker() {
         <button id="discord-btn" onclick="sendNhlCard('discord')" style="background:#0a1628;border:1px solid #0d2035;color:#cc66ff;
           border-radius:6px;padding:7px 14px;font-size:13px;font-weight:600;cursor:pointer;
           font-family:'Inter',sans-serif;">🖼 Send to Discord</button>
+        <button onclick="setNhlDiscordWebhook()" title="Discord webhook — when set, Send to Discord posts the card straight into your channel" style="background:#0a1628;border:1px solid #0d2035;color:${_nhlDiscordHook() ? '#cc66ff' : '#4a6fa5'};border-radius:6px;padding:7px 10px;font-size:13px;cursor:pointer;">${_nhlDiscordHook() ? '🔗' : '⚙'}</button>
         <button id="me-btn" onclick="sendNhlCard('me')" title="For you only: open bets where FanDuel, Novig or ProphetX is within 10 cents of play-to" style="background:#0a1628;border:1px solid #0d2035;color:#00cc66;
           border-radius:6px;padding:7px 14px;font-size:13px;font-weight:600;cursor:pointer;
           font-family:'Inter',sans-serif;">🖼 My Card (FD/NV/PX)</button>
@@ -5910,6 +5911,28 @@ function _nhlPaintCardReport() { const el = document.getElementById("nhl-card-re
 // Once a card has gone out today, the next send of that same card only carries picks it hasn't sent yet,
 // each with a NEW badge (header says "N NEW PROPS"). Nothing new → offer to resend everything.
 function _nhlSentKey(mode) { return mode; }
+// ── Discord webhook ──────────────────────────────────────────────────────────
+// Saved in this browser only (never in the file / GitHub). When set, Send to Discord posts the card image
+// straight into the channel and records it on the DISCORD tab — no copy/paste, no Yes/No.
+const NHL_DISCORD_HOOK_KEY = "nhl_discord_webhook";
+function _nhlDiscordHook() { try { return localStorage.getItem(NHL_DISCORD_HOOK_KEY) || ""; } catch (e) { return ""; } }
+function setNhlDiscordWebhook() {
+  const cur = _nhlDiscordHook();
+  const u = prompt("Discord webhook URL (Server Settings → Integrations → Webhooks → New Webhook → Copy Webhook URL).\nSaved only in this browser. Leave blank to turn it off and go back to copy/paste." + (cur ? "\n\nCurrently set: …" + cur.slice(-6) : ""), "");
+  if (u == null) return;
+  const v = u.trim();
+  if (v && !/^https:\/\/(?:ptb\.|canary\.)?discord(?:app)?\.com\/api\/webhooks\/\d+\/[\w-]+/.test(v)) { alert("That doesn't look like a Discord webhook URL (https://discord.com/api/webhooks/…)."); return; }
+  try { if (v) localStorage.setItem(NHL_DISCORD_HOOK_KEY, v); else localStorage.removeItem(NHL_DISCORD_HOOK_KEY); } catch (e) {}
+  showNhlToast(v ? "Discord webhook saved — Send to Discord now posts straight to the channel" : "Discord webhook off — back to copy/paste");
+  if (currentTab === "tracker") renderTracker();
+}
+async function _nhlPostToDiscord(blob, text) {
+  const fd = new FormData();
+  fd.append("payload_json", JSON.stringify({ content: text || "", allowed_mentions: { parse: [] } }));
+  fd.append("files[0]", blob, `nhl-sog-${_ymdLocal(new Date())}.png`);
+  const r = await fetch(_nhlDiscordHook(), { method: "POST", body: fd });
+  if (!r.ok) throw new Error("Discord said " + r.status + " " + (await r.text()).slice(0, 120));
+}
 async function sendNhlCard(mode) {
   const all = nhlPendingForSend();
   if (!all.length) { alert("No pending picks to send."); return; }
@@ -5949,6 +5972,21 @@ async function sendNhlCard(mode) {
     const canvas = await h2c(holder.firstElementChild, { backgroundColor: "#060b14", scale: 2, logging: false, useCORS: true, allowTaint: false });
     const blob = await new Promise(res => canvas.toBlob(res, "image/png"));
     if (!blob) throw new Error("no blob produced");
+    if (mode === "discord" && _nhlDiscordHook()) {
+      if (confirm(`Post ${freshPicks.length} pick${freshPicks.length === 1 ? "" : "s"} to Discord now?`)) {
+        try {
+          if (btn) btn.textContent = "Posting…";
+          await _nhlPostToDiscord(blob, "");
+          markSent();
+          const at = new Date().toISOString();
+          freshPicks.forEach(fp => { const real = bets.find(y => y.id === fp.id); if (real && !real.discordSent) Object.assign(real, { discordSent: true, discordOdds: fp.odds, discordBook: fp.book, discordAt: at }); });
+          saveBets();
+          showNhlToast(`Posted ${freshPicks.length} to Discord ✓ — on the DISCORD tab`);
+          if (btn) { btn.textContent = "✓ POSTED"; setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 1500); }
+          return;
+        } catch (err) { console.warn("[NHL] Discord webhook failed", err); alert("Couldn't post to Discord (" + err.message + ") — copying the card instead."); }
+      } else { if (btn) { btn.textContent = orig; btn.disabled = false; } return; }
+    }
     if (window.ClipboardItem && navigator.clipboard && navigator.clipboard.write) {
       try {
         await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
