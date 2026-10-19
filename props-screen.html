@@ -4984,9 +4984,27 @@ function sharpPing(e){
 // Discord: every ping also posts to a channel webhook (Server Settings → Integrations → Webhooks →
 // New Webhook → Copy URL, then paste it in the Sharp tab). Only sends while this page is open.
 let discordHook = LS.get('props_discord_hook','');
+// Discord rejects a whole post over one badly formed link, so links are cleaned first; if it still
+// says no, the post goes again without links/logos, and a toast says why if even that fails.
+const discordUrl = u => (u && /^https:\/\/[^\s]+$/i.test(String(u))) ? String(u).replace(/\[/g,'%5B').replace(/\]/g,'%5D') : undefined;
+function discordClean(p){
+  const q={...p, avatar_url:discordUrl(p.avatar_url)};
+  if(q.embeds) q.embeds=q.embeds.map(em=>({...em, url:discordUrl(em.url), thumbnail:em.thumbnail&&discordUrl(em.thumbnail.url)?{url:discordUrl(em.thumbnail.url)}:undefined}));
+  return q;
+}
 async function discordPost(payload){
   if(!discordHook) return false;
-  try{ const r=await fetch(discordHook,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}); return r.ok; }catch(e){ console.warn('[sharp] discord post failed', e.message); return false; }
+  const send = async body => { const r=await fetch(discordHook,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); return r.ok ? '' : `${r.status} ${(await r.text().catch(()=>'')).slice(0,160)}`; };
+  try{
+    const clean=discordClean(payload);
+    let err=await send(clean); if(!err) return true;
+    console.warn('[sharp] discord rejected post:', err, clean);
+    if(err.startsWith('429')){ await new Promise(r=>setTimeout(r,2500)); err=await send(clean); if(!err) return true; }
+    const bare={...clean, avatar_url:undefined, embeds:(clean.embeds||[]).map(em=>({...em, url:undefined, thumbnail:undefined}))};
+    err=await send(bare); if(!err) return true;
+    console.warn('[sharp] discord rejected bare post too:', err);
+    toast('Discord post failed: '+err.slice(0,70)); return false;
+  }catch(e){ console.warn('[sharp] discord post failed', e.message); toast('Discord post failed: '+e.message); return false; }
 }
 // Discord post laid out like the sharp-money alerts already in the channel: sent as the book
 // (name + logo), title "🏀 NBA ARB · Edge +0.4% · -110 — Player Under 26.5 — Player Points",
@@ -4996,7 +5014,7 @@ async function discordPost(payload){
 const pctTxt = v => `${Number(v).toFixed(1).replace(/\.0$/,'')}%`;
 const SPORT_EMOJI = { nfl:'🏈', nba:'🏀', wnba:'🏀', nhl:'🏒', mlb:'⚾' };
 const httpsLogo = k => [bookLogos[k], bookLogos[String(k).replace(/\s+/g,'')]].find(u=>u && /^https:\/\//i.test(u)) || undefined;
-function sharpDiscord(e){ discordPost(sharpDiscordPayload(e)); }
+function sharpDiscord(e){ try{ discordPost(sharpDiscordPayload(e)); }catch(err){ console.warn('[sharp] discord payload failed', err); toast('Discord post failed: '+err.message); } }
 function sharpDiscordPayload(e, example){
   const o=e.soft[0], bk=canonBook(o.sportsbook), url=sharpLink(o), f=e.f, sk=e.sk;
   const edge=o._edge??0, isArb=edge>1e-7, book=bookLabel(o.sportsbook);
