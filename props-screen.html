@@ -4837,6 +4837,12 @@ const SHARP_YESNO = new Set(['atd','ag']);
 // Which side a row is: over/under for line props, yes/no for anytime TD / goal.
 const sharpSideOf = (o, mk) => { if(SHARP_YESNO.has(mk)) return String(o.selection_line||'').toLowerCase()==='no' ? 'no' : 'yes'; const s=sideOf(o); return s==='over'||s==='under' ? s : null; };
 const SHARP_OPP = { over:'under', under:'over', yes:'no', no:'yes' };
+// Bet link that works on a phone and in Discord: FanDuel gets its https addToBetslip link (opens
+// the FD app with the bet in the slip when it's installed, the site otherwise), built from the row's
+// own marketId/selectionId; other books use their https deep link, else the book's home page.
+const sharpLink = o => { const k=canonBook(o?.sportsbook); if(k==='fanduel'){ const u=fdParlayLink([o]); if(u) return u; }
+  const d=o?.deep_link||{}; const https=[IS_IOS?d.ios:null, IS_ANDROID?d.android:null, d.desktop, d.ios, d.android].find(u=>u && /^https:\/\//i.test(String(u)));
+  return https || deepLinkFor(o) || BOOK_HOME[k] || ''; };
 const sharpSideLabel = side => side==='yes'?'Yes':side==='no'?'No':side==='over'?'Over':'Under';
 const SHARP_TICK_MS = 15000, SHARP_HIST_MS = 3*3600e3, SHARP_PING_STEP = 1000, SHARP_FX_TTL = 20*60e3;
 const SHARP_SPORTS = () => Object.keys(SHARP_MARKETS).filter(k=>SPORTS[k]);
@@ -4940,7 +4946,7 @@ function sharpCardHtml(e){
   const ladRows = (e.L.all||e.L.rows).filter(l=>l.zero || Math.abs(cents(-l.opp)-cents(Number(e.ref.price)))<=LIQ_BAND_CENTS).slice(0,6);
   const max=Math.max(...ladRows.map(l=>l.size),1);
   const lad = ladRows.map(l=>`<div class="pllv${l.zero?'':' off'}"><span class="pllvbk">${[...l.books].map(k=>{ const lg=bookLogo(k); return lg?`<img src="${esc(lg)}" alt="">`:`<span class="rlogotxt">${esc(bookShort(k))}</span>`; }).join('')}</span><span class="pllvp">${fmtAm(l.opp)}</span><span class="pllvbar"><i style="width:${Math.max(4,Math.round(l.size/max*100))}%"></i></span><span class="pllvs">${usd(l.size)}</span></div>`).join('');
-  const soft = e.soft.map(o=>{ const bk=canonBook(o.sportsbook), lg=bookLogo(bk), a=o._arb$||0, url=deepLinkFor(o)||BOOK_HOME[bk]||'';
+  const soft = e.soft.map(o=>{ const bk=canonBook(o.sportsbook), lg=bookLogo(bk), a=o._arb$||0, url=sharpLink(o);
     const inner=`<span class="shbk">${lg?`<img src="${esc(lg)}" alt="">`:esc(bookShort(bk))}</span><b>${fmtAm(o.price)}</b><span class="shev">${a?`${usd(a)} · ${edgeTxt(o._edge)}`:'no arb'}</span>`;
     return url?`<a class="shst${a?(o._edge>1e-7?' good':' match'):''}" href="${esc(url)}" target="_blank" rel="noopener" data-betlink>${inner}</a>`:`<span class="shst">${inner}</span>`; }).join('');
   const oppName = sharpSideLabel(SHARP_OPP[e.side]);
@@ -4958,7 +4964,7 @@ function sharpCardHtml(e){
 // ── pings ──
 function sharpBeep(){ try{ const A=window.AudioContext||window.webkitAudioContext; if(!A) return; const a=sharpBeep.ctx||(sharpBeep.ctx=new A()); const o=a.createOscillator(), g=a.createGain(); o.frequency.value=880; g.gain.setValueAtTime(0.08,a.currentTime); g.gain.exponentialRampToValueAtTime(0.0001,a.currentTime+0.35); o.connect(g); g.connect(a.destination); o.start(); o.stop(a.currentTime+0.35); }catch(e){} }
 function sharpPing(e){
-  const o=e.soft[0], bk=canonBook(o.sportsbook), url=deepLinkFor(o)||BOOK_HOME[bk]||'', lg=bookLogo(bk), sk=e.sk;
+  const o=e.soft[0], bk=canonBook(o.sportsbook), url=sharpLink(o), lg=bookLogo(bk), sk=e.sk;
   let wrap=$('#sharpPings'); if(!wrap){ wrap=document.createElement('div'); wrap.id='sharpPings'; document.body.appendChild(wrap); }
   const el=document.createElement(url?'a':'div'); el.className='sping';
   if(url){ el.href=url; el.target='_blank'; el.rel='noopener'; }
@@ -4980,7 +4986,7 @@ async function discordPost(payload){
   try{ const r=await fetch(discordHook,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}); return r.ok; }catch(e){ console.warn('[sharp] discord post failed', e.message); return false; }
 }
 function sharpDiscord(e){
-  const o=e.soft[0], bk=canonBook(o.sportsbook), url=deepLinkFor(o)||BOOK_HOME[bk]||'', f=e.f, sk=e.sk;
+  const o=e.soft[0], bk=canonBook(o.sportsbook), url=sharpLink(o), f=e.f, sk=e.sk;
   discordPost({ username:'PocketMarket', embeds:[{
     title:`${SPORTS[sk]?.label||sk} ${edgeTxt(o._edge)} · ${titleCase(e.player)} ${sharpSideLabel(e.side)}${e.line!=null?' '+e.line:''} ${marketLabel(sk,e.mk)}`, url:url||undefined, color:o._edge>1e-7?0x22c55e:0xeab308,
     description:`**${usd(e.L.total)}** exchange money at 0.0% arb or better · ${usd(e.L.band||0)} around target\n${e.soft.map(x=>`${bookShort(canonBook(x.sportsbook))} **${fmtAm(x.price)}**${x._arb$?` · ${usd(x._arb$)} · ${edgeTxt(x._edge)}`:''}`).join('\n')}`,
@@ -5087,7 +5093,7 @@ function closeSharpSheet(){ $('#shSheet')?.remove(); }
 function openSharpSheet(e){
   closeSharpSheet();
   const sk=e.sk, f=e.f, o=e.ref, bk=canonBook(o.sportsbook);
-  const url=deepLinkFor(o)||BOOK_HOME[bk]||'';
+  const url=sharpLink(o);
   const lineTxt=e.line!=null?' '+e.line:'';
   const oppSide=SHARP_OPP[e.side];
   const lg=k=>{ const u=bookLogo(k); return u?`<img src="${esc(u)}" alt="">`:`<span class="rlogotxt">${esc(bookShort(k))}</span>`; };
@@ -5101,7 +5107,7 @@ function openSharpSheet(e){
   const at=x=>(x.points??null)===(e.line??null);
   const by={}; rows.forEach(x=>{ const sd=sharpSideOf(x,e.mk); if(sd!==e.side && sd!==oppSide) return; if(!at(x)) return; const k=canonBook(x.sportsbook); const b=by[k]=by[k]||{}; if(!b[sd] || toDec(x.price)>toDec(b[sd].price)) b[sd]=x; });
   const order=Object.keys(by).sort((a,b)=>(a==='fanduel'?-1:b==='fanduel'?1:0) || (EXCH.has(b)-EXCH.has(a)) || a.localeCompare(b));
-  const cell=(x,isTarget)=>{ if(!x) return `<span class="sscell empty"></span>`; const k=canonBook(x.sportsbook); const liq=EXCH.has(k)?levelsOf(x)[0]?.size:null; const u=deepLinkFor(x)||BOOK_HOME[k]||'';
+  const cell=(x,isTarget)=>{ if(!x) return `<span class="sscell empty"></span>`; const k=canonBook(x.sportsbook); const liq=EXCH.has(k)?levelsOf(x)[0]?.size:null; const u=sharpLink(x);
     const inner=`${liq!=null?`<span class="ssliq">Liq ${usd(liq)}</span>`:'<span></span>'}<b>${fmtAm(x.price)}</b><span class="ssar">↗</span>`;
     return u?`<a class="sscell${isTarget?' tgt':''}" href="${esc(u)}" target="_blank" rel="noopener" data-betlink>${inner}</a>`:`<span class="sscell${isTarget?' tgt':''}">${inner}</span>`; };
   const table=order.map(k=>`<div class="ssrow">${cell(by[k][e.side], k===bk)}<span class="sslogo">${lg(k)}</span>${cell(by[k][oppSide], false)}</div>`).join('');
