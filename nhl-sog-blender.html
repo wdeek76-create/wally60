@@ -3953,6 +3953,14 @@ function _nhlDepthLevels(o) {
   return levels;
 }
 // Total $ and size-weighted average price an exchange has at or better than play-to.
+// Exchange counts as a best price only with $500+ up at prices at or better than play-to (whole depth,
+// not just the top quote); without a play-to, the top quote's own limit has to be $500+.
+function _nhlExchDeepEnough(entry, minPrice) {
+  const pt = minPrice != null ? parseInt(minPrice) : NaN;
+  if (isNaN(pt)) return entry.limit != null && entry.limit >= NHL_MODEL_EXCH_MIN;
+  const d = _nhlDepthToPlayTo(entry.levels || (entry.limit != null ? [{ price: entry.price, size: entry.limit }] : []), pt);
+  return !!d && d.total >= NHL_MODEL_EXCH_MIN;
+}
 function _nhlDepthToPlayTo(levels, playToNum) {
   const lv = (levels || []).filter(l => playToNum == null || isNaN(playToNum) || l.price >= playToNum);
   if (!lv.length) return null;
@@ -4171,7 +4179,7 @@ async function _nhlLiveBookFor(player, line, side, dateIso, teamHints, opts) {
     if (entry.isExch && lv && lv.length) entry.levels = lv;
     allBooks.push(entry);
     if (nhlBookRank(r.book) < 500) anchorCandidates.push(entry); // best price = Pinnacle / Prop Builder / FanDuel / Bet105; everything else is an alt book
-    else if (opts.exch500 && NHL_MODEL_EXCH.includes(r.book) && entry.limit != null && entry.limit >= NHL_MODEL_EXCH_MIN) anchorCandidates.push(entry); // model only: deep exchange price
+    else if (opts.exch500 && NHL_MODEL_EXCH.includes(r.book) && _nhlExchDeepEnough(entry, opts.minPrice)) anchorCandidates.push(entry); // deep exchange price ($500+, at or better than play-to when given)
   });
   if (!allBooks.length) return null;
   // Best price = highest American odds number, full stop — that's true
@@ -5597,7 +5605,8 @@ async function _nhlRefreshPicksForCard(picks) {
     const dateIso = _ymdLocal(new Date(b.date));
     const teamHints = b.team ? [b.team] : String(b.game || "").split("@").map(s => s.trim());
     let live = null;
-    try { live = await _nhlLiveBookFor(b.player, b.line, b.ou, dateIso, teamHints, b._modelFed ? { exch500: true } : undefined); } catch (e) { console.warn("[NHL] card refresh failed for", b.player, e && e.message); }
+    // Ensemble + model: an exchange is the best price only with $500+ up at play-to or better.
+    try { live = await _nhlLiveBookFor(b.player, b.line, b.ou, dateIso, teamHints, { exch500: true, minPrice: b.playTo }); } catch (e) { console.warn("[NHL] card refresh failed for", b.player, e && e.message); }
     // No live match right now (game started, board pulled, name miss) — fall
     // back to whatever was already logged rather than showing a blank price.
     const _log = (b.odds > 0 ? "+" : "") + b.odds + " " + b.book + ",";
@@ -5606,7 +5615,7 @@ async function _nhlRefreshPicksForCard(picks) {
     // Best trusted price no longer clears (play-to / every source's EV)? Send it at any other book that still
     // does — DraftKings, MGM, Kambi… — best price first. Same gate, just a different book on the card.
     if (!_nhlStillInRange(out)) {
-      const alt = (live.allBooks || []).filter(x => !x.alt && x.price > out.odds && (!x.isExch || x.limit == null || x.limit >= NHL_MODEL_EXCH_MIN))
+      const alt = (live.allBooks || []).filter(x => !x.alt && x.price > out.odds && (!x.isExch || _nhlExchDeepEnough(x, b.playTo)))
         .sort((x, y) => y.price - x.price).find(x => _nhlStillInRange(Object.assign({}, out, { odds: x.price, book: x.book })));
       if (alt) return Object.assign(out, { odds: alt.price, book: alt.book, _altFrom: (live.price > 0 ? "+" : "") + live.price + " " + live.book });
     }
