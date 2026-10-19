@@ -25565,8 +25565,8 @@ async function ooSyncInjuries() {
   return _injApplyMerged();
 }
 async function rwApiSyncLineups() {
-  const { rows, games: nGames } = await _rwFetchLineups();
-  if (!rows.length) throw new Error(`NBALineups: nothing posted yet (${nGames} game${nGames === 1 ? "" : "s"} listed) — RotoWire posts expected lineups close to game time; kept the existing lineups`);
+  const { rows, games: nGames, tried } = await _rwFetchLineups();
+  if (!rows.length) throw new Error(`NBALineups: nothing posted yet (${nGames} game${nGames === 1 ? "" : "s"} listed) — kept the existing lineups. Asked: ${(tried || []).join(" | ")}`);
   const players = {};
   const games = new Set();
   rows.forEach(o => {
@@ -25656,16 +25656,21 @@ function _rwDeepNamed(node, team, out) {
   return out;
 }
 async function _rwFetchLineups() {
-  // Today first; if nothing's posted yet, the next 2 days.
+  // Today first; if nothing's posted yet, tomorrow and the day after. RotoWire's own page uses date=tomorrow, so that
+  // literal is tried too. `tried` records what each date answered, so a miss says whether the date was honoured.
   let games = 0;
-  for (let i = 0; i < 3; i++) {
-    const d = new Date(); d.setDate(d.getDate() + i);
-    const data = await rwApiFetch("NBALineups", i === 0 ? null : localYMD(d));
-    games = Math.max(games, Array.isArray(data && data.Games) ? data.Games.length : 0);
+  const tried = [];
+  const attempts = [null, localYMD(new Date(Date.now() + 864e5)), "tomorrow", localYMD(new Date(Date.now() + 2 * 864e5))];
+  for (const dt of attempts) {
+    let data;
+    try { data = await rwApiFetch("NBALineups", dt); } catch (e) { if (dt === null) throw e; tried.push(`${dt}: ${String(e.message || e).slice(0, 60)}`); continue; }
+    const g = Array.isArray(data && data.Games) ? data.Games.length : 0;
+    games = Math.max(games, g);
     const rows = _rwDeepNamed(data);
-    if (rows.length) return { rows, games, data };
+    tried.push(`${dt || "today"} \u2192 Date ${data && data.Date ? data.Date : "?"}, ${g} game${g === 1 ? "" : "s"}, ${rows.length} players`);
+    if (rows.length) return { rows, games, data, tried };
   }
-  return { rows: [], games, data: null };
+  return { rows: [], games, data: null, tried };
 }
 async function _rwFetchDailyProj() {
   // Today first; an empty slate (no games / not posted yet) falls through to the next 3 days.
@@ -25837,7 +25842,7 @@ async function rwApiTest() {
       let data = await rwApiFetch(feed);
       let rows = feed === "NBADailyProj" ? _rwDeepPlayers(data) : (feed === "NBALineups" || feed === "NBACeilFloor") ? _rwDeepNamed(data) : _rwRows(data);
       if (feed === "NBACeilFloor" && !rows.length) out.push(`NBACeilFloor: no players posted yet · Games listed: ${data && data.Games && typeof data.Games === "object" ? (Array.isArray(data.Games) ? data.Games.length : Object.keys(data.Games).length) : 0} · Date: ${data && data.Date}`);
-      if (feed === "NBALineups" && !rows.length) out.push(`NBALineups: no players posted yet · Games listed: ${Array.isArray(data && data.Games) ? data.Games.length : "?"} · Date: ${data && data.Date}`);
+      if (feed === "NBALineups" && !rows.length) { const lf = await _rwFetchLineups(); if (lf.rows.length) { rows = lf.rows; data = lf.data; } out.push("NBALineups dates asked: " + lf.tried.join(" | ")); }
       if (feed === "NBADailyProj" && !rows.length) { const r2 = await _rwFetchDailyProj(); if (r2.rows.length) { rows = r2.rows; data = r2.data; } else out.push("NBADailyProj: no games/projections posted for the next 4 days (top-level: " + Object.keys(data || {}).join(", ") + ")"); }
       const keys = rows.length ? Object.keys(rows[0]).filter(k => k !== "__parent").join(", ") : "(no rows)";
       let mapped = "";

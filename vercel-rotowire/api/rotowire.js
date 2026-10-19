@@ -113,7 +113,7 @@ module.exports = async (req, res) => {
   const paths = PATHS[feed] || [];
   if (!paths.length && !PARAM_FEEDS.has(feed)) { res.status(400).json({ error: "unknown feed", feeds: [...Object.keys(PATHS), ...PARAM_FEEDS] }); return; }
 
-  const date = /^\d{4}-\d{2}-\d{2}$/.test(String((req.query && req.query.date) || "")) ? `&date=${req.query.date}` : "";
+  const date = /^(\d{4}-\d{2}-\d{2}|today|tomorrow)$/.test(String((req.query && req.query.date) || "")) ? `&date=${req.query.date}` : "";
   const sendOk = (text) => { res.setHeader("Cache-Control", "s-maxage=120, stale-while-revalidate=300"); res.setHeader("Content-Type", /^\s*</.test(text) ? "application/xml" : "application/json"); res.status(200).send(text); };
   // Feeds the regular API has no address for (ceiling/floor, lineups, DFS) go straight to RotoWire's proxy.
   if (PARAM_FEEDS.has(feed)) { const t0 = await viaProxy(feed, date, link); if (t0) { sendOk(t0); return; } }
