@@ -701,6 +701,20 @@ a.plbk{color:var(--cyan)}
 .rm{font-size:11px;color:var(--dim);padding:6px 10px;border:1px solid var(--line2);border-radius:8px}
 .ed{font-size:11px;color:var(--text);padding:6px 10px;border:1px solid rgba(34,197,94,.45);border-radius:8px;margin-right:6px}
 .tked{margin-top:10px;padding:10px;border:1px solid var(--line2);border-radius:10px;background:rgba(var(--bg2rgb),.45);grid-template-columns:1fr 1fr;gap:8px}
+.ttsum.closed > :not(.ttsumh){display:none}
+.ttsum.closed .ttsumh{margin-bottom:0}
+.ttsumh{cursor:pointer}
+.tkcaret{margin-left:auto;padding-left:8px;color:var(--dim);font-size:11px}
+.ttsumh button + .tkcaret{margin-left:8px}
+.tksport{display:flex;align-items:center;gap:8px;margin:14px 0 8px;font-size:11px;font-weight:900;letter-spacing:.6px;text-transform:uppercase;color:var(--dim)}
+.tksport b{font-size:10px;padding:1px 7px;border-radius:999px;background:var(--bg2);border:1px solid var(--line2);color:var(--text)}
+.tkpop{position:fixed;left:10px;right:10px;bottom:calc(var(--ftrh,70px) + 12px);z-index:9500;padding:12px;border-radius:16px;background:rgba(17,24,39,.98);border:1px solid rgba(34,197,94,.55);box-shadow:0 10px 30px rgba(0,0,0,.5);animation:spIn .3s}
+.tkpop .tkpt{font-size:12px;color:var(--dim);margin-bottom:8px} .tkpop .tkpt b{color:var(--text)}
+.tkpop .tkpr{display:flex;gap:8px;align-items:center}
+.tkpop input{flex:1;min-width:0;height:40px;border-radius:10px;border:1px solid var(--line2);background:var(--bg2);color:var(--text);font-family:var(--mono);font-size:16px;font-weight:700;padding:0 10px}
+.tkpop button{height:40px;padding:0 14px;border-radius:10px;border:1px solid var(--line2);background:var(--bg2);color:var(--text);font-weight:700}
+.tkpop button.p{border-color:rgba(34,197,94,.6);background:rgba(34,197,94,.15)}
+.tkpop .tkbar{height:3px;border-radius:2px;background:rgba(34,197,94,.6);margin-top:8px;transform-origin:left}
 .tkhist{margin-top:14px;padding-top:12px;border-top:1px solid var(--line2)}
 .tkhisttoggle{width:100%;text-align:left;padding:10px 12px;border-radius:12px;border:1px dashed var(--line2);background:transparent;color:var(--dim);font-size:12px;font-weight:700;margin-bottom:10px}
 .tkhist .tk{}
@@ -2839,7 +2853,25 @@ function trackProp(p, mkey, label, line, srcRows, bookKey, extra){
     isTeam:!!p.isTeam, teamSide:p.isTeam?p.teamSide:null, favDog:p.isTeam?moneylineFavDog(p.fixtureId,p.name):null, stakeUnits:p.isTeam?1:null, isGame:!!p.isGame,
     snapshots:[snap], live:null, actual:null, result:null, open:null, close:null });
   if(extra){ const {quiet, ...rest}=extra; Object.assign(tracked[0], rest); if(quiet){ saveTracked(); return; } }
-  saveTracked(); toast(`Tracking ${p.name} ${side==='over'?'o':side==='under'?'u':''}${line??''} ${marketLabel(sportKey,mkey)}${bestBook&&bookKey?' on '+bookLabel(bestBook[0]):''}`);
+  saveTracked(); showTrackPricePop(tracked[0]); toast(`Tracking ${p.name} ${side==='over'?'o':side==='under'?'u':''}${line??''} ${marketLabel(sportKey,mkey)}${bestBook&&bookKey?' on '+bookLabel(bestBook[0]):''}`);
+}
+// Right after Track: the price that was recorded, editable for 10s (paused while typing) in case
+// the bet went in at a different number. "102" means +102.
+let tkPopTimer=null;
+function showTrackPricePop(t){
+  $('#tkPop')?.remove(); clearInterval(tkPopTimer);
+  const el=document.createElement('div'); el.id='tkPop'; el.className='tkpop';
+  el.innerHTML=`<div class="tkpt">Tracked <b>${esc(t.playerName)} ${t.side==='over'?'o':t.side==='under'?'u':esc(t.side)+' '}${t.line??''} ${esc(t.marketLabel||'')}</b>${t.book?` · ${esc(t.book)}`:''} — got a different price?</div>
+    <div class="tkpr"><input type="text" autocomplete="off" value="${t.price!=null?fmtAm(t.price):''}" placeholder="-110 or 102"><button class="p" data-ok>Save</button><button data-x>✕</button></div><div class="tkbar"></div>`;
+  document.body.appendChild(el);
+  const inp=el.querySelector('input'), bar=el.querySelector('.tkbar');
+  let left=10000; const tick=100;
+  tkPopTimer=setInterval(()=>{ if(document.activeElement===inp) return; left-=tick; bar.style.transform=`scaleX(${Math.max(0,left/10000)})`; if(left<=0){ clearInterval(tkPopTimer); el.remove(); } }, tick);
+  const close=()=>{ clearInterval(tkPopTimer); el.remove(); };
+  const save=()=>{ const pr=parseAm(inp.value); if(pr==null){ toast('Odds like -110, +120 or 102'); return; } t.price=pr; t.edited=Date.now(); saveTracked(); toast(`Price set to ${fmtAm(pr)}`); close(); if(viewMode==='tracker') renderTracker(); };
+  el.querySelector('[data-ok]').addEventListener('click',save);
+  el.querySelector('[data-x]').addEventListener('click',close);
+  inp.addEventListener('keydown',e=>{ if(e.key==='Enter'){ e.preventDefault(); save(); } });
 }
 function addToParlay(p, mkey, label, line, srcRows, bookKey){
   const side=sideKey(label); if(isInParlay(p,mkey,label,line,bookKey)){ toast('Already in parlay'); return; }
@@ -4174,6 +4206,8 @@ function trackCardHtml(t){
   </div>`;
 }
 let historyShown=false;
+let tkRenderPending=false;
+const tkOpenSecs=new Set();
 // Lets the whole tracked list (every tracked bet, graded or not) travel as a real .json file --
 // so a freshly sent build (new origin, no carried-over localStorage) can pick the tracker back up
 // instead of starting over. Restoring reloads the page so every view picks up the restored data.
@@ -4215,13 +4249,34 @@ function renderTracker(){
   }
   // Graded bets drop out of the main list entirely -- they're done, no reason to keep scrolling
   // past them -- and sit behind a Bet History toggle instead, collapsed by default.
-  const openList=tracked.filter(t=>!t.final).sort((a,b)=>new Date(a.start||0)-new Date(b.start||0));
-  const historyList=tracked.filter(t=>t.final).sort((a,b)=>(b.edited||b.trackedAt||0)-(a.edited||a.trackedAt||0));
-  const openHtml = openList.length ? openList.map(trackCardHtml).join('') : '<div class="empty">No open bets.<br>Open a player and tap <b>Track</b> on a side.</div>';
+  // Something being typed into an edit box: don't wipe it with a background refresh -- redraw once
+  // the field is let go instead.
+  const ae=document.activeElement;
+  if(ae && ae.closest && ae.closest('#view .tked')){ tkRenderPending=true; return; }
+  tkRenderPending=false;
+  const kept={}; view.querySelectorAll('.tked').forEach(f=>{ if(f.style.display!=='none'){ const v={}; f.querySelectorAll('[name]').forEach(i=>v[i.name]=i.value); kept[f.dataset.ed]=v; } });
+  // Grouped by sport (the one with the latest addition first), newest-added first inside each.
+  const bySport = list => { const g={}; list.forEach(t=>{ const k=t.sportKey||'other'; (g[k]=g[k]||[]).push(t); });
+    return Object.entries(g).map(([k,l])=>[k, l.sort((a,b)=>(b.trackedAt||0)-(a.trackedAt||0))]).sort((a,b)=>(b[1][0].trackedAt||0)-(a[1][0].trackedAt||0))
+      .map(([k,l])=>`<div class="tksport"><span>${esc(SPORTS[k]?.label||'Other')}</span><b>${l.length}</b></div>${l.map(trackCardHtml).join('')}`).join(''); };
+  const openList=tracked.filter(t=>!t.final);
+  const historyList=tracked.filter(t=>t.final);
+  const openHtml = openList.length ? bySport(openList) : '<div class="empty">No open bets.<br>Open a player and tap <b>Track</b> on a side.</div>';
   const historyHtml = historyList.length
-    ? `<div class="tkhist"><button class="tkhisttoggle" id="tkhisttoggle">Bet History (${historyList.length}) ${historyShown?'▴ hide':'▾ show'}</button>${historyShown?historyList.map(trackCardHtml).join(''):''}</div>`
+    ? `<div class="tkhist"><button class="tkhisttoggle" id="tkhisttoggle">Bet History (${historyList.length}) ${historyShown?'▴ hide':'▾ show'}</button>${historyShown?bySport(historyList):''}</div>`
     : '';
   view.innerHTML = tkBackupHtml + dailyRecordHtml() + teamTotalsSummaryHtml() + sharpSummaryHtml() + openHtml + historyHtml;
+  // Summary sections start collapsed; tapping a header opens it (remembered until the page reloads).
+  view.querySelectorAll('.ttsum').forEach(sec=>{
+    const h=sec.querySelector('.ttsumh'); if(!h) return;
+    const key=(h.querySelector('span')?.textContent||'').trim(); sec.dataset.sec=key;
+    const open=tkOpenSecs.has(key); sec.classList.toggle('closed', !open);
+    h.insertAdjacentHTML('beforeend', `<span class="tkcaret">${open?'▴':'▾'}</span>`);
+    h.addEventListener('click', ev=>{ if(ev.target.closest('button')) return; if(tkOpenSecs.has(key)) tkOpenSecs.delete(key); else tkOpenSecs.add(key); const o=tkOpenSecs.has(key); sec.classList.toggle('closed', !o); h.querySelector('.tkcaret').textContent=o?'▴':'▾'; });
+  });
+  // edit boxes that were open stay open, with whatever was typed
+  Object.entries(kept).forEach(([id,v])=>{ const f=view.querySelector(`.tked[data-ed="${id}"]`); if(!f) return; f.style.display='grid'; Object.entries(v).forEach(([n,val])=>{ const i=f.querySelector(`[name="${n}"]`); if(i) i.value=val; }); });
+  view.querySelectorAll('.tked [name]').forEach(i=>i.addEventListener('blur',()=>setTimeout(()=>{ if(tkRenderPending && !(document.activeElement&&document.activeElement.closest&&document.activeElement.closest('#view .tked'))) renderTracker(); },300)));
   bindTkBackup();
   $('#tkhisttoggle')?.addEventListener('click',()=>{ historyShown=!historyShown; renderTracker(); });
   view.querySelectorAll('[data-rm]').forEach(b=>b.addEventListener('click',()=>{ tracked=tracked.filter(t=>t.id!==b.dataset.rm); saveTracked(); renderTracker(); }));
@@ -4236,14 +4291,14 @@ function renderTracker(){
   $('#stat').textContent=`Tracker · ${tracked.length} tracked · ${open} open${live?' · '+live+' live':''}`;
 }
 function editHtml(t){
-  const singleSided = t.side==='ML'||t.side==='Yes'||t.side==='ML60';
+  const singleSided = t.side==='ML'||t.side==='Yes'||t.side==='No'||t.side==='ML60';
   const sides = singleSided ? [[t.side,t.side]] : [['over','Over'],['under','Under']];
   const books = [...new Set([...BOOKS.map(b=>b.toLowerCase()), t.bookKey].filter(Boolean))];
   const curResult = t.manualGrade ? t.result : '';
   return `<div class="tked" data-ed="${t.id}" style="display:none">
     <label>Side<select name="side"${sides.length<2?' disabled':''}>${sides.map(([v,l])=>`<option value="${v}"${t.side===v?' selected':''}>${l}</option>`).join('')}</select></label>
     <label>Line<input name="line" type="text" inputmode="decimal" value="${t.line??''}" placeholder="${singleSided?'—':'27.5'}"${singleSided?' disabled':''}></label>
-    <label>Price<input name="price" type="text" value="${t.price!=null?fmtAm(t.price):''}" placeholder="-110"></label>
+    <label>Price<input name="price" type="text" autocomplete="off" value="${t.price!=null?fmtAm(t.price):''}" placeholder="-110 or 102 (= +102)"></label>
     <label>Shop<select name="book"><option value="">Best available</option>${books.map(b=>`<option value="${esc(b)}"${t.bookKey===b?' selected':''}>${esc(bookLabel(b))}</option>`).join('')}</select></label>
     <label>Result (manual grade)<select name="result"><option value=""${curResult===''?' selected':''}>Pending / auto-grade</option><option value="win"${curResult==='win'?' selected':''}>Win</option><option value="loss"${curResult==='loss'?' selected':''}>Loss</option><option value="push"${curResult==='push'?' selected':''}>Push</option></select></label>
     <div class="note">Correcting line/price/shop re-pulls open / close, so CLV follows what you actually took. Setting a result grades it yourself -- use this when a game's over and auto-grading hasn't caught up; it also moves the bet into Bet History.</div>
@@ -4258,7 +4313,7 @@ function saveEdit(id){
   const price = prRaw==='' ? null : parseAm(prRaw);
   if(prRaw!=='' && price==null){ toast('Price wants American odds, e.g. -110 or +120'); return; }
   let line = null;
-  if(t.side!=='ML'){ if(lnRaw===''){ toast('Line is required'); return; } line=Number(lnRaw); if(isNaN(line)){ toast('Line must be a number'); return; } }
+  if(t.side!=='ML' && t.side!=='Yes' && t.side!=='No' && t.side!=='ML60'){ if(lnRaw===''){ toast('Line is required'); return; } line=Number(lnRaw); if(isNaN(line)){ toast('Line must be a number'); return; } }
   const bk=f.querySelector('[name=book]').value;
   const sd=f.querySelector('[name=side]').value;
   const changed = t.line!==line || t.price!==price || t.side!==sd || (t.bookKey||'')!==bk;
@@ -4274,6 +4329,7 @@ function saveEdit(id){
   const resultRaw=f.querySelector('[name=result]').value;
   if(resultRaw){ t.result=resultRaw; t.final=true; t.manualGrade=true; }
   else if(t.manualGrade){ t.manualGrade=false; t.final=false; t.result=null; }
+  f.style.display='none'; document.activeElement?.blur?.();
   t.edited=Date.now(); saveTracked(); renderTracker(); refreshTracker();
   toast(resultRaw ? 'Graded — moved to Bet History' : 'Updated — re-pulling open / close');
 }
