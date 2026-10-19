@@ -692,36 +692,17 @@ const nameMatches = (name, query) => {
   return queryWords.every(qw => nameWords.some(nw => wordsClose(nw, qw)));
 };
 const normalizePickText = text => String(text || '').replace(/\u00a0/g, ' ').replace(/\r\n?|\u2028|\u2029|\u000b|\u000c/g, '\n');
-// The odds backend serves /api/odds -- the redirector below lives at /api/go on that same host.
-const ooRedirectBase = backendUrl => {
-  const b = String(backendUrl || '').replace(/\/+$/, '');
-  return /\/api\/odds$/i.test(b) ? b.replace(/\/api\/odds$/i, '/api/go') : 'https://nfl-props-tracker-1.vercel.app/api/go';
+const IS_IOS = /iPhone|iPad|iPod/i.test(navigator.userAgent) || navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1;
+// Pick the raw OpticOdds deep link that fits this device (app link on phones, web link on desktop).
+const pickDeviceLink = dl => {
+  if (!dl) return null;
+  if (typeof dl === 'string') return dl;
+  const order = IS_IOS ? [dl.ios, dl.desktop] : IS_ANDROID ? [dl.android, dl.desktop] : [dl.desktop, dl.ios, dl.android];
+  return order.find(l => typeof l === 'string' && l) || null;
 };
-// Turn a raw OpticOdds deep_link into a link that's safe to paste into chat: if ios/android
-// is already https (a real universal link -- works everywhere, opens the app on its own),
-// use it straight; if only a bare app scheme (novigapp://, etc.) is available, route it
-// through our own https redirector so it still renders/taps in chat apps, and let the
-// redirector pick ios vs android based on whichever device actually opens the link.
-const resolveShareLink = (deepLink, backendUrl, bookLabel) => {
-  if (!deepLink) return null;
-  if (typeof deepLink === 'string') return /^https?:\/\//i.test(deepLink) ? deepLink : null;
-  if (typeof deepLink !== 'object') return null;
-  const isHttp = l => typeof l === 'string' && /^https?:\/\//i.test(l);
-  const isScheme = l => typeof l === 'string' && /^[a-z][a-z0-9+.-]*:\/\//i.test(l) && !isHttp(l);
-  if (isHttp(deepLink.ios)) return deepLink.ios;
-  if (isHttp(deepLink.android)) return deepLink.android;
-  const iosScheme = isScheme(deepLink.ios) ? deepLink.ios : null;
-  const androidScheme = isScheme(deepLink.android) ? deepLink.android : null;
-  const webFallback = isHttp(deepLink.desktop) ? deepLink.desktop : '';
-  if (!iosScheme && !androidScheme) return webFallback || null;
-  const qs = [
-    iosScheme ? `i=${encodeURIComponent(iosScheme)}` : '',
-    androidScheme ? `a=${encodeURIComponent(androidScheme)}` : '',
-    webFallback ? `w=${encodeURIComponent(webFallback)}` : '',
-    bookLabel ? `b=${encodeURIComponent(bookLabel)}` : ''
-  ].filter(Boolean).join('&');
-  return `${ooRedirectBase(backendUrl)}?${qs}`;
-};
+// Web links open in a new tab via the <a target="_blank"> itself; app-scheme links (novig://, etc.)
+// have to be a same-page navigation to hand off to the installed app, especially from a home-screen web app.
+const isWebLink = url => /^https?:\/\//i.test(url || '');
 // Which books are playable for a row: FanDuel only at or better than the play-to;
 // Novig/ProphetX only with at least MIN_EXCH_LIQ available to the play-to.
 const playableBooks = row => (row.books || []).filter(b => {
@@ -1067,7 +1048,7 @@ const TennisSportsbookScreen = () => {
         limit: !ex ? lim : null,
         winPct: ex ? winPctA(r.odds_american) : null,
         link: r.deep_link || null,
-        shareLink: resolveShareLink(r.deep_link, apiKey, BOOK_FULL_NAMES[b])
+        betLink: pickDeviceLink(r.deep_link)
       };
     }).filter(Boolean).sort((a, b) => BOOK_ORDER.indexOf(a.book) - BOOK_ORDER.indexOf(b.book));
     const exchRows = rows.filter(p => EXCHANGES.includes(p.sportsbook));
@@ -1094,14 +1075,13 @@ const TennisSportsbookScreen = () => {
     });
     return out.sort((a, b) => new Date(a.commence) - new Date(b.commence));
   };
-  // Copied pick: FanDuel, then Novig/ProphetX with >= MIN_EXCH_LIQ to the play-to; start time on the first line.
-  // <angle brackets> around each URL keep the masked link clickable but suppress Discord's
-  // auto-embed preview card, so pasted picks don't turn into a wall of unfurled link cards.
+  // Copied pick (plain text, no links): FanDuel, then Novig/ProphetX with >= MIN_EXCH_LIQ to the play-to;
+  // start time on the first line.
   const copyLineFor = row => {
     const books = playableBooks(row);
     if (!books.length) return null;
     const countdown = startsInCopy(row.commence);
-    const linked = b => b.shareLink ? `[${BOOK_FULL_NAMES[b.book]}](<${b.shareLink}>)` : BOOK_FULL_NAMES[b.book];
+    const linked = b => BOOK_FULL_NAMES[b.book];
     return books.map((b, i) => {
       const starts = i === 0 && countdown ? ` starts ${countdown}` : '';
       if (b.isExch) return `${linked(b)} ${fmtAm(b.odds)} (${b.winPct}%) Liq ${formatMoney(b.liqPlay)}${row.playTo != null ? ' to ' + fmtAm(row.playTo) : ''}${starts}`;
@@ -1332,10 +1312,7 @@ const TennisSportsbookScreen = () => {
               is_main_line: true,
               limit: o.limits?.max ?? null,
               order_book: Array.isArray(o.order_book) ? o.order_book : null,
-              // Keep the raw {ios, android, desktop} shape here — resolveShareLink() decides
-              // whether to use a link straight (it's already https, i.e. a real universal link)
-              // or route it through the /api/go redirector (it's a bare app scheme like
-              // novigapp:// with no https equivalent).
+              // Keep the raw {ios, android, desktop} shape; pickDeviceLink() chooses one per device.
               deep_link: o.deep_link && typeof o.deep_link === 'object'
                 ? { ios: o.deep_link.ios || null, android: o.deep_link.android || null, desktop: o.deep_link.desktop || null }
                 : (typeof o.deep_link === 'string' ? o.deep_link : null),
@@ -1830,7 +1807,7 @@ const TennisSportsbookScreen = () => {
       maxHeight: '320px'
     }
   }, suggestions.map((suggestion, idx) => {
-    const betBooks = playableBooks(suggestion).filter(b => b.shareLink);
+    const betBooks = playableBooks(suggestion).filter(b => b.betLink);
     return React.createElement("div", {
       key: idx,
       className: "autocomplete-item",
@@ -1923,10 +1900,17 @@ const TennisSportsbookScreen = () => {
     }, "Copy Name"), betBooks.map(b => React.createElement("a", {
       key: b.book,
       className: "bet-link",
-      href: b.shareLink,
-      target: "_blank",
+      href: b.betLink,
+      target: isWebLink(b.betLink) ? "_blank" : undefined,
       rel: "noopener noreferrer",
-      onClick: e => e.stopPropagation()
+      onClick: e => {
+        e.stopPropagation();
+        console.log('[bet link] opening', b.betLink);
+        if (!isWebLink(b.betLink)) {
+          e.preventDefault();
+          window.location.href = b.betLink;
+        }
+      }
     }, "Bet ", BOOK_FULL_NAMES[b.book], " ", fmtAm(b.odds), " ↗"))), React.createElement("span", {
       style: {
         flexBasis: '100%',
