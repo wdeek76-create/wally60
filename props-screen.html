@@ -4992,6 +4992,8 @@ async function discordPost(payload){
 // (name + logo), title "🏀 NBA ARB · Edge +0.4% · -110 — Player Under 26.5 — Player Points",
 // the game + bet, an Edge Analysis block and an Exchange Depth table (best price + liquidity per
 // exchange on the other side). Green bar = arb, yellow = direct match.
+// 1.0 -> "1%", 0.64 -> "0.6%"
+const pctTxt = v => `${Number(v).toFixed(1).replace(/\.0$/,'')}%`;
 const SPORT_EMOJI = { nfl:'🏈', nba:'🏀', wnba:'🏀', nhl:'🏒', mlb:'⚾' };
 const httpsLogo = k => [bookLogos[k], bookLogos[String(k).replace(/\s+/g,'')]].find(u=>u && /^https:\/\//i.test(u)) || undefined;
 function sharpDiscord(e){ discordPost(sharpDiscordPayload(e)); }
@@ -5006,22 +5008,24 @@ function sharpDiscordPayload(e, example){
   const ex={}; const lv=(e.L.all||e.L.rows);
   lv.filter(l=>l.zero).forEach(l=>[...l.books].forEach(k=>{ const x=ex[k]=ex[k]||{opp:l.opp, size:0, arb:true}; x.size+=l.size; if(l.opp<x.opp) x.opp=l.opp; }));
   lv.filter(l=>!l.zero).forEach(l=>[...l.books].forEach(k=>{ if(!ex[k] || (!ex[k].arb && l.opp>ex[k].opp)) ex[k]={opp:l.opp, size:l.size, arb:false}; }));
+  // Exchange Depth shows each exchange's TOTAL across all its levels (ballpark), at that price
+  Object.keys(ex).forEach(k=>{ ex[k].all=lv.filter(l=>l.books.has(k)).reduce((a,l)=>a+l.size,0); });
   const exRows=Object.entries(ex).sort((a,b)=>(b[1].arb-a[1].arb) || b[1].size-a[1].size);
   // sharp fair: the counted price closest to the arb line (lowest price still at 0.0% or better)
   const near=lv.filter(l=>l.zero).sort((a,b)=>a.opp-b.opp)[0];
   const best=near ? [[...near.books][0], near] : exRows[0];
   const fairEdge = best ? -((toImplied(o.price)+toImplied(best[1].opp)-1)*100) : null;
-  const table=['Book          Odds   Liquidity', ...exRows.map(([k,v])=>`${bookLabel(k).padEnd(13)} ${fmtAm(v.opp).padStart(5)}  ${('$'+Math.round(v.size).toLocaleString()).padStart(9)}`)].join('\n');
+  const table=['Book          Odds   Liquidity', ...exRows.map(([k,v])=>`${bookLabel(k).padEnd(13)} ${fmtAm(v.opp).padStart(5)}  ${('$'+Math.round(v.all??v.size).toLocaleString()).padStart(9)}`)].join('\n');
   // day + time (ET), then Discord's live countdown tag ("starts in 2 hours", keeps updating itself)
-  const when=f?`${new Date(f.start).toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric',timeZone:'America/New_York'})} · ${new Date(f.start).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',timeZone:'America/New_York'})} ET · starts <t:${Math.floor(new Date(f.start).getTime()/1000)}:R>`:'';
+  const when=f?`${new Date(f.start).toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric',timeZone:'America/New_York'})} @ ${new Date(f.start).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',timeZone:'America/New_York'})} ET · starts <t:${Math.floor(new Date(f.start).getTime()/1000)}:R>`:'';
   return { username:book, avatar_url:httpsLogo(bk), content: example ? '🧪 **Example alert** — this is what sharp money pings will look like (not a real bet).' : undefined, embeds:[{
-    title:`${example?'[EXAMPLE] ':''}${SPORT_EMOJI[sk]||''} ${SPORTS[sk]?.label||sk} ${isArb?'ARB':'DIRECT MATCH'} · Edge +${edge.toFixed(1)}% · ${fmtAm(o.price)} — ${bet} — ${mktName}`.trim().slice(0,256),
+    title:`${example?'[EXAMPLE] ':''}${SPORTS[sk]?.label||sk} ${isArb?`${pctTxt(edge)} ARB`:'DIRECT MATCH'} ${fmtAm(o.price)} - ${bet} ${mktName}`.slice(0,256),
     url:url||undefined, color:isArb?0x22c55e:0xeab308,
     thumbnail: httpsLogo(bk) ? { url:httpsLogo(bk) } : undefined,
     description:`${f?`${f.away.name||f.away.ab} @ ${f.home.name||f.home.ab} · ${when}\n`:''}**${bet}**\n*${mktName}*`,
     fields:[
-      { name:'Edge Analysis', value:`${book}: ${sharpSideLabel(e.side)} **${fmtAm(o.price)}**\nSharp Fair: ${best?`${bookLabel(best[0])} **${fmtAm(best[1].opp)}**`:'—'}\nEdge: **${Math.max(0,fairEdge??0).toFixed(1)}%** at sharp fair${edge-(fairEdge??0)>0.05?` · up to ${edge.toFixed(1)}%`:''}\n**${usd(e.L.total)}** at 0.0% arb or better` },
-      { name:'Exchange Depth', value:'```\n'+table+'\n```' },
+      { name:'Edge Analysis', value:`${book}: ${sharpSideLabel(e.side)} **${fmtAm(o.price)}**\nSharp Fair: ${best?`${bookLabel(best[0])} **${fmtAm(best[1].opp)}**`:'—'}\n${(fairEdge??0)>1e-7?`Arb **${pctTxt(fairEdge)}** at sharp fair`:'**Direct match** at sharp fair'}\n**${usd(e.L.total)}** at 0.0% arb or better` },
+      { name:'Exchange Depth (Total of all - Ballpark)', value:'```\n'+table+'\n```' },
     ],
     footer:{ text:SPORTS[sk]?.label||sk } }] };
 }
@@ -5034,7 +5038,7 @@ function sharpExampleEntry(){
   L.rows=L.all.filter(l=>l.zero);
   return { sk:'nba', player:'Reed Sheppard', side:'under', line:14.5, mk:'pra',
     own:[{ market:'Player Points + Rebounds + Assists', _sd:'under' }],
-    soft:[{ sportsbook:'FanDuel', price:-122, _edge:0, _arb$:1023 }], L,
+    soft:[{ sportsbook:'FanDuel', price:-120, _edge:0.4, _arb$:1023 }], L,
     f:{ start:new Date(Date.now()+5*3600e3).toISOString(), away:{name:'Dallas Mavericks', ab:'DAL'}, home:{name:'Houston Rockets', ab:'HOU'} } };
 }
 // Tracked as Sharp Money (src:'sharp'): its own record in the Tracker, kept out of NBA Props 2026.
