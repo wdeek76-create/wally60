@@ -3936,26 +3936,34 @@ function dailyRecordHtml(){
   const rows=keys.map(k=>row(byDay[k].label, ttRecord(byDay[k].list))).join('');
   return `<div class="ttsum"><div class="ttsumh"><span>Daily Record</span></div>${row('All time', ttRecord(graded))}${rows}</div>`;
 }
-// NHL team totals only (full game + regulation) -- moneylines/spreads are team-level too but
-// aren't team totals. Records count graded bets only; open ones are shown as a separate count.
-const isNhlTT = t => t.isTeam && (t.mkey==='tt'||t.mkey==='tt60') && (t.sportKey||'nhl')==='nhl';
+// NBA player props from the 2026-27 season on (no team/game lines). Records count graded bets
+// only; open ones are shown as a separate count. Split further by prop type (Points, Assists...).
+const NBA26_FROM = Date.parse('2026-08-01T00:00:00Z');
+const isNbaProp26 = t => t.sportKey==='nba' && !t.isTeam && !t.isGame && !String(t.playerKey||'').startsWith('game:')
+  && (t.start ? Date.parse(t.start) : (t.trackedAt||0)) >= NBA26_FROM;
+// Pts, Reb, Ast, PRA, 3PM first (what's being tracked), anything else after.
+const NBA26_ORDER = ['pts','reb','ast','pra','3pm','pr','pa','ra'];
+const byPropSplits = list => [...new Set(list.map(t=>t.mkey))]
+  .sort((a,b)=>{ const ia=NBA26_ORDER.indexOf(a), ib=NBA26_ORDER.indexOf(b); return (ia<0?99:ia)-(ib<0?99:ib); })
+  .map(k=>[(list.find(t=>t.mkey===k)||{}).marketLabel||k, list.filter(t=>t.mkey===k)]);
 function teamTotalsSummaryHtml(){
-  const all=tracked.filter(isNhlTT); const tts=all.filter(t=>t.result); const openN=all.length-tts.length;
+  const all=tracked.filter(isNbaProp26); const tts=all.filter(t=>t.result); const openN=all.length-tts.length;
   const row=(label,r)=>`<div class="ttrow"><span>${esc(label)} <span class="dim">(${r.n})</span></span><span>${r.w}-${r.l}-${r.p}</span><span class="${r.u>0?'pos':r.u<0?'neg':''}">${r.u>=0?'+':''}${r.u.toFixed(2)}u</span><span class="dim">${r.roi!=null?r.roi.toFixed(1)+'% ROI':'—'}</span></div>`;
-  const summary = all.length ? `${row('Overall', ttRecord(tts))}${openN?`<div class="ttrow dim" style="font-size:10.5px">${openN} open / ungraded not counted</div>`:''}${row('Favorites', ttRecord(tts.filter(t=>t.favDog==='favorite')))}${row('Underdogs', ttRecord(tts.filter(t=>t.favDog==='underdog')))}${row('Over bets', ttRecord(tts.filter(t=>t.side==='over')))}${row('Under bets', ttRecord(tts.filter(t=>t.side==='under')))}` : `<div class="dim" style="font-size:11px;padding:4px 0">No team totals tracked yet — browse to one and tap Track.</div>`;
-  return `<div class="ttsum"><div class="ttsumh"><span>NHL Team Totals</span><button id="ttcopy" class="rm" style="background:var(--bg2)">Share</button></div>
+  const summary = all.length ? `${row('Overall', ttRecord(tts))}${openN?`<div class="ttrow dim" style="font-size:10.5px">${openN} open / ungraded not counted</div>`:''}${row('Favorites', ttRecord(tts.filter(t=>t.favDog==='favorite')))}${row('Underdogs', ttRecord(tts.filter(t=>t.favDog==='underdog')))}${row('Over bets', ttRecord(tts.filter(t=>t.side==='over')))}${row('Under bets', ttRecord(tts.filter(t=>t.side==='under')))}${byPropSplits(tts).map(([m,l])=>row(m, ttRecord(l))).join('')}` : `<div class="dim" style="font-size:11px;padding:4px 0">No NBA props tracked yet — open a player and tap Track.</div>`;
+  return `<div class="ttsum"><div class="ttsumh"><span>NBA Props 2026</span><button id="ttcopy" class="rm" style="background:var(--bg2)">Share</button></div>
     ${summary}</div>`;
 }
 function buildTeamTotalsText(){
-  const all=tracked.filter(isNhlTT); const tts=all.filter(t=>t.result);
-  if(!all.length) return 'No team totals tracked yet.';
+  const all=tracked.filter(isNbaProp26); const tts=all.filter(t=>t.result);
+  if(!all.length) return 'No NBA props tracked yet.';
   const recStr=list=>{ const r=ttRecord(list); return `${r.w}-${r.l}-${r.p}, ${r.u>=0?'+':''}${r.u.toFixed(2)}u${r.roi!=null?` (${r.roi>=0?'+':''}${r.roi.toFixed(1)}% ROI)`:''}`; };
-  const lines=['POCKETMARKET - NHL TEAM TOTALS', 'Generated '+new Date().toLocaleString(), '',
+  const lines=['POCKETMARKET - NBA PROPS 2026', 'Generated '+new Date().toLocaleString(), '',
     `OVERALL: ${recStr(tts)} (${tts.length} graded${all.length>tts.length?`, ${all.length-tts.length} open`:''})`,
     `FAVORITES: ${recStr(tts.filter(t=>t.favDog==='favorite'))}`,
     `UNDERDOGS: ${recStr(tts.filter(t=>t.favDog==='underdog'))}`,
     `OVER BETS: ${recStr(tts.filter(t=>t.side==='over'))}`,
-    `UNDER BETS: ${recStr(tts.filter(t=>t.side==='under'))}`, ''];
+    `UNDER BETS: ${recStr(tts.filter(t=>t.side==='under'))}`, '', 'BY PROP:',
+    ...byPropSplits(tts).map(([m,l])=>`${m.toUpperCase()}: ${recStr(l)}`), ''];
   const byDay={};
   tts.forEach(t=>{ const k=t.start?dayKeyOf(t.start):'unknown'; (byDay[k]=byDay[k]||{label:t.start?etDateKey(t.start):'Unknown date',list:[]}).list.push(t); });
   lines.push('DAILY:');
@@ -3976,15 +3984,15 @@ function ttRecordRow(c,T,x,y,w,h,label,r){
 }
 async function teamTotalsImageBlob(){
   await shareFontsReady(); const T=shareTheme();
-  const all=tracked.filter(isNhlTT); const tts=all.filter(t=>t.result); const openN=all.length-tts.length;
-  const splits=[['Overall',tts],['Favorites',tts.filter(t=>t.favDog==='favorite')],['Underdogs',tts.filter(t=>t.favDog==='underdog')],['Over bets',tts.filter(t=>t.side==='over')],['Under bets',tts.filter(t=>t.side==='under')]];
+  const all=tracked.filter(isNbaProp26); const tts=all.filter(t=>t.result); const openN=all.length-tts.length;
+  const splits=[['Overall',tts],['Favorites',tts.filter(t=>t.favDog==='favorite')],['Underdogs',tts.filter(t=>t.favDog==='underdog')],['Over bets',tts.filter(t=>t.side==='over')],['Under bets',tts.filter(t=>t.side==='under')], ...byPropSplits(tts)];
   const byDay={}; tts.forEach(t=>{ const k=t.start?dayKeyOf(t.start):'unknown'; (byDay[k]=byDay[k]||{label:t.start?etDateKey(t.start):'Unknown date',list:[]}).list.push(t); });
   const days=Object.keys(byDay).sort((a,b)=>b.localeCompare(a)).map(k=>byDay[k]);
   const W=640, rowH=64, gap=10, secHead=58, top=16+92+20;
   const H=top + secHead + splits.length*(rowH+gap) + (days.length?secHead+days.length*(rowH+gap):0) + 54;
   const {cv,c}=shareCanvas(W,H);
   c.fillStyle=T.bg; c.fillRect(0,0,W,H);
-  drawShareHeader(c,T,W,{ title:'NHL Team Totals', row2:false });
+  drawShareHeader(c,T,W,{ title:'NBA Props 2026', row2:false });
   let y=top;
   drawPill(c,T,16,y,'Record',openN?`${openN} open`:null,{h:40,size:16,center:false}); y+=secHead;
   splits.forEach(([lbl,list])=>{ ttRecordRow(c,T,16,y,W-32,rowH,lbl,ttRecord(list)); y+=rowH+gap; });
@@ -3994,11 +4002,11 @@ async function teamTotalsImageBlob(){
   return new Promise(resolve=>cv.toBlob(b=>resolve(b),'image/png'));
 }
 async function shareTeamTotals(){
-  if(!tracked.some(isNhlTT)){ toast('No team totals tracked yet'); return; }
+  if(!tracked.some(isNbaProp26)){ toast('No NBA props tracked yet'); return; }
   try{
     const blob=await teamTotalsImageBlob();
-    if(blob){ const file=new File([blob],'nhl-team-totals.png',{type:'image/png'});
-      if(navigator.canShare && navigator.canShare({files:[file]})){ await navigator.share({files:[file], title:'NHL Team Totals'}); return; } }
+    if(blob){ const file=new File([blob],'nba-props-2026.png',{type:'image/png'});
+      if(navigator.canShare && navigator.canShare({files:[file]})){ await navigator.share({files:[file], title:'NBA Props 2026'}); return; } }
   }catch(e){ if(e.name==='AbortError') return; console.warn('[props] team totals image share failed', e.message); }
   copyTeamTotalsText();
 }
