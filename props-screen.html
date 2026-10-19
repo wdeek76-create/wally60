@@ -1252,12 +1252,23 @@ async function shareBoard(){
 
 // opts.method/opts.body: for OpticOdds endpoints that take a POST with a JSON body (the parlay
 // pricer) -- the backend forwards `method` and `body` along with the query `params`.
+// Every call gets a timeout and one retry: a single request that hangs (dropped mobile signal,
+// backend cold start) used to stall a whole sport's load forever until the page was restarted.
+const OO_TIMEOUT_MS = 20000;
 async function oo(endpoint, params, opts){
   const payload={ endpoint, params:params||{} }; if(opts?.method) payload.method=opts.method; if(opts?.body) payload.body=opts.body;
-  const r = await fetch(getBackend(), { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload) });
-  const text = await r.text();
-  if(!r.ok){ let m=text; try{ const j=JSON.parse(text); m=j.error+(j.body?' — '+j.body:''); }catch(e){} throw new Error(`backend ${r.status}: ${m}`); }
-  return JSON.parse(text);
+  const once = async () => {
+    const ctl = new AbortController(); const t = setTimeout(()=>ctl.abort(), OO_TIMEOUT_MS);
+    try{
+      const r = await fetch(getBackend(), { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload), signal:ctl.signal });
+      const text = await r.text();
+      if(!r.ok){ let m=text; try{ const j=JSON.parse(text); m=j.error+(j.body?' — '+j.body:''); }catch(e){} const err=new Error(`backend ${r.status}: ${m}`); err.status=r.status; throw err; }
+      return JSON.parse(text);
+    } catch(e){ if(e.name==='AbortError') { const err=new Error(`timed out after ${OO_TIMEOUT_MS/1000}s`); err.retry=true; throw err; } if(e.status==null) e.retry=true; else if(e.status>=500||e.status===429) e.retry=true; throw e; }
+    finally{ clearTimeout(t); }
+  };
+  try{ return await once(); }
+  catch(e){ if(!e.retry) throw e; await new Promise(r=>setTimeout(r,600)); return once(); }
 }
 
 // order-book depth behind the top level, down to play-to
@@ -1440,7 +1451,7 @@ async function runPool(jobs, n){ let i=0; await Promise.all(Array.from({length:M
 // Everything a sport needs (fixtures in its window, main + prop lines from every book, the indexed
 // players/teams/games) fetched WITHOUT touching the on-screen globals -- so the parlay tool can load
 // any sport in the background, and loadSport just assigns the result for the sport on screen.
-async function fetchSportData(sk, status){
+async function fetchSportData(sk, status, onPartial){
   const S=SPORTS[sk]; const say=t=>{ if(status) status(t); };
   say(`${S.label} · loading fixtures…`);
   const raw=await fetchFixturesRaw(S, say);
@@ -1453,24 +1464,30 @@ async function fetchSportData(sk, status){
   if(!S.league){ const first={}; fx.forEach(f=>{ if(!(f.card in first)) first[f.card]=new Date(f.start).getTime(); }); fx.sort((a,b)=>first[a.card]-first[b.card] || new Date(a.start)-new Date(b.start)); }
   console.log(`[props] ${S.label} fixtures: ${raw.length} fetched, ${fx.length} in window`);
   if(!fx.length) return { fixtures:[], mainRows:[], players:[], injuries:null, at:Date.now() };
-  // injuries (best-effort; schema read defensively)
-  let inj=null;
-  if(!S.ml){ try{ say(`${S.label} · loading injuries…`); inj=await fetchInjuriesList(S); }catch(e){ console.warn('[props] injuries failed',e.message); } }
+  // injuries (best-effort; schema read defensively) -- fetched alongside the lines, not before them
+  const injP = S.ml ? Promise.resolve(null) : fetchInjuriesList(S).catch(e=>{ console.warn('[props] injuries failed',e.message); return null; });
   // main lines, 5 fixtures × 5 books per call
   const rows=[]; let done=0; const fxChunks=chunk(fx,5), bkChunks=chunk(bookReqFor(sk),5); const total=fxChunks.length*bkChunks.length;
   const jobs=[]; for(const fc of fxChunks) for(const bk of bkChunks) jobs.push(async()=>{
     try{ const r=await oo('/fixtures/odds',{fixture_id:fc.map(f=>f.id),sportsbook:bk,is_main:true}); (r?.data||[]).forEach(d=>(d.odds||[]).forEach(o=>{ o._fx=d.id; if(mainBookRow(sk,o)) rows.push(o); })); }
     catch(e){ console.warn('[props] chunk failed',e.message); }
     say(`${S.label} · loading lines ${++done}/${total}…`);
+    // Players become searchable while the rest is still loading (every few chunks), so a name
+    // typed early finds its match as soon as that game's lines are in.
+    if(onPartial && (done%3===0 || done===total)) onPartial({ fixtures:fx, mainRows:rows.slice(), players:indexPlayers(sk, S, fx, rows) });
   });
-  await runPool(jobs, S.league ? 4 : 6);
+  await runPool(jobs, S.league ? 6 : 8);
+  const inj = await injP;
   // Every-league sports (soccer, tennis) list plenty of matches no book we use prices -- drop
   // those so the slate is only games you can actually bet.
   if(!S.league){ const priced=new Set(rows.map(o=>o._fx)); fx=fx.filter(f=>priced.has(f.id)); }
-  // index players from prop rows (player_id set) or fighters from moneyline selections (UFC)
-  // — team totals are the one entity here that's never a player: no player_id, selection is a
-  // TEAM name, so they're indexed separately, keyed and labeled off the fixture's own home/away
-  // names rather than off a player_id.
+  return { fixtures:fx, mainRows:rows, players:indexPlayers(sk, S, fx, rows), injuries:inj, at:Date.now() };
+}
+// index players from prop rows (player_id set) or fighters from moneyline selections (UFC)
+// — team totals are the one entity here that's never a player: no player_id, selection is a
+// TEAM name, so they're indexed separately, keyed and labeled off the fixture's own home/away
+// names rather than off a player_id.
+function indexPlayers(sk, S, fx, rows){
   const idx={};
   rows.forEach(o=>{
     const mk=marketKeyFor(sk,o.market); if(!mk) return;
@@ -1500,8 +1517,7 @@ async function fetchSportData(sk, status){
     if(o.player_id){ idx[key].pids.add(o.player_id); if(!idx[key].pid) idx[key].pid=o.player_id; }
     idx[key].marketKeys.add(mk);
   });
-  const pl=Object.values(idx).sort((a,b)=>a.name.localeCompare(b.name));
-  return { fixtures:fx, mainRows:rows, players:pl, injuries:inj, at:Date.now() };
+  return Object.values(idx).sort((a,b)=>a.name.localeCompare(b.name));
 }
 function saveSportCacheData(sk, d){
   sportMem[sk]={ day:todayKey(), data:d };
@@ -1534,7 +1550,11 @@ async function loadSport(force){
     }
   }
   try{
-    const d=await fetchSportData(sk, t=>{ if(sportKey===sk) stat.textContent=t; });
+    const d=await fetchSportData(sk, t=>{ if(sportKey===sk) stat.textContent=t; }, part=>{
+      // Nothing on screen yet (no cache today): use what's loaded so far for search.
+      if(sportKey!==sk || loadedAt) return;
+      fixtures=part.fixtures; mainRows=part.mainRows; players=part.players; searchRefresh();
+    });
     if(sportKey!==sk) { saveSportCacheData(sk,d); return; }   // user switched tabs mid-load
     fixtures=d.fixtures; mainRows=d.mainRows; players=d.players; loadedAt=d.at;
     injuries={ byPid:{}, byName:{}, at:Date.now() };
@@ -1549,6 +1569,7 @@ async function loadSport(force){
                            : `${S.label} · ${fixtures.length} games · ${[...new Set(fixtures.map(f=>etDateKey(f.start)))].length}d · ${players.length} players`;
     if(current){ const again=players.find(p=>p.key===current.key); if(again) openPlayer(again, curMktIdx); }
     saveSportCache(sk);
+    searchRefresh();
   }catch(e){
     console.error(e); stat.textContent=`${S.label} · load failed`;
     $('#view').innerHTML=`<div class="err">${esc(e.message)}<br><span class="dim">Check the backend URL via ⚙.</span></div>`;
@@ -1575,12 +1596,28 @@ const teamLogoFor = p => { const info=p.pid?playerInfo[p.pid]:null; const f=fixt
 // — betting live is a different thing and not what this board is for. Already-tracked picks are
 // unaffected: the Tracker looks prices up straight from mainRows/fixtures, not through here.
 const fixtureIsLive = fid => !!fixtures.find(f=>f.id===fid)?.live;
+// Typed (or hit Enter) before the sport finished loading: re-check as players come in.
+let pendingSearchEnter=false;
+function searchRefresh(){
+  const q=$('#q')?.value||''; if(!q.trim()) return;
+  if(pendingSearchEnter && openSearchHit()) return;
+  if($('.sw')?.classList.contains('open') || document.activeElement===$('#q')) suggest(q);
+}
+function openSearchHit(){
+  const {name,mkey}=parseSearchQuery($('#q').value);
+  const hit=players.filter(p=>nameMatches(p.name,name||$('#q').value) && !fixtureIsLive(p.fixtureId))[0];
+  if(!hit) return false;
+  pendingSearchEnter=false;
+  openPlayer(hit, startIdxFor(hit,mkey)); $('#sug').classList.remove('show'); $('#q').blur(); $('#q').value=''; collapseSearch();
+  return true;
+}
 function suggest(q){
   const box=$('#sug'); q=String(q||'').trim();
-  if(!q||!players.length){ box.classList.remove('show'); box.innerHTML=''; return; }
+  if(!q){ pendingSearchEnter=false; box.classList.remove('show'); box.innerHTML=''; return; }
+  if(!players.length){ box.innerHTML=`<div class="si"><span class="nm dim">Loading ${esc(SPORTS[sportKey].label)} players… "${esc(q)}" will show up here as soon as it's in</span></div>`; box.classList.add('show'); return; }
   const {name,mkey}=parseSearchQuery(q);
   const hits=players.filter(p=>nameMatches(p.name,name||q) && !fixtureIsLive(p.fixtureId)).slice(0,12);
-  if(!hits.length){ box.innerHTML=`<div class="si"><span class="nm dim">No ${SPORTS[sportKey].ml?'fighter':'player'} matches "${esc(q)}"</span></div>`; box.classList.add('show'); return; }
+  if(!hits.length){ box.innerHTML=`<div class="si"><span class="nm dim">${loadedAt?`No ${SPORTS[sportKey].ml?'fighter':'player'} matches "${esc(q)}"`:`Still loading… no match for "${esc(q)}" yet`}</span></div>`; box.classList.add('show'); return; }
   const mhit = mkey ? `<span class="mhit">→ ${esc(marketLabel(sportKey,mkey))}</span> ` : '';
   box.innerHTML=hits.map((p,i)=>{ const f=fixtures.find(x=>x.id===p.fixtureId); const lg=teamLogoFor(p); return `<div class="si" data-i="${i}"><span class="nm">${lg?`<img class="stl" src="${esc(lg)}" alt="">`:''}${esc(titleCase(p.name))} ${injPill(p)}</span><span class="g">${mhit}${f?(SPORTS[sportKey].ml?`${esc(f.card)} · ${etDay(f.start)}`:`${esc(f.away.ab)}@${esc(f.home.ab)} ${etDay(f.start)} ${etTime(f.start)}`):''}</span></div>`; }).join('');
   box.querySelectorAll('.si[data-i]').forEach(el=>el.addEventListener('click',()=>{ const p=hits[+el.dataset.i]; openPlayer(p, startIdxFor(p,mkey)); box.classList.remove('show'); $('#q').value=''; $('#q').blur(); collapseSearch(); }));
@@ -4691,7 +4728,8 @@ function renderTabs(){
     sportKey=b.dataset.k; LS.set('props_sport',sportKey); current=null; renderTabs();
     if(same){ renderSlate(); return; }
     mainRows=[]; players=[]; loadedAt=0; $('#view').innerHTML=loadingHtml(SPORTS[sportKey].label); $('#q').value=''; suggest('');
-    loadSport(true).then(()=>{ if(!current) renderSlate(); }); })); }
+    // not forced: today's cached copy of this sport shows instantly, then refreshes in place
+    loadSport(false).then(()=>{ if(!current) renderSlate(); }); })); }
 $('#q').addEventListener('input',e=>suggest(e.target.value));
 $('#q').addEventListener('focus',e=>suggest(e.target.value));
 document.addEventListener('click',e=>{ if(!e.target.closest('.sw')) $('#sug').classList.remove('show'); });
@@ -4702,7 +4740,7 @@ function collapseSearch(){ $('.sw')?.classList.remove('open'); $('#sug')?.classL
 $('#sbtn')?.addEventListener('click',expandSearch);
 document.addEventListener('click',e=>{ if(!e.target.closest('.sw') && $('#q')?.value==='') collapseSearch(); });
 $('#clr').addEventListener('click',()=>{ $('#q').value=''; suggest(''); renderSlate(); collapseSearch(); });
-$('#q').addEventListener('keydown',e=>{ if(e.key==='Enter'){ e.preventDefault(); const {name,mkey}=parseSearchQuery($('#q').value); const hit=players.filter(p=>nameMatches(p.name,name||$('#q').value) && !fixtureIsLive(p.fixtureId))[0]; if(hit){ openPlayer(hit, startIdxFor(hit,mkey)); $('#sug').classList.remove('show'); $('#q').blur(); $('#q').value=''; collapseSearch(); } } });
+$('#q').addEventListener('keydown',e=>{ if(e.key==='Enter'){ e.preventDefault(); if(!openSearchHit() && !loadedAt) pendingSearchEnter=true; } });
 $('#reload').addEventListener('click',()=>loadSport(true));
 syncGridBtn();
 $('#gridToggle').addEventListener('click',toggleGridMode);
