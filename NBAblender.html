@@ -24492,6 +24492,7 @@ const _MORNING_PS_BOOKS = new Set([
   "novig", "prophetx", "kalshi", "propbuilder", "prop builder", "fliff", "betrivers",
   "pointsbet", "circa", "betcris", "bookmaker", "bet365", "betjack", "superbook",
   "williamhill", "bet105", "kambi", "onyx", "onyx odds", "betonline", "underdog", "sleeper",
+  "pb", "pin", "pinn", "mgm", "czr", "hr", "nvg", "bov", "br", "fan",
 ]);
 function _mSplitBlocks(raw) {
   const lines = raw.split("\n").map(l => l.trim()).filter(Boolean);
@@ -24527,8 +24528,8 @@ function _mExtractCells(tokens) {
   let sawGame = false, noProj = false;
   for (const t of tokens) {
     // Current PropShop layout: "OKC @ SAS Oct-20 9:30 PMalts" (no separator, "alts" glued on, no projection column)
-    const gm = !sawGame && t.match(/^([A-Z]{2,4})\s*@\s*([A-Z]{2,4})\s+([A-Za-z]{3}-\d+\s+\d+:\d+\s*[AP]M)/);
-    if (gm) { gameStr = gm[1] + " @ " + gm[2]; gameTime = gm[3]; sawGame = true; noProj = true; continue; }
+    const gm = !sawGame && t.match(/^([A-Z]{2,4})\s*@\s*([A-Z]{2,4})\s+(?:([A-Za-z]{3}-\d+)\s+)?(\d+:\d+\s*[AP]M)/);   // the date part is optional ("PHI @ NYK 7:00 PMalts")
+    if (gm) { gameStr = gm[1] + " @ " + gm[2]; gameTime = (gm[3] ? gm[3] + " " : "") + gm[4]; sawGame = true; noProj = true; continue; }
     if (!sawGame && t.includes("@") && (t.includes("•") || t.includes("—"))) {
       const sep = t.includes("•") ? "•" : "—";
       const parts = t.split(sep);
@@ -24539,8 +24540,16 @@ function _mExtractCells(tokens) {
     if (!sawGame) continue;
     rest.push(t);
   }
-  const projection = preGameNums.length ? preGameNums[0] : null;   // new layout has no projection column
-  if (noProj) { while (rest.length && /^[\u2212\u2014\u2013-]$/.test(rest[0])) rest.shift(); }   // leading "− −" placeholders
+  let projection = preGameNums.length ? preGameNums[0] : null;
+  let minutes = null;
+  if (noProj) {
+    // After the game line the board prints either "− −" (nothing) or the source projection and minutes ("3  32.98"),
+    // then the Consensus cell starts at the first line+odds pair.
+    let k = 0; while (k < rest.length && !(_mIsLine(rest[k]) && _mIsOdds(rest[k + 1]))) k++;
+    const pre = rest.slice(0, k).filter(x => /^\d+(\.\d+)?$/.test(x));
+    if (pre.length) { projection = parseFloat(pre[0]); if (pre.length > 1) minutes = parseFloat(pre[1]); }
+    rest.splice(0, k);
+  }
   const parseSide = i => {
     if (i >= rest.length) return { line: null, odds: null, consumed: 0 };
     if (rest[i] === "—") return { line: "—", odds: "—", consumed: 1 };
@@ -24566,7 +24575,7 @@ function _mExtractCells(tokens) {
     });
     cellIdx++;
   }
-  return { gameStr, gameTime, allCells, projection, noProj };
+  return { gameStr, gameTime, allCells, projection, minutes, noProj };
 }
 // Market from the header region of the paste (before the first player block).
 function morningDetectMarket(raw) {
@@ -24574,14 +24583,18 @@ function morningDetectMarket(raw) {
   for (const [re, stat] of MORNING_MARKET_PATTERNS) if (re.test(head)) return MORNING_STATS.includes(stat) ? stat : "UNSUPPORTED:" + stat;
   return null;
 }
-function parseMorningPropShop(raw) {
+// P(X <= k) for a Poisson(lam)
+function _poisCdf(k, lam) { let s0 = 0, term = Math.exp(-lam); for (let i = 0; i <= k; i++) { s0 += term; term *= lam / (i + 1); } return Math.min(1, s0); }
+function parseMorningPropShop(raw, stat) {
   const year = new Date().getFullYear();
+  const headerDate = (String(raw).match(/^\s*(\d{4}-\d{2}-\d{2})\s*$/m) || [])[1] || "";
   const results = [], errors = [];
   for (const block of _mSplitBlocks(raw)) {
     try {
-      const { gameStr, gameTime, allCells, projection, noProj } = _mExtractCells(block.tokens);
+      const { gameStr, gameTime, allCells, projection, minutes, noProj } = _mExtractCells(block.tokens);
       if (!gameStr || allCells.length < 2) continue;
       if (!noProj && (projection === 0 || projection == null)) continue;
+      if (noProj && projection === 0) continue;   // projected for nothing — not playing
       const best = allCells[1];   // 0 = Consensus, 1 = Best Line
       if (!best || best.ev === null) continue;
       const o = best.over, u = best.under;
@@ -24592,6 +24605,15 @@ function parseMorningPropShop(raw) {
         // same line → whichever side's price, against Consensus no-vig odds, gives the listed EV; different line → above consensus = under.
         const c = allCells[0], one = o;
         let side = "over";
+        const dB0 = oddsToDecimal(one.odds);
+        if (noProj && projection > 0 && best.ev != null && dB0 && stat && /^(3PM|AST|REB)$/.test(stat)) {
+          // The EV is the source's own (projection-based), so pick the side whose Poisson win chance at this line matches the
+          // win chance the price+EV implies — not the market's no-vig odds.
+          const pImp = (1 + best.ev / 100) / dB0, pOver = 1 - _poisCdf(Math.floor(Number(one.line)), projection);
+          side = Math.abs(pImp - pOver) <= Math.abs(pImp - (1 - pOver)) ? "over" : "under";
+        } else if (noProj && projection > 0 && Math.abs(projection - Number(one.line)) >= 1) {
+          side = projection > Number(one.line) ? "over" : "under";
+        } else
         if (c && c.over.odds && c.under.odds && c.over.line != null) {
           if (Number(one.line) === Number(c.over.line)) {
             const dO = oddsToDecimal(c.over.odds), dU = oddsToDecimal(c.under.odds), dB = oddsToDecimal(one.odds);
@@ -24605,14 +24627,14 @@ function parseMorningPropShop(raw) {
       }
       else if (u.odds) play = { ou: "under", line: u.line, odds: u.odds };
       if (!play || play.line == null) continue;
-      let gameDateIso = localYMD(new Date());
+      let gameDateIso = headerDate || localYMD(new Date());
       const dm = gameTime.match(/([A-Za-z]+)-(\d+)/);
       if (dm) {
         const mo = { Jan: "01", Feb: "02", Mar: "03", Apr: "04", May: "05", Jun: "06", Jul: "07", Aug: "08", Sep: "09", Oct: "10", Nov: "11", Dec: "12" }[dm[1].slice(0, 3)];
         // The season crosses New Year: an "Oct-28" pasted in January is last year's slate.
         if (mo) { let y = year; if (Number(mo) >= 9 && new Date().getMonth() < 6) y = year - 1; gameDateIso = y + "-" + mo + "-" + String(dm[2]).padStart(2, "0"); }
       }
-      results.push({ player: block.player, game: gameStr, gameTime: gameTime || "", gameDateIso, ou: play.ou, line: Number(play.line), odds: parseInt(play.odds, 10), book: best.book || "", ev: best.ev, proj: noProj ? null : projection });
+      results.push({ player: block.player, game: gameStr, gameTime: gameTime || "", gameDateIso, ou: play.ou, line: Number(play.line), odds: parseInt(play.odds, 10), book: best.book || "", ev: best.ev, proj: projection != null ? projection : null, minutes: minutes != null ? minutes : null });
     } catch (e) { errors.push((block.player || "?") + ": " + e.message); }
   }
   return { results, errors };
@@ -25252,7 +25274,7 @@ function morningImport() {
     if (!stat) { info.textContent = "Couldn't tell which market this board is — pick it in the Market box."; return; }
     if (stat.startsWith("UNSUPPORTED:")) { info.textContent = `That looks like a ${stat.slice(12)} board — Morning only does PTS, 3PM, REB, AST and PRA. Nothing imported.`; return; }
   }
-  const { results, errors } = parseMorningPropShop(raw);
+  const { results, errors } = parseMorningPropShop(raw, stat);
   if (!results.length) { info.textContent = "No props found in that paste." + (errors.length ? ` ${errors.length} parse error(s) — see console.` : ""); if (errors.length) console.warn("[MORNING]", errors); return; }
   // A paste REPLACES this source's board for this market (re-paste = clean fix).
   // Repeats of one player/side/line collapse to the best price.
