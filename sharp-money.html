@@ -226,6 +226,7 @@ let toastT; const toast = m => { const t=$('#toast'); t.textContent=m; t.classLi
 async function runPool(jobs, n){ let i=0; await Promise.all(Array.from({length:Math.min(n,jobs.length)},async()=>{ while(i<jobs.length){ const j=jobs[i++]; await j(); } })); }
 const cents = v => { v=Number(v); return isNaN(v)?null:(v>0?v-100:v+100); };
 const LIQ_BAND_CENTS = 20;
+const SHARP_MAX_ARB = 8; // % -- anything bigger is treated as bad data
 function levelsOf(o){
   const top=Number(o.price);
   const ob=(Array.isArray(o.order_book)?o.order_book:[]).filter(l=>Array.isArray(l)&&l.length>=2);
@@ -244,7 +245,10 @@ function levelsOf(o){
     // anything else (an unconverted percentage, a raw value the decimal-odds heuristic's narrow
     // 1-50 window didn't catch, whatever) is garbage, not a real price, and showing it verbatim
     // (e.g. "+83.43", which isn't a price any book could ever quote) is worse than dropping it.
-    ob.forEach(l=>{ const price=pf?normP(l[0]):normP(l[1]); const size=pf?Number(l[1]):Number(l[0]); if(!isNaN(price)&&Math.abs(price)>=100&&!isNaN(size)&&size>0) out.push({price,size}); });
+    ob.forEach(l=>{ const price=pf?normP(l[0]):normP(l[1]); const size=pf?Number(l[1]):Number(l[0]); if(!isNaN(price)&&Math.abs(price)>=100&&!isNaN(size)&&size>0) out.push({price:Math.round(price),size}); });
+    // A level can't beat the book's own best quote -- anything that does is a misread (columns
+    // swapped, stale data), so drop it rather than call it an arb.
+    if(Math.abs(top)>=100) return out.filter(l=>toDec(l.price)<=toDec(top)*1.02+0.01).sort((a,b)=>b.price-a.price);
   } else if(o.limits?.max) out.push({price:top,size:Number(o.limits.max)});
   return out.sort((a,b)=>b.price-a.price);
 }
@@ -432,8 +436,10 @@ let sharpSportF = 'all';
 let sharpTimer = null; const sharpBusy = {};
 const sharpStarted = Date.now();
 const sharpTape = {};          // "sk|fx|mk|player|side|line" -> { ...scan, hist:[{t,total}], at }
-const sharpPinged = {};        // key -> arb $ at last ping
-const sharpPrimed = {};        // sk -> first pass done (sides already there are marked, not pinged)
+// key -> {$, at} of the last alert, kept across reloads (36h) so reopening the page doesn't
+// re-post the same plays, but a play that's already up when you open it still alerts once.
+const sharpPinged = (()=>{ try{ const m=JSON.parse(LS.get('sm_alerted','{}'))||{}; const cut=Date.now()-36*3600e3; Object.keys(m).forEach(k=>{ if(!(m[k]?.at>cut)) delete m[k]; }); return m; }catch(e){ return {}; } })();
+const sharpPrimed = {};        // sk -> first scan done
 const sharpFxCache = {};       // sk -> { at, list }
 const sharpLastScan = {};      // sk -> time
 // The opposite side's real exchange order book vs the target price: orders at 0.0% hold or better
@@ -446,6 +452,7 @@ function arbLadder(oppRows, targetPrice){
     const id=`${k}|${o.id||''}|${o.points??''}|${o.price}`; if(seen.has(id)) return; seen.add(id);
     levelsOf(o).forEach(l=>{
       const opp=Number(l.price), hold=(tImp+toImplied(opp)-1)*100;
+      if(hold < -SHARP_MAX_ARB) return; // a "+20% arb" is bad exchange data, not money
       if(Math.abs(cents(-opp)-tC) <= LIQ_BAND_CENTS) band+=l.size;
       const lv=levels[opp]||(levels[opp]={opp, size:0, books:new Set(), zero:hold<=sharpMaxHold+1e-7, hold});
       lv.size+=l.size; lv.books.add(k);
@@ -678,13 +685,19 @@ function sharpAutoTrack(e){
   saveTracked();
 }
 function sharpCheckPings(sk){
-  const first = !sharpPrimed[sk]; sharpPrimed[sk]=true;
+  sharpPrimed[sk]=true;
+  let changed=false;
   Object.values(sharpTape).filter(e=>e.sk===sk && e.L.total>=sharpMin && !sharpLive(e)).forEach(e=>{
     const prev=sharpPinged[e.k];
-    const fire = sharpPingsOn;
-    if(prev==null){ sharpPinged[e.k]=e.L.total; if(!first && fire){ sharpPing(e); sharpDiscord(e); sharpAutoTrack(e); } return; }
-    if(e.L.total - prev >= SHARP_PING_STEP){ sharpPinged[e.k]=e.L.total; if(fire){ sharpPing(e); sharpDiscord(e); sharpAutoTrack(e); } }
+    // new play, or its money grew by SHARP_PING_STEP since the last alert
+    if(prev && e.L.total - prev.$ < SHARP_PING_STEP) return;
+    sharpPinged[e.k]={ $:e.L.total, at:Date.now() }; changed=true;
+    // Discord + tracker always; the on-screen banner/notification only with Pings on
+    if(discordHook) sharpDiscord(e);
+    sharpAutoTrack(e);
+    if(sharpPingsOn) sharpPing(e);
   });
+  if(changed) LS.set('sm_alerted', JSON.stringify(sharpPinged));
 }
 async function sharpScanSport(sk){
   const now=Date.now();
