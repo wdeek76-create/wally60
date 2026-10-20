@@ -25123,6 +25123,7 @@ function _mCsvProj(srcKey, name, stat) {
 }
 // Expected minutes for a player from one source's uploaded CSV (STOK / RG / RW / Saber slots).
 function _mAnchorModelHtml(r) {
+  if (!r.anchorSrc) { const mn0 = r.expMin != null ? `<div style="font-size:10px;color:#8b93a0;">${Number(r.expMin).toFixed(0)} min</div>` : ""; return `<div style="font:700 12px 'JetBrains Mono','Menlo',monospace;color:#fff;">${r.modelProj != null ? "MODEL " + Number(r.modelProj).toFixed(1) : (r.proj != null ? Number(r.proj).toFixed(1) : "\u2014")}</div>${mn0}`; }   // picks logged before the anchor fields existed
   const col = _mSrc(r.anchorSrc).color;
   const aev = r.anchorEv != null ? ` <span style="color:#4ade80;">${Number(r.anchorEv) >= 0 ? "+" : ""}${Number(r.anchorEv).toFixed(1)}%</span>` : "";
   const a = r.anchorProj != null ? `<span style="color:${col};font-weight:800;" title="The source that anchors the fair price: the worst source that still clears ${MORNING_QUAL_EV}% EV">${_mSrc(r.anchorSrc).label} ${Number(r.anchorProj).toFixed(1)}</span>${aev}` : `<span style="color:#6b7380;">\u2014</span>`;
@@ -25225,12 +25226,12 @@ function computeMorningEnsemble() {
     bump(entry.stat, "cleared");
     let best = null;
     entry.sources.forEach(({ prop }) => { if (_mPlayable(prop) && (!best || parseInt(prop.odds) > parseInt(best.odds))) best = prop; });
-    // Track at FanDuel, then Prop Builder, then Pinnacle when one of them has this price; otherwise the best price on the boards.
-    // (Fair/anchor math below is unchanged — it comes from the anchor source's own price + EV.)
-    for (const bk of MORNING_BOOK_PRIORITY) {
-      const c = entry.sources.map(x => x.prop).filter(pp => _mPlayable(pp) && String(pp.book || "").toUpperCase() === bk).sort((a, b) => parseInt(b.odds) - parseInt(a.odds))[0];
-      if (c) { best = c; break; }
-    }
+    // Best price = the highest playable price on the boards; a tie goes FanDuel, then Prop Builder, then Pinnacle.
+    entry.sources.forEach(({ prop }) => {
+      if (!_mPlayable(prop) || !best || parseInt(prop.odds) !== parseInt(best.odds)) return;
+      const rank = bk => { const k = MORNING_BOOK_PRIORITY.indexOf(String(bk || "").toUpperCase()); return k < 0 ? 99 : k; };
+      if (rank(prop.book) < rank(best.book)) best = prop;
+    });
     const sorted = [...entry.sources].sort((a, b) => (a.prop.ev || 0) - (b.prop.ev || 0));
     // FAIR anchors to the worst source's own price+EV; second-worst if the worst is under the bar.
     const anchor = (sorted[0].prop.ev || 0) >= MORNING_QUAL_EV ? sorted[0] : (sorted[1] || sorted[0]);
@@ -25797,11 +25798,14 @@ async function _morningCardHtml(picks, mode) {
       const prop = `<div style="font:700 14px 'Plus Jakarta Sans';color:#fff;">${esc(String(stat).toUpperCase())} <span style="font-family:'JetBrains Mono',monospace;color:#7dd3fc;">${b.line}</span></div>`;
       const sidec = `<span style="font:800 15px 'Plus Jakarta Sans';color:${sc};letter-spacing:.05em;">${side}</span>${pt ? `<div style="font:700 12px 'JetBrains Mono',monospace;color:#fff;margin-top:4px;">play to ${pt}</div>` : ""}`;
       const best = `<div style="display:inline-flex;align-items:center;gap:6px;">${bookLogo(b.book, 18)}<span style="font:800 17px 'JetBrains Mono',monospace;color:#fff;">${odds(b.odds)}</span></div>`;
-      // Books · Alts: every other source's price on this same side/line (the tracked price is already shown). Exchange prices
-      // under $500 are alt books; they carry their size.
-      const seenP = new Set([b.book + "|" + b.odds]);
-      const others = (b.sourcePrices || []).filter(x => x.odds && !isNaN(x.odds) && x.book).filter(x => { const k = x.book + "|" + x.odds; if (seenP.has(k)) return false; seenP.add(k); return true; }).sort((x, y) => y.odds - x.odds);
-      const books = others.length ? others.map(x => `<span style="display:inline-flex;align-items:center;gap:5px;margin:2px 10px 2px 0;">${bookLogo(x.book, 15)}<span style="font:700 13px 'JetBrains Mono',monospace;color:#fff;">${odds(x.odds)}</span>${x.liq != null && x.alt ? `<span style="font:700 10px 'JetBrains Mono',monospace;color:#a8b0bb;">$${x.liq}</span>` : ""}</span>`).join("") : `<span style="color:#fff;">\u2014</span>`;
+      // Books · Alts: every other price on this side/line — the boards' prices and the live OpticOdds books (best first). Exchanges
+      // under $500 are alt books and show the depth behind them.
+      const nm = bk => BOOK_CODE_NAMES[String(bk || "").trim().toUpperCase()] || bk;
+      const tracked = nm(b.book) + "|" + b.odds, seenP = new Set([tracked]);
+      const depth = bk => (b.liqBooks && b.liqBooks[bk] && b.liqBooks[bk].liq != null) ? b.liqBooks[bk].liq : null;
+      const rawAlts = (b.sourcePrices || []).map(x => ({ book: nm(x.book), odds: x.odds, liq: x.liq })).concat((b.altBooks || []).map(a => ({ book: nm(a.book), odds: a.odds, liq: a.liq })));
+      const others = rawAlts.filter(x => x.odds && !isNaN(x.odds) && x.book).filter(x => { const k = x.book + "|" + x.odds; if (seenP.has(k)) return false; seenP.add(k); return true; }).sort((x, y) => y.odds - x.odds);
+      const books = others.length ? others.map(x => { const dp = x.liq != null ? x.liq : (_mIsExchange(x.book) ? depth(x.book) : null); return `<span style="display:inline-flex;align-items:center;gap:5px;margin:2px 10px 2px 0;">${bookLogo(x.book, 15)}<span style="font:700 13px 'JetBrains Mono',monospace;color:#fff;">${odds(x.odds)}</span>${dp != null ? `<span style="font:700 10px 'JetBrains Mono',monospace;color:#a8b0bb;">$${Math.round(dp)}</span>` : ""}</span>`; }).join("") : `<span style="color:#fff;">\u2014</span>`;
       if (!nick) { body += `<tr>${td(player)}${td(prop)}${td(sidec)}${td(best, "center", "white-space:nowrap;")}${td(books)}</tr>`; return; }
       const pills = MORNING_SRC_KEYS.map(k => {
         if ((b.sourceProjs == null || b.sourceProjs[k] == null) && b.sourceEvs && b.sourceEvs[k] != null) {
@@ -25859,6 +25863,8 @@ async function morningPostDiscord() {
   const picks = morningCardPicks();
   if (!picks.length) { showToast("No pending morning picks to send"); return; }
   if (!confirm(`Post ${picks.length} morning pick${picks.length === 1 ? "" : "s"} to Discord now?`)) return;
+  showToast("Refreshing live prices + exchange depth\u2026");
+  try { await morningRefreshPicks(picks); } catch (e) {}
   showToast("Building Discord card\u2026");
   let blob;
   try { blob = await _morningCardBlob(picks, "discord"); } catch (e) { console.error("[MORNING card]", e); showToast("Card failed \u2014 " + (e && e.message || "see console")); return; }
@@ -25875,9 +25881,38 @@ async function morningPostDiscord() {
   saveMorningBets(); renderMorning();
   showToast(`Posted ${picks.length} pick${picks.length === 1 ? "" : "s"} to Discord \u2713`);
 }
+// Live prices + exchange depth for the cards, the same OpticOdds refresh the WNBA Discord pic did: every book's price on the pick's
+// side and line (5%+ edge vs the pick's fair), exchanges only with real depth. The best playable price becomes the headline
+// price; everything else becomes an alt book (exchanges under $500 carry their depth). Falls back to the board prices if
+// OpticOdds can't be reached.
+async function morningRefreshPicks(picks) {
+  const nameOf = bk => BOOK_CODE_NAMES[String(bk || "").trim().toUpperCase()] || bk;
+  const shadows = picks.map(b => ({ _m: b, player: b.player, stat: b.stat, ou: b.ou, line: b.line, odds: b.odds, book: nameOf(b.book), fair: b.fairProb != null ? b.fairProb * 100 : null, altBooks: [], team: b.team }));
+  let r = { refreshed: 0, skipped: picks.length };
+  try { r = await ooRefreshBetsForPic(shadows); } catch (e) { console.warn("[MORNING] live refresh failed, using board prices", e); }
+  const rank = bk => { const k = MORNING_BOOK_PRIORITY.indexOf(String(BOOK_CODE_NAMES[String(bk || "").toUpperCase()] ? String(bk).toUpperCase() : bk).toUpperCase()); return k < 0 ? 99 : k; };
+  shadows.forEach(sh => {
+    const b = sh._m; b.book = nameOf(b.book);
+    if (!(sh.liq || (sh.altBooks && sh.altBooks.length))) return;
+    const depthOf = bk => (sh.liq && sh.liq.books && sh.liq.books[bk]) ? sh.liq.books[bk].liq : null;
+    const priced = [{ book: b.book, odds: b.odds }].concat((sh.altBooks || []).filter(a => a && a.odds != null && (a.line == null || Number(a.line) === Number(b.line))).map(a => ({ book: a.book, odds: a.odds })));
+    priced.forEach(x => { if (_mIsExchange(x.book)) x.liq = depthOf(x.book); });
+    const playable = priced.filter(x => !_mIsExchange(x.book) || (x.liq != null && x.liq >= MORNING_EXCH_MIN_LIQ));
+    let best = playable[0] || priced[0];
+    playable.forEach(x => { if (x.odds > best.odds || (x.odds === best.odds && rank(x.book) < rank(best.book))) best = x; });
+    b.odds = best.odds; b.book = best.book;
+    b.altBooks = priced.filter(x => x !== best && !(x.book === best.book && x.odds === best.odds)).map(x => ({ book: x.book, odds: x.odds, liq: x.liq != null ? x.liq : null }));
+    b.liqBooks = sh.liq && sh.liq.books ? sh.liq.books : null;
+    b.liveAt = Date.now();
+  });
+  try { saveMorningBets(); } catch (e) {}
+  return r;
+}
 async function morningSendCard(mode) {
   const picks = morningCardPicks();
   if (!picks.length) { showToast("No pending morning picks to send"); return; }
+  showToast("Refreshing live prices + exchange depth\u2026");
+  try { await morningRefreshPicks(picks); } catch (e) {}
   showToast(`Building ${mode === "nick" ? "Nick" : "Discord"} card\u2026`);
   let blob;
   try { blob = await _morningCardBlob(picks, mode); } catch (e) { console.error("[MORNING card]", e); showToast("Card failed \u2014 " + (e && e.message || "see console")); return; }
