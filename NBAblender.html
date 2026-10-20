@@ -7333,6 +7333,12 @@ function deleteBet(id) {
   const removed = bets.find(b => String(b.id) === String(id));
   bets = bets.filter(b => String(b.id) !== String(id));
   saveBets();
+  // A Morning pick lives in two places (Morning log + Tracker); deleting one deletes the other.
+  if (removed && removed.source === "morning" && typeof morningBets !== "undefined") {
+    const before = morningBets.length;
+    morningBets = morningBets.filter(m => String(m.id) !== String(removed.morningId) && String(m.trackerId) !== String(removed.id));
+    if (morningBets.length !== before) { try { saveMorningBets(); } catch (e) {} try { if (currentTab === "morning") renderMorning(); } catch (e) {} }
+  }
   // Keep Projections' ✓ TRACKED pill in sync — if this was the last (or only)
   // bet backing that pill, untrack it too instead of leaving a stale count.
   if (removed) {
@@ -14740,6 +14746,7 @@ function updateEosCalc(plPerBet, currentPL) {
 }
 
 function renderTracker() {
+  try { morningCleanOrphans(); } catch (e) {}
   const el = document.getElementById("tracker-tab");
   // Apply kind filter (all | props | totals) to every aggregation in this view
   const kindMatch = (b) => {
@@ -14867,6 +14874,7 @@ function renderTracker() {
 
   const search = trackerSearch.toLowerCase();
   let filtered = openOnly ? scopedBets.filter(b => b.result === "pending") : scopedBets;
+  if (discordOnly) filtered = filtered.filter(b => b.discordSent);
   // Date search: build every reasonable string form of the bet's game date
   // (raw stored string, M/D, M/D/YYYY, zero-padded, ISO, and month-name forms)
   // so typing "1/15", "01-15", "2026-01-15", or "jan 15" all find it.
@@ -15057,7 +15065,7 @@ function renderTracker() {
                 }
                 return teamLogoImg(b.team, 16);
               })()}
-              <span onclick="editBet('${b.id}')" style="cursor:pointer;border-bottom:1px dashed #1e40af77;" title="Click to edit">${b.player}</span> <span style="color:#7dd3fc;font-weight:600;">${b.stat === "GAME_SPREAD" ? statLbl : `${b.ou} ${b.line} ${statLbl}`}</span>${(() => {
+              <span onclick="editBet('${b.id}')" style="cursor:pointer;border-bottom:1px dashed #1e40af77;" title="Click to edit">${b.player}</span>${b.discordSent ? ` <span title="Sent to Discord at ${_mEsc(String(b.discordBook || b.book || ""))} ${b.discordOdds != null ? (b.discordOdds > 0 ? "+" : "") + b.discordOdds : ""}" style="font-size:9px;font-weight:800;letter-spacing:.6px;color:#c4b5fd;border:1px solid #7c3aed99;background:#7c3aed22;border-radius:4px;padding:1px 6px;vertical-align:middle;">DISCORD</span>` : ""}${b.source === "morning" ? ` <span style="font-size:9px;font-weight:800;letter-spacing:.6px;color:#93c5fd;border:1px solid #93c5fd55;border-radius:4px;padding:1px 6px;vertical-align:middle;">AM</span>` : ""} <span style="color:#7dd3fc;font-weight:600;">${b.stat === "GAME_SPREAD" ? statLbl : `${b.ou} ${b.line} ${statLbl}`}</span>${(() => {
                 const ctx = b.injuryContext;
                 let badge = "";
                 if (ctx) {
@@ -15512,10 +15520,12 @@ function renderTracker() {
               return `<button onclick="setSeasonFilter('${k}')" style="background:${active?activeColor:'transparent'};border:none;color:${active?'#050507':'#d4dae3'};border-radius:4px;padding:4px 10px;font-size:10px;font-weight:700;letter-spacing:0.5px;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;">${lbl}</button>`;
             }).join("")}
           </div>
+          <button onclick="toggleDiscordOnly()" title="Only the picks sent to Discord" style="background:${discordOnly?'#7c3aed33':'#0c0d10'};border:1px solid ${discordOnly?'#a78bfa':'#1a1d22'};color:${discordOnly?'#c4b5fd':'#d4dae3'};border-radius:6px;padding:6px 12px;font-size:11px;font-weight:700;letter-spacing:0.5px;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;">${discordOnly?'✓ DISCORD':'DISCORD'}</button>
           <button onclick="toggleOpenOnly()" style="background:${openOnly?'#1e40af30':'#0c0d10'};border:1px solid ${openOnly?'#1e40af':'#1a1d22'};color:${openOnly?'#7dd3fc':'#d4dae3'};border-radius:6px;padding:6px 12px;font-size:11px;font-weight:700;letter-spacing:0.5px;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;">${openOnly?'✓ OPEN ONLY':'OPEN ONLY'}</button>
           <button onclick="copyProjStats()" title="Copy decider projections for open props — for theprop.shop fair pricing calculator" style="background:linear-gradient(135deg, #0c0d10 0%, #0a0d12 50%, #0c0d10 100%);border:1px solid #ec4899;color:#ec4899;border-radius:6px;padding:6px 12px;font-size:11px;font-weight:700;letter-spacing:0.5px;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;">📋 PROJ STATS</button>
         </div>
       </div>
+      ${(() => { const dr = _discordRecap(); if (!dr.n) return ""; const n = dr.w + dr.l, roi = dr.staked ? dr.pl / dr.staked * 100 : 0; return `<div style="margin:0 0 10px;border:1px solid #7c3aed66;background:#7c3aed14;border-radius:10px;padding:8px 14px;display:flex;gap:18px;flex-wrap:wrap;align-items:center;"><span style="font-size:11px;font-weight:800;letter-spacing:1px;color:#c4b5fd;">SENT TO DISCORD</span><span style="font-family:'JetBrains Mono',monospace;font-weight:800;color:#fff;">${dr.w}-${dr.l}${n ? ` (${(dr.w / n * 100).toFixed(0)}%)` : ""}</span><span style="font-family:'JetBrains Mono',monospace;font-weight:800;color:${dr.pl >= 0 ? "#4ade80" : "#f87171"};">${dr.pl >= 0 ? "+" : ""}${dr.pl.toFixed(2)}u</span><span style="font-size:11px;color:#a8b0bb;">${roi >= 0 ? "+" : ""}${roi.toFixed(1)}% ROI \u00b7 ${dr.open} open${dr.v ? ` \u00b7 ${dr.v} void` : ""} \u00b7 ${dr.n} sent</span></div>`; })()}
       ${filtered.length === 0 ? '<p style="color:#525a64;font-size:13px;padding:20px 0;text-align:center;">'+(search?"No bets match search.":openOnly?"No open bets.":"No bets yet. Hit TRACK on any player.")+'</p>' : `
         <div id="bet-table-body">${betRows}</div>`}
     </div></div>`;
@@ -15734,6 +15744,7 @@ function filterBetRows(val) {
 let qgQueue = [];
 let qgIdx = 0;
 let openOnly = false;
+let discordOnly = false;   // Tracker filter: only picks that were actually sent to Discord
 let trackerSearch = "";  // search input state, persists across renders
 // Bet kind filter for Tracker: 'all' | 'props' | 'totals'
 let betKindFilter = "props";
@@ -15748,6 +15759,17 @@ function setSeasonFilter(val) {
   renderTracker();
 }
 
+function toggleDiscordOnly() { discordOnly = !discordOnly; renderTracker(); }
+// Record of what was actually sent to Discord (at the price/book it was sent at).
+function _discordRecap() {
+  const sent = bets.filter(b => b && b.discordSent && (b.stat || "").toUpperCase() !== "GAME_TOTAL");
+  const st = { w: 0, l: 0, v: 0, open: 0, pl: 0, staked: 0 };
+  sent.forEach(b => {
+    const o = Number(b.discordOdds != null ? b.discordOdds : b.odds), stake = Number(b.stake) || 1, win = o > 0 ? stake * o / 100 : stake * 100 / Math.abs(o || -110);
+    if (b.result === "hit") { st.w++; st.pl += win; st.staked += stake; } else if (b.result === "miss") { st.l++; st.pl -= stake; st.staked += stake; } else if (b.result === "void") st.v++; else st.open++;
+  });
+  st.n = sent.length; return st;
+}
 function toggleOpenOnly() {
   openOnly = !openOnly;
   renderTracker();
@@ -25077,7 +25099,7 @@ function pruneMorningPs() {
 
 // ── Morning bet log (separate from the main Tracker) ─────────────────────────
 let morningBets = [];
-function loadMorningBets() { try { const r = localStorage.getItem(MORNING_BETS_KEY); morningBets = r ? JSON.parse(r) : []; } catch (e) { morningBets = []; } }
+function loadMorningBets() { try { const r = localStorage.getItem(MORNING_BETS_KEY); morningBets = r ? JSON.parse(r) : []; window._mbLoaded = true; } catch (e) { morningBets = []; } }
 function saveMorningBets() { try { localStorage.setItem(MORNING_BETS_KEY, JSON.stringify(morningBets)); } catch (e) { showToast("Morning log could not be saved — storage full?"); } }
 
 // A player's CURRENT team: the blended row (built from the loaded sources — RW API / CSVs), then any source that
@@ -25382,7 +25404,38 @@ function morningTrackRow(i) {
   renderMorning();
 }
 function morningLogAll() { if (!morningNewsLoadedAt()) { showToast("Paste today's RW news first — the news gate is blind without it"); return; } const n = morningAutoLog(); showToast(n ? `Logged ${n} morning pick${n === 1 ? "" : "s"}` : "Nothing new to log"); renderMorning(); }
-function morningDeleteBet(id) { if (!confirm("Delete this morning bet?")) return; morningBets = morningBets.filter(b => String(b.id) !== String(id)); saveMorningBets(); renderMorning(); }
+// Mark a Morning pick as sent to Discord, in the Morning log AND on its Tracker copy (price/book at send time; first send sticks).
+function _mStampDiscord(picks) {
+  const at = new Date().toISOString();
+  picks.forEach(b => {
+    const m = morningBets.find(x => x.id === b.id);
+    if (m && !m.discordSent) Object.assign(m, { discordSent: true, discordOdds: m.odds, discordBook: m.book, discordAt: at });
+    const tb = bets.find(x => x && x.source === "morning" && (String(x.morningId) === String(b.id) || (m && String(x.id) === String(m.trackerId))));
+    if (tb && !tb.discordSent) Object.assign(tb, { discordSent: true, discordOdds: tb.odds, discordBook: tb.book, discordAt: at });
+  });
+  try { saveMorningBets(); saveBets(); } catch (e) {}
+}
+function morningDeleteBet(id) {
+  if (!confirm("Delete this morning bet? (its Tracker copy goes too)")) return;
+  const m = morningBets.find(b => String(b.id) === String(id));
+  morningBets = morningBets.filter(b => String(b.id) !== String(id));
+  saveMorningBets();
+  if (m) { const n0 = bets.length; bets = bets.filter(b => !(b && b.source === "morning" && (String(b.morningId) === String(m.id) || String(b.id) === String(m.trackerId)) && b.result === "pending")); if (bets.length !== n0) { try { saveBets(); renderTracker(); } catch (e) {} } }
+  renderMorning();
+}
+// Tracker copies of Morning picks whose Morning-log entry is gone (deleted, or dropped by a rule change) are removed while
+// they are still pending; settled ones stay as history.
+function morningCleanOrphans() {
+  try {
+    if (typeof bets === "undefined" || !Array.isArray(bets) || !Array.isArray(morningBets) || !window._mbLoaded) return 0;   // never prune before the Morning log has loaded
+    const ids = new Set(morningBets.map(m => String(m.id)));
+    const n0 = bets.length;
+    bets = bets.filter(b => !(b && b.source === "morning" && b.result === "pending" && !ids.has(String(b.morningId))));
+    const n = n0 - bets.length;
+    if (n) { saveBets(); try { if (currentTab === "tracker") renderTracker(); } catch (e) {} }
+    return n;
+  } catch (e) { return 0; }
+}
 function morningSetResult(id, res) { const b = morningBets.find(x => String(x.id) === String(id)); if (!b) return; b.result = res; if (res === "pending") b.actual = null; saveMorningBets(); renderMorning(); }
 async function morningGradePending() {
   const pending = morningBets.filter(b => b.result === "pending");
@@ -25487,6 +25540,7 @@ function lineupPanelHtml(card, lc) {
   </div>`;
 }
 function renderMorning() {
+  try { morningCleanOrphans(); } catch (e) {}
   const el = document.getElementById("morning-tab");
   if (!el) return;
   pruneMorningPs();
@@ -25763,71 +25817,69 @@ function _mFullTeam(abbr) {
 async function _morningCardHtml(picks, mode) {
   const nick = mode === "nick";
   const esc = _mEsc;
-  const teams = [...new Set(picks.map(b => b.team).filter(Boolean))];
+  const teams = [...new Set(picks.map(b => b.team).concat(picks.flatMap(b => String(b.game || "").split("@").map(x => x.trim()))).filter(t => t && /^[A-Z]{2,3}$/.test(t)))];
   const logos = {};
   await Promise.all(teams.map(async t => { try { const u = await _teamLogoAsDataUri(t); if (u) logos[t] = u; } catch (e) {} }));
   let heads = {};
   try { heads = await buildHeadshotMap(picks.map(b => ({ player: b.player, team: b.team }))); } catch (e) {}
   const face = (name, sz) => {
     const u = heads[resolveNorm(name || "")];
-    const ring = "border-radius:50%;background:#0d0f13;border:1px solid #000;box-shadow:0 0 10px rgba(125,211,252,0.30),0 2px 5px rgba(0,0,0,0.45);";
-    if (u) return `<span style="width:${sz}px;height:${sz}px;${ring}display:inline-block;overflow:hidden;position:relative;flex:0 0 auto;"><img src="${u}" alt="" style="position:absolute;top:0;left:50%;width:${Math.round(sz * 1.62)}px;height:auto;transform:translateX(-50%);display:block;"/></span>`;
+    const ring = "border-radius:50%;background:#0d141f;border:2px solid #1b2a40;";
+    if (u) return `<span style="width:${sz}px;height:${sz}px;${ring}display:inline-block;overflow:hidden;position:relative;flex:0 0 auto;"><img src="${u}" alt="" style="position:absolute;top:0;left:50%;width:${Math.round(sz * 1.62)}px;height:auto;transform:translateX(-50%);"/></span>`;
     const ini = String(name || "").split(/\s+/).filter(Boolean).slice(0, 2).map(w => w[0]).join("").toUpperCase();
     return `<span style="width:${sz}px;height:${sz}px;${ring}display:inline-flex;align-items:center;justify-content:center;color:#7dd3fc;font:800 ${Math.round(sz * 0.38)}px 'Plus Jakarta Sans';flex:0 0 auto;">${esc(ini)}</span>`;
   };
   const logo = (t, sz) => logos[t] ? `<img src="${logos[t]}" alt="" style="width:${sz}px;height:${sz}px;object-fit:contain;vertical-align:middle;"/>` : "";
-  const bookLogo = (book, sz) => { const d = (typeof logoFor === "function") ? logoFor(book) : null; return d ? `<img src="${d}" alt="" style="width:${sz}px;height:${sz}px;border-radius:3px;object-fit:cover;vertical-align:middle;"/>` : `<span style="display:inline-flex;width:${sz}px;height:${sz}px;border-radius:3px;background:#1a1d22;color:#fff;font:700 ${Math.round(sz * 0.5)}px sans-serif;align-items:center;justify-content:center;">${esc(String(book || "?").slice(0, 2).toUpperCase())}</span>`; };
+  const nm = bk => BOOK_CODE_NAMES[String(bk || "").trim().toUpperCase()] || bk;
+  const bookLogo = (book, sz) => { const d = (typeof logoFor === "function") ? logoFor(book) : null; return d ? `<img src="${d}" alt="" style="width:${sz}px;height:${sz}px;border-radius:${Math.round(sz * 0.22)}px;object-fit:cover;vertical-align:middle;flex:0 0 auto;"/>` : `<span style="display:inline-flex;width:${sz}px;height:${sz}px;border-radius:${Math.round(sz * 0.22)}px;background:#1a2433;color:#fff;font:800 ${Math.round(sz * 0.38)}px 'Plus Jakarta Sans';align-items:center;justify-content:center;flex:0 0 auto;">${esc(String(book || "?").slice(0, 2).toUpperCase())}</span>`; };
   const odds = o => o > 0 ? `+${o}` : `−${Math.abs(o)}`;
-  const th = (t, a) => `<th style="text-align:${a || "left"};padding:13px 14px;font:800 12px 'Plus Jakarta Sans';color:#fff;letter-spacing:.08em;text-transform:uppercase;border-bottom:2px solid #1a1d22;background:#0b0f19;">${t}</th>`;
-  const td = (h, a, x) => `<td style="text-align:${a || "left"};padding:12px 14px;border-bottom:1px solid #1a1d22;vertical-align:middle;${x || ""}">${h}</td>`;
-  // group by game
-  const groups = new Map();
-  picks.forEach(b => { const k = b.game || b.team || "—"; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(b); });
-  const cols = nick ? 9 : 5;
-  let body = "";
-  groups.forEach((list, game) => {
-    const gm = String(game).match(/^([A-Z]{2,4})\s*@\s*([A-Z]{2,4})$/);
-    const gLabel = gm ? `${esc(_mFullTeam(gm[1]))} @ ${esc(_mFullTeam(gm[2]))}` : esc(game);
-    const gLogos = gm ? logo(gm[1], 17) + logo(gm[2], 17) : "";
-    const gTime = (list.find(x => x.gameTime) || {}).gameTime;
-    body += `<tr><td colspan="${cols}" style="padding:13px 16px 9px;background:#0f1115;border-bottom:2px solid #1a1d22;"><div style="display:flex;align-items:center;gap:8px;font:800 15px 'Plus Jakarta Sans';color:#fff;letter-spacing:.04em;text-transform:uppercase;">${gLogos}<span>${gLabel}</span>${!nick && gTime ? `<span style="font-size:11px;font-weight:700;margin-left:6px;text-transform:none;">${esc(gTime.replace(/^[A-Za-z]{3}-\d+\s*/, ""))} ET</span>` : ""}<span style="margin-left:auto;font-size:11px;font-weight:700;color:#7dd3fc;">${list.length} ${list.length === 1 ? "PROP" : "PROPS"}</span></div></td></tr>`;
-    list.forEach(b => {
-      const stat = (typeof STAT_FULL_NAME !== "undefined" && STAT_FULL_NAME[b.stat]) ? STAT_FULL_NAME[b.stat] : b.stat;
-      const side = b.ou.toUpperCase(), sc = b.ou === "over" ? "#fb923c" : "#38bdf8", pt = morningPlayTo(b);
-      const player = `<div style="display:flex;align-items:center;gap:10px;">${face(b.player, 40)}<div><div style="font:800 15px 'Plus Jakarta Sans';color:#fff;">${esc(displayPlayerName(b.player))}</div><div style="font:700 11px 'Plus Jakarta Sans';color:#a8b0bb;">${logo(b.team, 13)} ${esc(displayTeamAbbr(b.team || ""))}</div></div></div>`;
-      const prop = `<div style="font:700 14px 'Plus Jakarta Sans';color:#fff;">${esc(String(stat).toUpperCase())} <span style="font-family:'JetBrains Mono',monospace;color:#7dd3fc;">${b.line}</span></div>`;
-      const sidec = `<span style="font:800 15px 'Plus Jakarta Sans';color:${sc};letter-spacing:.05em;">${side}</span>${pt ? `<div style="font:700 12px 'JetBrains Mono',monospace;color:#fff;margin-top:4px;">play to ${pt}</div>` : ""}`;
-      const best = `<div style="display:inline-flex;align-items:center;gap:6px;">${bookLogo(b.book, 18)}<span style="font:800 17px 'JetBrains Mono',monospace;color:#fff;">${odds(b.odds)}</span></div>`;
-      // Books · Alts: every other price on this side/line — the boards' prices and the live OpticOdds books (best first). Exchanges
-      // under $500 are alt books and show the depth behind them.
-      const nm = bk => BOOK_CODE_NAMES[String(bk || "").trim().toUpperCase()] || bk;
-      const tracked = nm(b.book) + "|" + b.odds, seenP = new Set([tracked]);
-      const depth = bk => (b.liqBooks && b.liqBooks[bk] && b.liqBooks[bk].liq != null) ? b.liqBooks[bk].liq : null;
-      const rawAlts = (b.sourcePrices || []).map(x => ({ book: nm(x.book), odds: x.odds, liq: x.liq })).concat((b.altBooks || []).map(a => ({ book: nm(a.book), odds: a.odds, liq: a.liq })));
-      const others = rawAlts.filter(x => x.odds && !isNaN(x.odds) && x.book).filter(x => { const k = x.book + "|" + x.odds; if (seenP.has(k)) return false; seenP.add(k); return true; }).sort((x, y) => y.odds - x.odds);
-      const books = others.length ? others.map(x => { const dp = x.liq != null ? x.liq : (_mIsExchange(x.book) ? depth(x.book) : null); return `<span style="display:inline-flex;align-items:center;gap:5px;margin:2px 10px 2px 0;">${bookLogo(x.book, 15)}<span style="font:700 13px 'JetBrains Mono',monospace;color:#fff;">${odds(x.odds)}</span>${dp != null ? `<span style="font:700 10px 'JetBrains Mono',monospace;color:#a8b0bb;">$${Math.round(dp)}</span>` : ""}</span>`; }).join("") : `<span style="color:#fff;">\u2014</span>`;
-      if (!nick) { body += `<tr>${td(player)}${td(prop)}${td(sidec)}${td(best, "center", "white-space:nowrap;")}${td(books)}</tr>`; return; }
+  const mono = "font-family:'JetBrains Mono','Menlo',monospace;";
+  const th = (t, a, x) => `<th style="text-align:${a || "left"};padding:15px 18px;font:800 13px 'Plus Jakarta Sans';color:#e6edf5;letter-spacing:.1em;text-transform:uppercase;border-bottom:1px solid #14233a;background:#0a111d;${x || ""}">${t}</th>`;
+  const td = (h, a, x) => `<td style="text-align:${a || "left"};padding:14px 18px;border-bottom:1px solid #112036;vertical-align:middle;${x || ""}">${h}</td>`;
+  const depthOf = (b, bk) => (b.liqBooks && b.liqBooks[bk] && b.liqBooks[bk].liq != null) ? b.liqBooks[bk].liq : null;
+  const maxTag = v => v != null ? `<span style="${mono}font-weight:700;font-size:13px;color:#22c55e;">$${Math.round(v)} max</span>` : "";
+  const timeOf = b => { const m = String(b.gameTime || "").match(/(\d{1,2}:\d{2}\s*[AP]M)/i); return m ? m[1].toUpperCase().replace(/\s+/, " ") : ""; };
+  const sorted = picks.slice().sort((a, b) => { const ta = Date.parse("1/1/2000 " + timeOf(a)) || 0, tb = Date.parse("1/1/2000 " + timeOf(b)) || 0; return ta - tb || String(a.player).localeCompare(String(b.player)); });
+  const rows = sorted.map(b => {
+    const stat = (typeof STAT_FULL_NAME !== "undefined" && STAT_FULL_NAME[b.stat]) ? STAT_FULL_NAME[b.stat] : b.stat;
+    const pt = morningPlayTo(b), bookN = nm(b.book);
+    const exchDepth = _mIsExchange(bookN) ? (depthOf(b, bookN) != null ? depthOf(b, bookN) : ((b.sourcePrices || []).find(x => nm(x.book) === bookN && x.odds === b.odds) || {}).liq) : null;
+    const gm = String(b.game || "").match(/^([A-Z]{2,3})\s*@\s*([A-Z]{2,3})$/);
+    const gameLine = gm ? `${logo(gm[1], 20)} <span>${gm[1]}</span> <span style="color:#8b93a0;">@</span> ${logo(gm[2], 20)} <span>${gm[2]}</span>` : esc(b.game || b.team || "");
+    const player = `<div style="display:flex;align-items:center;gap:14px;">${face(b.player, 60)}<div><div style="font:800 21px 'Plus Jakarta Sans';color:#fff;line-height:1.15;">${esc(displayPlayerName(b.player))}</div><div style="font:700 13px 'Plus Jakarta Sans';color:#cbd5e1;margin-top:4px;display:flex;align-items:center;gap:6px;">${gameLine}<span style="margin-left:6px;color:#fff;">${esc(timeOf(b))}</span></div></div></div>`;
+    const line = `<div style="font:700 11px 'Plus Jakarta Sans';letter-spacing:.12em;color:#7aa6d6;text-transform:uppercase;margin-bottom:2px;">${esc(String(stat).toUpperCase())}</div><div style="${mono}font-weight:800;font-size:32px;color:#2f9bff;line-height:1;">${b.line}</div>`;
+    const side = `<div style="display:inline-block;border:2px solid #1f5f8f;background:#0b2740;border-radius:999px;padding:6px 26px;font:800 17px 'Plus Jakarta Sans';letter-spacing:.08em;color:#d6ecff;">${esc(b.ou.toUpperCase())}</div>${pt ? `<div style="font:600 15px 'Plus Jakarta Sans';color:#cbd5e1;margin-top:6px;">play to ${pt}</div>` : ""}${exchDepth != null ? `<div style="margin-top:4px;">${maxTag(exchDepth)}</div>` : ""}`;
+    const best = `<div style="display:inline-flex;align-items:center;gap:12px;">${bookLogo(bookN, 42)}<span style="${mono}font-weight:800;font-size:28px;color:#fff;">${odds(b.odds)}</span></div>`;
+    // Books: every other price on this side/line (boards' + live), best first; exchange alts carry their depth.
+    const seenP = new Set([bookN + "|" + b.odds]);
+    const rawAlts = (b.sourcePrices || []).map(x => ({ book: nm(x.book), odds: x.odds, liq: x.liq })).concat((b.altBooks || []).map(a => ({ book: nm(a.book), odds: a.odds, liq: a.liq })));
+    const others = rawAlts.filter(x => x.odds && !isNaN(x.odds) && x.book).filter(x => { const k = x.book + "|" + x.odds; if (seenP.has(k)) return false; seenP.add(k); return true; }).sort((x, y) => y.odds - x.odds);
+    const books = others.length ? `<div style="display:flex;flex-wrap:wrap;gap:8px 18px;align-items:center;">${others.map(x => { const dp = x.liq != null ? x.liq : (_mIsExchange(x.book) ? depthOf(b, x.book) : null); return `<span style="display:inline-flex;align-items:center;gap:8px;">${bookLogo(x.book, 30)}<span style="${mono}font-weight:700;font-size:20px;color:#fff;">${odds(x.odds)}</span>${maxTag(dp)}</span>`; }).join("")}</div>` : `<span style="color:#fff;font-size:20px;">—</span>`;
+    let extra = "";
+    if (nick) {
       const pills = MORNING_SRC_KEYS.map(k => {
-        if ((b.sourceProjs == null || b.sourceProjs[k] == null) && b.sourceEvs && b.sourceEvs[k] != null) {
-          const evn = Number(b.sourceEvs[k]);
-          return `<span style="font:700 11px 'JetBrains Mono',monospace;color:${_mSrc(k).color};border:1px solid ${_mSrc(k).color}66;border-radius:4px;padding:2px 6px;margin:2px 4px 2px 0;display:inline-block;">${_mSrc(k).label} \u2014 ${evn >= 0 ? "+" : ""}${evn.toFixed(1)}%</span>`;
-        }
-        if (b.sourceProjs == null || b.sourceProjs[k] == null) return k === b.missingSrc ? `<span style="font:700 11px 'JetBrains Mono',monospace;color:#8b93a0;border:1px dashed #525a64;border-radius:4px;padding:2px 6px;margin:2px 4px 2px 0;display:inline-block;">${_mSrc(k).label} ${b.missingProj != null ? Number(b.missingProj).toFixed(1) : "—"}</span>` : "";
-        const ev = Number(b.sourceEvs[k]);
-        return `<span style="font:700 11px 'JetBrains Mono',monospace;color:${_mSrc(k).color};border:1px solid ${_mSrc(k).color}66;border-radius:4px;padding:2px 6px;margin:2px 4px 2px 0;display:inline-block;">${_mSrc(k).label} ${Number(b.sourceProjs[k]).toFixed(1)} <b style="color:${ev >= MORNING_QUAL_EV ? "#4ade80" : ev >= 0 ? "#fbbf24" : "#f87171"};">${ev >= 0 ? "+" : ""}${ev.toFixed(1)}%</b></span>`;
+        const hasP = b.sourceProjs && b.sourceProjs[k] != null, hasE = b.sourceEvs && b.sourceEvs[k] != null;
+        if (!hasP && !hasE) return "";
+        const evn = hasE ? Number(b.sourceEvs[k]) : null;
+        return `<span style="${mono}font-weight:700;font-size:12px;color:${_mSrc(k).color};border:1px solid ${_mSrc(k).color}66;border-radius:6px;padding:3px 8px;margin:2px 6px 2px 0;display:inline-block;white-space:nowrap;">${_mSrc(k).label} ${hasP ? Number(b.sourceProjs[k]).toFixed(1) : "—"} <b style="color:${evn >= MORNING_QUAL_EV ? "#4ade80" : evn >= 0 ? "#fbbf24" : "#f87171"};">${evn != null ? (evn >= 0 ? "+" : "") + evn.toFixed(1) + "%" : ""}</b></span>`;
       }).join("");
-      const ev = b.ev != null ? `<div style="font:800 13px 'JetBrains Mono',monospace;color:#4ade80;">+${Number(b.ev).toFixed(1)}%</div>` : "";
-      const worst = b.minEv != null ? `<div style="font:700 11px 'JetBrains Mono',monospace;color:#a8b0bb;margin-top:2px;">worst ${b.minEv >= 0 ? "+" : ""}${Number(b.minEv).toFixed(1)}%</div>` : "";
-      body += `<tr>${td(player)}${td(prop)}${td(sidec)}${td(best, "center", "white-space:nowrap;")}${td(`<span style="font:800 15px 'JetBrains Mono',monospace;color:#c4b5fd;">${(b.sourcesAgreed || []).length}/${b.requiredQual || 4}</span>`, "center")}${td(pills)}${td(ev + worst, "center")}${td(_mAnchorModelHtml(b), "center")}${td(books)}</tr>`;
-    });
-  });
+      const ev = b.ev != null ? `<div style="${mono}font-weight:800;font-size:15px;color:#4ade80;">+${Number(b.ev).toFixed(1)}%</div>` : "";
+      const worst = b.minEv != null ? `<div style="${mono}font-weight:700;font-size:11px;color:#a8b0bb;margin-top:2px;">worst ${b.minEv >= 0 ? "+" : ""}${Number(b.minEv).toFixed(1)}%</div>` : "";
+      extra = td(`<span style="${mono}font-weight:800;font-size:17px;color:#c4b5fd;">${(b.sourcesAgreed || []).length}/${b.requiredQual || 4}</span>`, "center") + td(`<div style="display:flex;flex-wrap:wrap;max-width:330px;">${pills}</div>`) + td(ev + worst, "center") + td(_mAnchorModelHtml(b), "center");
+    }
+    return `<tr>${td(player)}${td(line, "center", "background:#0b1a2e;")}${td(side, "center")}${td(best, "center", "white-space:nowrap;")}${td(books, "left", "width:" + (nick ? "300px" : "420px") + ";")}${extra}</tr>`;
+  }).join("");
   const d = new Date(), days = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"], mo = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
-  const date = `${days[d.getDay()]} ${mo[d.getMonth()]} ${d.getDate()}`;
-  const over = picks.filter(b => b.ou === "over").length;
-  const head = nick ? [th("Player"), th("Prop"), th("Side"), th("Price", "center"), th("Agree", "center"), th("Sources · proj · EV"), th("Edge", "center"), th("Anchor · Model", "center"), th("Books · Alts")].join("") : [th("Player"), th("Prop"), th("Side"), th("Best Price", "center"), th("Books · Alts")].join("");
-  return `<style>.mcard, .mcard * { text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000; }</style><div class="mcard" style="font-family:'Plus Jakarta Sans','Helvetica Neue',sans-serif;background:${nick ? "#060b14" : "linear-gradient(135deg,#0c0d10 0%,#0a0d12 50%,#0c0d10 100%)"};border:1px solid #1a1d22;border-radius:18px;padding:24px;width:${nick ? 1180 : 1240}px;color:#fff;">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;gap:12px;"><div style="font-size:20px;font-weight:800;">NBA ${nick ? "Morning · Nick" : "Props"} · ${date}</div><div style="font-size:12px;font-weight:700;letter-spacing:.04em;">${picks.length} PROP${picks.length === 1 ? "" : "S"} &nbsp;·&nbsp; ${over} OVER &nbsp;·&nbsp; ${picks.length - over} UNDER</div></div>
-    <table style="width:100%;border-collapse:collapse;"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+  const date = `${days[d.getDay()]}, ${mo[d.getMonth()]} ${d.getDate()}`;
+  const nGames = new Set(picks.map(b => b.game || b.team)).size;
+  const head = [th("Player"), th("Prop", "center", "background:#0c1c31;"), th("Side", "center"), th("Best Price", "center"), th("Books")].concat(nick ? [th("Agree", "center"), th("Sources · proj · EV"), th("Edge", "center"), th("Anchor · Model", "center")] : []).join("");
+  return `<div class="mcard" style="font-family:'Plus Jakarta Sans','Helvetica Neue',sans-serif;background:#060b14;padding:26px 28px 30px;width:${nick ? 1760 : 1380}px;color:#fff;box-sizing:border-box;">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;gap:16px;">
+      <div style="flex:1;"></div>
+      <div style="display:flex;align-items:baseline;gap:22px;"><span style="font-size:40px;font-weight:800;letter-spacing:-.5px;">${date}</span><span style="font-size:30px;font-weight:800;color:#e2e8f0;letter-spacing:.02em;">NBA ${nick ? "MORNING · NICK" : "PROPS"}</span><span style="font-size:30px;font-weight:800;color:#e2e8f0;">${picks.length} PROP${picks.length === 1 ? "" : "S"}</span></div>
+      <div style="flex:1;text-align:right;font-size:24px;font-weight:800;">${nGames} GAME${nGames === 1 ? "" : "S"}</div>
+    </div>
+    <div style="border:2px solid #14304f;border-radius:24px;overflow:hidden;background:#070d17;"><table style="width:100%;border-collapse:collapse;"><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table></div></div>`;
 }
 // Renders the Morning card (nick | discord) to a PNG blob. Throws on failure.
 async function _morningCardBlob(picks, mode) {
@@ -25876,9 +25928,7 @@ async function morningPostDiscord() {
     const r = await fetch(hook + (hook.includes("?") ? "&" : "?") + "wait=true", { method: "POST", body: fd });
     if (!r.ok) { const t = await r.text().catch(() => ""); throw new Error(`Discord said ${r.status} ${t.slice(0, 120)}`); }
   } catch (e) { showToast("Discord post failed \u2014 " + (e && e.message || e)); return; }
-  const at = new Date().toISOString();
-  picks.forEach(b => { const m = morningBets.find(x => x.id === b.id); if (m && !m.discordSent) Object.assign(m, { discordSent: true, discordOdds: m.odds, discordBook: m.book, discordAt: at }); });
-  saveMorningBets(); renderMorning();
+  _mStampDiscord(picks); renderMorning();
   showToast(`Posted ${picks.length} pick${picks.length === 1 ? "" : "s"} to Discord \u2713`);
 }
 // Live prices + exchange depth for the cards, the same OpticOdds refresh the WNBA Discord pic did: every book's price on the pick's
@@ -25904,8 +25954,16 @@ async function morningRefreshPicks(picks) {
     b.altBooks = priced.filter(x => x !== best && !(x.book === best.book && x.odds === best.odds)).map(x => ({ book: x.book, odds: x.odds, liq: x.liq != null ? x.liq : null }));
     b.liqBooks = sh.liq && sh.liq.books ? sh.liq.books : null;
     b.liveAt = Date.now();
+    // the Tracker copy follows the price the card now shows
+    try {
+      const tb = bets.find(x => x && x.source === "morning" && (String(x.morningId) === String(b.id) || String(x.id) === String(b.trackerId)));
+      if (tb && tb.result === "pending") {
+        const st = calcStake(b.odds) || { stake: tb.stake, toWin: tb.toWin, type: tb.type };
+        Object.assign(tb, { odds: b.odds, book: b.book, stake: st.stake, toWin: st.toWin, type: st.type, altBooks: (b.altBooks || []).map(a => ({ book: a.book, odds: a.odds, line: b.line, fair: tb.fair })) });
+      }
+    } catch (e) {}
   });
-  try { saveMorningBets(); } catch (e) {}
+  try { saveMorningBets(); saveBets(); } catch (e) {}
   return r;
 }
 async function morningSendCard(mode) {
@@ -25925,9 +25983,7 @@ async function morningSendCard(mode) {
     if (!done) { const url = URL.createObjectURL(file), a = document.createElement("a"); a.href = url; a.download = file.name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000); showToast("Card saved"); }
   }
   if (mode === "discord" && confirm(`Mark these ${picks.length} pick${picks.length === 1 ? "" : "s"} as sent to Discord? (Tracks your Discord record on the Morning log.)`)) {
-    const at = new Date().toISOString();
-    picks.forEach(b => { const m = morningBets.find(x => x.id === b.id); if (m && !m.discordSent) Object.assign(m, { discordSent: true, discordOdds: m.odds, discordBook: m.book, discordAt: at }); });
-    saveMorningBets(); renderMorning();
+    _mStampDiscord(picks); renderMorning();
   }
 }
 
