@@ -226,7 +226,7 @@ let toastT; const toast = m => { const t=$('#toast'); t.textContent=m; t.classLi
 async function runPool(jobs, n){ let i=0; await Promise.all(Array.from({length:Math.min(n,jobs.length)},async()=>{ while(i<jobs.length){ const j=jobs[i++]; await j(); } })); }
 const cents = v => { v=Number(v); return isNaN(v)?null:(v>0?v-100:v+100); };
 const LIQ_BAND_CENTS = 20;
-const SM_BUILD = 'Oct 20 · dc-queue';
+const SM_BUILD = 'Oct 20 · kambi';
 const SHARP_MAX_ARB = 8; // % -- anything bigger is treated as bad data
 function levelsOf(o){
   const top=Number(o.price);
@@ -410,7 +410,7 @@ function sharpSummaryHtml(){
 // +200 (anytime TD / goal: -250 to +500). A side newly at/above the minimum
 // ($350 default, summed across exchanges) pings at the top of the screen wherever you are and is
 // tracked as Sharp Money.
-const SOFT_BOOKS = ['fanduel'];
+const SOFT_BOOKS = ['fanduel','kambi']; // targets; Kambi alerts go to their own Discord channel
 const SHARP_REQ_BOOKS = ['Novig','Prophet X','Kalshi','FanDuel'];
 const SHARP_MARKETS = { nfl:['atd','rec_yds','rush_yds','rush_att','rec','pass_cmp','pass_att'], nba:['pts','pra','3pm','reb','ast'], wnba:['pts','pra','3pm','reb','ast'], nhl:['sog','ag'] };
 const SHARP_YESNO = new Set(['atd','ag']);
@@ -513,14 +513,17 @@ function sharpScan(sk, rows){
     const lines = [...new Set(own.map(sharpLine))];
     sides.forEach(side=>lines.forEach(line=>{
       const at = o => sharpLine(o)===line;
-      const soft = own.filter(o=>o._sd===side && at(o) && SOFT_BOOKS.includes(canonBook(o.sportsbook))).sort((a,b)=>toDec(b.price)-toDec(a.price));
-      if(!soft.length || !sharpPriceOk(mk, soft[0].price)) return;
       const opp = own.filter(o=>o._sd===SHARP_OPP[side] && at(o) && EXCH.has(canonBook(o.sportsbook)));
+      // each target book is its own play (FanDuel and Kambi alert separately)
+      SOFT_BOOKS.forEach(tb=>{
+      const soft = own.filter(o=>o._sd===side && at(o) && canonBook(o.sportsbook)===tb).sort((a,b)=>toDec(b.price)-toDec(a.price));
+      if(!soft.length || !sharpPriceOk(mk, soft[0].price)) return;
       const L = arbLadder(opp, soft[0].price);
       if(L.all.length){ const h=Math.min(...L.all.map(l=>l.hold)); if(d.best==null || h<d.best) d.best=h; }
       if(!L.total) return;
       soft.forEach(o=>{ const a=arbLadder(opp, o.price); o._arb$=a.total; o._edge=a.bestHold!=null?-a.bestHold:null; });
-      out.push({ k:`${sk}|${g}|${side}|${line}`, sk, fx, mk, key, pid:own.find(o=>o.player_id)?.player_id||null, player:sharpPlayerOf(soft[0]), side, line, ref:soft[0], soft, L, own });
+      out.push({ k:`${sk}|${g}|${side}|${line}${tb==='fanduel'?'':'|'+tb}`, tgt:tb, sk, fx, mk, key, pid:own.find(o=>o.player_id)?.player_id||null, player:sharpPlayerOf(soft[0]), side, line, ref:soft[0], soft, L, own });
+      });
     }));
   });
   d.sides=out.length; d.big=out.filter(x=>x.L.total>=sharpMin).length;
@@ -563,7 +566,7 @@ function sharpCardHtml(e){
   const best = e.L.rows[0];
   return `<div class="shcard" data-k="${esc(e.k)}">
     <div class="shhd"><span class="shpl"><span class="shsp">${esc(SPORTS[sk]?.label||sk)}</span>${esc(titleCase(e.player))}</span><span class="shgm">${f?`${esc(f.away.ab||f.away.name)} @ ${esc(f.home.ab||f.home.name)} · ${etDay(f.start)} ${etTime(f.start)} · <b>${tillGame(f.start)}</b>`:''}</span></div>
-    <div class="shside ${e.side}"><b>${sharpSideLabel(e.side)}${lineTxt}</b> ${esc(marketLabel(sk,e.mk))} <span class="shedge ${e.soft[0]._edge>1e-7?'arb':'match'}">${edgeTxt(e.soft[0]._edge)}</span></div>
+    <div class="shside ${e.side}"><b>${sharpSideLabel(e.side)}${lineTxt}</b> ${esc(marketLabel(sk,e.mk))}${e.tgt==='kambi'?' <span class="shedge match" style="background:rgba(56,189,248,.18);color:#7dd3fc">KAMBI</span>':''} <span class="shedge ${e.soft[0]._edge>1e-7?'arb':'match'}">${edgeTxt(e.soft[0]._edge)}</span></div>
     <div class="shmoney"><span class="shbig">${usd(e.L.total)}</span><span class="shlbl">arb money</span>${flow}${best?`<span class="shfair">sharp fair ${esc(bookShort([...best.books][0]))} ${fmtAm(-best.opp)}</span>`:''}</div>
     <div class="shsub">${oppName} book on the exchanges · <b>${usd(e.L.total)}</b> at ${holdOkTxt()} · <b>${usd(e.L.band||0)}</b> around target (within ${LIQ_BAND_CENTS}¢ of FD ${fmtAm(e.ref.price)})</div>
     <div class="pllad">${lad}</div>
@@ -592,7 +595,10 @@ function sharpPing(e){
 let discordHook = LS.get('props_discord_hook','');
 // Role to tag on every alert (e.g. "SM"): Discord needs the role's ID, not its name.
 let discordRole = LS.get('props_discord_role','') || '1561828102278217968'; // SM
-const roleTag = () => discordRole ? { content:`<@&${discordRole}>`, allowed_mentions:{ roles:[discordRole] } } : { allowed_mentions:{ parse:[] } };
+let kambiHook = LS.get('sm_kambi_hook',''), kambiRole = LS.get('sm_kambi_role', discordRole);
+const hookFor = e => (e?.tgt==='kambi' ? kambiHook : discordHook);
+const roleFor = e => (e?.tgt==='kambi' ? kambiRole : discordRole);
+const roleTag = (role=discordRole) => role ? { content:`<@&${role}>`, allowed_mentions:{ roles:[role] } } : { allowed_mentions:{ parse:[] } };
 // Discord rejects a whole post over one badly formed link, so links are cleaned first; if it still
 // says no, the post goes again without links/logos, and a toast says why if even that fails.
 const discordUrl = u => (u && /^https:\/\/[^\s]+$/i.test(String(u))) ? String(u).replace(/\[/g,'%5B').replace(/\]/g,'%5D') : undefined;
@@ -601,9 +607,9 @@ function discordClean(p){
   if(q.embeds) q.embeds=q.embeds.map(em=>({...em, url:discordUrl(em.url), thumbnail:em.thumbnail&&discordUrl(em.thumbnail.url)?{url:discordUrl(em.thumbnail.url)}:undefined}));
   return q;
 }
-async function discordPost(payload, onErr){
-  if(!discordHook){ onErr?.('no webhook'); return false; }
-  const send = async body => { const r=await fetch(discordHook,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); return r.ok ? '' : `${r.status} ${(await r.text().catch(()=>'')).slice(0,160)}`; };
+async function discordPost(payload, onErr, hook=discordHook){
+  if(!hook){ onErr?.('no webhook'); return false; }
+  const send = async body => { const r=await fetch(hook,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); return r.ok ? '' : `${r.status} ${(await r.text().catch(()=>'')).slice(0,160)}`; };
   try{
     const clean=discordClean(payload);
     let err=await send(clean); if(!err) return true;
@@ -636,8 +642,9 @@ async function sharpDcPump(){
     while(sharpDcQ.length){
       const e=sharpDcQ.shift(), name=`${titleCase(e.player)} ${sharpSideLabel(e.side)}${e.line!=null?' '+e.line:''}`;
       let ok=false, why='';
-      try{ ok=await discordPost({ ...sharpDiscordPayload(e), ...roleTag() }, m=>{ why=m; }); }catch(err){ why=err.message; }
-      sharpDcNote(ok, ok ? `sent ${name}` : `FAILED ${name}: ${why||'?'}`);
+      const tag = e.tgt==='kambi' ? 'Kambi · ' : '';
+      try{ ok=await discordPost({ ...sharpDiscordPayload(e), ...roleTag(roleFor(e)) }, m=>{ why=m; }, hookFor(e)); }catch(err){ why=err.message; }
+      sharpDcNote(ok, ok ? `sent ${tag}${name}` : `FAILED ${tag}${name}: ${why||'?'}`);
       if(!ok) delete sharpPinged[e.k];
       await new Promise(r=>setTimeout(r,1200));
     }
@@ -693,7 +700,7 @@ function sharpExampleEntry(){
 function sharpAutoTrack(e){
   const o=e.soft[0], bk=canonBook(o.sportsbook), f=e.f;
   const tSide = e.side==='yes'?'Yes':e.side==='no'?'No':e.side;
-  if(tracked.some(t=>t.src==='sharp' && t.playerKey===e.key && t.fixtureId===e.fx && t.mkey===e.mk && t.side===tSide && (t.line??null)===(e.line??null))) return;
+  if(tracked.some(t=>t.src==='sharp' && t.playerKey===e.key && t.fixtureId===e.fx && t.mkey===e.mk && t.side===tSide && (t.line??null)===(e.line??null) && (t.bookKey||'fanduel')===bk)) return;
   const snap=snapshotFrom(e.own.filter(x=>x._sd===e.side), tSide, e.line);
   tracked.unshift({ id:Date.now()+Math.random().toString(36).slice(2,6), src:'sharp', sportKey:e.sk, fixtureId:e.fx, start:f?.start||null, away:f?.away.ab||f?.away.name||'', home:f?.home.ab||f?.home.name||'', card:null,
     playerKey:e.key, playerName:e.player, pid:e.pid, headshot:'', teamAb:'', teamLogo:'',
@@ -712,7 +719,7 @@ function sharpCheckPings(sk){
     if(prev && e.L.total - prev.$ < SHARP_PING_STEP) return;
     sharpPinged[e.k]={ $:e.L.total, at:Date.now() }; changed=true;
     // Discord + tracker always; the on-screen banner/notification only with Pings on
-    if(discordHook) sharpDiscord(e);
+    if(hookFor(e)) sharpDiscord(e);
     sharpAutoTrack(e);
     if(sharpPingsOn) sharpPing(e);
   });
@@ -726,9 +733,10 @@ async function sharpScanSport(sk){
   const rows=[];
   // FanDuel: its main lines. Exchanges: every line they post -- their "main" flag doesn't always
   // land on FanDuel's number, and a line that isn't flagged would otherwise never come back.
-  const reqs=[['FanDuel'],['Novig','Prophet X','Kalshi']];
+  // Kambi asked on its own so a problem with it can never cost the FanDuel read
+  const reqs=[['FanDuel'],['Kambi'],['Novig','Prophet X','Kalshi']];
   const jobs=[]; for(const fc of chunk(fx,5)) for(const bk of reqs) jobs.push(async()=>{
-    const params={fixture_id:fc.map(f=>f.id),sportsbook:bk}; if(bk[0]==='FanDuel') params.is_main=true;
+    const params={fixture_id:fc.map(f=>f.id),sportsbook:bk}; if(bk[0]==='FanDuel'||bk[0]==='Kambi') params.is_main=true;
     try{ const r=await oo('/fixtures/odds',params); (r?.data||[]).forEach(d=>(d.odds||[]).forEach(o=>{ o._fx=d.id; rows.push(o); })); }catch(e){ console.warn('[sharp] scan chunk failed', sk, e.message); }
   });
   await runPool(jobs, 4);
@@ -754,14 +762,14 @@ function renderSharp(){
   const counts = {}; Object.values(sharpTape).filter(e=>e.L.total>=sharpMin && !sharpLive(e)).forEach(e=>{ counts[e.sk]=(counts[e.sk]||0)+1; });
   const chips = `<div class="mnav" style="position:static"><button class="mchip${sharpSportF==='all'?' on':''}" data-shs="all">All</button>${sports.map(k=>`<button class="mchip${sharpSportF===k?' on':''}" data-shs="${k}">${esc(SPORTS[k].label)}${counts[k]?` <span class="tcount">${counts[k]}</span>`:''}</button>`).join('')}</div>
     <div class="mnav" style="position:static">${[250,350,500,1000,2500].map(v=>`<button class="mchip${sharpMin===v?' on':''}" data-shmin="${v}">${usd(v)}+</button>`).join('')}</div>
-    <div class="mnav" style="position:static"><button class="mchip${sharpPingsOn?' on':''}" data-shping>${sharpPingsOn?'🔔 Pings on':'🔕 Pings off'}</button><button class="mchip${discordHook?' on':''}" data-shdc>${discordHook?'Discord ✓':'Discord'}</button></div>`;
+    <div class="mnav" style="position:static"><button class="mchip${sharpPingsOn?' on':''}" data-shping>${sharpPingsOn?'🔔 Pings on':'🔕 Pings off'}</button><button class="mchip${discordHook?' on':''}" data-shdc>${discordHook?'FD Discord ✓':'FD Discord'}</button><button class="mchip${kambiHook?' on':''}" data-shdck>${kambiHook?'Kambi Discord ✓':'Kambi Discord'}</button></div>`;
   const scanned = sports.filter(k=>sharpLastScan[k]).length;
   // What each sport's last scan actually got back -- if a sport shows 0 for the exchanges, the
   // feed isn't returning their odds; if it shows props but 0 sides, nothing arbs FanDuel right now.
   const diag = sports.filter(k=>sharpDiag[k]).map(k=>{ const d=sharpDiag[k]; const bk=Object.entries(d.byBook).map(([b,n])=>`${b} ${n}`).join(' · ')||'no odds';
     const top = d.top?.length ? `<div class="smdiagtop">${d.top.map(esc).join('<br>')}</div>` : '';
     return `<div class="smdiag"><b>${esc(SPORTS[k].label)}</b> ${Math.max(0,Math.round((Date.now()-d.at)/1000))}s ago · ${d.games??0} games · ${esc(bk)} · ${d.withExch}/${d.props} props w/ exchange · ${d.sides} with money${d.best!=null?` · best ${d.best<=0?'ARB '+(-d.best).toFixed(1)+'%':(d.best.toFixed(1)+'% hold')}`:''}${d.big!=null?` · ${d.big} at ${usd(sharpMin)}+`:''}${top}</div>`; }).join('');
-  const body = list.length ? list.map(sharpCardHtml).join('') : `<div class="empty">${scanned?`Nothing with ${usd(sharpMin)}+ at ${holdOkTxt()} vs FanDuel right now. Scanning ${sports.length} sports nonstop.`:'Scanning…'}</div>`;
+  const body = list.length ? list.map(sharpCardHtml).join('') : `<div class="empty">${scanned?`Nothing with ${usd(sharpMin)}+ at ${holdOkTxt()} vs FanDuel/Kambi right now. Scanning ${sports.length} sports nonstop.`:'Scanning…'}</div>`;
   view.innerHTML = `<div class="sh"><span class="t">Sharp Money</span><span class="dim" style="font-size:10.5px">scanning ${scanned}/${sports.length} sports · since ${new Date(sharpStarted).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})}</span></div>${chips}<div class="shlist">${body}</div>${diag||sharpDcLog.length?`<div class="smdiagw"><div class="dim" style="font-size:10px;margin-bottom:3px">LAST SCAN · build ${SM_BUILD}</div>${diag}<div class="dim" style="font-size:10px;margin:6px 0 3px">DISCORD ${discordHook?(sharpDcQ.length?`· ${sharpDcQ.length} waiting`:''):'· not connected'}</div>${sharpDcLog.map(x=>`<div class="smdiag" style="color:${x.ok?'#86efac':'#fca5a5'}">${new Date(x.at).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})} ${esc(x.txt)}</div>`).join('')||'<div class="smdiag dim">nothing sent yet</div>'}</div>`:''}`;
   view.querySelectorAll('[data-shmin]').forEach(b=>b.addEventListener('click',()=>{ sharpMin=Number(b.dataset.shmin); LS.set('props_sharpmin2',String(sharpMin)); renderSharp(); }));
   view.querySelectorAll('[data-shs]').forEach(b=>b.addEventListener('click',()=>{ sharpSportF=b.dataset.shs; renderSharp(); if(sharpSportF!=='all' && !sharpLastScan[sharpSportF]) sharpScanSport(sharpSportF).then(()=>{ if(viewMode==='sharp') renderSharp(); }); }));
@@ -780,6 +788,18 @@ function renderSharp(){
       const ok=await discordPost({ username:'PocketMarket', content:'✅ PocketMarket sharp money pings connected.' }); toast(ok?'Discord connected':'Discord test failed — check the URL');
       if(ok){ await new Promise(r=>setTimeout(r,600)); const ex=sharpDiscordPayload(sharpExampleEntry(), true); const tag=roleTag(); discordPost({ ...ex, ...tag, content:[tag.content, ex.content].filter(Boolean).join(' ') }); }
     }
+  });
+  view.querySelector('[data-shdck]')?.addEventListener('click', async ()=>{
+    const v=prompt('Kambi alerts go to their own channel. Paste that channel\'s Discord webhook URL (Server Settings → Integrations → Webhooks → New Webhook → Copy Webhook URL). Leave empty to turn Kambi alerts off.', kambiHook);
+    if(v==null) return;
+    kambiHook=v.trim(); LS.set('sm_kambi_hook', kambiHook); renderSharp();
+    if(!kambiHook) return;
+    const r=prompt('Role to tag on Kambi alerts: paste its Role ID. Leave empty for no tag.', kambiRole);
+    if(r!=null){ kambiRole=(String(r).match(/\d{15,}/)||[''])[0]; LS.set('sm_kambi_role', kambiRole); }
+    const ok=await discordPost({ username:'Kambi', content:'✅ Kambi sharp money alerts connected.' }, null, kambiHook); toast(ok?'Kambi Discord connected':'Discord test failed — check the URL');
+    if(ok){ await new Promise(r=>setTimeout(r,600)); const exE=sharpExampleEntry(); exE.tgt='kambi'; exE.soft=[{ ...exE.soft[0], sportsbook:'Kambi' }]; const ex=sharpDiscordPayload(exE, true); const tag=roleTag(kambiRole); discordPost({ ...ex, ...tag, content:[tag.content, ex.content].filter(Boolean).join(' ') }, null, kambiHook); }
+    // plays already on the board for Kambi go out now
+    Object.values(sharpTape).filter(e=>e.tgt==='kambi' && e.L.total>=sharpMin && !sharpLive(e) && !sharpPinged[e.k]).forEach(e=>{ sharpPinged[e.k]={ $:e.L.total, at:Date.now() }; sharpDiscord(e); sharpAutoTrack(e); });
   });
   view.querySelectorAll('.shcard').forEach(el=>el.addEventListener('click',ev=>{
     if(ev.target.closest('a')) return;
