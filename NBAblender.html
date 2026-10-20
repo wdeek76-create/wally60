@@ -24846,23 +24846,44 @@ function lineupConflictFor(player) { try { return lineupConflicts().byPlayer.get
 // (RG / Tabs full names, blend, injuries) and only accepted when exactly one player fits; anything else is reported, not guessed.
 const _NBA_CODES = new Set(["ATL","BOS","BKN","CHA","CHI","CLE","DAL","DEN","DET","GSW","HOU","IND","LAC","LAL","MEM","MIA","MIL","MIN","NOP","NYK","OKC","ORL","PHI","PHX","POR","SAC","SAS","TOR","UTA","WAS"]);
 function _teamPlayerPool(team) {
-  const pool = new Map();   // resolveNorm → full name
-  const add = (n, t) => { if (!n || !t || (normTeamAbbr(t) || t) !== team) return; pool.set(resolveNorm(n), n); };
-  try { const rg = getRgLineups(); if (rg) Object.values(rg.players).forEach(p => add(p.name, p.team)); } catch (e) {}
-  try { const tb = getTabsLineups(); if (tb) Object.values(tb.players).forEach(p => add(p.name, p.team)); } catch (e) {}
-  try { if (merged) merged.forEach(r => add(r.rawName, r.team)); } catch (e) {}
-  try { if (injuriesCache) injuriesCache.forEach(v => add(v.name, v.team)); } catch (e) {}
+  const pool = new Map();   // resolveNorm → { name, poses:Set, starter:boolean }
+  const add = (n, t, pos, starter) => {
+    if (!n || !t || (normTeamAbbr(t) || t) !== team) return;
+    const k = resolveNorm(n), e = pool.get(k) || { name: n, poses: new Set(), starter: false };
+    String(pos || "").toUpperCase().split(/[-/,\s]+/).filter(Boolean).forEach(x => e.poses.add(x));
+    if (starter) e.starter = true;
+    pool.set(k, e);
+  };
+  try { const rg = getRgLineups(); if (rg) Object.values(rg.players).forEach(p => add(p.name, p.team, p.pos, p.role === "starter")); } catch (e) {}
+  try { const tb = getTabsLineups(); if (tb) Object.values(tb.players).forEach(p => add(p.name, p.team, p.pos, p.role === "starter")); } catch (e) {}
+  try { if (merged) merged.forEach(r => add(r.rawName, r.team, r.pos, false)); } catch (e) {}
+  try { if (injuriesCache) injuriesCache.forEach(v => add(v.name, v.team, "", false)); } catch (e) {}
   return pool;
 }
-function _resolveAbbrevName(raw, team, slug) {
+// Does a lineup slot / position label (PG, SG, SF, PF, C, or generic G / F) fit a player's listed positions?
+function _posFits(slot, poses) {
+  if (!slot || !poses || !poses.size) return false;
+  const has = (...xs) => xs.some(x => poses.has(x));
+  if (poses.has(slot)) return true;
+  if (slot === "G") return has("PG", "SG");
+  if (slot === "F") return has("SF", "PF");
+  if (slot === "PG" || slot === "SG") return has("G");
+  if (slot === "SF" || slot === "PF") return has("F");
+  return false;
+}
+function _resolveAbbrevName(raw, team, slug, slot) {
   const fromSlug = slug ? slug.replace(/-\d+$/, "").split("-").map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ") : "";
   if (fromSlug) return { name: fromSlug, how: "link" };
   const m = String(raw || "").match(/^([A-Za-z])\.\s*(.+)$/);
   if (!m) return { name: raw, how: "full" };
   const ini = m[1].toLowerCase(), last = resolveNorm(m[2]);
-  const hits = [];
-  _teamPlayerPool(team).forEach((full, k) => { const parts = full.trim().split(/\s+/); if (parts[0] && parts[0][0].toLowerCase() === ini && k.endsWith(last)) hits.push(full); });
-  return hits.length === 1 ? { name: hits[0], how: "roster" } : { name: raw, how: hits.length ? "ambiguous" : "unresolved" };
+  let hits = [];
+  _teamPlayerPool(team).forEach((e, k) => { const parts = e.name.trim().split(/\s+/); if (parts[0] && parts[0][0].toLowerCase() === ini && k.endsWith(last)) hits.push(e); });
+  // Two players can share initial + surname on a team (J. Williams = Jalen / Jaylin): the lineup slot he is listed in
+  // (SF vs PF/C) separates them; if that still leaves two, the one another source starts wins. Otherwise: ambiguous.
+  if (hits.length > 1 && slot) { const f = hits.filter(e => _posFits(slot, e.poses)); if (f.length) hits = f; }
+  if (hits.length > 1) { const st = hits.filter(e => e.starter); if (st.length === 1) hits = st; }
+  return hits.length === 1 ? { name: hits[0].name, how: "roster" } : { name: raw, how: hits.length ? "ambiguous" : "unresolved" };
 }
 function parseRwLineupsPaste(text) {
   const rawLines = String(text || "").split("\n");
@@ -24891,12 +24912,12 @@ function parseRwLineupsPaste(text) {
     if (!pos) return;
     const team = cur.team;
     if (section === "starters") {
-      const r = _resolveAbbrevName(t, team, slug); const k = resolveNorm(r.name);
+      const r = _resolveAbbrevName(t, team, slug, pos); const k = resolveNorm(r.name);
       teams[team].starters.push(k); players[norm(r.name)] = { name: r.name, displayedName: t, status: "STARTING", starter: true, position: pos, team };
       if (r.how === "ambiguous" || r.how === "unresolved") { unresolvedTeams.add(team); warnings.push(`${team}: "${t}" ${r.how === "ambiguous" ? "fits more than one player" : "could not be matched to a full name"}`); }
     } else if (section === "mnp") {
       const m = t.match(STAT); const nm = m ? m[1] : t, st = m ? map(m[2]) : "GTD";
-      const r = _resolveAbbrevName(nm, team, slug);
+      const r = _resolveAbbrevName(nm, team, slug, pos);
       teams[team].mnp[resolveNorm(r.name)] = st; players[norm(r.name)] = { name: r.name, displayedName: nm, status: st, starter: false, position: pos, team };
       if (r.how === "ambiguous" || r.how === "unresolved") mnpWarn.push(`${team}: ${nm} (${st})`);   // out/GTD player: only matters if he is also a starter somewhere, so it never blocks comparing the team
     }
