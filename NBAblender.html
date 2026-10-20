@@ -12594,11 +12594,12 @@ function renderSrcAnalytics() {
   );
 
   // The 3 sources we care about. Keys match what _modalSrcVals stores.
-  let SRC_KEYS = ["roto", "rotowire", "dimers"];
+  // RG / RW / Dimers always; STOK and Saber appear once any tracked bet carries their projection (Morning picks do).
+  let SRC_KEYS = ["roto", "rotowire", "dimers", "saber", "stok"].filter(k => k === "roto" || k === "rotowire" || k === "dimers" || settled.some(b => b.srcProjs[k] != null));
   // RW-only view: same maths, one source, so the numbers are that source's
   // record on its own rather than blended with the others.
   if (_srcAnalyticsOnly) SRC_KEYS = SRC_KEYS.filter(k => k === _srcAnalyticsOnly);
-  const SRC_LABELS = { roto: "RG", rotowire: "RW", dimers: "DIMERS" };
+  const SRC_LABELS = Object.fromEntries(SOURCES.map(s0 => [s0.key, s0.label]));
 
   // For each bet + each source: did that source's projection agree with the
   // bet's side at the bet's line+price? Honors the global _srcAnalyticsMode toggle:
@@ -24439,6 +24440,11 @@ const MORNING_SOURCES = [
 const MORNING_SRC_KEYS = MORNING_SOURCES.map(s => s.key);
 // 3 of the 4 sources need at least this much of their own EV; the 4th only has to be ≥ 0%.
 const MORNING_QUAL_EV = 7;
+const MORNING_EXCHANGES = new Set(["novig", "nv", "nvg", "prophetx", "px", "kalshi", "polymarket", "sporttrade"]);
+const MORNING_EXCH_MIN_LIQ = 500;   // an exchange price is only a play with $500+ available at it; below that it is an alt book
+function _mIsExchange(book) { return MORNING_EXCHANGES.has(String(book || "").toLowerCase()); }
+function _mPlayable(p) { return !_mIsExchange(p.book) || (p.liq != null && p.liq >= MORNING_EXCH_MIN_LIQ); }
+const MORNING_BOOK_PRIORITY = ["FD", "PB", "PIN"];   // tracked price/book order: FanDuel, Prop Builder, Pinnacle, then best available
 // Morning markets: points, threes, rebounds, assists, PRA only.
 const MORNING_STATS = ["PTS", "3PM", "REB", "AST", "PRA"];
 const MORNING_STAT_LABEL = { PTS: "Points", REB: "Rebounds", AST: "Assists", "3PM": "Threes", PRA: "Pts+Reb+Ast", PR: "Pts+Reb", PA: "Pts+Ast", RA: "Reb+Ast" };
@@ -24492,7 +24498,7 @@ const _MORNING_PS_BOOKS = new Set([
   "novig", "prophetx", "kalshi", "propbuilder", "prop builder", "fliff", "betrivers",
   "pointsbet", "circa", "betcris", "bookmaker", "bet365", "betjack", "superbook",
   "williamhill", "bet105", "kambi", "onyx", "onyx odds", "betonline", "underdog", "sleeper",
-  "pb", "pin", "pinn", "mgm", "czr", "hr", "nvg", "bov", "br", "fan",
+  "pb", "pin", "pinn", "mgm", "czr", "hr", "nvg", "nv", "px", "polymarket", "sporttrade", "bov", "br", "fan",
 ]);
 function _mSplitBlocks(raw) {
   const lines = raw.split("\n").map(l => l.trim()).filter(Boolean);
@@ -24568,10 +24574,12 @@ function _mExtractCells(tokens) {
     if (i < rest.length && _mIsEV(rest[i])) { ev = parseFloat(rest[i]); i++; }
     let book = "";
     if (i < rest.length && _MORNING_PS_BOOKS.has(rest[i].toLowerCase())) { book = rest[i]; i++; }
+    let liq = null;                                    // "$500" / "$1.7k": size available at this price
+    if (i < rest.length && /^\$[\d.,]+[kK]?$/.test(rest[i])) { const m0 = rest[i].replace(/[$,]/g, ""); liq = /k$/i.test(m0) ? parseFloat(m0) * 1000 : parseFloat(m0); i++; }
     allCells.push({
       over: { line: over.line === "—" ? null : over.line, odds: over.odds === "—" ? null : over.odds },
       under: { line: under.line === "—" ? null : under.line, odds: under.odds === "—" ? null : under.odds },
-      ev, book,
+      ev, book, liq,
     });
     cellIdx++;
   }
@@ -24634,7 +24642,7 @@ function parseMorningPropShop(raw, stat) {
         // The season crosses New Year: an "Oct-28" pasted in January is last year's slate.
         if (mo) { let y = year; if (Number(mo) >= 9 && new Date().getMonth() < 6) y = year - 1; gameDateIso = y + "-" + mo + "-" + String(dm[2]).padStart(2, "0"); }
       }
-      results.push({ player: block.player, game: gameStr, gameTime: gameTime || "", gameDateIso, ou: play.ou, line: Number(play.line), odds: parseInt(play.odds, 10), book: best.book || "", ev: best.ev, proj: projection != null ? projection : null, minutes: minutes != null ? minutes : null });
+      results.push({ player: block.player, game: gameStr, gameTime: gameTime || "", gameDateIso, ou: play.ou, line: Number(play.line), odds: parseInt(play.odds, 10), book: best.book || "", liq: best.liq != null ? best.liq : null, ev: best.ev, proj: projection != null ? projection : null, minutes: minutes != null ? minutes : null });
     } catch (e) { errors.push((block.player || "?") + ": " + e.message); }
   }
   return { results, errors };
@@ -25106,6 +25114,28 @@ function _mCsvProj(srcKey, name, stat) {
   }
   return null;
 }
+// Expected minutes for a player from one source's uploaded CSV (STOK / RG / RW / Saber slots).
+function _mAnchorModelHtml(r) {
+  const a = r.anchorProj != null ? `<span style="color:${_mSrc(r.anchorSrc).color};font-weight:800;">${_mSrc(r.anchorSrc).label} ${Number(r.anchorProj).toFixed(1)}</span>` : `<span style="color:#6b7380;">\u2014</span>`;
+  const m = r.modelProj != null ? `<span style="color:#fff;font-weight:700;"> \u00b7 M ${Number(r.modelProj).toFixed(1)}</span>` : "";
+  const mn = r.expMin != null ? `<div style="font-size:10px;color:#8b93a0;">${Number(r.expMin).toFixed(0)} min</div>` : "";
+  return `<div style="font:700 12px 'JetBrains Mono','Menlo',monospace;white-space:nowrap;">${a}${m}</div>${mn}`;
+}
+function _mCsvMin(srcKey, name) {
+  const i = SOURCES.findIndex(x => x.key === srcKey), sl = (typeof slots !== "undefined") ? slots[i] : null;
+  if (!sl) return null;
+  const hits = sl.players.filter(x => x.norm === resolveNorm(name));
+  return hits.length === 1 && hits[0].min > 0 ? Number(hits[0].min) : null;
+}
+// The blender's merged ("model") projection for a stat: the consensus across every loaded source.
+function _mModelProj(player, stat) {
+  try {
+    const key = { PTS: "pts", REB: "reb", AST: "ast", "3PM": "threepm", PRA: "pra" }[stat], k = resolveNorm(player);
+    const r = merged && merged.find(x => resolveNorm(x.rawName) === k);
+    const v = r && r.con ? r.con[key] : null;
+    return v != null && !isNaN(v) && v > 0 ? Number(v) : null;
+  } catch (e) { return null; }
+}
 function _mProjsAligned(ou, line, projs) {
   const ps = projs.filter(v => v != null && !isNaN(v) && v > 0);
   if (!ps.length) return true;
@@ -25127,7 +25157,7 @@ function computeMorningEnsemble() {
     if (!byKey[key]) byKey[key] = { player: p.player, team: p.team, stat: p.stat, ou: p.ou, line: Number(p.line), gameDateIso: p.gameDateIso, game: p.game, gameTime: p.gameTime || "", sources: [] };
     if (!byKey[key].sources.some(x => x.src === src)) byKey[key].sources.push({ src, prop: p });
   }));
-  const GATES = ["pasted", "oppo", "coverage", "qual", "worst", "proj", "news", "cleared"];
+  const GATES = ["pasted", "oppo", "coverage", "qual", "worst", "proj", "news", "price", "cleared"];
   // Every pasted row, negatives included, indexed by player/stat/date/line/side, so a source
   // that has the OTHER side of the line blocks the pick instead of being ignored.
   const sideIdx = {};
@@ -25178,10 +25208,20 @@ function computeMorningEnsemble() {
     const newsWhy = _mNewsGate(entry.player, team, entry.ou);
     if (newsWhy) { miss("news", newsWhy); return; }
     bump(entry.stat, "news");
+    // Price gate: the tracked price has to be playable — a regular book, or an exchange with $500+ at the price. Exchange
+    // prices under $500 are alt books only; if nothing playable is left there is no pick.
+    if (!entry.sources.some(x => _mPlayable(x.prop))) { miss("price", "only exchange prices under $" + MORNING_EXCH_MIN_LIQ + " (" + entry.sources.map(x => (x.prop.book || "?") + (x.prop.liq != null ? " $" + x.prop.liq : "")).join(", ") + ")"); return; }
+    bump(entry.stat, "price");
     if (_mRejected(entry.player)) { miss("cleared", "on the reject list"); return; }
     bump(entry.stat, "cleared");
     let best = null;
-    entry.sources.forEach(({ prop }) => { if (!best || parseInt(prop.odds) > parseInt(best.odds)) best = prop; });
+    entry.sources.forEach(({ prop }) => { if (_mPlayable(prop) && (!best || parseInt(prop.odds) > parseInt(best.odds))) best = prop; });
+    // Track at FanDuel, then Prop Builder, then Pinnacle when one of them has this price; otherwise the best price on the boards.
+    // (Fair/anchor math below is unchanged — it comes from the anchor source's own price + EV.)
+    for (const bk of MORNING_BOOK_PRIORITY) {
+      const c = entry.sources.map(x => x.prop).filter(pp => _mPlayable(pp) && String(pp.book || "").toUpperCase() === bk).sort((a, b) => parseInt(b.odds) - parseInt(a.odds))[0];
+      if (c) { best = c; break; }
+    }
     const sorted = [...entry.sources].sort((a, b) => (a.prop.ev || 0) - (b.prop.ev || 0));
     // FAIR anchors to the worst source's own price+EV; second-worst if the worst is under the bar.
     const anchor = (sorted[0].prop.ev || 0) >= MORNING_QUAL_EV ? sorted[0] : (sorted[1] || sorted[0]);
@@ -25189,15 +25229,22 @@ function computeMorningEnsemble() {
     const sourceProjs = {}, sourceEvs = {};
     entry.sources.forEach((x) => { sourceProjs[x.src] = projOf(x); sourceEvs[x.src] = x.prop.ev; });
     const pv = projs.filter(v => !isNaN(v));
+    // Projection of the source that anchors the +EV, the merged model projection beside it, and expected minutes per source.
+    const anchorProj = projOf(anchor), modelProj = _mModelProj(entry.player, entry.stat);
+    const sourceMins = {};
+    entry.sources.forEach(x => { const mv = x.prop.minutes > 0 ? Number(x.prop.minutes) : _mCsvMin(x.src, entry.player); sourceMins[x.src] = mv != null ? mv : null; });
+    MORNING_SRC_KEYS.forEach(k => { if (!(k in sourceMins)) { const mv = _mCsvMin(k, entry.player); if (mv != null) sourceMins[k] = mv; } });
+    const mvals = Object.values(sourceMins).filter(v => v != null);
     cleared.push({
+      anchorSrc: anchor.src, anchorProj: anchorProj != null ? anchorProj : null, modelProj, sourceMins, expMin: mvals.length ? mvals.reduce((a, b) => a + b, 0) / mvals.length : null,
       player: entry.player, team, stat: entry.stat, ou: entry.ou, line: entry.line,
-      gameDateIso: entry.gameDateIso, game: entry.game, gameTime: entry.gameTime || "", sourcePrices: entry.sources.map(x => ({ src: x.src, book: x.prop.book || "", odds: parseInt(x.prop.odds, 10), ev: Number(x.prop.ev) })), sourcesAgreed: uniq, qualCount, requiredQual, missingSrc, missingProj,
+      gameDateIso: entry.gameDateIso, game: entry.game, gameTime: entry.gameTime || "", sourcePrices: entry.sources.map(x => ({ src: x.src, book: x.prop.book || "", odds: parseInt(x.prop.odds, 10), ev: Number(x.prop.ev), liq: x.prop.liq != null ? x.prop.liq : null, alt: !_mPlayable(x.prop) })), sourcesAgreed: uniq, qualCount, requiredQual, missingSrc, missingProj,
       odds: parseInt(best.odds, 10), book: best.book, ev: Number(best.ev), minEv, proj: pv.length ? pv.reduce((a, b) => a + b, 0) / pv.length : null,
       anchorEv: Number(anchor.prop.ev), fairProb, fairOdds: fairProb != null ? probToAmerican(fairProb) : null, sourceProjs, sourceEvs,
     });
   });
   cleared.sort((a, b) => b.sourcesAgreed.length - a.sourcesAgreed.length || b.qualCount - a.qualCount || (b.ev || 0) - (a.ev || 0));
-  const order = { cleared: 0, news: 1, proj: 2, worst: 3, qual: 4, coverage: 5, oppo: 6 };
+  const order = { cleared: 0, price: 0.5, news: 1, proj: 2, worst: 3, qual: 4, coverage: 5, oppo: 6 };
   misses.sort((a, b) => order[a.gate] - order[b.gate]);
   return { cleared, funnel, misses, gates: GATES };
 }
@@ -25223,6 +25270,7 @@ function _mPushTracker(m, quiet) {
       id, date: `${mo}/${d}/${y}`, gameDate: m.gameDate, timestamp: new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" }) + " " + localYMD(new Date()),
       player: m.player, pos, team: m.team || "", game: m.game || "", stat: String(m.stat).toUpperCase(), ou: m.ou, line: Number(m.line), odds: m.odds,
       fair: m.fairProb != null ? m.fairProb * 100 : null, altBooks, book: m.book || "", srcProjs: m.sourceProjs || null, proj: m.proj,
+      srcMin: m.sourceMins || null, expMin: m.expMin != null ? m.expMin : null, anchorSrc: m.anchorSrc || null, anchorProj: m.anchorProj != null ? m.anchorProj : null, modelProj: m.modelProj != null ? m.modelProj : null, srcEv: m.sourceEvs || null,
       stake: s.stake, toWin: s.toWin, type: s.type, result: "pending", source: "morning", morningId: m.id,
     });
     m.trackerId = id;
@@ -25245,7 +25293,7 @@ function _mLogRow(r) {
     gameDate: r.gameDateIso, loggedAt: now.toISOString(),
     player: r.player, team: r.team || "", game: r.game || "", gameTime: r.gameTime || "", sourcePrices: r.sourcePrices || [], stat: r.stat, ou: r.ou, line: r.line,
     odds: r.odds, book: r.book || "PropShop", fairOdds: r.fairOdds, fairProb: r.fairProb, ev: r.ev, anchorEv: r.anchorEv, minEv: r.minEv,
-    proj: r.proj, sourceProjs: r.sourceProjs, sourceEvs: r.sourceEvs, sourcesAgreed: r.sourcesAgreed, qualCount: r.qualCount,
+    proj: r.proj, anchorSrc: r.anchorSrc || null, anchorProj: r.anchorProj != null ? r.anchorProj : null, modelProj: r.modelProj != null ? r.modelProj : null, sourceMins: r.sourceMins || null, expMin: r.expMin != null ? r.expMin : null, sourceProjs: r.sourceProjs, sourceEvs: r.sourceEvs, sourcesAgreed: r.sourcesAgreed, qualCount: r.qualCount,
     requiredQual: r.requiredQual, missingSrc: r.missingSrc, missingProj: r.missingProj,
     stake: s.stake, toWin: s.toWin, result: "pending", actual: null,
   });
@@ -25497,7 +25545,7 @@ function renderMorning() {
   </div>`;
 
   // Clearance funnel
-  const GATE_LABEL = { pasted: "Pasted", oppo: "No source on the other side", coverage: "Coverage (4/4 or 3/3 gap)", qual: `3 at ${MORNING_QUAL_EV}%+ EV`, worst: "4th source ≥ 0%", proj: "Projections on bet side", news: "RW news / injuries clear", cleared: "Cleared → morning card" };
+  const GATE_LABEL = { pasted: "Pasted", oppo: "No source on the other side", coverage: "Coverage (4/4 or 3/3 gap)", qual: `3 at ${MORNING_QUAL_EV}%+ EV`, worst: "4th source ≥ 0%", proj: "Projections on bet side", news: "RW news / injuries clear", price: "Playable price (exchange $500+)", cleared: "Cleared → morning card" };
   const statsWithData = MORNING_STATS.filter(s => funnel[s]);
   const fCols = ["ALL", ...statsWithData];
   const fAll = funnel.ALL || Object.fromEntries(gates.map(g => [g, 0]));
@@ -25533,10 +25581,10 @@ function renderMorning() {
     const rows = cleared.filter(r => statOk(r.stat));
     window._morningCleared = cleared;
     viewBody = rows.length ? `<div style="display:flex;justify-content:flex-end;margin-bottom:6px;">${btn("⧉ SEND TO NICK", "morningSendCard('nick')", false, "#00aaff")}${btn("🖼 SEND TO DISCORD", "morningSendCard('discord')", false, "#cc66ff")}${btn(getMorningWebhook() ? "➤ POST TO DISCORD" : "🔗 SET DISCORD WEBHOOK", "morningPostDiscord()", !!getMorningWebhook(), "#5865f2")}${btn("LOG ALL TO MORNING", "morningLogAll()", true, "#c4b5fd")}</div>
-      <div style="overflow-x:auto;"><table style="border-collapse:collapse;width:100%;"><thead><tr>${["PLAYER", "STAT", "SIDE", "LINE", "AVG PROJ", "AGREE · SOURCES (PROJ · EV)", "BEST", "BOOK", "FAIR", "WORST EV", ""].map(th).join("")}</tr></thead><tbody>
+      <div style="overflow-x:auto;"><table style="border-collapse:collapse;width:100%;"><thead><tr>${["PLAYER", "STAT", "SIDE", "LINE", "ANCHOR · MODEL", "AGREE · SOURCES (PROJ · EV)", "BEST", "BOOK", "FAIR", "WORST EV", ""].map(th).join("")}</tr></thead><tbody>
       ${rows.map(r => { const i = cleared.indexOf(r), logged = _mAlreadyLogged(r); return `<tr style="border-top:1px solid #1a1d22;${logged ? "opacity:.5;" : ""}">
         ${td(_mPlayerCell(r.player, r.team))}${td(r.stat, "font-weight:800;color:#fff;")}${td(r.ou.toUpperCase(), `font-weight:800;color:${r.ou === "over" ? "#4ade80" : "#f87171"};`)}${td(r.line, "color:#fff;")}
-        ${td(r.proj != null ? r.proj.toFixed(1) : "—")}
+        ${td(_mAnchorModelHtml(r))}
         ${td(`<span style="display:inline-flex;gap:5px;align-items:center;"><b style="color:#c4b5fd;">${r.sourcesAgreed.length}/${r.requiredQual}</b>${_mSrcPills(r.sourceProjs, r.sourceEvs, r.missingSrc, r.missingProj)}</span>`)}
         ${td(_mFmtOdds(r.odds), "color:#fff;font-weight:700;")}${td(_mEsc(r.book || "—"))}${td(_mFmtOdds(r.fairOdds))}
         ${td(`${r.minEv >= 0 ? "+" : ""}${r.minEv.toFixed(1)}%`)}
@@ -25757,13 +25805,13 @@ async function _morningCardHtml(picks, mode) {
       }).join("");
       const ev = b.ev != null ? `<div style="font:800 13px 'JetBrains Mono',monospace;color:#4ade80;">+${Number(b.ev).toFixed(1)}%</div>` : "";
       const worst = b.minEv != null ? `<div style="font:700 11px 'JetBrains Mono',monospace;color:#a8b0bb;margin-top:2px;">worst ${b.minEv >= 0 ? "+" : ""}${Number(b.minEv).toFixed(1)}%</div>` : "";
-      body += `<tr>${td(player)}${td(prop)}${td(sidec)}${td(best, "center", "white-space:nowrap;")}${td(`<span style="font:800 15px 'JetBrains Mono',monospace;color:#c4b5fd;">${(b.sourcesAgreed || []).length}/${b.requiredQual || 4}</span>`, "center")}${td(pills)}${td(ev + worst, "center")}${td(b.proj != null ? `<span style="font:700 13px 'JetBrains Mono',monospace;color:#fff;">${Number(b.proj).toFixed(1)}</span>` : "", "center")}</tr>`;
+      body += `<tr>${td(player)}${td(prop)}${td(sidec)}${td(best, "center", "white-space:nowrap;")}${td(`<span style="font:800 15px 'JetBrains Mono',monospace;color:#c4b5fd;">${(b.sourcesAgreed || []).length}/${b.requiredQual || 4}</span>`, "center")}${td(pills)}${td(ev + worst, "center")}${td(_mAnchorModelHtml(b), "center")}</tr>`;
     });
   });
   const d = new Date(), days = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"], mo = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
   const date = `${days[d.getDay()]} ${mo[d.getMonth()]} ${d.getDate()}`;
   const over = picks.filter(b => b.ou === "over").length;
-  const head = nick ? [th("Player"), th("Prop"), th("Side"), th("Price", "center"), th("Agree", "center"), th("Sources · proj · EV"), th("Edge", "center"), th("Avg proj", "center")].join("") : [th("Player"), th("Prop"), th("Side"), th("Best Price", "center"), th("Books · Alts")].join("");
+  const head = nick ? [th("Player"), th("Prop"), th("Side"), th("Price", "center"), th("Agree", "center"), th("Sources · proj · EV"), th("Edge", "center"), th("Anchor · Model", "center")].join("") : [th("Player"), th("Prop"), th("Side"), th("Best Price", "center"), th("Books · Alts")].join("");
   return `<style>.mcard, .mcard * { text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000; }</style><div class="mcard" style="font-family:'Plus Jakarta Sans','Helvetica Neue',sans-serif;background:${nick ? "#060b14" : "linear-gradient(135deg,#0c0d10 0%,#0a0d12 50%,#0c0d10 100%)"};border:1px solid #1a1d22;border-radius:18px;padding:24px;width:${nick ? 1180 : 1240}px;color:#fff;">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;gap:12px;"><div style="font-size:20px;font-weight:800;">NBA ${nick ? "Morning · Nick" : "Props"} · ${date}</div><div style="font-size:12px;font-weight:700;letter-spacing:.04em;">${picks.length} PROP${picks.length === 1 ? "" : "S"} &nbsp;·&nbsp; ${over} OVER &nbsp;·&nbsp; ${picks.length - over} UNDER</div></div>
     <table style="width:100%;border-collapse:collapse;"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
