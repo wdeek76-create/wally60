@@ -24656,7 +24656,7 @@ function parseRgLineups(text) {
       if (!tm && lines[li + 1] && /^76ers$/i.test(lines[li + 1])) { tm = _rgTeamFromLine(line + "76ers"); if (tm) li++; }
       if (tm) { pending.push(tm); continue; }
     }
-    if (/^lineup\b/i.test(line)) { cur = { pair: pending.slice(), idx: blk++, confirmed: !/not/i.test(line) && /confirm|releas/i.test(line), starters: [], bench: [] }; blocks.push(cur); section = null; continue; }
+    if (/^lineup\s+(?:not\s+released|released|confirmed)\b/i.test(line)) { cur = { pair: pending.slice(), idx: blk++, confirmed: !/not/i.test(line) && /confirm|releas/i.test(line), starters: [], bench: [] }; blocks.push(cur); section = null; continue; }
     if (/^starters$/i.test(line)) { section = "starters"; continue; }
     if (/^bench$/i.test(line)) { section = "bench"; continue; }
     if (!cur || !section) continue;
@@ -24780,38 +24780,145 @@ function _lineupViews() {
   mk("RG", getRgLineups()); mk("Tabs", getTabsLineups());
   return views;
 }
-// → { byPlayer: Map(resolveNorm → reason), list: [{team, text}], compared: [teams], noOpinion: [teams], sources: [keys] }
+// → { byPlayer: Map(resolveNorm → reason), list: [{team, text, name}], compared: [teams], noOpinion: [teams], sources: [keys] }
+// One entry per player. A player is in conflict when at least one source starts him and another source that has posted
+// that team does NOT list him as a clean starter (bench, OUT, or starter-but-GTD).
 function lineupConflicts() {
   const out = { byPlayer: new Map(), list: [], compared: [], noOpinion: [], sources: [] };
   const views = _lineupViews();
   out.sources = views.map(v => v.key);
   if (views.length < 2) return out;
   const allTeams = new Set(); views.forEach(v => Object.keys(v.teams).forEach(t => allTeams.add(t)));
-  const seen = new Set(), cmpTeams = new Set();
+  const cmpTeams = new Set();
   allTeams.forEach(team => {
     const have = views.filter(v => v.teams[team]);
     if (have.length < 2) { out.noOpinion.push(team); return; }   // only one source has posted this team — no opinion
     cmpTeams.add(team);
-    have.forEach(A => have.forEach(B => {
-      if (A === B) return;
-      const a = A.teams[team], b = B.teams[team];
-      a.starters.forEach(k => {
-        const nm = a.names[k] || b.names[k] || k;
-        let text = null;
-        if (b.status[k]) text = `${A.key} starts ${nm}, ${B.key} has him ${b.status[k]}`;
-        else if (!b.starters.has(k)) text = `${A.key} starts ${nm}, ${B.key} doesn't`;
-        if (!text || seen.has(team + "|" + k + "|" + A.key + "|" + B.key)) return;
-        seen.add(team + "|" + k + "|" + A.key + "|" + B.key);
-        if (!out.byPlayer.has(k)) out.byPlayer.set(k, text);
-        out.list.push({ team, text, name: nm });
+    const starters = new Set(); have.forEach(v => v.teams[team].starters.forEach(k => starters.add(k)));
+    starters.forEach(k => {
+      const clean = [], bad = [];
+      let nm = k;
+      have.forEach(v => {
+        const t = v.teams[team];
+        nm = t.names[k] && !/^[A-Z]\.\s/.test(t.names[k]) ? t.names[k] : (t.names[k] && nm === k ? t.names[k] : nm);
+        if (t.starters.has(k) && !t.status[k]) clean.push(v.key);
+        else bad.push(v.key + (t.status[k] ? " has him " + t.status[k] : t.starters.has(k) ? "" : " doesn't"));
       });
-    }));
+      if (!clean.length || !bad.length) return;
+      const text = `${nm}: ${clean.join(" + ")} start${clean.length === 1 ? "s" : ""} him; ${bad.join(", ")}`;
+      out.byPlayer.set(k, text);
+      out.list.push({ team, text, name: nm });
+    });
   });
   out.compared = [...cmpTeams];
   return out;
 }
 function lineupConflictFor(player) { try { return lineupConflicts().byPlayer.get(resolveNorm(player || "")) || null; } catch (e) { return null; } }
 
+
+// ── RotoWire lineups PAGE paste (rotowire.com/basketball/nba-lineups.php) → the RW lineups store ──────────────────────
+// Per game: time, two team codes, then "Expected|Confirmed Lineup" + PG/SG/SF/PF/C + name, "MAY NOT PLAY" + POS + name + status.
+// Plain-text copies lose the links, so abbreviated names ("M. Robinson") are resolved against the SAME team's known roster
+// (RG / Tabs full names, blend, injuries) and only accepted when exactly one player fits; anything else is reported, not guessed.
+const _NBA_CODES = new Set(["ATL","BOS","BKN","CHA","CHI","CLE","DAL","DEN","DET","GSW","HOU","IND","LAC","LAL","MEM","MIA","MIL","MIN","NOP","NYK","OKC","ORL","PHI","PHX","POR","SAC","SAS","TOR","UTA","WAS"]);
+function _teamPlayerPool(team) {
+  const pool = new Map();   // resolveNorm → full name
+  const add = (n, t) => { if (!n || !t || (normTeamAbbr(t) || t) !== team) return; pool.set(resolveNorm(n), n); };
+  try { const rg = getRgLineups(); if (rg) Object.values(rg.players).forEach(p => add(p.name, p.team)); } catch (e) {}
+  try { const tb = getTabsLineups(); if (tb) Object.values(tb.players).forEach(p => add(p.name, p.team)); } catch (e) {}
+  try { if (merged) merged.forEach(r => add(r.rawName, r.team)); } catch (e) {}
+  try { if (injuriesCache) injuriesCache.forEach(v => add(v.name, v.team)); } catch (e) {}
+  return pool;
+}
+function _resolveAbbrevName(raw, team, slug) {
+  const fromSlug = slug ? slug.replace(/-\d+$/, "").split("-").map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ") : "";
+  if (fromSlug) return { name: fromSlug, how: "link" };
+  const m = String(raw || "").match(/^([A-Za-z])\.\s*(.+)$/);
+  if (!m) return { name: raw, how: "full" };
+  const ini = m[1].toLowerCase(), last = resolveNorm(m[2]);
+  const hits = [];
+  _teamPlayerPool(team).forEach((full, k) => { const parts = full.trim().split(/\s+/); if (parts[0] && parts[0][0].toLowerCase() === ini && k.endsWith(last)) hits.push(full); });
+  return hits.length === 1 ? { name: hits[0], how: "roster" } : { name: raw, how: hits.length ? "ambiguous" : "unresolved" };
+}
+function parseRwLineupsPaste(text) {
+  const rawLines = String(text || "").split("\n");
+  const lines = rawLines.map(l => {
+    const slug = (l.match(/\/player\/([a-z0-9'.-]+?)(?:\))/i) || l.match(/\/player\/([a-z0-9'.-]+)/i) || [])[1] || "";
+    return { t: l.replace(/\[([^\]]*)\]\([^)]*\)/g, "$1").replace(/^\s*[*•-]\s+/, "").trim(), slug };
+  }).filter(x => x.t);
+  const teams = {}, players = {}, warnings = [];
+  let abbrs = [], blk = 0, cur = null, section = null, pos = null, games = 0;
+  const STAT = /^(.*?)\s+(Out|Ques|Questionable|GTD|Doubt|Doubtful|Prob|Probable|DTD)$/i;
+  const map = s0 => /^out$/i.test(s0) ? "OUT" : /^prob/i.test(s0) ? "PROBABLE" : /^dtd$/i.test(s0) ? "DTD" : "GTD";
+  lines.forEach(({ t, slug }) => {
+    if (/^\d{1,2}:\d{2}\s*[AP]M/i.test(t)) { abbrs = []; blk = 0; cur = null; section = null; pos = null; return; }
+    if (!cur && abbrs.length < 2 && _NBA_CODES.has((normTeamAbbr(t) || t))) { abbrs.push(normTeamAbbr(t) || t); return; }
+    if (/^(expected|confirmed)\s+lineup$/i.test(t)) { cur = { team: abbrs[blk++] || null, confirmed: /confirmed/i.test(t) }; if (cur.team) { teams[cur.team] = { starters: [], mnp: {}, confirmed: cur.confirmed }; games++; } section = "starters"; pos = null; return; }
+    if (/^referees:/i.test(t)) { cur = null; section = null; return; }
+    if (!cur || !cur.team) return;
+    if (/^may not play$/i.test(t)) { section = "mnp"; pos = null; return; }
+    if (/^(projected minutes|on\/off court stats|none)$/i.test(t)) return;
+    if (/^(PG|SG|SF|PF|C|G|F)$/.test(t)) { pos = t; return; }
+    if (!pos) return;
+    const team = cur.team;
+    if (section === "starters") {
+      const r = _resolveAbbrevName(t, team, slug); const k = resolveNorm(r.name);
+      teams[team].starters.push(k); players[norm(r.name)] = { name: r.name, displayedName: t, status: "STARTING", starter: true, position: pos, team };
+      if (r.how === "ambiguous" || r.how === "unresolved") warnings.push(`${team}: "${t}" ${r.how === "ambiguous" ? "fits more than one player" : "could not be matched to a full name"}`);
+    } else if (section === "mnp") {
+      const m = t.match(STAT); const nm = m ? m[1] : t, st = m ? map(m[2]) : "GTD";
+      const r = _resolveAbbrevName(nm, team, slug);
+      teams[team].mnp[resolveNorm(r.name)] = st; players[norm(r.name)] = { name: r.name, displayedName: nm, status: st, starter: false, position: pos, team };
+      if (r.how === "ambiguous" || r.how === "unresolved") warnings.push(`${team}: "${nm}" ${r.how === "ambiguous" ? "fits more than one player" : "could not be matched to a full name"}`);
+    }
+    pos = null;
+  });
+  return { teams, players, warnings, gameCount: Math.ceil(Object.keys(teams).length / 2) };
+}
+
+// ── ONE paste box for every lineup source ────────────────────────────────────────────────────────────────────────────
+// Paste RW, RG and Tabs together (any order) or one at a time. Each page is found by its own heading and parsed on its own;
+// every source is validated (5 starters per team) and reported. Nothing is saved for a source that doesn't validate.
+function splitLineupPaste(text) {
+  const t = String(text || "");
+  const marks = [];
+  let m;
+  if ((m = t.match(/NBA STARTING LINEUPS/))) marks.push({ src: "RG", at: m.index });
+  else if ((m = t.match(/lineup not released|Max Salary:/))) marks.push({ src: "RG", at: m.index });
+  if ((m = t.match(/^\s*Tabs NBA/m))) marks.push({ src: "Tabs", at: m.index });
+  else if ((m = t.match(/^[A-Z]{2,3} at [A-Z]{2,3}\s*$/m))) marks.push({ src: "Tabs", at: m.index });
+  if ((m = t.match(/NBA Daily Starting Lineups|Starting lineups for/))) marks.push({ src: "RW", at: m.index });
+  else if ((m = t.match(/^\s*\*?\s*Expected Lineup|^\s*\*?\s*Confirmed Lineup/m))) marks.push({ src: "RW", at: m.index });
+  marks.sort((a, b) => a.at - b.at);
+  const out = {};
+  marks.forEach((mk, i) => { out[mk.src] = t.slice(mk.at, i + 1 < marks.length ? marks[i + 1].at : t.length); });
+  return out;
+}
+let _lineupReport = [];
+function morningImportLineups() {
+  const ta = document.getElementById("morning-lineups-paste");
+  const text = ta ? ta.value : "";
+  const parts = splitLineupPaste(text);
+  const rep = [];
+  const sizes = o => Object.values(o.teams).map(t => t.starters.length);
+  const okAll = o => Object.keys(o.teams).length > 0 && sizes(o).every(n => n === 5);
+  if (!Object.keys(parts).length) { _lineupReport = [{ bad: true, text: "Couldn't recognise that paste as RW, RG or Tabs lineups." }]; renderMorning(); return; }
+  if (parts.RG) { const d = parseRgLineups(parts.RG); if (okAll(d)) { try { localStorage.setItem(RG_LINEUPS_KEY, JSON.stringify(d)); } catch (e) {} rep.push({ text: `RG: ${Object.keys(d.teams).length} teams, 5 starters each` }); } else rep.push({ bad: true, text: `RG NOT saved: ${Object.keys(d.teams).length} teams read, starters per team ${sizes(d).join("/") || "none"} — re-copy the whole page` }); }
+  if (parts.Tabs) { const d = parseTabsLineups(parts.Tabs); if (okAll(d)) { try { localStorage.setItem(TABS_LINEUPS_KEY, JSON.stringify(d)); } catch (e) {} rep.push({ text: `Tabs: ${Object.keys(d.teams).length} teams, 5 starters each` }); } else rep.push({ bad: true, text: `Tabs NOT saved: ${Object.keys(d.teams).length} teams read, starters per team ${sizes(d).join("/") || "none"} — re-copy the whole Lineups page` }); }
+  if (parts.RW) {
+    const d = parseRwLineupsPaste(parts.RW);
+    if (okAll(d)) {
+      saveLineupsData({ fetchedAt: Date.now(), players: d.players, gameCount: d.gameCount, source: "rotowire-paste" });
+      rep.push({ text: `RW: ${Object.keys(d.teams).length} teams, 5 starters each` + (d.warnings.length ? "" : ", every name matched") });
+      d.warnings.forEach(w => rep.push({ bad: true, text: "RW name check — " + w }));
+      try { renderLineupsStatus(); } catch (e) {}
+    } else rep.push({ bad: true, text: `RW NOT saved: ${Object.keys(d.teams).length} teams read, starters per team ${sizes(d).join("/") || "none"} — re-copy the whole lineups page` });
+  }
+  _lineupReport = rep;
+  if (ta && rep.every(r => !r.bad)) ta.value = "";
+  showToast(rep.some(r => r.bad) ? "Lineups imported with problems — see the panel" : "Lineups imported");
+  renderMorning();
+}
 // ── Pasted-board store: { srcKey: [ {stat, player, ...} ] } ─────────────────
 let morningPs = { stok: [], roto: [], saber: [], rotowire: [] };
 let morningView = "ensemble";            // "ensemble" | source key
@@ -25210,16 +25317,16 @@ function renderMorning() {
     <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;align-items:center;">
       <div>
         <div style="font-size:13px;font-weight:800;color:#d4dae3;letter-spacing:1px;text-transform:uppercase;">Lineup check \u00b7 ${lc.sources.length ? lc.sources.join(" vs ") : "RW vs RG vs Tabs"} <span style="font-size:11px;font-weight:800;color:${lc.list.length ? "#f87171" : (lc.compared.length ? "#22c55e" : "#a8b0bb")};">${lc.list.length ? lc.list.length + " CONFLICT" + (lc.list.length === 1 ? "" : "S") : (lc.compared.length ? "ALL " + lc.compared.length + " TEAMS AGREE" : "NOTHING TO COMPARE")}</span></div>
-        <div style="font-size:10px;color:#a8b0bb;margin-top:2px;max-width:700px;line-height:1.5;">Copy the whole RotoGrinders NBA starting-lineups page (rotogrinders.com/lineups/nba) and paste it below. Wherever RW and RG disagree on who plays or starts, that player is blocked on both sides in the funnel. A source that hasn't posted a team yet is no opinion, not a conflict. ${rgL ? `RG loaded: ${Object.keys(rgL.teams).length} teams \u00b7 ${Math.round((Date.now() - rgL.at) / 60000)}m ago.` : "RG not loaded."} ${(() => { const tb = getTabsLineups(); return tb ? `Tabs loaded: ${Object.keys(tb.teams).length} teams \u00b7 ${Math.round((Date.now() - tb.at) / 60000)}m ago.` : "Tabs not loaded."; })()} ${lc.noOpinion.length ? `Only one source posted: ${lc.noOpinion.join(", ")}.` : ""}</div>
+        <div style="font-size:10px;color:#a8b0bb;margin-top:2px;max-width:700px;line-height:1.5;">Copy each lineups page (RotoWire nba-lineups.php, RotoGrinders lineups/nba, Tabs Lineups) and paste them all in the one box below. Wherever RW and RG disagree on who plays or starts, that player is blocked on both sides in the funnel. A source that hasn't posted a team yet is no opinion, not a conflict. ${rgL ? `RG loaded: ${Object.keys(rgL.teams).length} teams \u00b7 ${Math.round((Date.now() - rgL.at) / 60000)}m ago.` : "RG not loaded."} ${(() => { const tb = getTabsLineups(); return tb ? `Tabs loaded: ${Object.keys(tb.teams).length} teams \u00b7 ${Math.round((Date.now() - tb.at) / 60000)}m ago.` : "Tabs not loaded."; })()} ${lc.noOpinion.length ? `Only one source posted: ${lc.noOpinion.join(", ")}.` : ""}</div>
       </div>
-      <div style="display:flex;gap:6px;"><button onclick="morningParseRgLineups()" style="background:#34d399;border:none;color:#050507;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:800;cursor:pointer;">PARSE RG LINEUPS</button><button onclick="morningParseTabsLineups()" style="background:#f59e0b;border:none;color:#050507;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:800;cursor:pointer;">PARSE TABS LINEUPS</button>${getTabsLineups() ? `<button onclick="morningClearTabsLineups()" style="background:transparent;border:1px solid #1a1d22;color:#f87171;border-radius:6px;padding:7px 10px;font-size:11px;font-weight:700;cursor:pointer;">CLEAR TABS</button>` : ""}${rgL ? `<button onclick="morningClearRgLineups()" style="background:transparent;border:1px solid #1a1d22;color:#f87171;border-radius:6px;padding:7px 10px;font-size:11px;font-weight:700;cursor:pointer;">CLEAR</button>` : ""}</div>
+      <div style="display:flex;gap:6px;"><button onclick="morningImportLineups()" style="background:#34d399;border:none;color:#050507;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:800;cursor:pointer;">IMPORT LINEUPS</button>${rgL ? `<button onclick="morningClearRgLineups()" style="background:transparent;border:1px solid #1a1d22;color:#f87171;border-radius:6px;padding:7px 10px;font-size:11px;font-weight:700;cursor:pointer;">CLEAR RG</button>` : ""}${getTabsLineups() ? `<button onclick="morningClearTabsLineups()" style="background:transparent;border:1px solid #1a1d22;color:#f87171;border-radius:6px;padding:7px 10px;font-size:11px;font-weight:700;cursor:pointer;">CLEAR TABS</button>` : ""}</div>
     </div>
     ${lc.list.length ? `<div style="margin-top:8px;display:grid;gap:3px;">${lc.list.map(x => `<div style="font-size:11px;color:#fca5a5;font-family:'JetBrains Mono','Menlo',monospace;">${_mEsc(x.team)} \u00b7 ${_mEsc(x.text)}</div>`).join("")}</div>` : ""}
+    ${_lineupReport.length ? `<div style="margin-top:8px;display:grid;gap:2px;">${_lineupReport.map(r => `<div style="font-size:11px;font-family:'JetBrains Mono','Menlo',monospace;color:${r.bad ? "#fbbf24" : "#4ade80"};">${r.bad ? "\u26a0" : "\u2713"} ${_mEsc(r.text)}</div>`).join("")}</div>` : ""}
     <span id="morning-lineups-info" style="font-size:11px;color:#a8b0bb;"></span>
-    <textarea id="morning-tabs-lineups" placeholder="Paste the Tabs NBA Lineups page here\u2026" spellcheck="false" style="width:100%;min-height:40px;margin-top:6px;background:#050507;border:1px solid #1a1d22;border-radius:6px;padding:8px 10px;color:#e2e8f0;font-family:'JetBrains Mono','Menlo',monospace;font-size:11px;outline:none;resize:vertical;box-sizing:border-box;"></textarea>
+    <textarea id="morning-lineups-paste" placeholder="Paste the RW, RG and/or Tabs lineups pages here \u2014 all at once, any order, or one at a time\u2026" spellcheck="false" style="width:100%;min-height:54px;margin-top:8px;background:#050507;border:1px solid #1a1d22;border-radius:6px;padding:8px 10px;color:#e2e8f0;font-family:'JetBrains Mono','Menlo',monospace;font-size:11px;outline:none;resize:vertical;box-sizing:border-box;"></textarea>
     <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px;"><div style="font-size:10px;color:#a8b0bb;max-width:700px;line-height:1.5;"><b style="color:#d4dae3;">RG impact ratings</b> (Situation Room injury report) \u2014 ${(() => { const ri = getRgImpact(); return ri ? Object.keys(ri.players).length + " players loaded \u00b7 " + Math.round((Date.now() - ri.at) / 60000) + "m ago" : "not loaded"; })()}. Used as an extra read on how much a teammate's absence matters.</div><div style="display:flex;gap:6px;"><button onclick="morningParseRgImpact()" style="background:#34d399;border:none;color:#050507;border-radius:6px;padding:6px 12px;font-size:11px;font-weight:800;cursor:pointer;">PARSE RG IMPACT</button>${getRgImpact() ? `<button onclick="morningClearRgImpact()" style="background:transparent;border:1px solid #1a1d22;color:#f87171;border-radius:6px;padding:6px 10px;font-size:11px;font-weight:700;cursor:pointer;">CLEAR</button>` : ""}</div></div>
     <textarea id="morning-rg-impact" placeholder="Paste the RG NBA injury report / impact ratings page here\u2026" spellcheck="false" style="width:100%;min-height:36px;margin-top:6px;background:#050507;border:1px solid #1a1d22;border-radius:6px;padding:8px 10px;color:#e2e8f0;font-family:'JetBrains Mono','Menlo',monospace;font-size:11px;outline:none;resize:vertical;box-sizing:border-box;"></textarea>
-    <textarea id="morning-rg-lineups" placeholder="Paste the RotoGrinders NBA starting lineups page here\u2026" spellcheck="false" style="width:100%;min-height:40px;margin-top:8px;background:#050507;border:1px solid #1a1d22;border-radius:6px;padding:8px 10px;color:#e2e8f0;font-family:'JetBrains Mono','Menlo',monospace;font-size:11px;outline:none;resize:vertical;box-sizing:border-box;"></textarea>
   </div>`;
   const newsPanel = `<div style="${card}border-color:${newsAt ? "#22c55e55" : "#f8717155"};">
     <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;align-items:center;">
