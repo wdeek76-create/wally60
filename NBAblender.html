@@ -24927,25 +24927,44 @@ function splitLineupPaste(text) {
   return out;
 }
 let _lineupReport = [];
-function morningImportLineups() {
-  const ta = document.getElementById("morning-lineups-paste");
-  const text = ta ? ta.value : "";
-  const parts = splitLineupPaste(text);
+// Parses ONE source's page text, validates it (5 starters per team) and saves it only if it checks out. → report lines.
+function _importLineupSrc(src, text) {
   const rep = [];
   const sizes = o => Object.values(o.teams).map(t => t.starters.length);
   const okAll = o => Object.keys(o.teams).length > 0 && sizes(o).every(n => n === 5);
-  if (!Object.keys(parts).length) { _lineupReport = [{ bad: true, text: "Couldn't recognise that paste as RW, RG or Tabs lineups." }]; renderMorning(); return; }
-  if (parts.RG) { const d = parseRgLineups(parts.RG); if (okAll(d)) { try { localStorage.setItem(RG_LINEUPS_KEY, JSON.stringify(d)); } catch (e) {} rep.push({ text: `RG: ${Object.keys(d.teams).length} teams, 5 starters each` }); } else rep.push({ bad: true, text: `RG NOT saved: ${Object.keys(d.teams).length} teams read, starters per team ${sizes(d).join("/") || "none"} — re-copy the whole page` }); }
-  if (parts.Tabs) { const d = parseTabsLineups(parts.Tabs); if (okAll(d)) { try { localStorage.setItem(TABS_LINEUPS_KEY, JSON.stringify(d)); } catch (e) {} rep.push({ text: `Tabs: ${Object.keys(d.teams).length} teams, 5 starters each` }); } else rep.push({ bad: true, text: `Tabs NOT saved: ${Object.keys(d.teams).length} teams read, starters per team ${sizes(d).join("/") || "none"} — re-copy the whole Lineups page` }); }
-  if (parts.RW) {
-    const d = parseRwLineupsPaste(parts.RW);
+  const fail = (o, what) => rep.push({ bad: true, text: `${src} NOT saved: ${Object.keys(o.teams).length} teams read, starters per team ${sizes(o).join("/") || "none"} — re-copy ${what}` });
+  if (src === "RG") { const d = parseRgLineups(text); if (okAll(d)) { try { localStorage.setItem(RG_LINEUPS_KEY, JSON.stringify(d)); } catch (e) {} rep.push({ text: `RG: ${Object.keys(d.teams).length} teams, 5 starters each` }); } else fail(d, "the whole RotoGrinders lineups page"); }
+  if (src === "Tabs") { const d = parseTabsLineups(text); if (okAll(d)) { try { localStorage.setItem(TABS_LINEUPS_KEY, JSON.stringify(d)); } catch (e) {} rep.push({ text: `Tabs: ${Object.keys(d.teams).length} teams, 5 starters each` }); } else fail(d, "the whole Tabs Lineups page"); }
+  if (src === "RW") {
+    const d = parseRwLineupsPaste(text);
     if (okAll(d)) {
       saveLineupsData({ fetchedAt: Date.now(), players: d.players, gameCount: d.gameCount, source: "rotowire-paste" });
       rep.push({ text: `RW: ${Object.keys(d.teams).length} teams, 5 starters each` + (d.warnings.length ? "" : ", every name matched") });
       d.warnings.forEach(w => rep.push({ bad: true, text: "RW name check — " + w }));
       try { renderLineupsStatus(); } catch (e) {}
-    } else rep.push({ bad: true, text: `RW NOT saved: ${Object.keys(d.teams).length} teams read, starters per team ${sizes(d).join("/") || "none"} — re-copy the whole lineups page` });
+    } else fail(d, "the whole RotoWire lineups page");
   }
+  return rep;
+}
+// One button per source (RW | RG | Tabs in a row), each with its own paste box.
+function morningParseLineupsSrc(src) {
+  const ta = document.getElementById("morning-lineups-" + src.toLowerCase());
+  const text = ta ? ta.value : "";
+  if (!text.trim()) { showToast(`Paste the ${src} lineups page first`); return; }
+  const mine = splitLineupPaste(text)[src] || text;     // if the page heading isn't in the copy, the whole paste is this source's
+  const rep = _importLineupSrc(src, mine);
+  _lineupReport = _lineupReport.filter(r => !r.text.startsWith(src + " ") && !r.text.startsWith(src + ":") && !(src === "RW" && r.text.startsWith("RW name check"))).concat(rep);
+  if (ta && rep.every(r => !r.bad)) ta.value = "";
+  showToast(rep.some(r => r.bad) ? `${src} lineups: problem — see the panel` : `${src} lineups imported`);
+  renderMorning();
+}
+// Several pages pasted into one box (kept for convenience): each is found by its heading.
+function morningImportLineups() {
+  const ta = document.getElementById("morning-lineups-paste");
+  const parts = splitLineupPaste(ta ? ta.value : "");
+  if (!Object.keys(parts).length) { _lineupReport = [{ bad: true, text: "Couldn't recognise that paste as RW, RG or Tabs lineups." }]; renderMorning(); return; }
+  let rep = [];
+  ["RG", "Tabs", "RW"].forEach(src => { if (parts[src]) rep = rep.concat(_importLineupSrc(src, parts[src])); });
   _lineupReport = rep;
   if (ta && rep.every(r => !r.bad)) ta.value = "";
   showToast(rep.some(r => r.bad) ? "Lineups imported with problems — see the panel" : "Lineups imported");
@@ -25349,15 +25368,15 @@ function renderMorning() {
     <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;align-items:center;">
       <div>
         <div style="font-size:13px;font-weight:800;color:#d4dae3;letter-spacing:1px;text-transform:uppercase;">Lineup check \u00b7 ${lc.sources.length ? lc.sources.join(" vs ") : "RW vs RG vs Tabs"} <span style="font-size:11px;font-weight:800;color:${lc.list.length ? "#f87171" : (lc.compared.length ? "#22c55e" : "#a8b0bb")};">${lc.list.length ? lc.list.length + " CONFLICT" + (lc.list.length === 1 ? "" : "S") : (lc.compared.length ? "ALL " + lc.compared.length + " TEAMS AGREE" : "NOTHING TO COMPARE")}</span></div>
-        <div style="font-size:10px;color:#a8b0bb;margin-top:2px;max-width:700px;line-height:1.5;">Copy each lineups page (RotoWire nba-lineups.php, RotoGrinders lineups/nba, Tabs Lineups) and paste them all in the one box below. Wherever RW and RG disagree on who plays or starts, that player is blocked on both sides in the funnel. A source that hasn't posted a team yet is no opinion, not a conflict. ${rgL ? `RG loaded: ${Object.keys(rgL.teams).length} teams \u00b7 ${Math.round((Date.now() - rgL.at) / 60000)}m ago.` : "RG not loaded."} ${(() => { const tb = getTabsLineups(); return tb ? `Tabs loaded: ${Object.keys(tb.teams).length} teams \u00b7 ${Math.round((Date.now() - tb.at) / 60000)}m ago.` : "Tabs not loaded."; })()} ${lc.noOpinion.length ? `Only one source posted: ${lc.noOpinion.join(", ")}.` : ""}</div>
+        <div style="font-size:10px;color:#a8b0bb;margin-top:2px;max-width:700px;line-height:1.5;">Copy each lineups page (RotoWire nba-lineups.php, RotoGrinders lineups/nba, Tabs Lineups) into its own box below and press that source\u2019s PARSE. Wherever RW and RG disagree on who plays or starts, that player is blocked on both sides in the funnel. A source that hasn't posted a team yet is no opinion, not a conflict. ${rgL ? `RG loaded: ${Object.keys(rgL.teams).length} teams \u00b7 ${Math.round((Date.now() - rgL.at) / 60000)}m ago.` : "RG not loaded."} ${(() => { const tb = getTabsLineups(); return tb ? `Tabs loaded: ${Object.keys(tb.teams).length} teams \u00b7 ${Math.round((Date.now() - tb.at) / 60000)}m ago.` : "Tabs not loaded."; })()} ${lc.noOpinion.length ? `Only one source posted: ${lc.noOpinion.join(", ")}.` : ""}</div>
       </div>
-      <div style="display:flex;gap:6px;"><button onclick="morningImportLineups()" style="background:#34d399;border:none;color:#050507;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:800;cursor:pointer;">IMPORT LINEUPS</button>${rgL ? `<button onclick="morningClearRgLineups()" style="background:transparent;border:1px solid #1a1d22;color:#f87171;border-radius:6px;padding:7px 10px;font-size:11px;font-weight:700;cursor:pointer;">CLEAR RG</button>` : ""}${getTabsLineups() ? `<button onclick="morningClearTabsLineups()" style="background:transparent;border:1px solid #1a1d22;color:#f87171;border-radius:6px;padding:7px 10px;font-size:11px;font-weight:700;cursor:pointer;">CLEAR TABS</button>` : ""}</div>
+      <div style="display:flex;gap:6px;">${rgL ? `<button onclick="morningClearRgLineups()" style="background:transparent;border:1px solid #1a1d22;color:#f87171;border-radius:6px;padding:7px 10px;font-size:11px;font-weight:700;cursor:pointer;">CLEAR RG</button>` : ""}${getTabsLineups() ? `<button onclick="morningClearTabsLineups()" style="background:transparent;border:1px solid #1a1d22;color:#f87171;border-radius:6px;padding:7px 10px;font-size:11px;font-weight:700;cursor:pointer;">CLEAR TABS</button>` : ""}</div>
     </div>
     ${lc.list.length ? `<div style="margin-top:8px;display:grid;gap:3px;">${lc.list.map(x => `<div style="font-size:11px;color:#fca5a5;font-family:'JetBrains Mono','Menlo',monospace;">${_mEsc(x.team)} \u00b7 ${_mEsc(x.text)}</div>`).join("")}</div>` : ""}
     ${_lineupReport.length ? `<div style="margin-top:8px;display:grid;gap:2px;">${_lineupReport.map(r => `<div style="font-size:11px;font-family:'JetBrains Mono','Menlo',monospace;color:${r.bad ? "#fbbf24" : "#4ade80"};">${r.bad ? "\u26a0" : "\u2713"} ${_mEsc(r.text)}</div>`).join("")}</div>` : ""}
     ${lineupCompareHtml()}
     <span id="morning-lineups-info" style="font-size:11px;color:#a8b0bb;"></span>
-    <textarea id="morning-lineups-paste" placeholder="Paste the RW, RG and/or Tabs lineups pages here \u2014 all at once, any order, or one at a time\u2026" spellcheck="false" style="width:100%;min-height:54px;margin-top:8px;background:#050507;border:1px solid #1a1d22;border-radius:6px;padding:8px 10px;color:#e2e8f0;font-family:'JetBrains Mono','Menlo',monospace;font-size:11px;outline:none;resize:vertical;box-sizing:border-box;"></textarea>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:8px;"><div style="flex:1 1 220px;min-width:200px;"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;"><button onclick="morningParseLineupsSrc('RW')" style="background:#93c5fd;border:none;color:#050507;border-radius:6px;padding:6px 14px;font-size:12px;font-weight:800;cursor:pointer;">RW PARSE</button><span style="font-size:10px;color:#8b93a0;">${(() => { const st = (() => { const d = getLineupsData(); return d && d.players ? Object.keys(d.players).length + " players \u00b7 " + Math.round((Date.now() - d.fetchedAt) / 60000) + "m ago" : ""; })(); return st ? st : "not loaded"; })()}</span></div><textarea id="morning-lineups-rw" placeholder="Paste the RotoWire NBA lineups page (rotowire.com/basketball/nba-lineups.php)\u2026" spellcheck="false" style="width:100%;min-height:54px;background:#050507;border:1px solid #1a1d22;border-radius:6px;padding:8px 10px;color:#e2e8f0;font-family:'JetBrains Mono','Menlo',monospace;font-size:11px;outline:none;resize:vertical;box-sizing:border-box;"></textarea></div><div style="flex:1 1 220px;min-width:200px;"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;"><button onclick="morningParseLineupsSrc('RG')" style="background:#34d399;border:none;color:#050507;border-radius:6px;padding:6px 14px;font-size:12px;font-weight:800;cursor:pointer;">RG PARSE</button><span style="font-size:10px;color:#8b93a0;">${(() => { const st = (() => { const d = getRgLineups(); return d ? Object.keys(d.teams).length + " teams \u00b7 " + Math.round((Date.now() - d.at) / 60000) + "m ago" : ""; })(); return st ? st : "not loaded"; })()}</span></div><textarea id="morning-lineups-rg" placeholder="Paste the RotoGrinders NBA starting lineups page\u2026" spellcheck="false" style="width:100%;min-height:54px;background:#050507;border:1px solid #1a1d22;border-radius:6px;padding:8px 10px;color:#e2e8f0;font-family:'JetBrains Mono','Menlo',monospace;font-size:11px;outline:none;resize:vertical;box-sizing:border-box;"></textarea></div><div style="flex:1 1 220px;min-width:200px;"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;"><button onclick="morningParseLineupsSrc('Tabs')" style="background:#f59e0b;border:none;color:#050507;border-radius:6px;padding:6px 14px;font-size:12px;font-weight:800;cursor:pointer;">TABS PARSE</button><span style="font-size:10px;color:#8b93a0;">${(() => { const st = (() => { const d = getTabsLineups(); return d ? Object.keys(d.teams).length + " teams \u00b7 " + Math.round((Date.now() - d.at) / 60000) + "m ago" : ""; })(); return st ? st : "not loaded"; })()}</span></div><textarea id="morning-lineups-tabs" placeholder="Paste the Tabs NBA Lineups page\u2026" spellcheck="false" style="width:100%;min-height:54px;background:#050507;border:1px solid #1a1d22;border-radius:6px;padding:8px 10px;color:#e2e8f0;font-family:'JetBrains Mono','Menlo',monospace;font-size:11px;outline:none;resize:vertical;box-sizing:border-box;"></textarea></div></div>
     <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px;"><div style="font-size:10px;color:#a8b0bb;max-width:700px;line-height:1.5;"><b style="color:#d4dae3;">RG impact ratings</b> (Situation Room injury report) \u2014 ${(() => { const ri = getRgImpact(); return ri ? Object.keys(ri.players).length + " players loaded \u00b7 " + Math.round((Date.now() - ri.at) / 60000) + "m ago" : "not loaded"; })()}. Used as an extra read on how much a teammate's absence matters.</div><div style="display:flex;gap:6px;"><button onclick="morningParseRgImpact()" style="background:#34d399;border:none;color:#050507;border-radius:6px;padding:6px 12px;font-size:11px;font-weight:800;cursor:pointer;">PARSE RG IMPACT</button>${getRgImpact() ? `<button onclick="morningClearRgImpact()" style="background:transparent;border:1px solid #1a1d22;color:#f87171;border-radius:6px;padding:6px 10px;font-size:11px;font-weight:700;cursor:pointer;">CLEAR</button>` : ""}</div></div>
     <textarea id="morning-rg-impact" placeholder="Paste the RG NBA injury report / impact ratings page here\u2026" spellcheck="false" style="width:100%;min-height:36px;margin-top:6px;background:#050507;border:1px solid #1a1d22;border-radius:6px;padding:8px 10px;color:#e2e8f0;font-family:'JetBrains Mono','Menlo',monospace;font-size:11px;outline:none;resize:vertical;box-sizing:border-box;"></textarea>
   </div>`;
