@@ -421,9 +421,12 @@ const sharpLink = o => { const k=canonBook(o?.sportsbook); if(k==='fanduel'){ co
   const d=o?.deep_link||{}; const https=[IS_IOS?d.ios:null, IS_ANDROID?d.android:null, d.desktop, d.ios, d.android].find(u=>u && /^https:\/\//i.test(String(u)));
   return https || deepLinkFor(o) || BOOK_HOME[k] || ''; };
 const sharpSideLabel = side => side==='yes'?'Yes':side==='no'?'No':side==='over'?'Over':'Under';
-const SHARP_TICK_MS = 15000, SHARP_HIST_MS = 3*3600e3, SHARP_PING_STEP = 1000, SHARP_FX_TTL = 20*60e3;
+const SHARP_TICK_MS = 2000, SHARP_HIST_MS = 3*3600e3, SHARP_PING_STEP = 1000, SHARP_FX_TTL = 20*60e3;
 const SHARP_SPORTS = () => Object.keys(SHARP_MARKETS).filter(k=>SPORTS[k]);
 let sharpMin = Number(LS.get('props_sharpmin2','350')) || 350;
+// Only 0.0% hold or better counts (true arbs / direct matches) -- no low holds.
+const sharpMaxHold = 0;
+const holdOkTxt = () => '0.0% arb or better';
 let sharpPingsOn = LS.get('props_sharppings','1')==='1';
 let sharpSportF = 'all';
 let sharpTimer = null, sharpBusy = false, sharpRR = 0;
@@ -444,7 +447,7 @@ function arbLadder(oppRows, targetPrice){
     levelsOf(o).forEach(l=>{
       const opp=Number(l.price), hold=(tImp+toImplied(opp)-1)*100;
       if(Math.abs(cents(-opp)-tC) <= LIQ_BAND_CENTS) band+=l.size;
-      const lv=levels[opp]||(levels[opp]={opp, size:0, books:new Set(), zero:hold<=1e-7, hold});
+      const lv=levels[opp]||(levels[opp]={opp, size:0, books:new Set(), zero:hold<=sharpMaxHold+1e-7, hold});
       lv.size+=l.size; lv.books.add(k);
     });
   });
@@ -506,6 +509,7 @@ function sharpScan(sk, rows){
       if(!soft.length || !sharpPriceOk(mk, soft[0].price)) return;
       const opp = own.filter(o=>o._sd===SHARP_OPP[side] && at(o) && EXCH.has(canonBook(o.sportsbook)));
       const L = arbLadder(opp, soft[0].price);
+      if(L.all.length){ const h=Math.min(...L.all.map(l=>l.hold)); if(d.best==null || h<d.best) d.best=h; }
       if(!L.total) return;
       soft.forEach(o=>{ const a=arbLadder(opp, o.price); o._arb$=a.total; o._edge=a.bestHold!=null?-a.bestHold:null; });
       out.push({ k:`${sk}|${g}|${side}|${line}`, sk, fx, mk, key, pid:own.find(o=>o.player_id)?.player_id||null, player:sharpPlayerOf(soft[0]), side, line, ref:soft[0], soft, L, own });
@@ -534,7 +538,7 @@ const sharpLive = e => e.f ? (e.f.live || new Date(e.f.start).getTime() <= Date.
 function sharpList(){
   return Object.values(sharpTape).filter(e=>e.L.total>=sharpMin && !sharpLive(e) && (sharpSportF==='all'||e.sk===sharpSportF));
 }
-const edgeTxt = e => e==null ? '' : e>1e-7 ? `ARB +${e.toFixed(1)}%` : 'DIRECT MATCH';
+const edgeTxt = e => e==null ? '' : e>1e-7 ? `ARB +${e.toFixed(1)}%` : e>=-1e-7 ? 'DIRECT MATCH' : `LOW HOLD ${(-e).toFixed(1)}%`;
 function sharpCardHtml(e){
   const f=e.f; const fl=sharpFlow(e); const sk=e.sk;
   const ago = t => { const m=Math.max(0,Math.round((Date.now()-t)/60000)); return m<1?'just now':m<60?m+'m':Math.floor(m/60)+'h '+(m%60)+'m'; };
@@ -552,7 +556,7 @@ function sharpCardHtml(e){
     <div class="shhd"><span class="shpl"><span class="shsp">${esc(SPORTS[sk]?.label||sk)}</span>${esc(titleCase(e.player))}</span><span class="shgm">${f?`${esc(f.away.ab||f.away.name)} @ ${esc(f.home.ab||f.home.name)} · ${etDay(f.start)} ${etTime(f.start)} · <b>${tillGame(f.start)}</b>`:''}</span></div>
     <div class="shside ${e.side}"><b>${sharpSideLabel(e.side)}${lineTxt}</b> ${esc(marketLabel(sk,e.mk))} <span class="shedge ${e.soft[0]._edge>1e-7?'arb':'match'}">${edgeTxt(e.soft[0]._edge)}</span></div>
     <div class="shmoney"><span class="shbig">${usd(e.L.total)}</span><span class="shlbl">arb money</span>${flow}${best?`<span class="shfair">sharp fair ${esc(bookShort([...best.books][0]))} ${fmtAm(-best.opp)}</span>`:''}</div>
-    <div class="shsub">${oppName} book on the exchanges · <b>${usd(e.L.total)}</b> at 0.0% arb or better · <b>${usd(e.L.band||0)}</b> around target (within ${LIQ_BAND_CENTS}¢ of FD ${fmtAm(e.ref.price)})</div>
+    <div class="shsub">${oppName} book on the exchanges · <b>${usd(e.L.total)}</b> at ${holdOkTxt()} · <b>${usd(e.L.band||0)}</b> around target (within ${LIQ_BAND_CENTS}¢ of FD ${fmtAm(e.ref.price)})</div>
     <div class="pllad">${lad}</div>
     <div class="shstale"><span class="shlbl">Bet at</span>${soft}</div>
   </div>`;
@@ -615,7 +619,7 @@ const httpsLogo = k => k==='fanduel' ? FD_DISCORD_LOGO : [bookLogos[k], bookLogo
 function sharpDiscord(e){ try{ discordPost({ ...sharpDiscordPayload(e), ...roleTag() }); }catch(err){ console.warn('[sharp] discord payload failed', err); toast('Discord post failed: '+err.message); } }
 function sharpDiscordPayload(e, example){
   const o=e.soft[0], bk=canonBook(o.sportsbook), url=sharpLink(o), f=e.f, sk=e.sk;
-  const edge=o._edge??0, isArb=edge>1e-7, book=bookLabel(o.sportsbook);
+  const edge=o._edge??0, isArb=edge>1e-7, isDirect=!isArb&&edge>=-1e-7, book=bookLabel(o.sportsbook);
   const mktName= e.mk==='pra' ? 'PRA' : ((e.own.find(x=>x._sd===e.side)||e.own[0])?.market || marketLabel(sk,e.mk));
   const bet=`${titleCase(e.player)} ${sharpSideLabel(e.side)}${e.line!=null?' '+e.line:''}`;
   // one row per exchange on the other side: its arb money (orders at 0.0% or better) at its price
@@ -634,12 +638,12 @@ function sharpDiscordPayload(e, example){
   // day + time (ET), then Discord's live countdown tag ("starts in 2 hours", keeps updating itself)
   const when=f?`${new Date(f.start).toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric',timeZone:'America/New_York'})} @ ${new Date(f.start).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',timeZone:'America/New_York'})} ET · starts <t:${Math.floor(new Date(f.start).getTime()/1000)}:R>`:'';
   return { username:book, avatar_url:httpsLogo(bk), content: example ? '🧪 **Example alert** — this is what sharp money pings will look like (not a real bet).' : undefined, embeds:[{
-    title:`${example?'[EXAMPLE] ':''}[${SPORTS[sk]?.label||sk} ${isArb?'ARB':'DIRECT MATCH'} ${fmtAm(o.price)}] - ${bet} ${mktName}`.slice(0,256),
-    url:url||undefined, color:isArb?0x22c55e:0xeab308,
+    title:`${example?'[EXAMPLE] ':''}[${SPORTS[sk]?.label||sk} ${isArb?'ARB':isDirect?'DIRECT MATCH':'LOW HOLD'} ${fmtAm(o.price)}] - ${bet} ${mktName}`.slice(0,256),
+    url:url||undefined, color:isArb?0x22c55e:isDirect?0xeab308:0xf97316,
     thumbnail: httpsLogo(bk) ? { url:httpsLogo(bk) } : undefined,
     description:`${f?`${f.away.name||f.away.ab} @ ${f.home.name||f.home.ab} · ${when}\n`:''}**${bet}**\n*${mktName}*`,
     fields:[
-      { name:'Edge Analysis', value:`${book}: ${sharpSideLabel(e.side)} **${fmtAm(o.price)}**\nSharp Fair: ${best?`${bookLabel(best[0])} **${fmtAm(-best[1].opp)}**`:'—'}\n${(fairEdge??0)>1e-7?`Arb **${pctTxt(fairEdge)}** at sharp fair`:'**Direct match** at sharp fair'}\n**${usd(e.L.total)}** at 0.0% arb or better` },
+      { name:'Edge Analysis', value:`${book}: ${sharpSideLabel(e.side)} **${fmtAm(o.price)}**\nSharp Fair: ${best?`${bookLabel(best[0])} **${fmtAm(-best[1].opp)}**`:'—'}\n${(fairEdge??0)>1e-7?`Arb **${pctTxt(fairEdge)}** at sharp fair`:(fairEdge??0)>=-1e-7?'**Direct match** at sharp fair':`Hold **${pctTxt(-fairEdge)}** at sharp fair`}\n**${usd(e.L.total)}** at ${holdOkTxt()}` },
       { name:`Exchange Depth (Ballpark ${usd(exRows.reduce((t,[,v])=>t+(v.all??v.size),0))})`, value: '```\n'+[`${'Book'.padEnd(9)} ${'Odds'.padStart(5)} ${'Liq'.padStart(7)}`, ...exRows.map(([k,v])=>`${bookShort(k).padEnd(9)} ${fmtAm(v.opp).padStart(5)} ${('$'+Math.round(v.all??v.size).toLocaleString()).padStart(7)}`)].join('\n')+'\n```' },
     ],
     footer:{ text:SPORTS[sk]?.label||sk } }] };
@@ -711,7 +715,7 @@ async function sharpTick(){
     if(viewMode==='sharp') renderSharp();
   } finally { sharpBusy=false; }
 }
-// Scans nonstop while this page is open (pings on or off -- the feed always stays current).
+// Scans nonstop while this page is open: a new scan starts ~2s after the last one finishes (pings on or off).
 function sharpSchedule(){ clearInterval(sharpTimer); sharpTimer=setInterval(sharpTick, SHARP_TICK_MS); }
 function renderSharp(){
   const view=$('#view');
@@ -725,8 +729,8 @@ function renderSharp(){
   // What each sport's last scan actually got back -- if a sport shows 0 for the exchanges, the
   // feed isn't returning their odds; if it shows props but 0 sides, nothing arbs FanDuel right now.
   const diag = sports.filter(k=>sharpDiag[k]).map(k=>{ const d=sharpDiag[k]; const bk=Object.entries(d.byBook).map(([b,n])=>`${b} ${n}`).join(' · ')||'no odds';
-    return `<div class="smdiag"><b>${esc(SPORTS[k].label)}</b> ${Math.max(0,Math.round((Date.now()-d.at)/1000))}s ago · ${d.games??0} games · ${esc(bk)} · ${d.withExch}/${d.props} props w/ exchange · ${d.sides} with arb money${d.big!=null?` · ${d.big} at ${usd(sharpMin)}+`:''}</div>`; }).join('');
-  const body = list.length ? list.map(sharpCardHtml).join('') : `<div class="empty">${scanned?`Nothing with ${usd(sharpMin)}+ of 0% arb exchange money vs FanDuel right now. Scanning ${sports.length} sports nonstop.`:'Scanning…'}</div>`;
+    return `<div class="smdiag"><b>${esc(SPORTS[k].label)}</b> ${Math.max(0,Math.round((Date.now()-d.at)/1000))}s ago · ${d.games??0} games · ${esc(bk)} · ${d.withExch}/${d.props} props w/ exchange · ${d.sides} with money${d.best!=null?` · closest ${d.best<=0?'ARB '+(-d.best).toFixed(1):'hold '+d.best.toFixed(1)}%`:''}${d.big!=null?` · ${d.big} at ${usd(sharpMin)}+`:''}</div>`; }).join('');
+  const body = list.length ? list.map(sharpCardHtml).join('') : `<div class="empty">${scanned?`Nothing with ${usd(sharpMin)}+ at ${holdOkTxt()} vs FanDuel right now. Scanning ${sports.length} sports nonstop.`:'Scanning…'}</div>`;
   view.innerHTML = `<div class="sh"><span class="t">Sharp Money</span><span class="dim" style="font-size:10.5px">scanning ${scanned}/${sports.length} sports · since ${new Date(sharpStarted).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})}</span></div>${chips}<div class="shlist">${body}</div>${diag?`<div class="smdiagw"><div class="dim" style="font-size:10px;margin-bottom:3px">LAST SCAN</div>${diag}</div>`:''}`;
   view.querySelectorAll('[data-shmin]').forEach(b=>b.addEventListener('click',()=>{ sharpMin=Number(b.dataset.shmin); LS.set('props_sharpmin2',String(sharpMin)); renderSharp(); }));
   view.querySelectorAll('[data-shs]').forEach(b=>b.addEventListener('click',()=>{ sharpSportF=b.dataset.shs; renderSharp(); if(sharpSportF!=='all' && !sharpLastScan[sharpSportF]) sharpScanSport(sharpSportF).then(()=>{ if(viewMode==='sharp') renderSharp(); }); }));
