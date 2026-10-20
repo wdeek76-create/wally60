@@ -1833,6 +1833,7 @@ function rerenderNow() { const v = $('#view'); if (v) delete v.dataset.lastHtml;
   view.addEventListener('pointerup', end); view.addEventListener('pointercancel', end);
   view.addEventListener('click', e => {
     if (e.target.closest('#unhideAll')) { hiddenKeys = {}; saveSwipeState(); rerenderNow(); return; }
+    if (e.target.closest('[data-bndc]')) { bnDiscordSetup(); return; }
     const m = e.target.closest('[data-bnmode]'); if (m) { betNowMode = m.dataset.bnmode; LS.set('fdst_bnmode', betNowMode); rerenderNow(); }
   });
   view.addEventListener('change', e => {
@@ -2074,26 +2075,117 @@ const FADE_BOOK_CHOICES = [['Fliff', 'Fliff'], ['Caesars', 'CZR'], ['DraftKings'
 //  - Betting FD's side: the consensus books' no-vig fair (DK/Fliff/Caesars).
 //  - Fading: FanDuel's Over flipped (the whole point of the fade: FD's price is the accurate one).
 function bnFairHtml(r, top) {
+  const F = bnFair(r, top); if (!F) return '';
+  const { fairP, ev, src } = F;
+  const logos = [...new Set(src)].map(bk => logoOf(bk) ? `<img src="${esc(logoOf(bk))}" alt="${esc(bk)}" title="${esc(bk)}">` : `<i>${esc(bk.slice(0, 3))}</i>`).join('');
+  return `<span class="bn-fair">Fair <b>${fmtAm(probToAm(fairP))}</b><span class="bn-ev ${ev >= 0 ? 'pos' : 'neg'}">${ev >= 0 ? '+' : ''}${ev.toFixed(1)}%</span><span class="bn-src">${logos}</span></span>`;
+}
+function bnFair(r, top) {
   let fairP = null, src = [];
   if (r.fade) {
     // FanDuel's Over flipped is the Under's fair (FD Over +186 -> Under fair -186) -- FD often
     // doesn't post the Under at all, and its Over is the line the fade trusts.
     fairP = imp(-Number(r.fdPrice)); src = ['FanDuel'];
   } else if (r.fairProb != null) { fairP = r.fairProb; src = ((r.arbBooks && r.arbBooks.length >= MIN_ARB_BOOKS ? r.arbBooks : r.valueBooks) || []).map(b => b.book); }
-  if (fairP == null || !(fairP > 0 && fairP < 1)) return '';
-  const ev = (fairP * toDec(top.price) - 1) * 100;
-  const logos = [...new Set(src)].map(bk => logoOf(bk) ? `<img src="${esc(logoOf(bk))}" alt="${esc(bk)}" title="${esc(bk)}">` : `<i>${esc(bk.slice(0, 3))}</i>`).join('');
-  return `<span class="bn-fair">Fair <b>${fmtAm(probToAm(fairP))}</b><span class="bn-ev ${ev >= 0 ? 'pos' : 'neg'}">${ev >= 0 ? '+' : ''}${ev.toFixed(1)}%</span><span class="bn-src">${logos}</span></span>`;
+  if (!top || fairP == null || !(fairP > 0 && fairP < 1)) return null;
+  return { fairP, ev: (fairP * toDec(top.price) - 1) * 100, src };
 }
 function betNowControlsHtml() {
   return `<div class="bn-ctrl">
+    <div class="bn-seg"><button class="${bnHook ? 'on' : ''}" data-bndc>${bnHook ? 'Discord ✓' : 'Discord'}</button></div>
     <div class="bn-seg">${[['fd', 'Bet FD'], ['fade', 'Fade FD'], ['both', 'Both']].map(([v, t]) => `<button class="${betNowMode === v ? 'on' : ''}" data-bnmode="${v}">${t}</button>`).join('')}</div>
     ${betNowMode !== 'fd' ? `<div class="bn-books"><span>Fade at</span>${FADE_BOOK_CHOICES.map(([bk, t]) => `<label class="${fadeBooks.includes(bk) ? 'on' : ''}"><input type="checkbox" data-fadebook="${bk}"${fadeBooks.includes(bk) ? ' checked' : ''}>${logoOf(bk) ? `<img src="${esc(logoOf(bk))}" alt="">` : ''}${t}</label>`).join('')}</div>` : ''}
   </div>`;
 }
-function renderBetNow() {
-  const view = $('#view');
-  const stats = buildBetNowStats();
+// ───── Bet Now → Discord ─────
+// Every pick that shows up in Bet Now (same Bet FD / Fade FD / fade-book filters as the screen)
+// is posted once to a Discord webhook, while this page is open and on screen. Posts go out one at
+// a time so a burst doesn't get rate-limited away; a failed post is retried on the next refresh.
+let bnHook = LS.get('fdst_dc_hook', ''), bnRole = LS.get('fdst_dc_role', '');
+const BN_FD_LOGO = 'https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcRH3NobGIn_Yoc0wsD3j73VvYQ1zSEm3GZ1mhXHUJW1Ag&s=10';
+const bnPosted = (() => { try { const m = JSON.parse(LS.get('fdst_dc_posted', '{}')) || {}; const cut = Date.now() - 12 * 3600e3; Object.keys(m).forEach(k => { if (!(m[k] > cut)) delete m[k]; }); return m; } catch(e) { return {}; } })();
+const bnQ = []; let bnPumping = false;
+const httpsOnly = u => { u = String(u || ''); return /^https:\/\//.test(u) ? u.replace(/\[/g, '%5B').replace(/\]/g, '%5D') : undefined; };
+async function bnSend(body) {
+  const r = await fetch(bnHook, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  return r.ok ? '' : `${r.status} ${(await r.text().catch(() => '')).slice(0, 160)}`;
+}
+async function bnPost(body) {
+  if (!bnHook) return false;
+  try {
+    let err = await bnSend(body); if (!err) return true;
+    for (let i = 0; i < 3 && err.startsWith('429'); i++) { const ra = Number((err.match(/"retry_after":\s*([\d.]+)/) || [])[1]); await new Promise(r => setTimeout(r, (ra > 0 ? ra * 1000 : 2000) + 250)); err = await bnSend(body); if (!err) return true; }
+    // a link or logo Discord won't take: try once more without them
+    err = await bnSend({ ...body, avatar_url: undefined, embeds: (body.embeds || []).map(e => ({ ...e, url: undefined, thumbnail: undefined })) }); if (!err) return true;
+    console.warn('[fd-sharp] discord rejected', err); toast('Discord post failed: ' + err.slice(0, 70)); return false;
+  } catch(e) { console.warn('[fd-sharp] discord failed', e.message); toast('Discord post failed: ' + e.message); return false; }
+}
+function bnPayload(r, example) {
+  const P = bnPick(r), top = P.top, f = r.f, st = stateOf(f), F = bnFair(r, top);
+  const mkt = marketLabel(r.mkey);
+  const bet = `${r.player} ${P.betSide}`;
+  const score = (Number.isFinite(st.away) && Number.isFinite(st.home)) ? ` · ${f.away.ab} ${st.away}-${st.home} ${f.home.ab}` : '';
+  const lines = [
+    `**${top.book}: ${P.betSide} ${fmtAm(top.price)}**${r.fade && P.hq[1] ? ` (or ${P.hq[1].book} ${fmtAm(P.hq[1].price)})` : ''}`,
+    r.fade ? `FanDuel: ${P.sideLabel} ${fmtAm(r.fdPrice)} · ${P.fadeTxt}` : null,
+    F ? `Fair **${fmtAm(probToAm(F.fairP))}** (${[...new Set(F.src)].join('/')}) · EV **${F.ev >= 0 ? '+' : ''}${F.ev.toFixed(1)}%**` : null,
+    `Score **+${r.score.toFixed(2)}u** from your graded history`,
+  ].filter(Boolean).join('\n');
+  const role = /^\d{15,}$/.test(bnRole) ? bnRole : '';
+  return {
+    username: 'FD Sharp Tracker', avatar_url: BN_FD_LOGO,
+    content: [role ? `<@&${role}>` : '', example ? '🧪 **Example alert** — this is what Bet Now posts will look like (not a real bet).' : ''].filter(Boolean).join(' ') || undefined,
+    allowed_mentions: role ? { roles: [role] } : { parse: [] },
+    embeds: [{
+      title: `${example ? '[EXAMPLE] ' : ''}[LIVE ${P.tier[0].toUpperCase()}${r.fade ? ' FADE' : ''}] - ${bet} ${mkt}`.slice(0, 256),
+      url: httpsOnly(top.link),
+      color: P.tier[1] === 'strong' ? 0x22c55e : P.tier[1] === 'good' ? 0xeab308 : 0x64748b,
+      thumbnail: httpsOnly(logoOf(top.book)) ? { url: httpsOnly(logoOf(top.book)) } : undefined,
+      description: `${f.away.name || f.away.ab} @ ${f.home.name || f.home.ab}${score}${st.label ? ' · ' + st.label : ''}\n**${bet}**\n*${mkt}*`,
+      fields: [{ name: 'Bet Now', value: lines.slice(0, 1024) }],
+      footer: { text: 'FD Sharp Tracker · Bet Now' }, timestamp: new Date().toISOString(),
+    }],
+  };
+}
+async function bnPump() {
+  if (bnPumping) return; bnPumping = true;
+  try {
+    while (bnQ.length) {
+      const { k, r } = bnQ.shift();
+      let ok = false; try { ok = await bnPost(bnPayload(r)); } catch(e) { console.warn('[fd-sharp] discord payload', e); }
+      if (!ok) delete bnPosted[k]; else LS.set('fdst_dc_posted', JSON.stringify(bnPosted));
+      await new Promise(res => setTimeout(res, 1200));
+    }
+  } finally { bnPumping = false; }
+}
+function bnDiscordCheck() {
+  if (!bnHook) return;
+  let list = []; try { list = betNowRanked(buildBetNowStats()); } catch(e) { console.warn('[fd-sharp] bet now for discord', e); return; }
+  list.forEach(r => {
+    const P = bnPick(r); if (!P.top) return;
+    const k = `${r.key}|${r.fade ? 'fade' : 'fd'}|${r.isAlt ? 'alt' : ''}`;
+    if (bnPosted[k]) return;
+    bnPosted[k] = Date.now(); bnQ.push({ k, r });
+  });
+  bnPump();
+}
+async function bnDiscordSetup() {
+  const v = prompt('Paste the Discord webhook URL for Bet Now alerts (Server Settings → Integrations → Webhooks → New Webhook → Copy Webhook URL). Leave empty to turn it off.', bnHook);
+  if (v == null) return;
+  bnHook = v.trim(); LS.set('fdst_dc_hook', bnHook); rerenderNow();
+  if (!bnHook) { toast('Discord off'); return; }
+  const role = prompt('Role to tag on every alert: paste its Role ID (leave empty for no tag).', bnRole || '1561828102278217968');
+  if (role != null) { bnRole = (String(role).match(/\d{15,}/) || [''])[0]; LS.set('fdst_dc_role', bnRole); }
+  const ok = await bnPost({ username: 'FD Sharp Tracker', avatar_url: BN_FD_LOGO, content: '✅ FD Sharp Tracker · Bet Now alerts connected.' });
+  toast(ok ? 'Discord connected' : 'Discord test failed — check the URL');
+  if (!ok) return;
+  // example card, built from a live pick when there is one
+  let ex = null; try { ex = betNowRanked(buildBetNowStats())[0] || null; } catch(e) {}
+  if (ex) { await new Promise(r => setTimeout(r, 600)); bnPost(bnPayload(ex, true)); }
+  bnDiscordCheck();
+}
+// The Bet Now list itself (same filters as the screen) -- also what goes to Discord.
+function betNowRanked(stats) {
   const mainScored = rows.map(r => Object.assign({}, r, scoreLiveRow(r, stats, false), { isAlt: false }));
   const altScored = altRows.map(r => Object.assign({}, r, scoreLiveRow(r, stats, true), { isAlt: true }));
   // Bet Now is a "what should I actually bet" list, not a full inventory -- a pick whose matching
@@ -2108,6 +2200,21 @@ function renderBetNow() {
     .filter(r => r.fade || r.isAlt || !isLeakSpot(r))
     .filter(r => betNowMode === 'both' || (betNowMode === 'fade' ? r.fade : !r.fade))
     .sort((a, b) => b.score - a.score);
+  return ranked;
+}
+// What the card actually tells you to bet: the side, the book, the price, the tier.
+function bnPick(r) {
+  const sideLabel = r.isAlt ? 'Yes' : (r.side === 'over' ? `Over ${r.line}` : r.side === 'under' ? `Under ${r.line}` : 'Yes');
+  const hedgeLabel = r.isAlt ? null : (r.side === 'over' ? `Under ${r.line}` : `Over ${r.line}`);
+  const hq = (r.hedgeQuotes || []).filter(q => fadeBooks.includes(q.book)).sort((a, b) => b.price - a.price);
+  const top = r.fade ? hq[0] : { book: 'FanDuel', price: r.fdPrice, link: r.fdLink };
+  const tier = r.score >= 25 ? ['Strong', 'strong'] : r.score >= 10 ? ['Good', 'good'] : ['Lean', 'lean'];
+  return { sideLabel, hedgeLabel, hq, top, betSide: r.fade ? hedgeLabel : sideLabel, tier, fadeTxt: `Fade the ${r.side === 'under' ? 'Under' : 'Over'}` };
+}
+function renderBetNow() {
+  const view = $('#view');
+  const stats = buildBetNowStats();
+  const ranked = betNowRanked(stats);
   const all = swipeOrder(ranked);
   if (!all.length) { setViewHtml(view, betNowControlsHtml() + betNowSourceHtml(stats) + hiddenBarHtml(ranked) + '<div class="empty">Nothing live with a positive track record right now.</div>'); return; }
   const card = r => {
@@ -2444,6 +2551,7 @@ async function load(force) {
     }
     setLastUpdated();
     render();
+    bnDiscordCheck();
     setSync('idle');
   } catch(e) {
     console.warn('[fd-sharp] load failed', e.message);
