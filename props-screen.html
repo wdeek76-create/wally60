@@ -860,7 +860,7 @@ const BOOK_REQ = [...BOOKS,'Courtside','Onyx Odds'];
 // quick arb's own reference list (see ensureQarbExtras), so they never show up anywhere else:
 // not the regular board/boxes, not the grid, not the parlay tool, not the Target shop picker.
 // Hard Rock goes by both names depending on feed -- ask for both; canonBook folds them together.
-const EXTRA_BOOK_REQ = ['Caesars','Hard Rock Bet','Hard Rock','Kambi','BetRivers','BetMGM'];
+const EXTRA_BOOK_REQ = ['Caesars','Hard Rock Bet','Hard Rock','Kambi','BetRivers','BetMGM','theScore'];
 // BookMaker is NHL main lines + team totals only: requested for NHL, and any row it returns for a
 // player prop is dropped (mainBookRow) so it never shows outside those markets.
 const bookReqFor = sk => sk==='nhl' ? [...BOOK_REQ,'BookMaker'] : BOOK_REQ;
@@ -1072,6 +1072,35 @@ function startsInTxt(iso){
   if(h<24) return `starts in ${h}h ${m}m`;
   const d = Math.floor(h/24), hh = h%24;
   return `starts in ${d}d ${hh}h`;
+}
+// Copy summary: one line -- the market on screen, the side you're on, then every book (Kambi /
+// Caesars / Hard Rock / theScore / MGM included) priced within 15¢ of the best, best first:
+//   Dillon Brooks under 24.5 PRA -108 novig -110 fd -115 hardrock -119 pbuilder
+const SUM_NAME = { 'fanduel':'fd','props builder':'pbuilder','prophet x':'prophetx','hard rock bet':'hardrock','draftkings':'dk','betmgm':'mgm','betonline':'bol','thescore':'thescore','onyx odds':'onyx' };
+async function copySummary(p, mkey){
+  if(!p || !mkey){ toast('Nothing to copy'); return; }
+  const ctx=`${p.key}|${mkey}`;
+  let extra=[]; try{ extra=await ensureQarbExtras(p,mkey); }catch(e){}
+  const rows=cardRows(p,mkey,ctx);
+  const line=(rows.find(o=>o.points!=null)||{}).points ?? null;
+  const exAt=rowsFor(p,mkey,extra).filter(o=>line==null || o.points==null || Number(o.points)===Number(line));
+  const list=bookBoard([...rows,...exAt]);
+  const single=list.every(b=>!b.over&&!b.under);
+  const sd=single?'single':(oddsSide==='under'?'under':'over');
+  const ranked=list.filter(b=>b[sd]).map(b=>({ b, c:cellPrice(b,b[sd]) })).filter(x=>x.c.price!=null && !isNaN(Number(x.c.price))).sort((x,y)=>toDec(y.c.price)-toDec(x.c.price));
+  if(!ranked.length){ toast('No prices to copy'); return; }
+  const best=centsOf(ranked[0].c.price);
+  const amt=v=>{ const n=Math.round(Number(v)); return n>0?'+'+n:String(n); };
+  const nm=k=>SUM_NAME[k] || String(k).replace(/\s+/g,'').toLowerCase();
+  const sideTxt=single?(singleSideLabel(mkey)||'Yes').toLowerCase():sd;
+  const mk=mkey==='pra'?'PRA':marketLabel(sportKey,mkey);
+  const books=ranked.filter(x=>best-centsOf(x.c.price)<=15).map(({b,c})=>`${amt(c.price)} ${nm(b.key)}`).join(' ');
+  await copyText(`${titleCase(p.name)} ${sideTxt}${line!=null&&!single?' '+line:''} ${mk} ${books}`);
+}
+const centsOf = v => { v=Number(v); return v>0 ? v-100 : v+100; };
+async function copyText(text){
+  try{ if(navigator.clipboard?.writeText){ await navigator.clipboard.writeText(text); toast('Summary copied'); return; } }catch(e){}
+  try{ const ta=document.createElement('textarea'); ta.value=text; ta.setAttribute('readonly',''); ta.style.cssText='position:fixed;opacity:0'; document.body.appendChild(ta); ta.select(); const ok=document.execCommand('copy'); ta.remove(); toast(ok?'Summary copied':'Copy failed'); }catch(e){ toast('Copy failed'); }
 }
 // Copies a player's name to paste into an exchange's search; falls back to a hidden textarea
 // where the async clipboard API isn't allowed.
@@ -2406,7 +2435,7 @@ async function openPlayer(p, startAt, keepScroll){
   const psub = S.ml
     ? (f?`<span class="mupill">vs <b>${esc(normName(f.home.name)===p.key?f.away.name:f.home.name)}</b></span><span>${esc(f.card)}</span>${whenHtml}`:'')
     : `${teamAb?`<span><b>${esc(teamAb)}</b></span>`:''}${f?`<span class="mupill">${f.away.logo?`<img class="mtl" src="${esc(f.away.logo)}" alt="">`:''}${esc(f.away.ab)}<span class="at">@</span>${f.home.logo?`<img class="mtl" src="${esc(f.home.logo)}" alt="">`:''}${esc(f.home.ab)}</span>${whenHtml}`:''}`;
-  let h=`<div class="sh shback"><span class="t">${esc(S.label)}</span><span class="shr"><button class="cpname" id="cpname" title="Copy name">⧉ Copy name</button><button class="ib" id="shot" title="Share">⇧</button><button class="back" id="back">‹ Slate</button></span></div><div class="pcard">
+  let h=`<div class="sh shback"><span class="t">${esc(S.label)}</span><span class="shr"><button class="cpname" id="cpname" title="Copy name">⧉ Copy name</button><button class="cpname" id="cpsum" title="Copy summary">⧉ Copy summary</button><button class="ib" id="shot" title="Share">⇧</button><button class="back" id="back">‹ Slate</button></span></div><div class="pcard">
     <div class="ptop">${hsWrap}<div style="min-width:0;flex:1">
       <div class="pname">${teamLogo?`<img class="tl" src="${esc(teamLogo)}" alt="">`:''}${esc(titleCase(p.name))}${injPill(p)}</div>
       <div class="psub">${psub}</div>
@@ -2425,6 +2454,7 @@ async function openPlayer(p, startAt, keepScroll){
   $('#back')?.addEventListener('click',()=>{ $('#q').value=''; renderSlate(); });
   $('#shot')?.addEventListener('click',shareBoard);
   $('#cpname')?.addEventListener('click',()=>copyName(titleCase(p.name)));
+  $('#cpsum')?.addEventListener('click',()=>{ const i=Number(document.querySelector('#mnav .mchip.on')?.dataset.mi||startIdx); copySummary(p, mkeys[i]); });
   // Pinned above the search bar instead of inline in the scrolling card, so switching players
   // from here never yanks the screen back to the top of a new page.
   renderGstripDock(p, mkeys[startIdx]);
