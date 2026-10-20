@@ -31,7 +31,8 @@ in the tool and set the backend to:  https://nfl-props-tracker-1.vercel.app/api/
 SEND TO DISCORD + SENT TRACKER
 - On the Ensemble source, "📤 Send to Discord" builds the same image as "🖼 Discord Card" and
   posts it to your Discord webhook (asked for the first time; change it on the Sent tab).
-  The webhook URL is saved only in this browser.
+  The webhook URL is saved only in this browser. Each send pings role 1555588738191589538
+  (change or turn off with "Change role" on the Sent tab).
 - Every pick that was actually drawn on that image is logged to the "📤 Sent" tab, at the best
   price shown on the card. Grades follow the Ensemble automatically; W / L / P on a row
   overrides by hand ("auto" hands it back). Sending the same pick again doesn't double it.
