@@ -5741,6 +5741,7 @@ function _nhlCardReportHtml() {
 // Discord tracker: after a Discord card is copied, ask "Sent?" — Yes stamps those picks as sent
 // (price/book at send time; a pick already sent keeps its first send). The recap counts only those.
 let _nhlDiscordAsk = null; // [{ id, odds, book }] waiting on Yes/No
+let _nhlDiscordAskCard = null; // the card image those picks went out on — saved on Yes
 function _nhlDiscordWin(b) { const o = Number(b.discordOdds != null ? b.discordOdds : b.odds), st = Number(b.stake) || 1; return o > 0 ? st * o / 100 : st * 100 / Math.abs(o); }
 function _nhlDiscordStats() {
   const sent = bets.filter(b => b.discordSent);
@@ -5762,9 +5763,10 @@ function _nhlDiscordAnswer(yes) {
     const at = new Date().toISOString();
     _nhlDiscordAsk.forEach(x => { const b = bets.find(y => y.id === x.id); if (b && !b.discordSent) Object.assign(b, { discordSent: true, discordOdds: x.odds, discordBook: x.book, discordAt: at }); });
     saveBets();
+    if (_nhlDiscordAskCard && _nhlDiscordAskCard.blob) _nhlSaveSentCard(_nhlDiscordAskCard.blob, _nhlDiscordAskCard.picks);
     showNhlToast("Marked " + _nhlDiscordAsk.length + " as sent — see the DISCORD tab");
   }
-  _nhlDiscordAsk = null;
+  _nhlDiscordAsk = null; _nhlDiscordAskCard = null;
   _nhlPaintDiscordBox();
 }
 function _nhlDiscordBoxHtml() {
@@ -5798,7 +5800,10 @@ function renderNhlDiscordTab() {
     ${sent.length ? `<div style="overflow-x:auto;border:1px solid #0d2035;border-radius:8px;display:inline-block;max-width:100%;"><table style="border-collapse:collapse;color:#fff;">
       <thead><tr style="background:#0a1628;">${["Date", "Player", "Prop", "Sent at", "Result", "Units", ""].map(h => `<th style="padding:6px 10px;font-size:11px;text-align:left;letter-spacing:.5px;text-transform:uppercase;">${h}</th>`).join("")}</tr></thead>
       <tbody>${rows}</tbody></table></div>` : `<div style="color:#9fb8d6;font-size:13px;">Nothing marked yet. Hit Send to Discord in the tracker, then Yes when it asks.</div>`}
+    <div style="font-size:14px;font-weight:800;color:#fff;margin:20px 0 8px;">Sent cards</div>
+    <div id="nhl-sent-cards" style="display:flex;flex-wrap:wrap;gap:10px;"></div>
   </div>`;
+  _nhlPaintSentCards();
 }
 function _nhlPaintDiscordBox() { const el = document.getElementById("nhl-discord-box"); if (el) el.innerHTML = _nhlDiscordBoxHtml(); }
 // Recheck: today's open bets run back through the ensemble rules at the live price — every source's
@@ -5929,6 +5934,45 @@ function setNhlDiscordWebhook() {
   if (currentTab === "tracker") renderTracker();
   if (currentTab === "discord") renderNhlDiscordTab();
 }
+// Every card that goes to Discord is kept (this browser's IndexedDB — images are too big for localStorage)
+// and shown on the DISCORD tab, newest first.
+function _nhlCardDb() {
+  return new Promise((res, rej) => { const r = indexedDB.open("nhl_discord_cards", 1);
+    r.onupgradeneeded = () => r.result.createObjectStore("cards", { keyPath: "id" });
+    r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+}
+async function _nhlSaveSentCard(blob, picks) {
+  try {
+    const db = await _nhlCardDb();
+    await new Promise((res, rej) => { const tx = db.transaction("cards", "readwrite");
+      tx.objectStore("cards").put({ id: Date.now(), at: new Date().toISOString(), blob, picks: picks.map(b => `${b.player} ${b.ou === "over" ? "O" : "U"}${b.line} ${Number(b.odds) > 0 ? "+" : ""}${b.odds} ${b.book || ""}`.trim()) });
+      tx.oncomplete = res; tx.onerror = () => rej(tx.error); });
+    if (currentTab === "discord") renderNhlDiscordTab();
+  } catch (e) { console.warn("[NHL] couldn't save the Discord card", e); }
+}
+async function _nhlSentCards() {
+  try { const db = await _nhlCardDb(); return await new Promise((res, rej) => { const r = db.transaction("cards").objectStore("cards").getAll(); r.onsuccess = () => res((r.result || []).sort((a, b) => b.id - a.id)); r.onerror = () => rej(r.error); }); }
+  catch (e) { return []; }
+}
+async function _nhlDeleteSentCard(id) {
+  if (!confirm("Delete this saved card image? (The picks stay on the Discord tracker.)")) return;
+  try { const db = await _nhlCardDb(); await new Promise(res => { const tx = db.transaction("cards", "readwrite"); tx.objectStore("cards").delete(id); tx.oncomplete = res; }); } catch (e) {}
+  renderNhlDiscordTab();
+}
+let _nhlCardUrls = [];
+async function _nhlPaintSentCards() {
+  const el = document.getElementById("nhl-sent-cards"); if (!el) return;
+  _nhlCardUrls.forEach(u => URL.revokeObjectURL(u)); _nhlCardUrls = [];
+  const cards = await _nhlSentCards();
+  if (!cards.length) { el.innerHTML = `<span style="color:#9fb8d6;font-size:13px;">Cards you send to Discord show up here.</span>`; return; }
+  el.innerHTML = cards.map(c => { const u = URL.createObjectURL(c.blob); _nhlCardUrls.push(u);
+    const d = new Date(c.at);
+    return `<div style="background:#0a1628;border:1px solid #0d2035;border-radius:8px;padding:8px;width:220px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;font-size:12px;color:#fff;margin-bottom:6px;"><b>${d.toLocaleDateString([], { month: "short", day: "numeric" })} · ${d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</b>
+        <span><a href="${u}" download="nhl-discord-${_ymdLocal(d)}-${c.id}.png" style="color:#00aaff;text-decoration:none;margin-right:8px;">⬇</a><span onclick="_nhlDeleteSentCard(${c.id})" style="cursor:pointer;color:#3b4b63;">✕</span></span></div>
+      <a href="${u}" target="_blank"><img src="${u}" style="width:100%;border-radius:5px;display:block;"></a>
+      <div style="font-size:11px;color:#9fb8d6;margin-top:6px;line-height:1.5;">${c.picks.map(escapeHtmlBasic).join("<br>")}</div></div>`; }).join("");
+}
 async function _nhlPostToDiscord(blob, text) {
   const fd = new FormData();
   fd.append("payload_json", JSON.stringify({ content: text || "", allowed_mentions: { parse: [] } }));
@@ -5969,18 +6013,21 @@ async function sendNhlCard(mode) {
     holder.innerHTML = await _buildNhlCard(freshPicks, mode, { newOnly });
     // Mark what this card carried as sent (only once it's actually copied or saved).
     const markSent = () => { freshPicks.forEach(fp => { const real = bets.find(x => x.id === fp.id); if (real) { real.sentTo = Object.assign({}, real.sentTo, { [_nhlSentKey(mode)]: today }); } }); saveBets(); };
-    const askDiscord = () => { markSent(); if (mode === "discord") { _nhlDiscordAsk = freshPicks.map(b => ({ id: b.id, odds: b.odds, book: b.book })); _nhlPaintDiscordBox(); } };
+    let cardBlob = null;
+    const askDiscord = () => { markSent(); if (mode === "discord") { _nhlDiscordAsk = freshPicks.map(b => ({ id: b.id, odds: b.odds, book: b.book })); _nhlDiscordAskCard = { blob: cardBlob, picks: freshPicks }; _nhlPaintDiscordBox(); } };
     const h2c = await _ensureHtml2CanvasNhl();
     // Card fonts (Sora + IBM Plex Mono) have to be loaded before the snapshot or it paints the fallback.
     try { await Promise.all(["400 12px Sora", "800 22px Sora", "700 12px 'IBM Plex Mono'"].map(f => document.fonts.load(f))); await document.fonts.ready; } catch (e) {}
     const canvas = await h2c(holder.firstElementChild, { backgroundColor: "#060b14", scale: 2, logging: false, useCORS: true, allowTaint: false });
     const blob = await new Promise(res => canvas.toBlob(res, "image/png"));
     if (!blob) throw new Error("no blob produced");
+    cardBlob = blob;
     if (mode === "discord" && _nhlDiscordHook()) {
       {
         try {
           if (btn) btn.textContent = "Posting…";
           await _nhlPostToDiscord(blob, "");
+          _nhlSaveSentCard(blob, freshPicks);
           markSent();
           const at = new Date().toISOString();
           freshPicks.forEach(fp => { const real = bets.find(y => y.id === fp.id); if (real && !real.discordSent) Object.assign(real, { discordSent: true, discordOdds: fp.odds, discordBook: fp.book, discordAt: at }); });
