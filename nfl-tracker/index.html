@@ -527,6 +527,7 @@ select.sel:focus { border-color: var(--teal); }
     <button class="btn ghost" id="copyNickBtn" onclick="copyEnsemble('nick')" style="display:none">⧉ Send to Nick</button>
     <button class="btn ghost" id="copyConsensusBtn" onclick="copyEnsemble('consensus')" style="display:none;color:var(--purple)">⧉ Full Consensus</button>
     <button class="btn ghost" id="discordCardBtn" onclick="makeDiscordCard('partners')" style="display:none">🖼 Discord Card</button>
+    <button class="btn ghost" id="discordSendBtn" onclick="makeDiscordCard('partners', { send: true })" style="display:none;color:#a5b4fc;border-color:rgba(129,140,248,0.4)" title="Posts the Discord Card straight to your Discord webhook and logs every pick on it to the Sent tab">📤 Send to Discord</button>
     <button class="btn ghost" id="nickCardBtn" onclick="makeDiscordCard('nick')" style="display:none" title="Same card plus the sources grid (edges + projections) and agreeing standalones — internal">🖼 Nick Card</button>
     <button class="btn ghost" onclick="openManageModal()">⋯ Manage</button>
   </div>
@@ -552,6 +553,7 @@ select.sel:focus { border-color: var(--teal); }
   <button class="tab" id="tab-weekly" onclick="setTab('weekly')">Weekly</button>
   <button class="tab" id="tab-pending" onclick="setTab('pending')">Pending <span class="tab-badge" id="tab-pending-count">0</span></button>
   <button class="tab" id="tab-log" onclick="setTab('log')">Bet Log <span class="tab-badge" id="tab-log-count">0</span></button>
+  <button class="tab" id="tab-sent" onclick="setTab('sent')" title="Only the picks that were in a card you sent to Discord">📤 Sent <span class="tab-badge" id="tab-sent-count">0</span></button>
 </div>
 
 <div class="wrap" id="wrap"></div>
@@ -3856,7 +3858,7 @@ function findPlayerStat(lookup, playerName, marketKey, gameTeams) {
 // ===== TABS =====
 function setTab(tab) {
   currentTab = tab;
-  ['blender','dash','weekly','pending','log'].forEach(t => {
+  ['blender','dash','weekly','pending','log','sent'].forEach(t => {
     const el = document.getElementById('tab-'+t);
     if (el) el.classList.toggle('active', t === tab);
   });
@@ -3914,7 +3916,7 @@ function renderSourceBar() {
   if (cp) cp.style.display = isEns ? 'none' : '';
   if (cpp) cpp.style.display = isEns ? '' : 'none';
   if (cpn) cpn.style.display = isEns ? '' : 'none';
-  if (dcb) dcb.style.display = isEns ? '' : 'none'; { const nkb = document.getElementById('nickCardBtn'); if (nkb) nkb.style.display = isEns ? '' : 'none'; }
+  if (dcb) dcb.style.display = isEns ? '' : 'none'; { const dsb = document.getElementById('discordSendBtn'); if (dsb) dsb.style.display = isEns ? '' : 'none'; } { const nkb = document.getElementById('nickCardBtn'); if (nkb) nkb.style.display = isEns ? '' : 'none'; }
   const all = [...SOURCES, 'ensemble'];
   container.innerHTML = all.map(src => {
     const arr = src === 'ensemble' ? computeEnsembleProps() : (propsBySource[src] || []);
@@ -3944,6 +3946,8 @@ function render() {
   const reviewCount = props.filter(p => (!p.result || p.result === '') && p.needsReview).length;
   const pCountEl = document.getElementById('tab-pending-count');
   if (pCountEl) pCountEl.textContent = pendingCount + (reviewCount ? ' ⚠' + reviewCount : '');
+  { const sc = document.getElementById('tab-sent-count'); if (sc) sc.textContent = loadSent().length; }
+  if (currentTab === 'sent') { renderSent(); return; } // its own list, whatever source is picked
   if (props.length === 0) {
     const isEnsemble = currentSource === 'ensemble';
     wrap.innerHTML = `
@@ -5193,6 +5197,145 @@ async function copyEnsemble(mode) {
   }
 }
 
+// ===== DISCORD WEBHOOK + SENT TRACKER =====
+// "📤 Send to Discord" builds the same image as 🖼 Discord Card and posts it to your webhook.
+// Every pick that actually made it INTO that image (not the ones the live re-check dropped) is
+// logged to the Sent tab, at the best price shown in the picture. Grades come from the
+// Ensemble grading automatically, nothing to grade twice; a row can still be graded by hand.
+const DISCORD_HOOK_KEY = 'nfl_discord_webhook';
+const SENT_KEY = 'nfl_sent_card_picks';
+const _isDiscordHook = u => /^https:\/\/(?:ptb\.|canary\.)?(?:discord|discordapp)\.com\/api\/webhooks\/\d+\/[\w-]+/i.test(String(u || '').trim());
+function setDiscordWebhook() {
+  const cur = localStorage.getItem(DISCORD_HOOK_KEY) || '';
+  const v = prompt('Discord webhook URL (Server Settings → Integrations → Webhooks → Copy Webhook URL).\nLeave empty to remove.', cur);
+  if (v === null) return cur || null;
+  const u = v.trim();
+  if (!u) { localStorage.removeItem(DISCORD_HOOK_KEY); if (currentTab === 'sent') render(); return null; }
+  if (!_isDiscordHook(u)) { alert("That doesn't look like a Discord webhook URL (https://discord.com/api/webhooks/…)."); return null; }
+  localStorage.setItem(DISCORD_HOOK_KEY, u);
+  if (currentTab === 'sent') render();
+  return u;
+}
+async function _discordPost(blob, fname, content) {
+  const hook = localStorage.getItem(DISCORD_HOOK_KEY) || setDiscordWebhook();
+  if (!hook) return false;
+  const fd = new FormData();
+  fd.append('payload_json', JSON.stringify({ content: content || '' }));
+  fd.append('files[0]', blob, fname);
+  const r = await fetch(hook + (hook.includes('?') ? '&' : '?') + 'wait=true', { method: 'POST', body: fd });
+  if (!r.ok) { let t = ''; try { t = (await r.json()).message || ''; } catch (e) {} throw new Error(`Discord said ${r.status}${t ? ' — ' + t : ''}`); }
+  return true;
+}
+function loadSent() { try { const a = JSON.parse(localStorage.getItem(SENT_KEY) || '[]'); return Array.isArray(a) ? a : []; } catch (e) { return []; } }
+function saveSent(a) { try { localStorage.setItem(SENT_KEY, JSON.stringify(a)); } catch (e) { console.warn('sent save failed', e); } }
+const _sentKey = p => normName(p.player) + '|' + p.market + '|' + p.side + '|' + String(Number(p.line)) + '|' + (p.date || '');
+function _sentPnl(result, odds) {
+  const o = parseFloat(odds);
+  if (result === 'win') return isNaN(o) ? 1 : o > 0 ? o / 100 : 1.0;
+  if (result === 'loss') return isNaN(o) ? -1 : o > 0 ? -1.0 : -(Math.abs(o) / 100);
+  if (result === 'push') return 0;
+  return null;
+}
+// shown = [{p, best, pt}] — exactly the rows drawn on the card
+function logSentPicks(shown) {
+  const arr = loadSent(); const have = new Set(arr.map(e => e.key));
+  let added = 0;
+  shown.forEach(({ p, best, pt }) => {
+    const key = _sentKey(p);
+    if (have.has(key)) return; // already sent once — keep the price people first saw
+    have.add(key); added++;
+    arr.push({
+      key, ensId: p.id || null, player: p.player, team: p.team || '', market: p.market, side: p.side, line: p.line,
+      date: p.date || getTodayStr(), game: p.game || '', gameTime: p.gameTime || '',
+      odds: best ? _ooFmtPrice(best.price) : String(p.odds || ''), book: best ? best.sportsbook : (p.book || ''),
+      playTo: pt && pt.odds ? String(pt.odds) : null, ev: p.ev || null, tier: p.tier || null,
+      sentAt: Date.now(), result: '', actual: null, pnl: null,
+    });
+  });
+  saveSent(arr);
+  return added;
+}
+// Pull grades from the Ensemble (by id, then by player+market+side+line+date). Hand grades win.
+function refreshSentGrades() {
+  const arr = loadSent(); if (!arr.length) return arr;
+  let ens = [];
+  try { ens = computeEnsembleProps(); } catch (e) { console.warn('[sent] ensemble read failed', e); }
+  const byId = {}, byKey = {};
+  ens.forEach(p => { if (p.id) byId[p.id] = p; byKey[_sentKey(p)] = p; });
+  let changed = false;
+  arr.forEach(e => {
+    if (e.manual) return;
+    const src = (e.ensId && byId[e.ensId]) || byKey[e.key];
+    if (!src) return;
+    const res = ['win', 'loss', 'push'].includes(src.result) ? src.result : '';
+    if (res === e.result && (src.actual ?? null) === (e.actual ?? null)) return;
+    if (!res && e.result) return; // keep a grade we already captured if the source pick was cleared
+    e.result = res; e.actual = src.actual ?? null; e.pnl = _sentPnl(res, e.odds); e.gradedAt = res ? Date.now() : null;
+    changed = true;
+  });
+  if (changed) saveSent(arr);
+  return arr;
+}
+function gradeSent(key, res) {
+  const arr = loadSent(); const e = arr.find(x => x.key === key); if (!e) return;
+  if (res === 'auto') { delete e.manual; e.result = ''; e.pnl = null; e.actual = null; }
+  else { e.manual = true; e.result = res; e.pnl = _sentPnl(res, e.odds); e.gradedAt = Date.now(); }
+  saveSent(arr); render();
+}
+function removeSent(key) {
+  const arr = loadSent(); const e = arr.find(x => x.key === key); if (!e) return;
+  if (!confirm(`Remove ${e.player} ${e.side === 'O' ? 'over' : 'under'} ${e.line} from the Sent tracker?`)) return;
+  saveSent(arr.filter(x => x.key !== key)); render();
+}
+function renderSent() {
+  const wrap = document.getElementById('wrap');
+  const arr = refreshSentGrades();
+  const hook = localStorage.getItem(DISCORD_HOOK_KEY);
+  const hookBar = `<div class="panel"><div class="panel-body" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:12px">
+    <span>Discord webhook: ${hook ? '<b class="pos">set ✓</b> <span class="dim">…' + escHtml(hook.slice(-6)) + '</span>' : '<b class="neg">not set</b>'}</span>
+    <button class="btn ghost" onclick="setDiscordWebhook()">${hook ? 'Change' : 'Set'} webhook</button>
+    <span class="dim">Only picks that were in a picture you sent with 📤 Send to Discord land here, at the price shown on the card. Grades follow the Ensemble.</span></div></div>`;
+  if (!arr.length) {
+    wrap.innerHTML = hookBar + `<div class="empty"><h3>Nothing sent yet</h3><p>Go to the <strong>Ensemble</strong> source and hit <strong>📤 Send to Discord</strong>. Every pick on that card gets tracked here.</p></div>`;
+    return;
+  }
+  const _pnlOf = a => calcStats(a).pnl;
+  const rec = s => `${s.w}-${s.l}${s.pu ? '-' + s.pu : ''}`;
+  const row = (label, a) => {
+    const s = calcStats(a); const pc = s.pnl > 0 ? 'pos' : s.pnl < 0 ? 'neg' : 'muted'; const rc = s.roi !== null && s.roi >= 0 ? 'pos' : s.roi !== null ? 'neg' : 'muted';
+    return `<tr><td>${label}</td><td class="c mono">${rec(s)}</td><td class="c mono">${s.wr !== null ? s.wr.toFixed(1) + '%' : '—'}</td><td class="r mono ${pc}">${fmtU(s.pnl)}</td><td class="r mono ${rc}">${s.roi !== null ? (s.roi >= 0 ? '+' : '') + s.roi.toFixed(1) + '%' : '—'}</td><td class="c mono dim">${s.total}</td></tr>`;
+  };
+  const table = (title, groups) => `<div class="panel"><div class="panel-head"><span class="panel-title">${title}</span></div><div class="panel-body compact" style="overflow-x:auto"><table class="tbl">
+    <thead><tr><th></th><th class="c">W-L</th><th class="c">W%</th><th class="r">P&L</th><th class="r">ROI</th><th class="c">Picks</th></tr></thead>
+    <tbody>${groups.sort((a, b) => _pnlOf(b[1]) - _pnlOf(a[1])).map(([l, a]) => row(l, a)).join('')}</tbody></table></div></div>`;
+  const groupBy = fn => { const g = {}; arr.forEach(e => { const k = fn(e); (g[k] = g[k] || []).push(e); }); return Object.entries(g); };
+  const weeks = groupBy(e => isoWeek(e.date)).map(([k, a]) => [weekRange(k).label, a]);
+  const mkts = groupBy(e => e.market).map(([k, a]) => [`<span class="mkt-tag">${escHtml((MARKET_MAP[k] || { label: k }).label)}</span>`, a]);
+  const sides = groupBy(e => e.side).map(([k, a]) => [k === 'O' ? '<span class="side-o">OVER</span>' : '<span class="side-u">UNDER</span>', a]);
+  const tiers = groupBy(e => e.tier === 'strong' ? '10%+' : e.tier ? '5–10%' : 'Unknown tier').map(([k, a]) => [k, a]);
+  // Picks: open first (soonest game first), then graded, most recently graded first
+  const list = arr.slice().sort((a, b) => (!!a.result - !!b.result) || (a.result ? (b.gradedAt || 0) - (a.gradedAt || 0) : String(a.date).localeCompare(String(b.date)) || (a.sentAt - b.sentAt)));
+  const resTag = e => e.result === 'win' ? '<b class="pos">WIN</b>' : e.result === 'loss' ? '<b class="neg">LOSS</b>' : e.result === 'push' ? '<b>PUSH</b>' : '<span class="dim">pending</span>';
+  const gbtn = (e, r, t) => `<button class="btn ghost" style="padding:2px 7px;font-size:11px" onclick="gradeSent('${escHtml(e.key).replace(/'/g, "\\'")}','${r}')">${t}</button>`;
+  const picks = list.map(e => `<tr>
+    <td><div style="font-weight:700">${escHtml(e.player)}</div><div class="dim" style="font-size:11px">${escHtml(dateLabel(e.date))}${e.game ? ' · ' + escHtml(e.game) : ''} · sent ${new Date(e.sentAt).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</div></td>
+    <td class="c">${escHtml((MARKET_MAP[e.market] || { label: e.market }).label)}</td>
+    <td class="c mono"><span class="${e.side === 'O' ? 'side-o' : 'side-u'}">${e.side === 'O' ? 'O' : 'U'} ${e.line}</span></td>
+    <td class="c mono">${escHtml(e.odds || '—')}${e.book ? ' <span class="dim" style="font-size:11px">' + escHtml(e.book) + '</span>' : ''}${e.playTo ? '<div class="dim" style="font-size:11px">play to ' + escHtml(e.playTo) + '</div>' : ''}</td>
+    <td class="c">${resTag(e)}${e.actual != null && e.actual !== '' ? ' <span class="dim mono">(' + escHtml(e.actual) + ')</span>' : ''}${e.manual ? ' <span class="dim" title="graded by hand">✎</span>' : ''}</td>
+    <td class="r mono ${e.pnl > 0 ? 'pos' : e.pnl < 0 ? 'neg' : 'muted'}">${e.pnl != null ? fmtU(e.pnl) : '—'}</td>
+    <td class="r" style="white-space:nowrap">${gbtn(e, 'win', 'W')}${gbtn(e, 'loss', 'L')}${gbtn(e, 'push', 'P')}${e.manual ? gbtn(e, 'auto', 'auto') : ''}<button class="btn ghost" style="padding:2px 7px;font-size:11px;color:var(--red)" onclick="removeSent('${escHtml(e.key).replace(/'/g, "\\'")}')">✕</button></td>
+  </tr>`).join('');
+  wrap.innerHTML = hookBar + kpiStrip(arr, 'sent to Discord') + `
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:12px">
+      ${table('By Week', weeks)}${table('By Market', mkts)}${table('By Side', sides)}${table('By Tier', tiers)}
+    </div>
+    <div class="panel"><div class="panel-head"><span class="panel-title">Sent Picks</span><span class="muted" style="font-size:11px">P&L at the best price on the card, 1u to win (risk 1u on plus money)</span></div>
+      <div class="panel-body compact" style="overflow-x:auto"><table class="tbl">
+        <thead><tr><th>Player</th><th class="c">Market</th><th class="c">Side</th><th class="c">Price on card</th><th class="c">Result</th><th class="r">P&L</th><th class="r"></th></tr></thead>
+        <tbody>${picks}</tbody></table></div></div>`;
+}
+
 // ===== DISCORD CARD (ensemble 10%+ plays as one image) =====
 // Builds offscreen DOM, rasterizes with html2canvas at 3x, downloads PNG (or shares on mobile).
 // Book rows come from Parlay API live odds (if key set), else from PropShop best + play-to only.
@@ -5296,9 +5439,11 @@ async function _uriFor(url) {
   _uriCache[url] = null; return null;
 }
 // mode: 'partners' (default) = plays + books only. 'nick' = adds the sources grid + agreeing standalones.
-async function makeDiscordCard(mode = 'partners') {
+async function makeDiscordCard(mode = 'partners', opts = {}) {
   const forNick = mode === 'nick';
-  const btn = document.getElementById(forNick ? 'nickCardBtn' : 'discordCardBtn');
+  const btn = document.getElementById(opts.send ? 'discordSendBtn' : forNick ? 'nickCardBtn' : 'discordCardBtn');
+  if (opts.send && !localStorage.getItem(DISCORD_HOOK_KEY) && !setDiscordWebhook()) return;
+  const cardShown = []; // rows actually drawn on the card → Sent tracker
   const setBtn = t => { if (btn) btn.textContent = t; };
   const orig = btn ? btn.textContent : '';
   const plays = _sendPlays(p => _tierOk(p) && _yardsOk(p) && _projAgreesWithSide(p) && !_kickoffPassed(p) && _newOk(p) && _stillGoodLive(p));
@@ -5496,6 +5641,7 @@ async function makeDiscordCard(mode = 'partners') {
         if (!ok.length) { console.log('[card] dropped (nothing at stop):', p.player, p.side + p.line, mkt, '| stop', pt.odds, '| board:', m.exact.map(o => o.sportsbook + ' ' + o.price).join(', ') || 'no rows at this line'); return; }
         shown++;
         const best = ok[0] || null;
+        cardShown.push({ p, best, pt });
         const pctTag = (o, sz) => _ooIsExch(o.sportsbook) ? `<span style="font:700 ${sz}px 'JetBrains Mono',monospace;color:#fff;line-height:1;margin-left:2px">(${Math.round(Number(_ooImplPct(o.price)))}%)</span>` : '';
         const liqTag = (o, sz) => _ooIsExch(o.sportsbook) && o.limits?.max ? `<span style="font:700 ${sz}px 'JetBrains Mono',monospace;color:#fff;line-height:1;margin-left:8px">${_ooFmtUsd(o.limits.max)}</span>` : '';
         const bestCell = best ? `<div style="display:inline-flex;align-items:center;gap:8px;line-height:1">${_badgesFor(best, 1.3)}<span style="font:800 19px 'JetBrains Mono',monospace;color:#fff;line-height:1;white-space:nowrap">${_ooFmtPrice(best.price)}${pctTag(best, 13)}</span>${liqTag(best, 13)}</div>`
@@ -5570,13 +5716,25 @@ async function makeDiscordCard(mode = 'partners') {
       const blob = await new Promise(r => canvas.toBlob(r, 'image/png'));
       const fname = `nfl-props${forNick ? '-nick' : ''}-${pg.date}${pg.multiDate ? '_to_' + pg.dateTo : ''}.png`;
       const file = new File([blob], fname, { type: 'image/png' });
-      if (navigator.canShare && navigator.canShare({ files: [file] }) && pages.length === 1) {
+      if (opts.send) {
+        if (!cardShown.length) { alert('Nothing made the card (every pick was dropped by the live re-check), so nothing was sent.'); }
+        else {
+          setBtn('Sending…');
+          const hdr = pg.multiDate ? fmtDateHdr(pg.date) + ' – ' + fmtDateHdr(pg.dateTo) : fmtDateHdr(pg.date);
+          if (await _discordPost(blob, fname, `**NFL Props · ${hdr}** · ${cardShown.length} play${cardShown.length === 1 ? '' : 's'}`)) {
+            const added = logSentPicks(cardShown);
+            render();
+            setBtn('✓ Sent'); await new Promise(r => setTimeout(r, 1500));
+            console.log('[discord] sent', cardShown.length, 'picks,', added, 'new in Sent tracker');
+          }
+        }
+      } else if (navigator.canShare && navigator.canShare({ files: [file] }) && pages.length === 1) {
         try { await navigator.share({ files: [file], title: fname }); }
         catch(e) { _downloadBlob(blob, fname); }
       } else {
         _downloadBlob(blob, fname);
       }
-    } catch(e) { console.error('card render failed', e); alert('Card render failed: ' + e.message); }
+    } catch(e) { console.error(opts.send ? 'discord send failed' : 'card render failed', e); alert((opts.send ? 'Send to Discord failed: ' : 'Card render failed: ') + e.message + (opts.send ? '\nNothing was logged to Sent. Check the webhook URL (Sent tab → Change webhook).' : '')); }
     document.body.removeChild(panel);
   }
   setBtn(orig);
