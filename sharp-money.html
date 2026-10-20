@@ -226,6 +226,7 @@ let toastT; const toast = m => { const t=$('#toast'); t.textContent=m; t.classLi
 async function runPool(jobs, n){ let i=0; await Promise.all(Array.from({length:Math.min(n,jobs.length)},async()=>{ while(i<jobs.length){ const j=jobs[i++]; await j(); } })); }
 const cents = v => { v=Number(v); return isNaN(v)?null:(v>0?v-100:v+100); };
 const LIQ_BAND_CENTS = 20;
+const SM_BUILD = 'Oct 20 · dc-queue';
 const SHARP_MAX_ARB = 8; // % -- anything bigger is treated as bad data
 function levelsOf(o){
   const top=Number(o.price);
@@ -600,19 +601,19 @@ function discordClean(p){
   if(q.embeds) q.embeds=q.embeds.map(em=>({...em, url:discordUrl(em.url), thumbnail:em.thumbnail&&discordUrl(em.thumbnail.url)?{url:discordUrl(em.thumbnail.url)}:undefined}));
   return q;
 }
-async function discordPost(payload){
-  if(!discordHook) return false;
+async function discordPost(payload, onErr){
+  if(!discordHook){ onErr?.('no webhook'); return false; }
   const send = async body => { const r=await fetch(discordHook,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); return r.ok ? '' : `${r.status} ${(await r.text().catch(()=>'')).slice(0,160)}`; };
   try{
     const clean=discordClean(payload);
     let err=await send(clean); if(!err) return true;
     console.warn('[sharp] discord rejected post:', err, clean);
-    if(err.startsWith('429')){ await new Promise(r=>setTimeout(r,2500)); err=await send(clean); if(!err) return true; }
+    for(let i=0; i<3 && err.startsWith('429'); i++){ const ra=Number((err.match(/"retry_after":\s*([\d.]+)/)||[])[1]); await new Promise(r=>setTimeout(r,(ra>0?ra*1000:2000)+250)); err=await send(clean); if(!err) return true; }
     const bare={...clean, avatar_url:undefined, embeds:(clean.embeds||[]).map(em=>({...em, url:undefined, thumbnail:undefined}))};
     err=await send(bare); if(!err) return true;
     console.warn('[sharp] discord rejected bare post too:', err);
-    toast('Discord post failed: '+err.slice(0,70)); return false;
-  }catch(e){ console.warn('[sharp] discord post failed', e.message); toast('Discord post failed: '+e.message); return false; }
+    onErr?.(err.slice(0,120)); toast('Discord post failed: '+err.slice(0,70)); return false;
+  }catch(e){ console.warn('[sharp] discord post failed', e.message); onErr?.(e.message); toast('Discord post failed: '+e.message); return false; }
 }
 // Discord post laid out like the sharp-money alerts already in the channel: sent as the book
 // (name + logo), title "🏀 NBA ARB · Edge +0.4% · -110 — Player Under 26.5 — Player Points",
@@ -624,7 +625,25 @@ const SPORT_EMOJI = { nfl:'🏈', nba:'🏀', wnba:'🏀', nhl:'🏒', mlb:'⚾'
 // FanDuel's Discord logo (avatar + thumbnail): the user's chosen image.
 const FD_DISCORD_LOGO = 'https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcRH3NobGIn_Yoc0wsD3j73VvYQ1zSEm3GZ1mhXHUJW1Ag&s=10';
 const httpsLogo = k => k==='fanduel' ? FD_DISCORD_LOGO : [bookLogos[k], bookLogos[String(k).replace(/\s+/g,'')]].find(u=>u && /^https:\/\//i.test(u)) || undefined;
-function sharpDiscord(e){ try{ discordPost({ ...sharpDiscordPayload(e), ...roleTag() }); }catch(err){ console.warn('[sharp] discord payload failed', err); toast('Discord post failed: '+err.message); } }
+// Alerts go out one at a time (Discord allows ~5 posts per 2s per webhook -- a burst of plays
+// at once used to get rate-limited and silently dropped). A post that fails un-marks the play so
+// the next scan tries it again; the last few results show under Last Scan.
+const sharpDcQ = [], sharpDcLog = []; let sharpDcRunning = false;
+const sharpDcNote = (ok, txt) => { sharpDcLog.unshift({ ok, txt, at:Date.now() }); sharpDcLog.length=Math.min(sharpDcLog.length,5); };
+async function sharpDcPump(){
+  if(sharpDcRunning) return; sharpDcRunning=true;
+  try{
+    while(sharpDcQ.length){
+      const e=sharpDcQ.shift(), name=`${titleCase(e.player)} ${sharpSideLabel(e.side)}${e.line!=null?' '+e.line:''}`;
+      let ok=false, why='';
+      try{ ok=await discordPost({ ...sharpDiscordPayload(e), ...roleTag() }, m=>{ why=m; }); }catch(err){ why=err.message; }
+      sharpDcNote(ok, ok ? `sent ${name}` : `FAILED ${name}: ${why||'?'}`);
+      if(!ok) delete sharpPinged[e.k];
+      await new Promise(r=>setTimeout(r,1200));
+    }
+  } finally { sharpDcRunning=false; if(viewMode==='sharp') renderSharp(); }
+}
+function sharpDiscord(e){ try{ if(!sharpDcQ.some(x=>x.k===e.k)) sharpDcQ.push(e); sharpDcPump(); }catch(err){ console.warn('[sharp] discord payload failed', err); toast('Discord post failed: '+err.message); } }
 function sharpDiscordPayload(e, example){
   const o=e.soft[0], bk=canonBook(o.sportsbook), url=sharpLink(o), f=e.f, sk=e.sk;
   const edge=o._edge??0, isArb=edge>1e-7, isDirect=!isArb&&edge>=-1e-7, book=bookLabel(o.sportsbook);
@@ -743,7 +762,7 @@ function renderSharp(){
     const top = d.top?.length ? `<div class="smdiagtop">${d.top.map(esc).join('<br>')}</div>` : '';
     return `<div class="smdiag"><b>${esc(SPORTS[k].label)}</b> ${Math.max(0,Math.round((Date.now()-d.at)/1000))}s ago · ${d.games??0} games · ${esc(bk)} · ${d.withExch}/${d.props} props w/ exchange · ${d.sides} with money${d.best!=null?` · best ${d.best<=0?'ARB '+(-d.best).toFixed(1)+'%':(d.best.toFixed(1)+'% hold')}`:''}${d.big!=null?` · ${d.big} at ${usd(sharpMin)}+`:''}${top}</div>`; }).join('');
   const body = list.length ? list.map(sharpCardHtml).join('') : `<div class="empty">${scanned?`Nothing with ${usd(sharpMin)}+ at ${holdOkTxt()} vs FanDuel right now. Scanning ${sports.length} sports nonstop.`:'Scanning…'}</div>`;
-  view.innerHTML = `<div class="sh"><span class="t">Sharp Money</span><span class="dim" style="font-size:10.5px">scanning ${scanned}/${sports.length} sports · since ${new Date(sharpStarted).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})}</span></div>${chips}<div class="shlist">${body}</div>${diag?`<div class="smdiagw"><div class="dim" style="font-size:10px;margin-bottom:3px">LAST SCAN</div>${diag}</div>`:''}`;
+  view.innerHTML = `<div class="sh"><span class="t">Sharp Money</span><span class="dim" style="font-size:10.5px">scanning ${scanned}/${sports.length} sports · since ${new Date(sharpStarted).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})}</span></div>${chips}<div class="shlist">${body}</div>${diag||sharpDcLog.length?`<div class="smdiagw"><div class="dim" style="font-size:10px;margin-bottom:3px">LAST SCAN · build ${SM_BUILD}</div>${diag}<div class="dim" style="font-size:10px;margin:6px 0 3px">DISCORD ${discordHook?(sharpDcQ.length?`· ${sharpDcQ.length} waiting`:''):'· not connected'}</div>${sharpDcLog.map(x=>`<div class="smdiag" style="color:${x.ok?'#86efac':'#fca5a5'}">${new Date(x.at).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})} ${esc(x.txt)}</div>`).join('')||'<div class="smdiag dim">nothing sent yet</div>'}</div>`:''}`;
   view.querySelectorAll('[data-shmin]').forEach(b=>b.addEventListener('click',()=>{ sharpMin=Number(b.dataset.shmin); LS.set('props_sharpmin2',String(sharpMin)); renderSharp(); }));
   view.querySelectorAll('[data-shs]').forEach(b=>b.addEventListener('click',()=>{ sharpSportF=b.dataset.shs; renderSharp(); if(sharpSportF!=='all' && !sharpLastScan[sharpSportF]) sharpScanSport(sharpSportF).then(()=>{ if(viewMode==='sharp') renderSharp(); }); }));
   view.querySelector('[data-shping]')?.addEventListener('click',()=>{
