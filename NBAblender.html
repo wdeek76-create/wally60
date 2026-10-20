@@ -25002,7 +25002,7 @@ function renderMorning() {
   if (morningView === "ensemble") {
     const rows = cleared.filter(r => statOk(r.stat));
     window._morningCleared = cleared;
-    viewBody = rows.length ? `<div style="display:flex;justify-content:flex-end;margin-bottom:6px;">${btn("⧉ SEND TO NICK", "morningSendCard('nick')", false, "#00aaff")}${btn("🖼 SEND TO DISCORD", "morningSendCard('discord')", false, "#cc66ff")}${btn("LOG ALL TO MORNING", "morningLogAll()", true, "#c4b5fd")}</div>
+    viewBody = rows.length ? `<div style="display:flex;justify-content:flex-end;margin-bottom:6px;">${btn("⧉ SEND TO NICK", "morningSendCard('nick')", false, "#00aaff")}${btn("🖼 SEND TO DISCORD", "morningSendCard('discord')", false, "#cc66ff")}${btn(getMorningWebhook() ? "➤ POST TO DISCORD" : "🔗 SET DISCORD WEBHOOK", "morningPostDiscord()", !!getMorningWebhook(), "#5865f2")}${btn("LOG ALL TO MORNING", "morningLogAll()", true, "#c4b5fd")}</div>
       <div style="overflow-x:auto;"><table style="border-collapse:collapse;width:100%;"><thead><tr>${["PLAYER", "STAT", "SIDE", "LINE", "AVG PROJ", "AGREE · SOURCES (PROJ · EV)", "BEST", "BOOK", "FAIR", "WORST EV", ""].map(th).join("")}</tr></thead><tbody>
       ${rows.map(r => { const i = cleared.indexOf(r), logged = _mAlreadyLogged(r); return `<tr style="border-top:1px solid #1a1d22;${logged ? "opacity:.5;" : ""}">
         ${td(_mPlayerCell(r.player, r.team))}${td(r.stat, "font-weight:800;color:#fff;")}${td(r.ou.toUpperCase(), `font-weight:800;color:${r.ou === "over" ? "#4ade80" : "#f87171"};`)}${td(r.line, "color:#fff;")}
@@ -25049,7 +25049,7 @@ function renderMorning() {
       <div style="font-size:13px;font-weight:800;color:#d4dae3;letter-spacing:1px;text-transform:uppercase;">Morning log <span style="color:#a8b0bb;font-weight:600;font-size:11px;text-transform:none;letter-spacing:0;">· separate from the Tracker</span></div>
       <div style="display:flex;gap:6px;flex-wrap:wrap;">
         <button id="morning-grade-btn" onclick="morningGradePending()" style="background:#7dd3fc1a;border:1px solid #7dd3fc;color:#7dd3fc;border-radius:6px;padding:6px 12px;font-size:11px;font-weight:800;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;">GRADE PENDING</button>
-        ${btn("⧉ NICK", "morningSendCard('nick')", false, "#00aaff")}${btn("🖼 DISCORD", "morningSendCard('discord')", false, "#cc66ff")}${btn("COPY TODAY", "morningCopyCard()", false)}${btn("EXPORT CSV", "morningExportCsv()", false)}
+        ${btn("⧉ NICK", "morningSendCard('nick')", false, "#00aaff")}${btn("🖼 DISCORD", "morningSendCard('discord')", false, "#cc66ff")}${btn(getMorningWebhook() ? "➤ POST" : "🔗 WEBHOOK", "morningPostDiscord()", !!getMorningWebhook(), "#5865f2")}${getMorningWebhook() ? btn("⚙", "morningSetWebhook()", false) : ""}${btn("COPY TODAY", "morningCopyCard()", false)}${btn("EXPORT CSV", "morningExportCsv()", false)}
       </div>
     </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;">
@@ -25216,24 +25216,62 @@ async function _morningCardHtml(picks, mode) {
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;gap:12px;"><div style="font-size:20px;font-weight:800;">NBA ${nick ? "Morning · Nick" : "Props"} · ${date}</div><div style="font-size:12px;font-weight:700;letter-spacing:.04em;">${picks.length} PROP${picks.length === 1 ? "" : "S"} &nbsp;·&nbsp; ${over} OVER &nbsp;·&nbsp; ${picks.length - over} UNDER</div></div>
     <table style="width:100%;border-collapse:collapse;"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
 }
+// Renders the Morning card (nick | discord) to a PNG blob. Throws on failure.
+async function _morningCardBlob(picks, mode) {
+  const html = await _morningCardHtml(picks, mode);
+  try { if (document.fonts && document.fonts.load) { await document.fonts.load("800 16px 'Plus Jakarta Sans'"); await document.fonts.load("700 16px 'JetBrains Mono'"); } } catch (e) {}
+  const h2c = await _ensureHtml2Canvas();
+  const box = document.createElement("div");
+  box.style.cssText = "position:fixed;left:-9999px;top:0;z-index:-1;";
+  box.innerHTML = html;
+  document.body.appendChild(box);
+  try {
+    const canvas = await h2c(box.querySelector(".mcard"), { backgroundColor: "#0c0d10", scale: 3, logging: false, useCORS: true });
+    return await new Promise(r => canvas.toBlob(r, "image/png"));
+  } finally { document.body.removeChild(box); }
+}
+// ── Discord webhook (Morning card posts straight to your channel) ───────────
+// The webhook URL is saved only in this browser (never in the HTML, GitHub or the backup file).
+const MORNING_WEBHOOK_KEY = "nba_morning_discord_webhook";
+function getMorningWebhook() { try { return localStorage.getItem(MORNING_WEBHOOK_KEY) || ""; } catch (e) { return ""; } }
+function morningSetWebhook() {
+  const cur = getMorningWebhook();
+  const v = prompt("Paste your Discord webhook URL (Channel settings \u2192 Integrations \u2192 Webhooks \u2192 Copy Webhook URL).\n\nSaved only in this browser. Leave empty to remove it.", cur);
+  if (v === null) return;
+  const t = v.trim();
+  if (t && !/^https:\/\/(?:[a-z]+\.)?discord(?:app)?\.com\/api\/webhooks\/\d+\/[\w-]+/i.test(t)) { showToast("That doesn't look like a Discord webhook URL"); return; }
+  try { if (t) localStorage.setItem(MORNING_WEBHOOK_KEY, t); else localStorage.removeItem(MORNING_WEBHOOK_KEY); } catch (e) {}
+  showToast(t ? "Discord webhook saved" : "Discord webhook removed");
+  renderMorning();
+}
+async function morningPostDiscord() {
+  const hook = getMorningWebhook();
+  if (!hook) { morningSetWebhook(); return; }
+  const picks = morningCardPicks();
+  if (!picks.length) { showToast("No pending morning picks to send"); return; }
+  if (!confirm(`Post ${picks.length} morning pick${picks.length === 1 ? "" : "s"} to Discord now?`)) return;
+  showToast("Building Discord card\u2026");
+  let blob;
+  try { blob = await _morningCardBlob(picks, "discord"); } catch (e) { console.error("[MORNING card]", e); showToast("Card failed \u2014 " + (e && e.message || "see console")); return; }
+  if (!blob) { showToast("Card failed"); return; }
+  const fd = new FormData();
+  fd.append("payload_json", JSON.stringify({ content: `**NBA Morning \u2014 ${picks.length} play${picks.length === 1 ? "" : "s"}**` }));
+  fd.append("files[0]", new File([blob], `nba-morning-${localYMD(new Date())}.png`, { type: "image/png" }));
+  try {
+    const r = await fetch(hook + (hook.includes("?") ? "&" : "?") + "wait=true", { method: "POST", body: fd });
+    if (!r.ok) { const t = await r.text().catch(() => ""); throw new Error(`Discord said ${r.status} ${t.slice(0, 120)}`); }
+  } catch (e) { showToast("Discord post failed \u2014 " + (e && e.message || e)); return; }
+  const at = new Date().toISOString();
+  picks.forEach(b => { const m = morningBets.find(x => x.id === b.id); if (m && !m.discordSent) Object.assign(m, { discordSent: true, discordOdds: m.odds, discordBook: m.book, discordAt: at }); });
+  saveMorningBets(); renderMorning();
+  showToast(`Posted ${picks.length} pick${picks.length === 1 ? "" : "s"} to Discord \u2713`);
+}
 async function morningSendCard(mode) {
   const picks = morningCardPicks();
   if (!picks.length) { showToast("No pending morning picks to send"); return; }
-  showToast(`Building ${mode === "nick" ? "Nick" : "Discord"} card…`);
+  showToast(`Building ${mode === "nick" ? "Nick" : "Discord"} card\u2026`);
   let blob;
-  try {
-    const html = await _morningCardHtml(picks, mode);
-    try { if (document.fonts && document.fonts.load) { await document.fonts.load("800 16px 'Plus Jakarta Sans'"); await document.fonts.load("700 16px 'JetBrains Mono'"); } } catch (e) {}
-    const h2c = await _ensureHtml2Canvas();
-    const box = document.createElement("div");
-    box.style.cssText = "position:fixed;left:-9999px;top:0;z-index:-1;";
-    box.innerHTML = html;
-    document.body.appendChild(box);
-    try {
-      const canvas = await h2c(box.querySelector(".mcard"), { backgroundColor: "#0c0d10", scale: 3, logging: false, useCORS: true });
-      blob = await new Promise(r => canvas.toBlob(r, "image/png"));
-    } finally { document.body.removeChild(box); }
-  } catch (e) { console.error("[MORNING card]", e); showToast("Card failed — " + (e && e.message || "see console")); return; }
+  try { blob = await _morningCardBlob(picks, mode); } catch (e) { console.error("[MORNING card]", e); showToast("Card failed \u2014 " + (e && e.message || "see console")); return; }
   if (!blob) { showToast("Card failed"); return; }
   const file = new File([blob], `nba-morning-${mode}-${localYMD(new Date())}.png`, { type: "image/png" });
   let done = false;
