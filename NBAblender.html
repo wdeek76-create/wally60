@@ -24625,22 +24625,38 @@ function parseMorningPropShop(raw) {
 const RG_LINEUPS_KEY = "nba_lineups_rg_v1";
 function _rgTeamFromLine(line) {
   const k = String(line || "").toLowerCase().replace(/[^a-z]/g, "");   // "Philadelphia76ers" → "philadelphiaers"
-  if (!k) return null;
-  for (const [name, ab] of Object.entries(TEAM_NAME_ALIASES)) if (name.includes(" ") && name.replace(/[^a-z]/g, "") === k) return normTeamAbbr(ab) || ab;
+  if (!k || k.length < 5) return null;
+  const ents = Object.entries(TEAM_NAME_ALIASES).filter(([n]) => n.includes(" ")).map(([n, ab]) => [n.replace(/[^a-z]/g, ""), ab]);
+  for (const [sp, ab] of ents) if (sp === k) return normTeamAbbr(ab) || ab;
+  for (const [sp, ab] of ents) if (sp.length >= 8 && k.length >= 8 && (k.includes(sp) || sp.includes(k))) return normTeamAbbr(ab) || ab;   // extra words around the name
   return null;
 }
 // RotoGrinders "NBA starting lineups" page, copied as text or markdown: per game a time, two team names, then for each
 // team "lineup not released|confirmed", Starters (5) and Bench lists of  "Name POS $salary proj own%".
+// Best-known CURRENT team for a player key, from whatever is loaded (RW lineups, Tabs lineups, blend rows, RW depth, roster).
+function _knownTeamOf(k) {
+  try { const rw = getLineupsData(); if (rw && rw.players) { const p = Object.values(rw.players).find(x => resolveNorm(x.name || "") === k); if (p && p.team) return normTeamAbbr(p.team) || p.team; } } catch (e) {}
+  try { const tb = getTabsLineups(); if (tb && tb.players && tb.players[k] && tb.players[k].team) return tb.players[k].team; } catch (e) {}
+  try { if (merged) { const r = merged.find(x => resolveNorm(x.rawName) === k); if (r && r.team) return normTeamAbbr(r.team) || r.team; } } catch (e) {}
+  try { if (_rwDepthIdx && _rwDepthIdx[k]) return _rwDepthIdx[k]; } catch (e) {}
+  return "";
+}
 function parseRgLineups(text) {
-  const lines = String(text || "").split("\n").map(l => l.replace(/\[([^\]]*)\]\([^)]*\)/g, "$1").replace(/^\s*[*\u2022-]\s+/, "").trim()).filter(Boolean);
-  const teams = {}, players = {};
+  const lines = String(text || "").split("\n").map(l => l.replace(/\[([^\]]*)\]\([^)]*\)/g, "$1").replace(/^\s*[*•-]\s+/, "").trim()).filter(Boolean);
+  const blocks = [];                       // one per "lineup …" line: { pair, idx, confirmed, starters:[{k,name,pos,flag}], bench:[…] }
   let pending = [], blk = 0, cur = null, section = null;
   const POS = "(?:PG|SG|SF|PF|C|G|F|UTIL)";
   const PL = new RegExp("^(.*?)\\s+(" + POS + "(?:/" + POS + ")*)\\s+\\$[\\d.]+K?", "i");
-  for (const line of lines) {
+  for (let li = 0; li < lines.length; li++) {
+    const line = lines[li];
     if (/^\d{1,2}:\d{2}\s*[AP]M/i.test(line)) { pending = []; blk = 0; cur = null; section = null; continue; }
-    if (cur === null && pending.length < 2) { const tm = _rgTeamFromLine(line); if (tm) { pending.push(tm); continue; } }
-    if (/^lineup\b/i.test(line)) { cur = pending[blk++] || null; section = null; if (cur) teams[cur] = { starters: [], bench: [], confirmed: !/not/i.test(line) && /confirm|releas/i.test(line) }; continue; }
+    if (cur === null && pending.length < 2) {
+      let tm = _rgTeamFromLine(line);
+      if (!tm && lines[li + 1] && !/\d/.test(line) && !/\d/.test(lines[li + 1])) { tm = _rgTeamFromLine(line + lines[li + 1]); if (tm) li++; }   // "Philadelphia" / "76ers" on two lines
+      if (!tm && lines[li + 1] && /^76ers$/i.test(lines[li + 1])) { tm = _rgTeamFromLine(line + "76ers"); if (tm) li++; }
+      if (tm) { pending.push(tm); continue; }
+    }
+    if (/^lineup\b/i.test(line)) { cur = { pair: pending.slice(), idx: blk++, confirmed: !/not/i.test(line) && /confirm|releas/i.test(line), starters: [], bench: [] }; blocks.push(cur); section = null; continue; }
     if (/^starters$/i.test(line)) { section = "starters"; continue; }
     if (/^bench$/i.test(line)) { section = "bench"; continue; }
     if (!cur || !section) continue;
@@ -24648,9 +24664,21 @@ function parseRgLineups(text) {
     const flag = (m[1].match(/\(([A-Z]{1,3})\)\s*$/) || [])[1] || "";
     const name = m[1].replace(/\s*\([A-Z]{1,3}\)\s*$/, "").trim();
     const k = resolveNorm(name); if (!k) continue;
-    teams[cur][section].push(k);
-    players[k] = { name, team: cur, role: section === "starters" ? "starter" : "bench", pos: m[2].toUpperCase(), flag };
+    cur[section].push({ k, name, pos: m[2].toUpperCase(), flag });
   }
+  // Team for each block: the page's team-name order is only a hint — the players' own CURRENT teams (RW / Tabs / blend)
+  // decide when they clearly point at one of the game's two teams (a misread name can't swap a whole lineup).
+  const teams = {}, players = {};
+  blocks.forEach(b => {
+    const votes = {};
+    b.starters.forEach(x => { const t = _knownTeamOf(x.k); if (t) votes[t] = (votes[t] || 0) + 1; });
+    const top = Object.entries(votes).sort((a, c) => c[1] - a[1])[0];
+    let team = b.pair[b.idx] || null;
+    if (top && top[1] >= 3 && (!b.pair.length || b.pair.includes(top[0]) || !team)) team = top[0];
+    if (!team) return;
+    teams[team] = { starters: b.starters.map(x => x.k), bench: b.bench.map(x => x.k), confirmed: b.confirmed };
+    b.starters.concat(b.bench).forEach(x => { players[x.k] = { name: x.name, team, role: b.starters.includes(x) ? "starter" : "bench", pos: x.pos, flag: x.flag }; });
+  });
   return { at: Date.now(), teams, players };
 }
 function getRgLineups() { try { const r = localStorage.getItem(RG_LINEUPS_KEY); return r ? JSON.parse(r) : null; } catch (e) { return null; } }
