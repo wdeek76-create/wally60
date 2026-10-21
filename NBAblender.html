@@ -24955,14 +24955,14 @@ function _lineupViews() {
 // that team does NOT list him as a clean starter (bench, OUT, or starter-but-GTD).
 // Upside named in RotoWire blurbs for a flagged player's absence (someone else starts / more minutes / bigger role). Same blurb reader as the model's
 // CEILING pills (beneficiariesCache); only the "ceiling" readings count here, a bare mention is not upside.
-function lineupUpsideFor(name) {
+function _lineupBen(name, re) {
   const out = [];
   try {
     if (!beneficiariesCache || !name) return out;
     const k = norm(name);
     beneficiariesCache.forEach((list, bk) => list.forEach(e => {
-      if (norm(e.causedBy) !== k || !/ceiling/i.test(e.reason || "")) return;
-      // A player who is himself out / doubtful (injury feed, or listed OUT in any lineup source) cannot be the upside.
+      if (norm(e.causedBy) !== k || !re.test(e.reason || "")) return;
+      // A player who is himself out / doubtful (injury feed, or listed OUT in any lineup source) cannot be the upside (or a floor risk).
       const own = injuriesCache && injuriesCache.get(bk);
       if (own && /^out|doubt|inactive|season|suspen/i.test(String(own.status || ""))) return;
       try { if (_lineupViews().some(v => Object.values(v.teams).some(t => t.status[bk] === "OUT"))) return; } catch (e) {}
@@ -24972,17 +24972,19 @@ function lineupUpsideFor(name) {
   } catch (e) {}
   return out;
 }
+function lineupUpsideFor(name) { return _lineupBen(name, /ceiling/i); }          // blurb says more role / minutes / starting for him
+function lineupFloorFor(name) { return _lineupBen(name, /floor risk/i); }        // blurb says a return / bigger role for someone cuts his minutes
 // Everyone out / GTD on a team that has a game (any lineup source or the injury feed) whose RotoWire blurb names someone who gets the upside.
 function lineupUpsides() {
   const res = [], seen = new Set();
   let views = []; try { views = _lineupViews(); } catch (e) {}
   const inGame = new Set(); views.forEach(v => Object.keys(v.teams).forEach(t => inGame.add(t)));
-  const consider = (team, nm, st) => { const k = resolveNorm(nm || ""); if (!k || seen.has(k)) return; const up = lineupUpsideFor(nm); if (!up.length) return; seen.add(k); res.push({ team, name: nm, text: `${nm}: ${st}`, up }); };
+  const consider = (team, nm, st) => { const k = resolveNorm(nm || ""); if (!k || seen.has(k)) return; const up = lineupUpsideFor(nm), down = lineupFloorFor(nm); if (!up.length && !down.length) return; seen.add(k); res.push({ team, name: nm, text: `${nm}: ${st}`, up, down }); };
   views.forEach(v => Object.entries(v.teams).forEach(([team, t]) => {
     Object.entries(t.status).forEach(([k, st]) => consider(team, t.names[k] || k, st));
-    Object.entries(t.flag || {}).forEach(([k, f]) => { if (f !== "PROB") consider(team, t.names[k] || k, f); });
+    Object.entries(t.flag || {}).forEach(([k, f]) => consider(team, t.names[k] || k, f === "PROB" ? "returning" : f));
   }));
-  try { if (injuriesByTeam) injuriesByTeam.forEach((arr, team) => { if (!inGame.has(team)) return; arr.forEach(e => { const bk = _mInjBucket(String(e.status || "")); if (bk && bk !== "PROB") consider(team, e.name, bk); }); }); } catch (e) {}
+  try { if (injuriesByTeam) injuriesByTeam.forEach((arr, team) => { if (!inGame.has(team)) return; arr.forEach(e => { const bk = _mInjBucket(String(e.status || "")); if (bk) consider(team, e.name, bk === "PROB" ? "returning" : bk); }); }); } catch (e) {}
   return res;
 }
 function lineupConflicts() {
@@ -25008,13 +25010,13 @@ function lineupConflicts() {
       });
       if (clean.length === have.length) {                 // every source starts him: fine — just note any % / tag
         const notes = have.map(v => { const t = v.teams[team], f = t.flag && t.flag[k], pc = t.pct && t.pct[k]; return f || pc != null ? v.key + " " + (pc != null ? pc + "% to start" : f) : ""; }).filter(Boolean);
-        if (notes.length) { const tv = have.find(v => v.key === "Tabs" && v.teams[team].flag && v.teams[team].flag[k] && v.teams[team].alt && v.teams[team].alt.length); out.notes.push({ team, name: nm, text: `${nm}: starting in all ${have.length} \u00b7 ${notes.join(" \u00b7 ")}`, up: lineupUpsideFor(nm), alt: tv ? tv.teams[team].alt : [] }); }
+        if (notes.length) { const tv = have.find(v => v.key === "Tabs" && v.teams[team].flag && v.teams[team].flag[k] && v.teams[team].alt && v.teams[team].alt.length); out.notes.push({ team, name: nm, text: `${nm}: starting in all ${have.length} \u00b7 ${notes.join(" \u00b7 ")}`, up: lineupUpsideFor(nm), down: lineupFloorFor(nm), alt: tv ? tv.teams[team].alt : [] }); }
         return;
       }
       if (!clean.length || !bad.length) return;
       const text = `${nm}: ${clean.join(" + ")} start${clean.length === 1 ? "s" : ""} him; ${bad.join(", ")}`;
       out.byPlayer.set(k, text);
-      out.list.push({ team, text, name: nm, up: lineupUpsideFor(nm) });
+      out.list.push({ team, text, name: nm, up: lineupUpsideFor(nm), down: lineupFloorFor(nm) });
       // compact form: per team, "RW / RG start A, Tabs B" — players grouped by the sources that start them
       let tl = out.teamLines.find(x => x.team === team); if (!tl) { tl = { team, groups: [] }; out.teamLines.push(tl); }
       const sig = clean.join(" / "); let g = tl.groups.find(x => x.sig === sig); if (!g) { g = { sig, srcs: clean.slice(), names: [] }; tl.groups.push(g); }
@@ -25066,7 +25068,8 @@ async function morningRefreshRwLineups() {
 function _topLine(x, color) {
   const t = String(x.text || ""), nm = String(x.name || ""), esc = _mEsc;
   const altH = x.alt && x.alt.length ? ` <span style="color:#fbbf24;">\u2192 possibly starting instead: ${x.alt.map(a => esc(a.name) + " " + a.pct + "%").join(" \u00b7 ")}</span>` : "";
-  const up = x.up && x.up.length ? ` <span style="color:#4ade80;background:#4ade8022;border:1px solid #4ade8077;border-radius:5px;padding:0 6px;font-weight:800;white-space:nowrap;">\u25b2 UPSIDE ${esc(x.up.slice(0, 3).join(", "))}</span>` : "";
+  const dn = x.down && x.down.length ? ` <span style="color:#fb923c;background:#fb923c22;border:1px solid #fb923c77;border-radius:5px;padding:0 6px;font-weight:800;white-space:nowrap;">\u25bc FLOOR RISK ${esc(x.down.slice(0, 3).join(", "))}</span>` : "";
+  const up = (x.up && x.up.length ? ` <span style="color:#4ade80;background:#4ade8022;border:1px solid #4ade8077;border-radius:5px;padding:0 6px;font-weight:800;white-space:nowrap;">\u25b2 UPSIDE ${esc(x.up.slice(0, 3).join(", "))}</span>` : "") + dn;
   if (nm && t.startsWith(nm + ":")) return `<span>\u00b7 <span style="color:${color};background:${color}22;border:1px solid ${color}77;border-radius:5px;padding:0 6px;font-weight:800;">${esc(nm)}</span> ${esc(t.slice(nm.length + 1))}${altH}${up}</span>`;
   return `<span>\u00b7 ${esc(t)}${up}</span>`;
 }
@@ -25108,7 +25111,7 @@ function _lineupShareHtml(logos) {
     const alt = x.alt && x.alt.length ? ` <span style="color:#fbbf24;">\u2192 possibly starting instead: <b>${x.alt.map(a => esc(a.name) + " " + a.pct + "%").join(" \u00b7 ")}</b></span>` : "";
     const altN = new Set((x.alt || []).map(a => norm(a.name)));
     const upn = (x.up || []).filter(n => !altN.has(norm(n)));
-    const up = upn.length ? ` ${chip("\u25b2 UPSIDE " + upn.slice(0, 3).join(", "), "#4ade80")}` : "";
+    const up = (upn.length ? ` ${chip("\u25b2 UPSIDE " + upn.slice(0, 3).join(", "), "#4ade80")}` : "") + (x.down && x.down.length ? ` ${chip("\u25bc FLOOR RISK " + x.down.slice(0, 3).join(", "), "#fb923c")}` : "");
     if (x.html) return `<span style="white-space:normal;">${x.html}</span>`;
     return `<span style="white-space:normal;">${chip(x.name, c)} ${esc(rest)}${alt}${up}</span>`;
   };
@@ -25122,12 +25125,12 @@ function _lineupShareHtml(logos) {
   const srcs = views.map(v => `<span style="color:${SC[v.key] || "#8b93a0"};font-weight:800;">${esc(v.key)}</span>`).join(" \u00b7 ");
   return `<div class="lcard" style="width:1500px;box-sizing:border-box;background:#0c0d10;padding:22px 24px;font-family:'Plus Jakarta Sans','Inter',sans-serif;color:#e2e8f0;">
     <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;">
-      <div style="display:flex;align-items:center;gap:14px;">${_ballSvg(64)}<div><div style="font-size:36px;font-weight:800;letter-spacing:1.5px;color:#fff;line-height:1.1;">NBA LINEUP <span style="color:#f97316;">CHECK</span></div><div style="font-size:15px;color:#a8b0bb;margin-top:4px;">${srcs} \u00b7 ${esc(when)}</div></div></div>
+      <div style="display:flex;align-items:center;gap:14px;">${_ballSvg(64)}<div><div style="font-size:36px;font-weight:800;letter-spacing:1.5px;color:#fff;line-height:1.1;">NBA LINEUP <span style="color:#f97316;">CHECK</span></div><div style="font-size:15px;color:#a8b0bb;margin-top:4px;">${srcs} \u00b7 ${esc(when)}${_rwSyncedAt() ? " \u00b7 RotoWire synced " + esc(new Date(_rwSyncedAt()).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })) : ""}</div></div></div>
       <div style="font-size:22px;font-weight:800;color:${state.c};border:2px solid ${state.c};border-radius:24px;padding:6px 22px;white-space:nowrap;">${state.t}</div>
     </div>
     ${panel("LINEUP CONFLICTS \u00b7 BLOCKED", "#fdba74", confItems, "#f87171", "#1a0f08", "#f9731666")}
     ${panel("STARTING EVERYWHERE \u00b7 BUT FLAGGED", "#fbbf24", lc.notes, "#fbbf24", "#1a1405", "#fbbf2466")}
-    ${panel("\u25b2 UPSIDE \u00b7 FROM ROTOWIRE BLURBS", "#4ade80", ups, "#f87171", "#07160d", "#4ade8066")}
+    ${panel("\u25b2 UPSIDE / \u25bc FLOOR RISK \u00b7 FROM ROTOWIRE BLURBS", "#4ade80", ups, "#f87171", "#07160d", "#4ade8066")}
     <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-top:16px;">${teams.map(block).join("")}</div>
     <div style="margin-top:12px;font-size:10px;color:#6b7380;">\u2713 green = every source agrees \u00b7 red = conflict / OUT \u00b7 amber = GTD / Q \u00b7 lime = probable \u00b7 % = Tabs chance to start</div>
   </div>`;
@@ -25171,44 +25174,92 @@ function lineupSetHook() {
   showToast(t ? "Lineup webhook saved" : "Using the Morning webhook"); renderMorning();
 }
 function lineupToggleLive() { try { localStorage.setItem(LINEUP_LIVE_KEY, lineupLiveOn() ? "0" : "1"); } catch (e) {} showToast(lineupLiveOn() ? "LIVE on \u2014 Discord updates after every lineup parse / refresh" : "LIVE off"); renderMorning(); if (lineupLiveOn()) lineupPostDiscord(true); }
-function _lineupDiscordText() {                // caption + the same lines as the picture, so the upside is copyable text too
+function _lineupDiscordText(diff) {                // caption + the same lines as the picture, so the upside is copyable text too
   const lc = lineupConflicts(), ups = lineupUpsides(), shown = new Set(lc.list.concat(lc.notes).map(x => norm(x.name)));
   const t = new Date().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
-  const L = [`**NBA lineup check** \u00b7 updated ${t} \u00b7 ${lc.list.length ? lc.list.length + " conflict" + (lc.list.length === 1 ? "" : "s") : "no conflicts"}`];
+  const rwT = _rwSyncedAt();
+  const L = [`**NBA lineup check** \u00b7 updated ${t}${rwT ? " \u00b7 RotoWire synced " + new Date(rwT).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }) : ""} \u00b7 ${lc.list.length ? lc.list.length + " conflict" + (lc.list.length === 1 ? "" : "s") : "no conflicts"}`];
+  if (diff && diff.length) { L.push("**What changed since the last update**"); diff.forEach(x => L.push(x)); }
   lc.teamLines.forEach(tl => L.push(`\u274c **${tl.team}** ` + tl.groups.map((g, i) => `${g.srcs.join(" / ")}${i === 0 ? " start" : ""} ${g.names.join(", ")}`).join(", ")));
   lc.notes.forEach(x => L.push(`\u26a0\ufe0f **${x.team}** ${x.text}${x.alt && x.alt.length ? " \u2192 possibly instead: " + x.alt.map(a => a.name + " " + a.pct + "%").join(", ") : ""}`));
   const u = ups.filter(x => !shown.has(norm(x.name)));
-  if (u.length) { L.push("**\u25b2 Upside (RotoWire blurbs)**"); u.forEach(x => L.push(`\u25b2 **${x.team}** ${x.name} ${x.text.split(": ")[1] || ""} \u2192 ${x.up.slice(0, 3).join(", ")}`)); }
+  if (u.length) { L.push("**\u25b2 Upside / \u25bc floor risk (RotoWire blurbs)**"); u.forEach(x => L.push(`**${x.team}** ${x.name} ${x.text.split(": ")[1] || ""}` + (x.up.length ? ` \u2192 \u25b2 ${x.up.slice(0, 3).join(", ")}` : "") + (x.down.length ? ` \u2192 \u25bc floor: ${x.down.slice(0, 3).join(", ")}` : ""))); }
   let txt = L.join("\n"); if (txt.length > 1900) txt = txt.slice(0, 1890) + "\u2026"; return txt;
+}
+// ── what RotoWire changed since the last Discord edit ──
+function _rwSyncedAt() { let t = 0; try { const sy = JSON.parse(localStorage.getItem(RW_API_SYNC_KEY) || "null"); if (sy && sy.at) t = sy.at; } catch (e) {} try { if (injuriesLastFetched) t = Math.max(t, injuriesLastFetched); } catch (e) {} return t; }
+function _lineupSnap() {
+  const snap = { at: _rwSyncedAt(), proj: {}, inj: {}, lu: {} };
+  try { const i = SOURCES.findIndex(x => x.key === "rotowire"); ((slots[i] && slots[i].players) || []).forEach(p => { if (p.min != null) snap.proj[p.norm || norm(p.rawName)] = [p.rawName, Math.round(p.min * 10) / 10, p.pts != null ? Math.round(p.pts * 10) / 10 : null]; }); } catch (e) {}
+  try { if (injuriesCache) injuriesCache.forEach((e, k) => { const b = _mInjBucket(String(e.status || "")); if (b) snap.inj[k] = [e.name, b]; }); } catch (e) {}
+  try { _lineupViews().forEach(v => Object.entries(v.teams).forEach(([t, e]) => { snap.lu[v.key + "|" + t] = [...e.starters].map(k => [k, e.names[k] || k]); })); } catch (e) {}
+  return snap;
+}
+function _lineupDiffLines(prev, cur) {
+  const L = [];
+  if (!prev) return L;
+  const short = n => { const w = String(n || "").trim().split(/\s+/); return w.length > 1 ? w[0][0] + ". " + w.slice(1).join(" ") : n; };
+  // lineups: who came into / dropped out of a source's starting five
+  Object.keys(cur.lu).forEach(key => { const a = (prev.lu[key] || []).map(x => x[0]); if (!prev.lu[key]) return; const b = cur.lu[key].map(x => x[0]);
+    const inn = cur.lu[key].filter(x => !a.includes(x[0])).map(x => short(x[1])), out = prev.lu[key].filter(x => !b.includes(x[0])).map(x => short(x[1]));
+    if (inn.length || out.length) L.push(`\ud83d\udd01 ${key.split("|")[0]} ${key.split("|")[1]} starters: ${inn.length ? "in " + inn.join(", ") : ""}${inn.length && out.length ? " \u00b7 " : ""}${out.length ? "out " + out.join(", ") : ""}`); });
+  // injury tags that changed
+  const ch = [];
+  Object.keys(cur.inj).forEach(k => { const o = prev.inj[k]; if (!o) ch.push(`${short(cur.inj[k][0])} now ${cur.inj[k][1]}`); else if (o[1] !== cur.inj[k][1]) ch.push(`${short(cur.inj[k][0])} ${o[1]} \u2192 ${cur.inj[k][1]}`); });
+  Object.keys(prev.inj).forEach(k => { if (!cur.inj[k]) ch.push(`${short(prev.inj[k][0])} cleared (was ${prev.inj[k][1]})`); });
+  if (ch.length) L.push("\ud83e\ude7a " + ch.slice(0, 8).join(" \u00b7 ") + (ch.length > 8 ? ` +${ch.length - 8} more` : ""));
+  // RotoWire projections: biggest minute moves (more / less)
+  const mv = [];
+  Object.keys(cur.proj).forEach(k => { const o = prev.proj[k]; if (!o) return; const dm = cur.proj[k][1] - o[1], dp = (cur.proj[k][2] != null && o[2] != null) ? cur.proj[k][2] - o[2] : 0; if (Math.abs(dm) >= 1.5 || Math.abs(dp) >= 2) mv.push({ n: cur.proj[k][0], dm, dp }); });
+  mv.sort((x, y) => Math.abs(y.dm) - Math.abs(x.dm) || Math.abs(y.dp) - Math.abs(x.dp));
+  const up = mv.filter(x => x.dm > 0 || (x.dm === 0 && x.dp > 0)).slice(0, 5), dn = mv.filter(x => x.dm < 0 || (x.dm === 0 && x.dp < 0)).slice(0, 5);
+  const f = x => `${short(x.n)} ${x.dm > 0 ? "+" : ""}${x.dm.toFixed(1)}m${Math.abs(x.dp) >= 2 ? " (" + (x.dp > 0 ? "+" : "") + x.dp.toFixed(1) + " pts)" : ""}`;
+  if (up.length) L.push("\u25b2 RW more: " + up.map(f).join(" \u00b7 "));
+  if (dn.length) L.push("\u25bc RW less: " + dn.map(f).join(" \u00b7 "));
+  return L;
+}
+// What the lineup check currently says, minus the clock — LIVE only edits Discord when this changes.
+function _lineupSig() {
+  try {
+    const views = _lineupViews(), lc = lineupConflicts();
+    return JSON.stringify([views.map(v => [v.key, Object.entries(v.teams).map(([t, e]) => [t, e.order, e.flag, e.status, e.pct, e.alt])]), lc.list.map(x => x.text), lc.notes.map(x => x.text), lineupUpsides().map(u => u.text + "|" + u.up.join(",") + "|" + u.down.join(","))]);
+  } catch (e) { return ""; }
 }
 let _lineupPosting = false;
 async function lineupPostDiscord(auto) {
   const hook = getLineupHook();
   if (!hook) { if (!auto) lineupSetHook(); return; }
   if (!_lineupViews().length) { if (!auto) showToast("Nothing to post yet \u2014 parse a lineup first"); return; }
-  if (_lineupPosting) return; _lineupPosting = true;
+  if (_lineupPosting) return;
+  const sigNow = _lineupSig(), snapNow = _lineupSnap();
+  let diff = [];
+  { let sv = null; try { sv = JSON.parse(_lsGet(LINEUP_MSG_KEY) || "null"); } catch (e) {} if (sv && sv.snap && sv.day === localYMD(new Date())) diff = _lineupDiffLines(sv.snap, snapNow); if (auto && sv && sv.sig === sigNow && sv.day === localYMD(new Date()) && !diff.length) return; }   // LIVE: nothing changed, nothing to edit
+  _lineupPosting = true;
   try {
     if (!auto) { showToast("Syncing RotoWire injuries\u2026"); try { await _mSyncInjuriesQuiet(); } catch (e) {} }
     let blob; try { blob = await _lineupPicBlob(); } catch (e) { console.error("[LINEUP discord]", e); if (!auto) showToast("Picture failed \u2014 " + (e && e.message || "see console")); return; }
     if (!blob) return;
     const base = hook.split("?")[0], today = localYMD(new Date());
     let saved = null; try { saved = JSON.parse(_lsGet(LINEUP_MSG_KEY) || "null"); } catch (e) {}
-    const mk = (edit) => { const fd = new FormData(); fd.append("payload_json", JSON.stringify(edit ? { content: _lineupDiscordText(), attachments: [{ id: 0 }] } : { content: _lineupDiscordText() })); fd.append("files[0]", new File([blob], `nba-lineups-${today}.png`, { type: "image/png" })); return fd; };
+    const mk = (edit) => { const fd = new FormData(); fd.append("payload_json", JSON.stringify(edit ? { content: _lineupDiscordText(diff), attachments: [{ id: 0 }] } : { content: _lineupDiscordText(diff) })); fd.append("files[0]", new File([blob], `nba-lineups-${today}.png`, { type: "image/png" })); return fd; };
     let done = false;
     if (saved && saved.hook === base && saved.day === today && saved.id) {
-      try { const r = await fetch(`${base}/messages/${saved.id}`, { method: "PATCH", body: mk(true) }); if (r.ok) { done = true; if (!auto) showToast("Discord lineup message updated \u2713"); } } catch (e) {}
+      try { const r = await fetch(`${base}/messages/${saved.id}`, { method: "PATCH", body: mk(true) }); if (r.ok) { done = true; try { localStorage.setItem(LINEUP_MSG_KEY, JSON.stringify(Object.assign({}, saved, { sig: sigNow, snap: snapNow }))); } catch (e) {} showToast(auto ? "LIVE: Discord updated" + (diff.length ? " \u2014 " + diff.length + " change" + (diff.length === 1 ? "" : "s") : "") : "Discord lineup message updated \u2713"); } } catch (e) {}
     }
     if (!done) {
       try {
         const r = await fetch(base + "?wait=true", { method: "POST", body: mk(false) });
         if (!r.ok) { const t = await r.text().catch(() => ""); throw new Error(`Discord said ${r.status} ${t.slice(0, 120)}`); }
         const j = await r.json().catch(() => ({}));
-        try { localStorage.setItem(LINEUP_MSG_KEY, JSON.stringify({ hook: base, id: j.id || "", day: today })); } catch (e) {}
+        try { localStorage.setItem(LINEUP_MSG_KEY, JSON.stringify({ hook: base, id: j.id || "", day: today, sig: sigNow, snap: snapNow })); } catch (e) {}
         if (!auto) showToast("Lineup check posted to Discord \u2713");
       } catch (e) { showToast("Discord post failed \u2014 " + (e && e.message || e)); }
     }
   } finally { _lineupPosting = false; }
 }
+// LIVE also watches for data that changes on its own (RotoWire syncs, injury merges, auto refresh): a cheap local check every minute,
+// and an edit only when the lineup check's content actually changed.
+setInterval(() => { try { if (lineupLiveOn() && !document.hidden && getLineupHook() && _lineupViews().length) lineupPostDiscord(true); } catch (e) {} }, 60000);
 let _lineupLiveT = null;
 function _lineupLiveKick() { if (!lineupLiveOn()) return; clearTimeout(_lineupLiveT); _lineupLiveT = setTimeout(() => { lineupPostDiscord(true); }, 2500); }
 function lineupConflictFor(player) { try { return lineupConflicts().byPlayer.get(resolveNorm(player || "")) || null; } catch (e) { return null; } }
@@ -25894,7 +25945,7 @@ function lineupPanelHtml(card, lc) {
     ${_lineupReport.length ? `<div style="margin-top:8px;display:grid;gap:2px;">${_lineupReport.map(r => `<div style="font-size:11px;font-family:'JetBrains Mono','Menlo',monospace;color:${r.bad ? "#fbbf24" : "#4ade80"};">${r.bad ? "⚠" : "✓"} ${esc(r.text)}</div>`).join("")}</div>` : ""}
     ${lc.list.length ? `<div style="margin-top:8px;border:1px solid #f8717144;border-radius:8px;padding:6px 10px;display:grid;gap:3px;">${lc.teamLines.map(tl => `<div style="font-size:12px;color:#ffffff;font-family:'JetBrains Mono','Menlo',monospace;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">${teamLogoImg(tl.team, 16)}<b style="color:#fdba74;">${esc(tl.team)}</b>${tl.groups.map((g, i) => `<span>${esc(g.srcs.join(" / "))}${i === 0 ? " start" : ""} ${g.names.map(n => `<span style="color:#f87171;background:#f8717122;border:1px solid #f8717177;border-radius:5px;padding:0 6px;font-weight:800;">${esc(n)}</span>`).join(" ")}</span>`).join("<span style=\"color:#94a3b8;\">,</span>")}</div>`).join("")}</div>` : ""}
     ${lc.notes && lc.notes.length ? `<div style="margin-top:8px;border:1px solid #fbbf2455;border-radius:8px;padding:6px 10px;display:grid;gap:3px;"><div style="font-size:10px;font-weight:800;letter-spacing:.8px;color:#fbbf24;">TOSS-UPS \u00b7 START IN EVERY SOURCE, NOTED (not blocked)</div>${lc.notes.map(x => `<div style="font-size:11px;color:#ffffff;font-family:'JetBrains Mono','Menlo',monospace;display:flex;align-items:center;gap:6px;">${teamLogoImg(x.team, 16)}<b style="color:#fbbf24;">${esc(x.team)}</b>${_topLine(x, "#fbbf24")}</div>`).join("")}</div>` : ""}
-    ${(() => { const shownU = new Set(lc.list.concat(lc.notes || []).map(x => norm(x.name))); const ups = lineupUpsides().filter(x => !shownU.has(norm(x.name))); return ups.length ? `<div style="margin-top:8px;border:1px solid #4ade8055;border-radius:8px;padding:6px 10px;display:grid;gap:3px;"><div style="font-size:10px;font-weight:800;letter-spacing:.8px;color:#4ade80;">\u25b2 UPSIDE \u00b7 FROM ROTOWIRE BLURBS (same reading as the model\u2019s CEILING)</div>${ups.map(x => `<div style="font-size:11px;color:#ffffff;font-family:'JetBrains Mono','Menlo',monospace;display:flex;align-items:center;gap:6px;">${teamLogoImg(x.team, 16)}<b style="color:#4ade80;">${esc(x.team)}</b>${_topLine(x, "#f87171")}</div>`).join("")}</div>` : ""; })()}
+    ${(() => { const shownU = new Set(lc.list.concat(lc.notes || []).map(x => norm(x.name))); const ups = lineupUpsides().filter(x => !shownU.has(norm(x.name))); return ups.length ? `<div style="margin-top:8px;border:1px solid #4ade8055;border-radius:8px;padding:6px 10px;display:grid;gap:3px;"><div style="font-size:10px;font-weight:800;letter-spacing:.8px;color:#4ade80;">\u25b2 UPSIDE / \u25bc FLOOR RISK \u00b7 FROM ROTOWIRE BLURBS (same reading as the model\u2019s CEILING)</div>${ups.map(x => `<div style="font-size:11px;color:#ffffff;font-family:'JetBrains Mono','Menlo',monospace;display:flex;align-items:center;gap:6px;">${teamLogoImg(x.team, 16)}<b style="color:#4ade80;">${esc(x.team)}</b>${_topLine(x, "#f87171")}</div>`).join("")}</div>` : ""; })()}
     ${lineupCompareHtml()}
     <details style="margin-top:8px;"><summary style="cursor:pointer;font-size:11px;font-weight:800;color:#d4dae3;letter-spacing:.8px;">RG IMPACT RATINGS ${ri ? `<span style="color:#4ade80;font-weight:600;">✓ ${Object.keys(ri.players).length} players · ${ago(ri.at)}</span>` : `<span style="color:#6b7380;font-weight:600;">not loaded</span>`}</summary>
       <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap;"><button onclick="morningParseRgImpact()" style="background:#34d399;border:none;color:#050507;border-radius:6px;padding:5px 12px;font-size:11px;font-weight:800;cursor:pointer;">PARSE RG IMPACT</button>${ri ? `<button onclick="morningClearRgImpact()" style="background:transparent;border:1px solid #1a1d22;color:#f87171;border-radius:6px;padding:5px 10px;font-size:11px;font-weight:700;cursor:pointer;">CLEAR</button>` : ""}<span style="font-size:10px;color:#8b93a0;align-self:center;">Situation Room injury report — an extra read on how much a teammate’s absence matters.</span></div>
@@ -26674,6 +26725,7 @@ function _injApplyMerged() {
   } catch (e) {}
   _injurySource = "rotowire";
   if (typeof updateInjuryPanel === "function") updateInjuryPanel();
+  try { _lineupLiveKick(); } catch (e) {}
   try {
     const st = document.getElementById("rw-injury-status");
     if (st) { st.style.color = "#22c55e"; st.textContent = `API · ${records.length} players · ${new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })} (RW${_injStore.oo.length ? " + OpticOdds" : ""})`; }
@@ -27005,6 +27057,7 @@ async function rwApiSyncAll(quiet) {
   if (btn) { btn.disabled = false; btn.textContent = "⚡ SYNC RW API"; }
   if (!quiet) showToast(done.length ? `RotoWire: ${done.join(" · ")}${fail.length ? ` · ${fail.length} failed` : ""}` : `RotoWire sync failed — ${fail[0] || "no response"}`);
   if (typeof morningAutoLog === "function" && morningAutoLog()) saveMorningBets();
+  try { _lineupLiveKick(); } catch (e) {}
   if (currentTab === "morning") renderMorning();
   if (currentTab === "results" && typeof renderTable === "function" && merged) renderTable();
 }
