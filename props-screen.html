@@ -1097,6 +1097,61 @@ async function copySummary(p, mkey){
   const books=ranked.filter(x=>best-centsOf(x.c.price)<=18).map(({b,c})=>`${amt(c.price)} ${nm(b.key)}`).join(' ');
   await copyText(`${titleCase(p.name)}${p._teamAb?' '+p._teamAb:''} ${sideTxt}${line!=null&&!single?' '+line:''} ${mk} ${books}`);
 }
+// Matrix: you type your edge % at the book you track (FanDuel by default, or e.g. "10 dk"), we
+// back the fair price out of it -- fair = (1 + edge) / that book's decimal odds -- and list every
+// sportsbook (no exchanges; DK / Onyx / Courtside each on their own) still +5% EV or better at its
+// own price, Pinnacle / bet105 / Props Builder first, then best price. "play to" is the worst price
+// that's still +5% EV. When at least one book clears it, the bet is tracked as a Matrix bet (its
+// own record in the Tracker, kept out of NBA Props 2026 and the Daily Record) at the book you named.
+const MATRIX_MIN_EV = 5;
+const MATRIX_FIRST = ['pinnacle','bet105','props builder'];
+const MATRIX_ALIAS = { fd:'fanduel', fanduel:'fanduel', dk:'draftkings', draftkings:'draftkings', pin:'pinnacle', pinny:'pinnacle', pinnacle:'pinnacle', b105:'bet105', bet105:'bet105', pb:'props builder', pbuilder:'props builder', onyx:'onyx odds', cs:'courtside', courtside:'courtside', br:'betrivers', betrivers:'betrivers', rivers:'betrivers', mgm:'betmgm', betmgm:'betmgm', czr:'caesars', caesars:'caesars', hr:'hard rock bet', hardrock:'hard rock bet', kambi:'kambi', fliff:'fliff', bol:'betonline', betonline:'betonline' };
+const matrixBookOf = o => { const k=String(o.sportsbook||'').toLowerCase(); return k==='hard rock'||k==='hardrock' ? 'hard rock bet' : k; };
+async function runMatrix(p, mkey){
+  if(!p || !mkey){ toast('Nothing to run'); return; }
+  const ctx=`${p.key}|${mkey}`;
+  let extra=[]; try{ extra=await ensureQarbExtras(p,mkey); }catch(e){}
+  const rows=cardRows(p,mkey,ctx);
+  const line=(rows.find(o=>o.points!=null)||{}).points ?? null;
+  const all=[...rows, ...rowsFor(p,mkey,extra).filter(o=>line==null || o.points==null || Number(o.points)===Number(line))];
+  const single=all.every(o=>sideOf(o)==='single');
+  const sd=single?'single':(oddsSide==='under'?'under':'over');
+  // best price per sportsbook on this side (raw book names, so DK / Onyx / Courtside stay apart)
+  const by={}; all.forEach(o=>{ if(sideOf(o)!==sd || EXCH.has(canonBook(o.sportsbook))) return; const k=matrixBookOf(o); if(!by[k] || toDec(o.price)>toDec(by[k].price)) by[k]=o; });
+  if(!Object.keys(by).length){ toast('No sportsbook prices for this side'); return; }
+  const sideTxt=single?(singleSideLabel(mkey)||'Yes').toLowerCase():sd;
+  const mk=mkey==='pra'?'PRA':marketLabel(sportKey,mkey);
+  const head=`${titleCase(p.name)}${p._teamAb?' '+p._teamAb:''} ${sideTxt}${line!=null&&!single?' '+line:''} ${mk}`;
+  const def=by.fanduel ? 'fanduel' : Object.keys(by).sort((a,b)=>toDec(by[b].price)-toDec(by[a].price))[0];
+  const ans=prompt(`Matrix · ${head}\nYour edge % at ${bookLabel(def)} ${fmtAm(by[def].price)} (e.g. 10).\nAdd a book to use a different one, e.g. "10 dk".`, '');
+  if(ans==null) return;
+  const m=String(ans).trim().match(/^([+-]?\d+(?:\.\d+)?)\s*%?\s*([a-z0-9 ]*)$/i);
+  if(!m){ toast('Type a number like 10, or 10 dk'); return; }
+  const edge=Number(m[1]); const want=m[2].trim().toLowerCase().replace(/\s+/g,'');
+  const refKey=want ? (MATRIX_ALIAS[want]||want) : def;
+  const ref=by[refKey]; if(!ref){ toast(`${want||refKey} isn't posting this side`); return; }
+  const fairP=(1+edge/100)/toDec(ref.price);
+  if(!(fairP>0 && fairP<1)){ toast('That edge puts the fair past 100% -- check the number'); return; }
+  const amt=v=>{ const n=Math.round(Number(v)); return n>0?'+'+n:String(n); };
+  const fairAm=toAm(1/fairP);
+  // worst price still +5% EV, rounded toward the better side so it never lists a -EV number
+  const playTo=(()=>{ const d=(1+MATRIX_MIN_EV/100)/fairP; const a=d-1>=1 ? Math.ceil((d-1)*100) : -Math.floor(100/(d-1)); return a; })();
+  const evOf=o=>(fairP*toDec(o.price)-1)*100;
+  const ok=Object.entries(by).filter(([,o])=>evOf(o)>=MATRIX_MIN_EV-1e-9)
+    .sort((a,b)=>{ const ia=MATRIX_FIRST.indexOf(a[0]), ib=MATRIX_FIRST.indexOf(b[0]); if(ia>=0||ib>=0) return (ia<0?99:ia)-(ib<0?99:ib); return toDec(b[1].price)-toDec(a[1].price); });
+  const nm=k=>SUM_NAME[k] || String(k).replace(/\s+/g,'').toLowerCase();
+  const books=ok.map(([k,o])=>`${amt(o.price)} ${nm(k)}`).join(' ');
+  const text=`${head} ${books||'(no book at +5% EV)'} · fair ${amt(fairAm)} · play to ${amt(playTo)}`;
+  await copyText(text);
+  if(!ok.length){ toast(`No book at +${MATRIX_MIN_EV}% EV -- copied, not tracked`); return; }
+  // track it (once per player/market/side/line) as a Matrix bet at the book you named
+  const label=single?(singleSideLabel(mkey)||'Yes'):(sd==='under'?'Under':'Over');
+  const dupe=tracked.find(t=>t.src==='matrix' && t.playerKey===p.key && t.fixtureId===p.fixtureId && t.mkey===mkey && t.side===sideKey(label) && (t.line??null)===(single?null:line));
+  const info={ src:'matrix', matrixEdge:edge, matrixFair:fairAm, matrixPlayTo:playTo, matrixBooks:ok.map(([k,o])=>`${amt(o.price)} ${nm(k)}`), price:Number(ref.price), book:bookLabel(refKey), bookKey:canonBook(refKey), pinned:true };
+  if(dupe){ Object.assign(dupe, info, { edited:Date.now() }); saveTracked(); toast('Matrix copied · tracked bet updated'); return; }
+  trackProp(p, mkey, label, single?null:line, all, canonBook(refKey), { ...info, quiet:true });
+  showTrackPricePop(tracked[0]); toast(`Matrix copied · tracked (${ok.length} book${ok.length===1?'':'s'} at +${MATRIX_MIN_EV}%)`);
+}
 const centsOf = v => { v=Number(v); return v>0 ? v-100 : v+100; };
 async function copyText(text){
   try{ if(navigator.clipboard?.writeText){ await navigator.clipboard.writeText(text); toast('Summary copied'); return; } }catch(e){}
@@ -2441,7 +2496,7 @@ async function openPlayer(p, startAt, keepScroll){
   const psub = S.ml
     ? (f?`<span class="mupill">vs <b>${esc(normName(f.home.name)===p.key?f.away.name:f.home.name)}</b></span><span>${esc(f.card)}</span>${whenHtml}`:'')
     : `${teamAb?`<span><b>${esc(teamAb)}</b></span>`:''}${f?`<span class="mupill">${f.away.logo?`<img class="mtl" src="${esc(f.away.logo)}" alt="">`:''}${esc(f.away.ab)}<span class="at">@</span>${f.home.logo?`<img class="mtl" src="${esc(f.home.logo)}" alt="">`:''}${esc(f.home.ab)}</span>${whenHtml}`:''}`;
-  let h=`<div class="sh shback"><span class="t">${esc(S.label)}</span><span class="shr"><button class="cpname" id="cpname" title="Copy name">⧉ Copy name</button><button class="cpname" id="cpsum" title="Copy summary">⧉ Copy summary</button><button class="ib" id="shot" title="Share">⇧</button><button class="back" id="back">‹ Slate</button></span></div><div class="pcard">
+  let h=`<div class="sh shback"><span class="t">${esc(S.label)}</span><span class="shr"><button class="cpname" id="cpname" title="Copy name">⧉ Copy name</button><button class="cpname" id="cpsum" title="Copy summary">⧉ Copy summary</button><button class="cpname" id="cpmatrix" title="Matrix">◈ Matrix</button><button class="ib" id="shot" title="Share">⇧</button><button class="back" id="back">‹ Slate</button></span></div><div class="pcard">
     <div class="ptop">${hsWrap}<div style="min-width:0;flex:1">
       <div class="pname">${teamLogo?`<img class="tl" src="${esc(teamLogo)}" alt="">`:''}${esc(titleCase(p.name))}${injPill(p)}</div>
       <div class="psub">${psub}</div>
@@ -2462,6 +2517,7 @@ async function openPlayer(p, startAt, keepScroll){
   $('#cpname')?.addEventListener('click',()=>copyName(titleCase(p.name)));
   p._teamAb=teamAb; // for Copy summary
   $('#cpsum')?.addEventListener('click',()=>{ const i=Number(document.querySelector('#mnav .mchip.on')?.dataset.mi||startIdx); copySummary(p, mkeys[i]); });
+  $('#cpmatrix')?.addEventListener('click',()=>{ const i=Number(document.querySelector('#mnav .mchip.on')?.dataset.mi||startIdx); runMatrix(p, mkeys[i]); });
   // Pinned above the search bar instead of inline in the scrolling card, so switching players
   // from here never yanks the screen back to the top of a new page.
   renderGstripDock(p, mkeys[startIdx]);
@@ -4168,7 +4224,7 @@ function ttRecord(list){
 const dayKeyOf = iso => { try{ return new Intl.DateTimeFormat('en-CA',{timeZone:'America/New_York',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(iso)); }catch(e){ return 'unknown'; } };
 function dailyRecordHtml(){
   // Reset: the old NHL team-total bets (full game + regulation) no longer count toward this record.
-  const graded = tracked.filter(t=>t.final && t.result && t.src!=='sharp' && !(t.isTeam && (t.mkey==='tt'||t.mkey==='tt60')));
+  const graded = tracked.filter(t=>t.final && t.result && t.src!=='sharp' && t.src!=='matrix' && !(t.isTeam && (t.mkey==='tt'||t.mkey==='tt60')));
   if(!graded.length) return '';
   const byDay = {};
   graded.forEach(t=>{
@@ -4183,7 +4239,7 @@ function dailyRecordHtml(){
 // NBA player props from the 2026-27 season on (no team/game lines). Records count graded bets
 // only; open ones are shown as a separate count. Split further by prop type (Points, Assists...).
 const NBA26_FROM = Date.parse('2026-08-01T00:00:00Z');
-const isNbaProp26 = t => t.sportKey==='nba' && t.src!=='sharp' && !t.isTeam && !t.isGame && !String(t.playerKey||'').startsWith('game:')
+const isNbaProp26 = t => t.sportKey==='nba' && t.src!=='sharp' && t.src!=='matrix' && !t.isTeam && !t.isGame && !String(t.playerKey||'').startsWith('game:')
   && (t.start ? Date.parse(t.start) : (t.trackedAt||0)) >= NBA26_FROM;
 // Pts, Reb, Ast, PRA, 3PM first (what's being tracked), anything else after.
 const NBA26_ORDER = ['pts','reb','ast','pra','3pm','pr','pa','ra'];
@@ -4194,6 +4250,14 @@ const byPropSideSplits = list => byPropSplits(list).flatMap(([m,l])=>[['over','O
 const byPropSplits = list => [...new Set(list.map(t=>t.mkey))]
   .sort((a,b)=>{ const ia=NBA26_ORDER.indexOf(a), ib=NBA26_ORDER.indexOf(b); return (ia<0?99:ia)-(ib<0?99:ib); })
   .map(k=>[(list.find(t=>t.mkey===k)||{}).marketLabel||k, list.filter(t=>t.mkey===k)]);
+// Matrix bets: their own record (graded only), split by sport and by prop type.
+function matrixSummaryHtml(){
+  const all=tracked.filter(t=>t.src==='matrix'); if(!all.length) return '';
+  const g=all.filter(t=>t.result); const openN=all.length-g.length;
+  const row=(label,r)=>`<div class="ttrow"><span>${esc(label)} <span class="dim">(${r.n})</span></span><span>${r.w}-${r.l}-${r.p}</span><span class="${r.u>0?'pos':r.u<0?'neg':''}">${r.u>=0?'+':''}${r.u.toFixed(2)}u</span><span class="dim">${r.roi!=null?r.roi.toFixed(1)+'% ROI':'—'}</span></div>`;
+  const sports=[...new Set(g.map(t=>t.sportKey))];
+  return `<div class="ttsum"><div class="ttsumh"><span>Matrix</span></div>${row('Overall', ttRecord(g))}${openN?`<div class="ttrow dim" style="font-size:10.5px">${openN} open / ungraded not counted</div>`:''}${sports.length>1?sports.map(k=>row(SPORTS[k]?.label||k, ttRecord(g.filter(t=>t.sportKey===k)))).join(''):''}${byPropSideSplits(g).map(([l,x])=>row(l, ttRecord(x))).join('')}</div>`;
+}
 function teamTotalsSummaryHtml(){
   const all=tracked.filter(isNbaProp26); const tts=all.filter(t=>t.result); const openN=all.length-tts.length;
   const row=(label,r)=>`<div class="ttrow"><span>${esc(label)} <span class="dim">(${r.n})</span></span><span>${r.w}-${r.l}-${r.p}</span><span class="${r.u>0?'pos':r.u<0?'neg':''}">${r.u>=0?'+':''}${r.u.toFixed(2)}u</span><span class="dim">${r.roi!=null?r.roi.toFixed(1)+'% ROI':'—'}</span></div>`;
@@ -4315,7 +4379,7 @@ function trackCardHtml(t){
   const snaps = t.snapshots.length>1 ? snapsHtml(t) : '';
   return `<div class="tk ${t.result||''}">
     <div class="tkh"${t.final?'':` data-open="${t.id}"`}>${hs}<div class="who"><div class="nm">${teamLogo?`<img class="tl" src="${esc(teamLogo)}" alt="">`:''}${esc(t.playerName)} ${res}</div><div class="bet">${betStr}</div></div><div class="st">${st}<br><span class="dim">${esc(S.label)} · ${esc(t.away)}@${esc(t.home)}</span></div></div>
-    ${prog}${mv}${clvRowHtml(t)}<div class="tkbooks">${books}</div>${snaps}
+    ${prog}${mv}${t.src==='matrix'?`<div class="dim" style="font-size:11px;margin:3px 0">◈ Matrix ${esc(String(t.matrixEdge))}% edge · fair ${fmtAm(t.matrixFair)} · play to ${fmtAm(t.matrixPlayTo)}</div>`:''}${clvRowHtml(t)}<div class="tkbooks">${books}</div>${snaps}
     <div class="tkf"><span class="dim" style="font-size:10px;font-family:var(--mono)">tracked ${new Date(t.trackedAt).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})}${t.edited?' · edited':''}${t.manualGrade?' · manually graded':''}</span><span><button class="ed" data-share="${t.id}">Share</button><button class="ed" data-edit="${t.id}">Edit</button><button class="rm" data-rm="${t.id}">Remove</button></span></div>
     ${editHtml(t)}
   </div>`;
@@ -4371,9 +4435,9 @@ function renderTracker(){
   tkRenderPending=false;
   const kept={}; view.querySelectorAll('.tked').forEach(f=>{ if(f.style.display!=='none'){ const v={}; f.querySelectorAll('[name]').forEach(i=>v[i.name]=i.value); kept[f.dataset.ed]=v; } });
   // Grouped by sport (the one with the latest addition first), newest-added first inside each.
-  const bySport = list => { const g={}; list.forEach(t=>{ const k=t.sportKey||'other'; (g[k]=g[k]||[]).push(t); });
+  const bySport = list => { const g={}; list.forEach(t=>{ const k=t.src==='matrix'?'__matrix':(t.sportKey||'other'); (g[k]=g[k]||[]).push(t); });
     return Object.entries(g).map(([k,l])=>[k, l.sort((a,b)=>(b.trackedAt||0)-(a.trackedAt||0))]).sort((a,b)=>(b[1][0].trackedAt||0)-(a[1][0].trackedAt||0))
-      .map(([k,l])=>`<div class="tksport"><span>${esc(SPORTS[k]?.label||'Other')}</span><b>${l.length}</b></div>${l.map(trackCardHtml).join('')}`).join(''); };
+      .map(([k,l])=>`<div class="tksport"><span>${k==='__matrix'?'◈ Matrix':esc(SPORTS[k]?.label||'Other')}</span><b>${l.length}</b></div>${l.map(trackCardHtml).join('')}`).join(''); };
   // Sharp Money bets live in their own tool now (sharp-money.html), not in this tracker.
   const openList=tracked.filter(t=>!t.final && t.src!=='sharp');
   const historyList=tracked.filter(t=>t.final && t.src!=='sharp');
@@ -4381,7 +4445,7 @@ function renderTracker(){
   const historyHtml = historyList.length
     ? `<div class="tkhist"><button class="tkhisttoggle" id="tkhisttoggle">Bet History (${historyList.length}) ${historyShown?'▴ hide':'▾ show'}</button>${historyShown?bySport(historyList):''}</div>`
     : '';
-  view.innerHTML = tkBackupHtml + dailyRecordHtml() + teamTotalsSummaryHtml() + openHtml + historyHtml;
+  view.innerHTML = tkBackupHtml + dailyRecordHtml() + teamTotalsSummaryHtml() + matrixSummaryHtml() + openHtml + historyHtml;
   // Summary sections start collapsed; tapping a header opens it (remembered until the page reloads).
   view.querySelectorAll('.ttsum').forEach(sec=>{
     const h=sec.querySelector('.ttsumh'); if(!h) return;
