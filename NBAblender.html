@@ -25059,7 +25059,7 @@ async function morningRefreshRwLineups() {
     showToast("RW refresh failed \u2014 see the lineup check");
   }
   try { renderLineupsStatus(); } catch (e) {}
-  renderMorning();
+  renderMorning(); _lineupLiveKick();
 }
 // Share picture of the whole lineup check: conflicts on top, every team's lineup per source below (no textareas / buttons).
 // "Name: rest of the text" → the player's name as a highlighted chip, the rest in white.
@@ -25130,21 +25130,22 @@ function _lineupShareHtml(logos) {
     <div style="margin-top:12px;font-size:10px;color:#6b7380;">red = conflict / OUT \u00b7 amber = GTD / Q \u00b7 green = probable \u00b7 % = Tabs chance to start</div>
   </div>`;
 }
+async function _lineupPicBlob() {
+  try { if (document.fonts && document.fonts.load) { await document.fonts.load("800 16px 'Plus Jakarta Sans'"); await document.fonts.load("700 16px 'JetBrains Mono'"); } } catch (e) {}
+  const h2c = await _ensureHtml2Canvas();
+  const box = document.createElement("div");
+  box.style.cssText = "position:fixed;left:-9999px;top:0;z-index:-1;";
+  const logos = {}; await Promise.all(_lineupViews().flatMap(v => Object.keys(v.teams)).filter((t, i, a) => a.indexOf(t) === i).map(async t => { try { const u = await _teamLogoAsDataUri(t); if (u) logos[t] = u; } catch (e) {} }));
+  box.innerHTML = _lineupShareHtml(logos);
+  document.body.appendChild(box);
+  try { const canvas = await h2c(box.querySelector(".lcard"), { backgroundColor: "#0c0d10", scale: 2, logging: false, useCORS: true }); return await new Promise(r => canvas.toBlob(r, "image/png")); }
+  finally { document.body.removeChild(box); }
+}
 async function lineupSharePic() {
   if (!_lineupViews().length) { showToast("Nothing to share yet \u2014 parse a lineup first"); return; }
   showToast("Building lineup picture\u2026");
   let blob;
-  try {
-    try { if (document.fonts && document.fonts.load) { await document.fonts.load("800 16px 'Plus Jakarta Sans'"); await document.fonts.load("700 16px 'JetBrains Mono'"); } } catch (e) {}
-    const h2c = await _ensureHtml2Canvas();
-    const box = document.createElement("div");
-    box.style.cssText = "position:fixed;left:-9999px;top:0;z-index:-1;";
-    const logos = {}; await Promise.all(_lineupViews().flatMap(v => Object.keys(v.teams)).filter((t, i, a) => a.indexOf(t) === i).map(async t => { try { const u = await _teamLogoAsDataUri(t); if (u) logos[t] = u; } catch (e) {} }));
-    box.innerHTML = _lineupShareHtml(logos);
-    document.body.appendChild(box);
-    try { const canvas = await h2c(box.querySelector(".lcard"), { backgroundColor: "#0c0d10", scale: 2, logging: false, useCORS: true }); blob = await new Promise(r => canvas.toBlob(r, "image/png")); }
-    finally { document.body.removeChild(box); }
-  } catch (e) { console.error("[LINEUP pic]", e); showToast("Picture failed \u2014 " + (e && e.message || "see console")); return; }
+  try { blob = await _lineupPicBlob(); } catch (e) { console.error("[LINEUP pic]", e); showToast("Picture failed \u2014 " + (e && e.message || "see console")); return; }
   if (!blob) { showToast("Picture failed"); return; }
   let copied = false;
   try { if (navigator.clipboard && window.ClipboardItem) { await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]); copied = true; } } catch (e) {}
@@ -25152,6 +25153,61 @@ async function lineupSharePic() {
   document.body.appendChild(a); a.click(); document.body.removeChild(a); setTimeout(() => URL.revokeObjectURL(a.href), 4000);
   showToast(copied ? "Lineup picture saved + copied to clipboard" : "Lineup picture saved");
 }
+// ── Lineup check \u2192 Discord (one message that is EDITED in place each time lineups change) ─────────────────────
+// First press posts the picture; every later press (or an auto-update after a parse / REFRESH RW while LIVE is on) edits that same
+// message, so the channel always shows the current lineups, flags and upside. The webhook is saved in this browser only.
+const LINEUP_HOOK_KEY = "nba_lineup_discord_webhook", LINEUP_MSG_KEY = "nba_lineup_discord_msg", LINEUP_LIVE_KEY = "nba_lineup_discord_live";
+const _lsGet = k => { try { return localStorage.getItem(k) || ""; } catch (e) { return ""; } };
+const getLineupHook = () => _lsGet(LINEUP_HOOK_KEY) || getMorningWebhook();
+const lineupLiveOn = () => _lsGet(LINEUP_LIVE_KEY) === "1";
+function lineupSetHook() {
+  const v = prompt("Discord webhook URL for the LINEUP CHECK channel (Channel settings \u2192 Integrations \u2192 Webhooks).\n\nLeave empty to use the Morning webhook. Saved only in this browser.", _lsGet(LINEUP_HOOK_KEY));
+  if (v === null) return;
+  const t = v.trim();
+  if (t && !/^https:\/\/(?:[a-z]+\.)?discord(?:app)?\.com\/api\/webhooks\/\d+\/[\w-]+/i.test(t)) { showToast("That doesn't look like a Discord webhook URL"); return; }
+  try { if (t) localStorage.setItem(LINEUP_HOOK_KEY, t); else localStorage.removeItem(LINEUP_HOOK_KEY); localStorage.removeItem(LINEUP_MSG_KEY); } catch (e) {}
+  showToast(t ? "Lineup webhook saved" : "Using the Morning webhook"); renderMorning();
+}
+function lineupToggleLive() { try { localStorage.setItem(LINEUP_LIVE_KEY, lineupLiveOn() ? "0" : "1"); } catch (e) {} showToast(lineupLiveOn() ? "LIVE on \u2014 Discord updates after every lineup parse / refresh" : "LIVE off"); renderMorning(); if (lineupLiveOn()) lineupPostDiscord(true); }
+function _lineupDiscordText() {
+  const lc = lineupConflicts(), ups = lineupUpsides(), shown = new Set(lc.list.concat(lc.notes).map(x => norm(x.name)));
+  const t = new Date().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+  const L = [`**NBA lineup check** \u00b7 updated ${t} \u00b7 ${lc.list.length ? lc.list.length + " conflict" + (lc.list.length === 1 ? "" : "s") : "no conflicts"}`];
+  lc.teamLines.forEach(tl => L.push(`\u274c **${tl.team}** ` + tl.groups.map((g, i) => `${g.srcs.join(" / ")}${i === 0 ? " start" : ""} ${g.names.join(", ")}`).join(", ")));
+  lc.notes.forEach(x => L.push(`\u26a0\ufe0f **${x.team}** ${x.text}${x.alt && x.alt.length ? " \u2192 possibly instead: " + x.alt.map(a => a.name + " " + a.pct + "%").join(", ") : ""}`));
+  ups.filter(x => !shown.has(norm(x.name))).forEach(x => L.push(`\u25b2 **${x.team}** ${x.name} ${x.text.split(": ")[1] || ""} \u2192 upside ${x.up.slice(0, 3).join(", ")}`));
+  let txt = L.join("\n"); if (txt.length > 1900) txt = txt.slice(0, 1890) + "\u2026"; return txt;
+}
+let _lineupPosting = false;
+async function lineupPostDiscord(auto) {
+  const hook = getLineupHook();
+  if (!hook) { if (!auto) lineupSetHook(); return; }
+  if (!_lineupViews().length) { if (!auto) showToast("Nothing to post yet \u2014 parse a lineup first"); return; }
+  if (_lineupPosting) return; _lineupPosting = true;
+  try {
+    if (!auto) { showToast("Syncing RotoWire injuries\u2026"); try { await _mSyncInjuriesQuiet(); } catch (e) {} }
+    let blob; try { blob = await _lineupPicBlob(); } catch (e) { console.error("[LINEUP discord]", e); if (!auto) showToast("Picture failed \u2014 " + (e && e.message || "see console")); return; }
+    if (!blob) return;
+    const base = hook.split("?")[0], today = localYMD(new Date());
+    let saved = null; try { saved = JSON.parse(_lsGet(LINEUP_MSG_KEY) || "null"); } catch (e) {}
+    const mk = (edit) => { const fd = new FormData(); fd.append("payload_json", JSON.stringify(edit ? { content: _lineupDiscordText(), attachments: [{ id: 0 }] } : { content: _lineupDiscordText() })); fd.append("files[0]", new File([blob], `nba-lineups-${today}.png`, { type: "image/png" })); return fd; };
+    let done = false;
+    if (saved && saved.hook === base && saved.day === today && saved.id) {
+      try { const r = await fetch(`${base}/messages/${saved.id}`, { method: "PATCH", body: mk(true) }); if (r.ok) { done = true; if (!auto) showToast("Discord lineup message updated \u2713"); } } catch (e) {}
+    }
+    if (!done) {
+      try {
+        const r = await fetch(base + "?wait=true", { method: "POST", body: mk(false) });
+        if (!r.ok) { const t = await r.text().catch(() => ""); throw new Error(`Discord said ${r.status} ${t.slice(0, 120)}`); }
+        const j = await r.json().catch(() => ({}));
+        try { localStorage.setItem(LINEUP_MSG_KEY, JSON.stringify({ hook: base, id: j.id || "", day: today })); } catch (e) {}
+        if (!auto) showToast("Lineup check posted to Discord \u2713");
+      } catch (e) { showToast("Discord post failed \u2014 " + (e && e.message || e)); }
+    }
+  } finally { _lineupPosting = false; }
+}
+let _lineupLiveT = null;
+function _lineupLiveKick() { if (!lineupLiveOn()) return; clearTimeout(_lineupLiveT); _lineupLiveT = setTimeout(() => { lineupPostDiscord(true); }, 2500); }
 function lineupConflictFor(player) { try { return lineupConflicts().byPlayer.get(resolveNorm(player || "")) || null; } catch (e) { return null; } }
 
 
@@ -25314,7 +25370,7 @@ function morningParseLineupsSrc(src, quiet) {
   const have = ["RG", "Tabs", "RW"].filter(k => rep.some(r => r.text.startsWith(k + ":") || r.text.startsWith(k + " ")));
   _lineupReport = _lineupReport.filter(r => !have.some(k => r.text.startsWith(k + ":") || r.text.startsWith(k + " "))).concat(rep);
   if (ta && rep.every(r => !r.bad)) ta.value = "";
-  if (!quiet) { showToast(rep.some(r => r.bad) ? `${src} lineups: problem — see the panel` : `${src} lineups imported`); renderMorning(); }
+  if (!quiet) { showToast(rep.some(r => r.bad) ? `${src} lineups: problem — see the panel` : `${src} lineups imported`); renderMorning(); _lineupLiveKick(); }
 }
 // Everything pasted in the three boxes, in one go (RG and Tabs first so RW's abbreviated names resolve).
 function morningParseLineupsAll() {
@@ -25322,7 +25378,7 @@ function morningParseLineupsAll() {
   ["RG", "Tabs", "RW"].forEach(src => { const ta = document.getElementById("morning-lineups-" + src.toLowerCase()); if (ta && ta.value.trim()) { any = true; morningParseLineupsSrc(src, true); } });
   if (!any) { showToast("Paste at least one lineups page first"); return; }
   showToast(_lineupReport.some(r => r.bad) ? "Lineups parsed — check the amber lines" : "All lineups parsed");
-  renderMorning();
+  renderMorning(); _lineupLiveKick();
 }
 function morningClearLineupsAll() { try { localStorage.removeItem(RG_LINEUPS_KEY); localStorage.removeItem(TABS_LINEUPS_KEY); localStorage.removeItem(LINEUPS_STORAGE_KEY); localStorage.removeItem(RW_LINEUPS_RAW_KEY); } catch (e) {} _lineupReport = []; showToast("All lineups cleared"); renderMorning(); }
 // Several pages pasted into one box (kept for convenience): each is found by its heading.
@@ -25335,7 +25391,7 @@ function morningImportLineups() {
   _lineupReport = rep;
   if (ta && rep.every(r => !r.bad)) ta.value = "";
   showToast(rep.some(r => r.bad) ? "Lineups imported with problems — see the panel" : "Lineups imported");
-  renderMorning();
+  renderMorning(); _lineupLiveKick();
 }
 // ── Pasted-board store: { srcKey: [ {stat, player, ...} ] } ─────────────────
 let morningPs = { stok: [], roto: [], saber: [], rotowire: [] };
@@ -25824,7 +25880,7 @@ function lineupPanelHtml(card, lc) {
         <span style="font-size:11px;font-weight:800;color:${state.c};border:1px solid ${state.c}66;border-radius:10px;padding:1px 9px;">${state.t}</span>
         ${lc.noOpinion.length ? `<span style="font-size:10px;color:#6b7380;">only one source: ${esc(lc.noOpinion.join(", "))}</span>` : ""}
       </div>
-      <div style="display:flex;gap:6px;flex-wrap:wrap;"><button onclick="lineupSharePic()" title="Save a share picture of this lineup check" style="background:transparent;border:1px solid #7dd3fc;color:#7dd3fc;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:800;cursor:pointer;">\ud83d\udcf8 SHARE PIC</button><button onclick="morningParseLineupsAll()" style="background:#7c3aed;border:none;color:#fff;border-radius:6px;padding:7px 18px;font-size:12px;font-weight:800;cursor:pointer;">PARSE ALL</button>${(rw || rg || tb) ? `<button onclick="morningClearLineupsAll()" style="background:transparent;border:1px solid #f8717166;color:#f87171;border-radius:6px;padding:7px 12px;font-size:11px;font-weight:800;cursor:pointer;">CLEAR ALL</button>` : ""}</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;"><button onclick="lineupSharePic()" title="Save a share picture of this lineup check" style="background:transparent;border:1px solid #7dd3fc;color:#7dd3fc;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:800;cursor:pointer;">\ud83d\udcf8 SHARE PIC</button><button onclick="lineupPostDiscord()" title="Post the lineup check to Discord (edits the same message on every later press)" style="background:#5865f222;border:1px solid #5865f2;color:#a5b4fc;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:800;cursor:pointer;">\ud83d\udce3 DISCORD</button><button onclick="lineupToggleLive()" title="LIVE: update the Discord message automatically after every lineup parse / REFRESH RW" style="background:${lineupLiveOn() ? "#22c55e22" : "transparent"};border:1px solid ${lineupLiveOn() ? "#22c55e" : "#3a4150"};color:${lineupLiveOn() ? "#4ade80" : "#a8b0bb"};border-radius:6px;padding:7px 10px;font-size:11px;font-weight:800;cursor:pointer;">LIVE ${lineupLiveOn() ? "ON" : "OFF"}</button><button onclick="lineupSetHook()" title="Lineup Discord webhook" style="background:transparent;border:1px solid #3a4150;color:#a8b0bb;border-radius:6px;padding:7px 9px;font-size:12px;cursor:pointer;">\u2699</button><button onclick="morningParseLineupsAll()" style="background:#7c3aed;border:none;color:#fff;border-radius:6px;padding:7px 18px;font-size:12px;font-weight:800;cursor:pointer;">PARSE ALL</button>${(rw || rg || tb) ? `<button onclick="morningClearLineupsAll()" style="background:transparent;border:1px solid #f8717166;color:#f87171;border-radius:6px;padding:7px 12px;font-size:11px;font-weight:800;cursor:pointer;">CLEAR ALL</button>` : ""}</div>
     </div>
     <div style="font-size:10px;color:#8b93a0;margin-top:4px;line-height:1.5;">Paste each page in its box, then PARSE ALL (or parse one alone). A player one source starts that another doesn’t is blocked on both sides in the funnel. A source that hasn’t posted a team is no opinion.</div>
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:8px;margin-top:8px;">
