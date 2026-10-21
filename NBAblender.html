@@ -1294,7 +1294,7 @@ function buildSlots() {
         </label>
       </div>
     </div>`;
-  }).join("") + _uaIdsSlotHtml();
+  }).join("") + _tabsPasteHtml() + _uaIdsSlotHtml();
   updateMergeBtn();
 }
 function loadFile(idx, input, onDone) {
@@ -2129,6 +2129,80 @@ function conFromSourceKeys(r, allowedKeys) {
   return { con: out, sourcesFound: picked.length };
 }
 
+// ── TABS PASTE (solo tool, Upload tab) ───────────────────────────────────────────────────────────────────────────────
+// Paste the Tabs "NBA Projections" page (DraftKings or FanDuel view). Each player block is: name (+START / Q / OUT), game time,
+// "POS TEAM OPP", minutes, salary, boost, then FPTS, value, floor, ceiling, boom%, own% and PTS REB AST 3PM STL+BLK DD%.
+// Parsing loads the TABS source (same as uploading the CSV) and downloads "TABS UA" for Unabated in one go.
+function parseTabsProjectionsPage(text) {
+  const lines = String(text || "").split(/\r?\n/).map(l => l.trim()).filter(l => l !== "");
+  const timeRe = /^\d{1,2}:\d{2}\s*[ap]m\s*ET$/i, statsRe = /^-?[\d.]+\s+[\d.]+x\s+/i;
+  const out = [];
+  for (let i = 1; i < lines.length; i++) {
+    if (!timeRe.test(lines[i])) continue;
+    const nameRaw = lines[i - 1];
+    if (!nameRaw || timeRe.test(nameRaw)) continue;
+    const status = (nameRaw.match(/([a-z.])((?:START|OUT|GTD|DTD|DOUBT|PROB|Q|D|P)+)$/) || [])[2] || "";
+    const name = nameRaw.replace(/([a-z.])(?:START|OUT|GTD|DTD|DOUBT|PROB|Q|D|P)+$/, "$1").trim();
+    let pos = "", team = "", opp = "", min = null, stats = null;
+    for (let j = i + 1; j < Math.min(lines.length, i + 14) && !timeRe.test(lines[j]); j++) {
+      const L = lines[j];
+      const pm = L.match(/^([A-Z]{1,2}(?:\/[A-Z]{1,2})*)\s+([A-Z]{2,3})\s+([A-Z]{2,3})(?:\s|$)/);
+      if (pm && !team) { pos = pm[1]; team = pm[2]; opp = pm[3]; continue; }
+      if (min == null && /^\d+(\.\d+)?$/.test(L)) { min = parseFloat(L); continue; }
+      if (statsRe.test(L)) { stats = L.split(/\s+/); break; }
+    }
+    if (!name || !stats || stats.length < 12 || !team) continue;          // OUT players carry no numbers
+    const n = k => parseFloat(stats[k]);
+    const pts = n(6), reb = n(7), ast = n(8), threepm = n(9);
+    if ([pts, reb, ast, threepm].some(v => isNaN(v))) continue;
+    out.push({ rawName: name, norm: resolveNorm(name), team: normTeamAbbr(team) || team, pos, opp, status, min, fpts: n(0), pts, reb, ast, threepm, pra: pts + reb + ast, dd: stats[11] });
+  }
+  return out;
+}
+let _tabsPasteInfo = "";
+// Shared finish: load the players as the TABS source, blend, and download "TABS UA".
+function _tabsLoad(players, label) {
+  const idx = SOURCES.findIndex(s => s.key === "tabs");
+  slots[idx] = { label, players };
+  setLog(`TABS loaded: ${players.length} players`);
+  runMerge();
+  _tabsPasteInfo = `${players.length} players · loaded as TABS · downloaded "TABS UA ${_psDate()}.csv"`;
+  buildSlots(); updateBadges();
+  writeConsensusCsv(["tabs"], `TABS UA ${_psDate()}.csv`, "TABS UA");
+}
+function tabsPasteImport() {
+  const ta = document.getElementById("tabs-paste");
+  const text = ta ? ta.value : "";
+  if (!text.trim()) { showToast("Paste the Tabs NBA Projections page first"); return; }
+  const players = parseTabsProjectionsPage(text);
+  if (!players.length) { _tabsPasteInfo = "Couldn't find any players in that paste — copy the whole Tabs Projections page (DraftKings or FanDuel view)."; buildSlots(); showToast("Tabs paste: nothing found"); return; }
+  _tabsLoad(players.map(p => ({ rawName: p.rawName, norm: p.norm, team: p.team, pos: p.pos, pts: p.pts, reb: p.reb, ast: p.ast, threepm: p.threepm, pra: p.pra, min: p.min })), "Tabs page paste");
+  if (ta) ta.value = "";
+}
+// Or upload the Tabs CSV download (or a saved copy of the page text) — same result.
+function tabsFileImport(input) {
+  const f = input && input.files && input.files[0]; if (!f) return;
+  const rd = new FileReader();
+  rd.onload = () => {
+    const text = String(rd.result || "");
+    let players = [];
+    if (/^﻿?\s*"?Player"?\s*,/i.test(text)) players = parseSource(text);       // the CSV export
+    else players = parseTabsProjectionsPage(text).map(p => ({ rawName: p.rawName, norm: p.norm, team: p.team, pos: p.pos, pts: p.pts, reb: p.reb, ast: p.ast, threepm: p.threepm, pra: p.pra, min: p.min }));
+    if (!players.length) { _tabsPasteInfo = "Couldn't read players from that file."; buildSlots(); showToast("Tabs upload: nothing found"); return; }
+    _tabsLoad(players, f.name);
+  };
+  rd.readAsText(f); input.value = "";
+}
+function _tabsPasteHtml() {
+  return `<div class="slot" style="display:block;border-color:#f59e0b55;">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:6px;">
+      <div><span style="color:#f59e0b;font-weight:800;font-size:13px;letter-spacing:.8px;">TABS PASTE</span> <span style="color:#8b93a0;font-size:11px;">solo tool \u2014 paste the Tabs NBA Projections page or upload the Tabs CSV: it loads TABS and downloads the UA file</span></div>
+      <div style="display:flex;gap:6px;align-items:center;"><label class="upload-label" style="background:#0c0d10;border:1px solid #f59e0b;color:#f59e0b;">UPLOAD + EXPORT TABS UA<input type="file" accept=".csv,.txt,text/*" style="display:none;" onchange="tabsFileImport(this)"/></label><button onclick="tabsPasteImport()" style="background:#f59e0b;border:none;color:#050507;border-radius:6px;padding:7px 16px;font-size:12px;font-weight:800;cursor:pointer;">PARSE PASTE + EXPORT TABS UA</button></div>
+    </div>
+    <textarea id="tabs-paste" placeholder="Paste the Tabs NBA Projections page here\u2026" spellcheck="false" style="width:100%;height:56px;background:#050507;border:1px solid #1a1d22;border-radius:6px;padding:8px 10px;color:#e2e8f0;font-family:'JetBrains Mono','Menlo',monospace;font-size:10px;outline:none;resize:vertical;box-sizing:border-box;"></textarea>
+    ${_tabsPasteInfo ? `<div style="font-size:11px;color:${/^Couldn/.test(_tabsPasteInfo) ? "#fbbf24" : "#4ade80"};margin-top:6px;">${_mEsc(_tabsPasteInfo)}</div>` : ""}
+  </div>`;
+}
 // One source's own projections in the UA upload format (Upload tab: EXPORT UA on each source).
 function doExportUaSource(key) {
   const i = SOURCES.findIndex(x => x.key === key);
