@@ -24887,7 +24887,9 @@ function morningClearRgLineups() { try { localStorage.removeItem(RG_LINEUPS_KEY)
 // and a "Lineup news" list ("out A, B" / "GTD Name injury Q: played x/y NN%").
 const TABS_LINEUPS_KEY = "nba_lineups_tabs_v1";
 function parseTabsLineups(text) {
-  const lines = String(text || "").split("\n").map(l => l.trim()).filter(Boolean);
+  let txt = String(text || "");
+  const alls = txt.search(/^\s*All lineups\s*$/m); if (alls >= 0) txt = txt.slice(alls);   // skip the "Starting spots to watch" summary above the real list
+  const lines = txt.split("\n").map(l => l.trim()).filter(Boolean);
   const teams = {}, players = {};
   const known = new Set();
   try { NBA_TEMPLATE.forEach(t => known.add(resolveNorm(t.name))); } catch (e) {}
@@ -24902,13 +24904,20 @@ function parseTabsLineups(text) {
     if (w.length < 2) return null;
     return /^(jr\.?|sr\.?|ii|iii|iv)$/i.test(w[2] || "") ? w.slice(0, 3).join(" ") : w.slice(0, 2).join(" ");
   };
-  let game = null, team = null, pos = null, news = false, newsKind = null, lastStarter = null;
+  let game = null, team = null, pos = null, news = false, newsKind = null, lastStarter = null, teamIdx = 0;
   const POSS = new Set(["PG", "SG", "SF", "PF", "C"]);
   for (let idx = 0; idx < lines.length; idx++) {
     const line = lines[idx];
-    const g = line.match(/^([A-Z]{2,3})\s+(?:at|@|vs\.?)\s+([A-Z]{2,3})(?:\s.*)?$/);
-    if (g) { game = [normTeamAbbr(g[1]) || g[1], normTeamAbbr(g[2]) || g[2]]; team = null; news = false; continue; }
+    const g = line.match(/^([A-Z]{2,3})\s+(?:at|@|vs\.?)\s+([A-Z]{2,3})$/);
+    if (g) { game = [normTeamAbbr(g[1]) || g[1], normTeamAbbr(g[2]) || g[2]]; team = null; news = false; teamIdx = 0; continue; }
     if (!game) continue;
+    // Newer Tabs layout: a team NICKNAME ("Bucks") followed by "· Projected|Confirmed" instead of a 3-letter code.
+    if (/^[A-Z][A-Za-z.' ]{2,20}$/.test(line) && !POSS.has(line) && /^(?:·|•|◷)?\s*(?:·\s*)?(Projected|Confirmed)\b/i.test(lines[idx + 1] || "") || (/^[A-Z][A-Za-z.' ]{2,20}$/.test(line) && lines[idx + 1] === "·" && /^(Projected|Confirmed)/i.test(lines[idx + 2] || ""))) {
+      const nick = line.toLowerCase();
+      const byName = game.find(c => Object.entries(TEAM_NAME_ALIASES).some(([n, ab]) => (normTeamAbbr(ab) || ab) === c && n.toLowerCase().endsWith(nick)));
+      team = byName || game[Math.min(teamIdx, 1)]; teamIdx++;
+      teams[team] = teams[team] || { starters: [], q: {}, out: [], gtd: [] }; news = false; pos = null; continue;
+    }
     if (/^[A-Z]{2,3}$/.test(line) && !POSS.has(line) && game.includes(normTeamAbbr(line) || line)) { team = normTeamAbbr(line) || line; teams[team] = teams[team] || { starters: [], q: {}, out: [], gtd: [] }; news = false; pos = null; continue; }
     if (!team) continue;
     if (/^Lineup news$/i.test(line)) { news = true; newsKind = null; pos = null; continue; }
@@ -24924,7 +24933,7 @@ function parseTabsLineups(text) {
       if (k && teams[team].starters.length < 5) { teams[team].starters.push(k); players[k] = { name: line, team, role: "starter", pos }; lastStarter = k; }
       pos = null; continue;
     }
-    if (line === "?" && lastStarter) { teams[team].q[lastStarter] = true; continue; }
+    if ((line === "?" || /^Uncertain$/i.test(line)) && lastStarter) { teams[team].q[lastStarter] = true; continue; }
   }
   return { at: Date.now(), teams, players };
 }
@@ -25128,7 +25137,7 @@ function splitLineupPaste(text) {
   if ((m = t.match(/NBA STARTING LINEUPS/))) marks.push({ src: "RG", at: m.index });
   else if ((m = t.match(/lineup not released|Max Salary:/))) marks.push({ src: "RG", at: m.index });
   if ((m = t.match(/^\s*Tabs NBA/m))) marks.push({ src: "Tabs", at: m.index });
-  else if ((m = t.match(/^[A-Z]{2,3} at [A-Z]{2,3}\s*$/m))) marks.push({ src: "Tabs", at: m.index });
+  else if ((m = t.match(/^[A-Z]{2,3} (?:at|@|vs\.?) [A-Z]{2,3}\s*$/m))) marks.push({ src: "Tabs", at: m.index });
   if ((m = t.match(/NBA Daily Starting Lineups|Starting lineups for/))) marks.push({ src: "RW", at: m.index });
   else if ((m = t.match(/Expected Lineup|Confirmed Lineup|MAY NOT PLAY/))) {
     // no page heading in the copy: start at the game time line just above the first lineup so game 1 isn't cut off
@@ -25137,7 +25146,9 @@ function splitLineupPaste(text) {
   }
   marks.sort((a, b) => a.at - b.at);
   const out = {};
-  marks.forEach((mk, i) => { out[mk.src] = t.slice(mk.at, i + 1 < marks.length ? marks[i + 1].at : t.length); });
+  // Each page's own footer (SEO text, nav, "TABS NBA 2026") is cut off so only the lineups themselves are parsed.
+  const ENDS = { RG: /\n\s*NBA starting lineups are some of the most/, RW: /\n\s*You may also be interested in/, Tabs: /\n\s*TABS NBA \d{4}\s*$/m };
+  marks.forEach((mk, i) => { let seg = t.slice(mk.at, i + 1 < marks.length ? marks[i + 1].at : t.length); const e = seg.search(ENDS[mk.src]); if (e > 0) seg = seg.slice(0, e); out[mk.src] = seg; });
   return out;
 }
 let _lineupReport = [];
@@ -25151,7 +25162,7 @@ const RW_LINEUPS_RAW_KEY = "nba_rw_lineups_raw";
 function _importLineupSrc(src, text) {
   const rep = [];
   const sizes = o => Object.values(o.teams).map(t => t.starters.length);
-  const games = src === "Tabs" ? (String(text).match(/^\s*[A-Z]{2,3}\s+(?:at|@|vs\.?)\s+[A-Z]{2,3}\b.*$/gm) || []).length : (String(text).match(/^\s*\*?\s*\d{1,2}:\d{2}\s*[AP]M/gim) || []).length;
+  const games = src === "Tabs" ? new Set((String(text).replace(/^[\s\S]*?^\s*All lineups\s*$/m, "").match(/^\s*[A-Z]{2,3}\s+(?:at|@|vs\.?)\s+[A-Z]{2,3}\s*$/gm) || []).map(x => x.trim())).size : (String(text).match(/^\s*\*?\s*\d{1,2}:\d{2}\s*[AP]M/gim) || []).length;
   const okAll = o => Object.keys(o.teams).length > 0 && sizes(o).every(n => n === 5) && (!games || Object.keys(o.teams).length === games * 2);
   const fail = (o, what) => rep.push({ bad: true, text: `${src} NOT saved: ${Object.keys(o.teams).length} teams read${games ? ` (the page has ${games} games = ${games * 2} teams)` : ""}, starters per team ${sizes(o).join("/") || "none"}${o.dropped && o.dropped.length ? " \u00b7 skipped: " + o.dropped.join(", ") : ""}${src === "Tabs" && !Object.keys(o.teams).length ? " \u00b7 no \"BOS at DET\" game headers found" + (games ? "" : " in the paste") : ""}${Object.keys(o.teams).length && games && Object.keys(o.teams).length !== games * 2 ? " \u00b7 missing: " + _missingTeams(o, text, src) : ""} — re-copy ${what}` });
   if (src === "RG") { const d = parseRgLineups(text); if (okAll(d)) { try { localStorage.setItem(RG_LINEUPS_KEY, JSON.stringify(d)); } catch (e) {} rep.push({ text: `RG: ${Object.keys(d.teams).length} teams, 5 starters each` }); } else fail(d, "the whole RotoGrinders lineups page"); }
