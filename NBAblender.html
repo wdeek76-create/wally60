@@ -2204,6 +2204,28 @@ function _tabsPasteHtml() {
     ${_tabsPasteInfo ? `<div style="font-size:11px;color:${/^Couldn/.test(_tabsPasteInfo) ? "#fbbf24" : "#4ade80"};margin-top:6px;">${_mEsc(_tabsPasteInfo)}</div>` : ""}
   </div>`;
 }
+// Builds the UA upload exactly the way EXPORT CONSENSUS does (the one UA accepts): every row of the UA player template with UA's own id,
+// name, position (G / F / C / G-F / F-C) and team code, and the projection columns filled for the players valFor(r) returns values for.
+// Players with no values stay at 0.00 (same as the consensus export). → { csv, exported, unmatched:[blend names with values but no UA id] }
+function _uaBuildCsv(valFor) {
+  const header = "id,name,first_name,last_name,position,team,three_pointers_made,assists,blocks,double_double,points,rebounds,steals,triple_double,turnovers,fd_points,dk_points";
+  const byNorm = {}; (merged || []).forEach(r => { [r.norm, resolveNorm(r.rawName), norm(r.rawName)].forEach(k => { if (k && !byNorm[k]) byNorm[k] = r; }); });
+  const cache = new Map(), get = r => { if (!cache.has(r)) cache.set(r, valFor(r)); return cache.get(r); };
+  const num = v => (v != null && !isNaN(v)) ? Number(v).toFixed(2) : "0.00";
+  const tmpl = _uaTemplate(), tTeams = new Set(tmpl.map(t => t.team).filter(Boolean));
+  const used = new Set(); let exported = 0;
+  const rows = tmpl.map(t => {
+    const r = byNorm[norm(t.name)] || byNorm[resolveNorm(t.name)];
+    const v = r ? get(r) : null;
+    if (v) { exported++; used.add(r); }
+    const x = v || {};
+    const team = (r && r.team && tTeams.has(r.team)) ? r.team : t.team;
+    return [t.id, t.name, t.first_name, t.last_name, t.position, team, num(x.tpm), num(x.ast), "0.00", "0.00", num(x.pts), num(x.reb), "0.00", "0.00", "0.00", "0.00", "0.00"].map(q => `"${q}"`).join(",");
+  });
+  const tKeys = new Set(); tmpl.forEach(t => { tKeys.add(norm(t.name)); tKeys.add(resolveNorm(t.name)); });
+  const unmatched = (merged || []).filter(r => !used.has(r) && !tKeys.has(norm(r.rawName)) && !tKeys.has(resolveNorm(r.rawName)) && !tKeys.has(r.norm) && get(r)).map(r => r.rawName);   // (the blend can hold the same player twice under Ron / Ronald — not a missing id)
+  return { csv: [header, ...rows].join("\n"), exported, unmatched };
+}
 // One source's own projections in the UA upload format (Upload tab: EXPORT UA on each source).
 function doExportUaSource(key) {
   const i = SOURCES.findIndex(x => x.key === key);
@@ -2214,43 +2236,10 @@ function doExportUaSource(key) {
 // Shared writer for consensus-style CSVs (RG+RW core or RG+RW+Extras).
 function writeConsensusCsv(allowedKeys, filename, label) {
   if (!merged) return;
-  // Export ALL players, not just those filtered by the current stat tab.
-  // Each row contains every stat (3PM, AST, PTS, REB) — the CSV is complete
-  // regardless of which stat the user happened to be viewing.
-  const searchLoose = looseName(document.getElementById("search-box").value);
-  const rows = merged
-    .filter(r => !searchLoose || looseName(r.rawName).includes(searchLoose))
-    .sort((a, b) => a.rawName.localeCompare(b.rawName));
-  if (!rows.length) { showToast("No players to export"); return; }
-  const header = "id,name,first_name,last_name,position,team,three_pointers_made,assists,blocks,double_double,points,rebounds,steals,triple_double,turnovers,fd_points,dk_points";
-  const tmplByNorm = {};
-  _uaTemplate().forEach(t => { tmplByNorm[norm(t.name)] = t; });
-  let exported = 0;
-  const dataRows = rows.map(r => {
-    const { con, sourcesFound } = conFromSourceKeys(r, allowedKeys);
-    if (sourcesFound === 0) return null; // skip rows where none of the allowed sources had this player
-    exported++;
-    const t = tmplByNorm[r.norm] || {};
-    const first = t.first_name || (r.rawName.split(" ")[0] || "");
-    const last  = t.last_name  || (r.rawName.split(" ").slice(1).join(" ") || "");
-    // Numeric stat helper: ALWAYS emit a number (0 if missing). Downstream
-    // importers like Unabated do per-column type inference on early rows, and
-    // a leading blank can trip the parser into treating the whole column as
-    // text — silently dropping the projections. Writing "0.00" everywhere
-    // keeps every column numeric end-to-end.
-    const num = (v) => (v != null && !isNaN(v)) ? Number(v).toFixed(2) : "0.00";
-    return [
-      t.id || "", r.rawName, first, last, r.pos || t.position || "", r.team || t.team || "",
-      num(con.threepm),
-      num(con.ast),
-      "0.00", "0.00",           // blocks, double_double (not projected — stable 0)
-      num(con.pts),
-      num(con.reb),
-      "0.00", "0.00", "0.00",   // steals, triple_double, turnovers (not projected)
-      "0.00", "0.00",           // fd_points, dk_points (not projected)
-    ].map(v=>`"${v}"`).join(",");
-  }).filter(Boolean);
-  const csv = [header,...dataRows].join("\n");
+  const built = _uaBuildCsv(r => { const { con, sourcesFound } = conFromSourceKeys(r, allowedKeys); return sourcesFound ? { tpm: con.threepm, ast: con.ast, pts: con.pts, reb: con.reb } : null; });
+  const exported = built.exported;
+  if (!exported) { showToast("No players to export"); return; }
+  const csv = built.csv;
   // UTF-8 BOM so importers correctly decode accented characters (Salaün, Jocytė, etc.).
   const blob = new Blob(["\uFEFF" + csv],{type:"text/csv;charset=utf-8"});
   const url = URL.createObjectURL(blob);
@@ -2258,8 +2247,8 @@ function writeConsensusCsv(allowedKeys, filename, label) {
   a.href=url; a.download=filename; a.style.display="none";
   document.body.appendChild(a); a.click();
   setTimeout(()=>{document.body.removeChild(a);URL.revokeObjectURL(url);},100);
-  const noId = dataRows.filter(l => String(l).startsWith('"",')).length;
-  showToast(`Exported ${exported} ${label} rows` + (noId ? ` \u00b7 \u26a0 ${noId} have no UA id (UA will skip them) \u2014 load a UA player list on the Upload tab` : ""));
+  const um = built.unmatched;
+  showToast(`Exported ${label}: ${exported} players with projections (full UA player list)` + (um.length ? ` \u00b7 \u26a0 ${um.length} not in the UA list, left out: ${um.slice(0, 4).join(", ")}${um.length > 4 ? "\u2026" : ""}` : ""));
 }
 
 function doExportConsensus() {
@@ -2315,42 +2304,18 @@ function doExportMatrix() {
     return (r.con && r.con[stat] != null) ? r.con[stat] : avg;
   };
 
-  const searchLoose = looseName(document.getElementById("search-box").value);
-  const rows = merged
-    .filter(r => !searchLoose || looseName(r.rawName).includes(searchLoose))
-    .sort((a, b) => a.rawName.localeCompare(b.rawName));
-  if (!rows.length) { showToast("No players to export"); return; }
-  const header = "id,name,first_name,last_name,position,team,three_pointers_made,assists,blocks,double_double,points,rebounds,steals,triple_double,turnovers,fd_points,dk_points";
-  const tmplByNorm = {};
-  _uaTemplate().forEach(t => { tmplByNorm[norm(t.name)] = t; });
-  let exported = 0, edgeCount = 0;
-  const dataRows = rows.map(r => {
-    // Gate each stat on its own threshold; non-passing stats become null → 0.00.
-    const tpm = tightVal(r, "threepm");
-    const ast = tightVal(r, "ast");
-    const pts = tightVal(r, "pts");
-    const reb = tightVal(r, "reb");
+  let edgeCount = 0;
+  const built = _uaBuildCsv(r => {
+    // Gate each stat on its own threshold; non-passing stats become 0.00.
+    const tpm = tightVal(r, "threepm"), ast = tightVal(r, "ast"), pts = tightVal(r, "pts"), reb = tightVal(r, "reb");
     const passed = [tpm, ast, pts, reb].filter(v => v != null).length;
-    if (passed === 0) return null; // no agreeing edges for this player — skip row
+    if (!passed) return null;                  // no agreeing edges for this player
     edgeCount += passed;
-    exported++;
-    const t = tmplByNorm[r.norm] || {};
-    const first = t.first_name || (r.rawName.split(" ")[0] || "");
-    const last  = t.last_name  || (r.rawName.split(" ").slice(1).join(" ") || "");
-    const num = (v) => (v != null && !isNaN(v)) ? Number(v).toFixed(2) : "0.00";
-    return [
-      t.id || "", r.rawName, first, last, r.pos || t.position || "", r.team || t.team || "",
-      num(tpm),
-      num(ast),
-      "0.00", "0.00",           // blocks, double_double
-      num(pts),
-      num(reb),
-      "0.00", "0.00", "0.00",   // steals, triple_double, turnovers
-      "0.00", "0.00",           // fd_points, dk_points
-    ].map(v => `"${v}"`).join(",");
-  }).filter(Boolean);
+    return { tpm, ast, pts, reb };
+  });
+  const exported = built.exported;
   if (!exported) { showToast("No props passed the per-stat tightness"); return; }
-  const csv = [header, ...dataRows].join("\n");
+  const csv = built.csv;
   // UTF-8 BOM so importers correctly decode accented characters (Salaün, etc.).
   const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8" });
   const url = URL.createObjectURL(blob);
@@ -2386,40 +2351,16 @@ function doExportMatrixPRA() {
     return spreadPct <= thresh;
   };
 
-  const searchLoose = looseName(document.getElementById("search-box").value);
-  const rows = merged
-    .filter(r => !searchLoose || looseName(r.rawName).includes(searchLoose))
-    .sort((a, b) => a.rawName.localeCompare(b.rawName));
-  if (!rows.length) { showToast("No players to export"); return; }
-  const header = "id,name,first_name,last_name,position,team,three_pointers_made,assists,blocks,double_double,points,rebounds,steals,triple_double,turnovers,fd_points,dk_points";
-  const tmplByNorm = {};
-  _uaTemplate().forEach(t => { tmplByNorm[norm(t.name)] = t; });
-  let exported = 0;
-  const dataRows = rows.map(r => {
+  const built = _uaBuildCsv(r => {
     if (!praAgrees(r)) return null;
     // Carry the blended PTS/REB/AST through so PRA reconstructs (P+R+A) on upload.
-    const pts = (r.con && r.con.pts != null) ? r.con.pts : null;
-    const reb = (r.con && r.con.reb != null) ? r.con.reb : null;
-    const ast = (r.con && r.con.ast != null) ? r.con.ast : null;
-    if (pts == null || reb == null || ast == null) return null; // need all 3 for a valid PRA
-    exported++;
-    const t = tmplByNorm[r.norm] || {};
-    const first = t.first_name || (r.rawName.split(" ")[0] || "");
-    const last  = t.last_name  || (r.rawName.split(" ").slice(1).join(" ") || "");
-    const num = (v) => (v != null && !isNaN(v)) ? Number(v).toFixed(2) : "0.00";
-    return [
-      t.id || "", r.rawName, first, last, r.pos || t.position || "", r.team || t.team || "",
-      "0.00",                   // three_pointers_made (not part of PRA)
-      num(ast),
-      "0.00", "0.00",           // blocks, double_double
-      num(pts),
-      num(reb),
-      "0.00", "0.00", "0.00",   // steals, triple_double, turnovers
-      "0.00", "0.00",           // fd_points, dk_points
-    ].map(v => `"${v}"`).join(",");
-  }).filter(Boolean);
+    const pts = (r.con && r.con.pts != null) ? r.con.pts : null, reb = (r.con && r.con.reb != null) ? r.con.reb : null, ast = (r.con && r.con.ast != null) ? r.con.ast : null;
+    if (pts == null || reb == null || ast == null) return null;   // need all 3 for a valid PRA
+    return { tpm: 0, ast, pts, reb };
+  });
+  const exported = built.exported;
   if (!exported) { showToast("No players passed PRA tightness"); return; }
-  const csv = [header, ...dataRows].join("\n");
+  const csv = built.csv;
   const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
