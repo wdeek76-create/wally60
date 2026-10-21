@@ -87,7 +87,8 @@ button{cursor:pointer;border:none;background:none;color:inherit}
 .ib{width:30px;height:30px;border-radius:50%;border:1px solid var(--line2);background:var(--bg2);display:flex;align-items:center;justify-content:center;color:var(--text);font-size:13px}
 .mxask{position:fixed;inset:0;z-index:120;background:rgba(0,0,0,.55);display:flex;align-items:flex-start;justify-content:center;padding:70px 16px 0}
 .mxbox{width:100%;max-width:380px;background:var(--bg2);border:1px solid var(--line2);border-radius:16px;padding:14px;display:grid;gap:10px}
-.mxh{font-weight:800;font-size:15px}.mxsub{font-size:12px;opacity:.75;margin-top:-6px}
+.mxh{font-weight:800;font-size:15px;display:flex;align-items:center;justify-content:space-between}
+.mxdc{height:28px;padding:0 10px;border-radius:999px;border:1px solid var(--line2);background:var(--bg);color:var(--text);font-size:11px;font-weight:800;cursor:pointer}.mxdc.on{border-color:rgba(34,197,94,.6);color:#22c55e}.mxsub{font-size:12px;opacity:.75;margin-top:-6px}
 .mxl{display:grid;gap:5px;font-size:11px;font-weight:700}
 .mxl input{height:40px;border-radius:10px;border:1px solid var(--line2);background:var(--bg);color:var(--text);font-size:17px;font-weight:800;padding:0 12px;width:100%;box-sizing:border-box}
 .mxprow{display:flex;gap:8px}.mxsign{display:flex;border:1px solid var(--line2);border-radius:10px;overflow:hidden;flex:0 0 auto}
@@ -1124,6 +1125,34 @@ const MATRIX_MIN_EV = 5;
 const MATRIX_FIRST = ['pinnacle','bet105','props builder'];
 const MATRIX_ALIAS = { fd:'fanduel', fanduel:'fanduel', dk:'draftkings', draftkings:'draftkings', pin:'pinnacle', pinny:'pinnacle', pinnacle:'pinnacle', b105:'bet105', bet105:'bet105', pb:'props builder', pbuilder:'props builder', onyx:'onyx odds', cs:'courtside', courtside:'courtside', br:'betrivers', betrivers:'betrivers', rivers:'betrivers', mgm:'betmgm', betmgm:'betmgm', czr:'caesars', caesars:'caesars', hr:'hard rock bet', hardrock:'hard rock bet', kambi:'kambi', fliff:'fliff', bol:'betonline', betonline:'betonline' };
 const matrixBookOf = o => { const k=String(o.sportsbook||'').toLowerCase(); return k==='hard rock'||k==='hardrock' ? 'hard rock bet' : k; };
+// Matrix → Discord: its own webhook (and optional role tag), set from the Matrix sheet.
+let matrixHook = LS.get('pm_matrix_hook',''), matrixRole = LS.get('pm_matrix_role','');
+async function matrixPost(body){
+  if(!matrixHook) return false;
+  const send=async b=>{ const r=await fetch(matrixHook,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}); return r.ok?'':`${r.status} ${(await r.text().catch(()=>'')).slice(0,120)}`; };
+  try{
+    let err=await send(body); if(!err) return true;
+    for(let i=0;i<3 && err.startsWith('429');i++){ const ra=Number((err.match(/"retry_after":\s*([\d.]+)/)||[])[1]); await new Promise(r=>setTimeout(r,(ra>0?ra*1000:2000)+250)); err=await send(body); if(!err) return true; }
+    toast('Discord post failed: '+err.slice(0,70)); return false;
+  }catch(e){ toast('Discord post failed: '+e.message); return false; }
+}
+function matrixDiscord(m){
+  const role=/^\d{15,}$/.test(matrixRole)?matrixRole:'';
+  return matrixPost({ username:'Matrix', content: role?`<@&${role}>`:undefined, allowed_mentions: role?{roles:[role]}:{parse:[]},
+    embeds:[{ title:`◈ MATRIX ${m.edge}% - ${m.head}`.slice(0,256), color:0x22c55e,
+      description:[`Edge **${m.edge}%** at ${bookLabel(m.refKey)} **${m.amt(m.ref.price)}** · Fair **${m.amt(m.fairAm)}** · Play to **${m.amt(m.playTo)}**`,
+        m.ok.length?`**Books:** ${m.ok.join(' · ')}`:null, m.ex.length?`**Exchanges:** ${m.ex.join(' · ')}`:null].filter(Boolean).join('\n'),
+      footer:{ text:`${SPORTS[sportKey]?.label||''} · Matrix` }, timestamp:new Date().toISOString() }] });
+}
+async function matrixDiscordSetup(){
+  const v=prompt('Matrix Discord webhook URL (Server Settings → Integrations → Webhooks → New Webhook → Copy Webhook URL). Leave empty to turn it off.', matrixHook);
+  if(v==null) return;
+  matrixHook=v.trim(); LS.set('pm_matrix_hook', matrixHook);
+  if(!matrixHook){ toast('Matrix Discord off'); return; }
+  const r=prompt('Role to tag on Matrix posts: paste its Role ID (leave empty for no tag).', matrixRole);
+  if(r!=null){ matrixRole=(String(r).match(/\d{15,}/)||[''])[0]; LS.set('pm_matrix_role', matrixRole); }
+  const ok=await matrixPost({ username:'Matrix', content:'✅ Matrix posts connected.' }); toast(ok?'Matrix Discord connected':'Discord test failed — check the URL');
+}
 // Matrix input sheet: edge % plus the price you got, with a big −/+ toggle (phone keypads have no
 // minus key). Resolves to the same text the old prompt took ("10 -141"), or null on cancel.
 function matrixAsk(head, defKey, defPrice){
@@ -1132,7 +1161,7 @@ function matrixAsk(head, defKey, defPrice){
     let neg = Number(defPrice)<0;
     const el=document.createElement('div'); el.id='mxAsk'; el.className='mxask';
     el.innerHTML=`<div class="mxbox">
-      <div class="mxh">◈ Matrix</div><div class="mxsub">${esc(head)}</div>
+      <div class="mxh">◈ Matrix<button type="button" class="mxdc${matrixHook?' on':''}">${matrixHook?'Discord ✓':'Discord'}</button></div><div class="mxsub">${esc(head)}</div>
       <label class="mxl">Edge %<input id="mxEdge" type="text" inputmode="decimal" autocomplete="off" placeholder="10"></label>
       <label class="mxl">Price you got <span class="dim">(${esc(bookLabel(defKey))} ${fmtAm(defPrice)} if blank)</span>
         <span class="mxprow"><span class="mxsign"><button type="button" data-s="-">−</button><button type="button" data-s="+">+</button></span><input id="mxPrice" type="text" inputmode="numeric" autocomplete="off" placeholder="${Math.abs(Number(defPrice))||''}"></span></label>
@@ -1144,6 +1173,7 @@ function matrixAsk(head, defKey, defPrice){
     el.querySelectorAll('.mxsign button').forEach(b=>b.addEventListener('click',()=>{ neg=b.dataset.s==='-'; sync(); }));
     const done=v=>{ el.remove(); res(v); };
     el.querySelector('.mxx').addEventListener('click',()=>done(null));
+    el.querySelector('.mxdc').addEventListener('click',async ()=>{ await matrixDiscordSetup(); const b=el.querySelector('.mxdc'); b.classList.toggle('on',!!matrixHook); b.textContent=matrixHook?'Discord ✓':'Discord'; });
     el.addEventListener('click',e=>{ if(e.target===el) done(null); });
     const go=()=>{
       const edge=el.querySelector('#mxEdge').value.trim(); if(!edge){ toast('Type your edge %'); return; }
@@ -1207,14 +1237,17 @@ async function runMatrix(p, mkey){
   const books=[...ok.map(([k,o])=>`${amt(o.price)} ${nm(k)}`), ...exOk.map(x=>`${amt(x.price)} ${nm(x.k)} ${usd(x.$)}`)].join(' ');
   const text=`${head} ${books||'(no book at +5% EV)'} play to ${amt(playTo)}`; // like Copy summary, + exchange $ at the play-to price or better
   await copyText(text);
-  if(!ok.length && !exOk.length){ toast(`No book at +${MATRIX_MIN_EV}% EV -- copied, not tracked`); return; }
+  const inRange = ok.length>0 || exOk.length>0;
+  // In range -> also posted to the Matrix Discord channel (when one is set). Tracked either way.
+  if(inRange && matrixHook) matrixDiscord({ head, edge, ref, refKey, fairAm, playTo, ok:ok.map(([k,o])=>`${amt(o.price)} ${nm(k)}`), ex:exOk.map(x=>`${amt(x.price)} ${nm(x.k)} ${usd(x.$)}`), amt });
   // track it (once per player/market/side/line) as a Matrix bet at the book you named
   const label=single?(singleSideLabel(mkey)||'Yes'):(sd==='under'?'Under':'Over');
   const dupe=tracked.find(t=>t.src==='matrix' && t.playerKey===p.key && t.fixtureId===p.fixtureId && t.mkey===mkey && t.side===sideKey(label) && (t.line??null)===(single?null:line));
   const info={ src:'matrix', matrixEdge:edge, matrixFair:fairAm, matrixPlayTo:playTo, matrixBooks:ok.map(([k,o])=>`${amt(o.price)} ${nm(k)}`), price:Number(ref.price), book:bookLabel(refKey), bookKey:canonBook(refKey), pinned:true };
-  if(dupe){ Object.assign(dupe, info, { edited:Date.now() }); saveTracked(); toast('Matrix copied · tracked bet updated'); return; }
+  const sent = inRange && matrixHook ? ' · sent to Discord' : !inRange ? ` · no book at +${MATRIX_MIN_EV}%` : '';
+  if(dupe){ Object.assign(dupe, info, { edited:Date.now() }); saveTracked(); toast(`Matrix copied · tracked bet updated${sent}`); return; }
   trackProp(p, mkey, label, single?null:line, all, canonBook(refKey), { ...info, quiet:true });
-  showTrackPricePop(tracked[0]); toast(`Matrix copied · tracked (${ok.length} book${ok.length===1?'':'s'} at +${MATRIX_MIN_EV}%)`);
+  showTrackPricePop(tracked[0]); toast(`Matrix copied · tracked${sent}`);
 }
 const centsOf = v => { v=Number(v); return v>0 ? v-100 : v+100; };
 async function copyText(text){
