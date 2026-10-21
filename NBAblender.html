@@ -24951,6 +24951,27 @@ function morningParseTabsLineups() {
 }
 function morningClearTabsLineups() { try { localStorage.removeItem(TABS_LINEUPS_KEY); } catch (e) {} renderMorning(); }
 // Each source → { team: { starters:Set, status:{norm: "OUT"|"GTD"} } } (only teams it has actually posted).
+// Put a team's five starters in lineup order PG, SG, SF, PF, C. Each player has the position(s) his source lists ("PG/SG", "C"); the
+// order that best fits every player's eligibility wins, ties keep the page order — so a source that lists a C before a PF is straightened out.
+function _slotOrder(entries) {                       // entries: [{ k, pos }] in page order → keys in PG,SG,SF,PF,C order
+  const SL = ["PG", "SG", "SF", "PF", "C"];
+  if (entries.length < 2 || entries.length > 6 || !entries.some(e => e.pos)) return entries.map(e => e.k);
+  const elig = (pos, slot) => { const L = String(pos || "").toUpperCase().split(/[\/\-,\s]+/).filter(Boolean); if (!L.length) return 3; if (L[0] === slot) return 0; if (L.includes(slot)) return 0.1; if ((L.includes("G") && (slot === "PG" || slot === "SG")) || (L.includes("F") && (slot === "SF" || slot === "PF")) || L.includes("UTIL")) return 0.1; return 100; };   // a player in a slot he can't play costs most; then distance from the page order; position fit last
+  let best = null, bestCost = Infinity;
+  const used = new Array(entries.length).fill(false), cur = [];
+  (function rec(slot, cost) {
+    if (cost >= bestCost) return;
+    if (slot === entries.length) { bestCost = cost; best = cur.slice(); return; }
+    for (let i = 0; i < entries.length; i++) { if (used[i]) continue; used[i] = true; cur[slot] = i; rec(slot + 1, cost + elig(entries[i].pos, SL[slot]) + Math.abs(i - slot) * 1); used[i] = false; }
+  })(0, 0);
+  return best ? best.map(i => entries[i].k) : entries.map(e => e.k);
+}
+// Teams in game order (RG lists them game by game, away then home), else Tabs, else RW.
+function _lineupTeamOrder(views) {
+  const out = [], seen = new Set();
+  [...views].sort((a, b) => ({ RG: 0, Tabs: 1, RW: 2 }[a.key] - { RG: 0, Tabs: 1, RW: 2 }[b.key])).forEach(v => Object.keys(v.teams).forEach(t => { if (!seen.has(t)) { seen.add(t); out.push(t); } }));
+  return out;
+}
 function _lineupViews() {
   const views = [];
   const rw = getLineupsData();
@@ -24958,21 +24979,23 @@ function _lineupViews() {
     const m = {};
     Object.values(rw.players).forEach(p => {
       const t = normTeamAbbr(p.team || "") || String(p.team || "").toUpperCase(), k = resolveNorm(p.name || ""); if (!k || !t) return;
-      const e = m[t] = m[t] || { starters: new Set(), status: {}, names: {}, order: [] };
-      e.names[k] = p.name;
-      if (p.status === "STARTING") { e.starters.add(k); e.order.push(k); }
+      const e = m[t] = m[t] || { starters: new Set(), status: {}, names: {}, order: [], pos: {}, flag: {} };
+      e.names[k] = p.name; e.pos[k] = p.position || "";
+      if (p.alsoStarter) { e.starters.add(k); e.order.push(k); e.flag[k] = /OUT/i.test(p.status) ? "OUT" : /PROB/i.test(p.status) ? "PROB" : /QUES/i.test(p.status) ? "Q" : /DOUBT/i.test(p.status) ? "D" : "GTD"; if (!/PROB/i.test(p.status)) e.status[k] = /OUT/i.test(p.status) ? "OUT" : "GTD"; }
+      else if (p.status === "STARTING") { e.starters.add(k); e.order.push(k); }
       else if (/OUT/i.test(p.status)) e.status[k] = "OUT";
       else if (/GTD|DTD|QUES|DOUBT/i.test(p.status)) e.status[k] = "GTD";
     });
     const unres = rw.unresolvedTeams || [];
     Object.keys(m).forEach(t => { if (m[t].starters.size < 4 || unres.includes(t)) delete m[t]; });   // a team whose RW names could not be matched is no opinion, never a guess   // 4+: a GTD starter drops out of RW's STARTING list but the lineup is posted
+    Object.values(m).forEach(e => { e.order = _slotOrder(e.order.map(k => ({ k, pos: e.pos[k] }))); });
     views.push({ key: "RW", teams: m });
   }
   const mk = (key, d) => {
     if (!d || !d.teams) return;
     const m = {};
     Object.entries(d.teams).forEach(([t, v]) => {
-      const e = m[t] = { starters: new Set(v.starters), status: {}, names: {}, order: v.starters.slice() };
+      const e = m[t] = { starters: new Set(v.starters), status: {}, names: {}, order: key === "RG" ? _slotOrder(v.starters.map(k => ({ k, pos: (d.players[k] || {}).pos || "" }))) : v.starters.slice() };
       Object.entries(d.players).forEach(([k, p]) => { if (p.team === t) e.names[k] = p.name; });
       (v.out || []).forEach(k => { e.status[k] = "OUT"; });
       (v.gtd || []).forEach(k => { e.status[k] = "GTD"; });
@@ -25022,7 +25045,7 @@ function lineupConflicts() {
 function lineupCompareHtml() {
   const views = _lineupViews(); if (!views.length) return "";
   const lc = lineupConflicts();
-  const teams = []; views.forEach(v => Object.keys(v.teams).forEach(t => { if (!teams.includes(t)) teams.push(t); }));
+  const teams = _lineupTeamOrder(views);
   const esc = _mEsc, short = n => { const w = String(n || "").trim().split(/\s+/); return w.length > 1 ? w[0][0] + ". " + w.slice(1).join(" ") : n; };
   const rows = teams.map(team => {
     const have = views.filter(v => v.teams[team]);
@@ -25030,8 +25053,9 @@ function lineupCompareHtml() {
       const t = v.teams[team];
       const cells = t.order.map(k => {
         const bad = lc.byPlayer.has(k), flag = t.status[k];
-        const col = bad ? "#f87171" : flag ? "#fbbf24" : "#e2e8f0";
-        return `<td style="padding:3px 8px;color:${col};font-weight:${bad ? 800 : 600};white-space:nowrap;border-bottom:1px solid #14161a;">${esc(short(t.names[k] || k))}${flag ? ` <span style="font-size:9px;">${t.pct && t.pct[k] != null ? t.pct[k] + "%" : esc(flag)}</span>` : ""}</td>`;
+        const fl = (t.flag && t.flag[k]) || flag;
+        const col = bad ? "#f87171" : flag === "OUT" ? "#f87171" : flag ? "#fbbf24" : fl ? "#a3e635" : "#e2e8f0";
+        return `<td style="padding:3px 8px;color:${col};font-weight:${bad || fl ? 800 : 600};white-space:nowrap;border-bottom:1px solid #14161a;${bad || fl ? `background:${col}14;` : ""}">${esc(short(t.names[k] || k))}${fl ? ` <span style="font-size:9px;">${t.pct && t.pct[k] != null ? t.pct[k] + "%" : esc(fl)}</span>` : ""}</td>`;
       }).join("");
       const out = Object.entries(t.status).filter(([k]) => !t.starters.has(k)).map(([k, st]) => (t.names[k] ? short(t.names[k]) : k) + " " + st);
       return `<tr><td style="padding:3px 8px;color:#8b93a0;font-weight:800;border-bottom:1px solid #14161a;">${esc(v.key)}</td>${cells}<td style="padding:3px 8px;color:#6b7380;font-size:10px;border-bottom:1px solid #14161a;">${esc(out.join(" \u00b7 "))}</td></tr>`;
@@ -25054,38 +25078,50 @@ async function morningRefreshRwLineups() {
   renderMorning();
 }
 // Share picture of the whole lineup check: conflicts on top, every team's lineup per source below (no textareas / buttons).
+function _ballSvg(size) {
+  return `<svg width="${size}" height="${size}" viewBox="0 0 64 64" style="flex:0 0 auto;filter:drop-shadow(0 2px 6px rgba(249,115,22,.55));"><defs><radialGradient id="bbg" cx="35%" cy="30%" r="75%"><stop offset="0" stop-color="#fdba74"/><stop offset=".55" stop-color="#f97316"/><stop offset="1" stop-color="#c2410c"/></radialGradient></defs><circle cx="32" cy="32" r="29" fill="url(#bbg)" stroke="#7c2d12" stroke-width="2"/><g fill="none" stroke="#1c0a02" stroke-width="2.2" stroke-linecap="round"><path d="M32 3v58"/><path d="M3 32h58"/><path d="M10 11c13 10 13 32 0 42"/><path d="M54 11c-13 10-13 32 0 42"/></g></svg>`;
+}
 function _lineupShareHtml(logos) {
   logos = logos || {};
   const views = _lineupViews(), lc = lineupConflicts(), esc = _mEsc;
   const short = n => { const w = String(n || "").trim().split(/\s+/); return w.length > 1 ? w[0][0] + ". " + w.slice(1).join(" ") : n; };
-  const teams = []; views.forEach(v => Object.keys(v.teams).forEach(t => { if (!teams.includes(t)) teams.push(t); }));
+  const teams = _lineupTeamOrder(views);
   const SC = { RW: "#93c5fd", RG: "#34d399", Tabs: "#f59e0b" };
   const block = team => {
     const have = views.filter(v => v.teams[team]);
     const rows = have.map(v => {
       const t = v.teams[team];
       const names = t.order.map(k => {
-        const bad = lc.byPlayer.has(k), flag = t.status[k];
-        return `<span style="color:${bad ? "#f87171" : flag ? "#fbbf24" : "#e2e8f0"};font-weight:${bad ? 800 : 600};">${esc(short(t.names[k] || k))}${flag ? `<sup style="font-size:8px;"> ${t.pct && t.pct[k] != null ? t.pct[k] + "% to start" : esc(flag)}</sup>` : ""}</span>`;
-      }).join(" \u00b7 ");
+        const bad = lc.byPlayer.has(k), st = t.status[k], fl = (t.flag && t.flag[k]) || st;
+        const label = t.pct && t.pct[k] != null ? t.pct[k] + "%" : fl;
+        const col = bad ? "#f87171" : st === "OUT" ? "#f87171" : st ? "#fbbf24" : fl ? "#a3e635" : "#e2e8f0";
+        const hl = bad || fl ? `background:${col}22;border:1px solid ${col}77;border-radius:5px;padding:0 5px;` : "";
+        return `<span style="color:${col};font-weight:${bad || fl ? 800 : 600};${hl}display:inline-block;margin:1px 8px 1px 0;">${esc(short(t.names[k] || k))}${label ? `<span style="font-size:9px;margin-left:3px;">${esc(label)}</span>` : ""}</span>`;
+      }).join(" ");
       const alt = t.alt && t.alt.length ? `<div style="font-size:10px;color:#a8b0bb;margin-top:1px;">alt: ${t.alt.map(a => esc(short(a.name)) + " " + a.pct + "%").join(" \u00b7 ")}</div>` : "";
       return `<div style="display:flex;gap:8px;margin-top:3px;"><span style="width:34px;flex:0 0 34px;color:${SC[v.key] || "#8b93a0"};font-weight:800;font-size:10px;padding-top:1px;">${esc(v.key)}</span><span style="font-size:11px;line-height:1.45;">${names}${alt}</span></div>`;
     }).join("");
     const miss = views.filter(v => !v.teams[team]).map(v => v.key);
+    // Everyone listed out / GTD for the team: any source's may-not-play list plus the RW/OpticOdds injury feed.
+    const outM = new Map(), gtdM = new Map();
+    const startersAll = new Set(); views.forEach(v => { const t = v.teams[team]; if (t) t.starters.forEach(k => startersAll.add(k)); });
+    views.forEach(v => { const t = v.teams[team]; if (!t) return; Object.entries(t.status).forEach(([k, st]) => { if (startersAll.has(k)) return; const nm = short(t.names[k] || k); (st === "OUT" ? outM : gtdM).set(k, nm); }); });
+    try { (injuriesByTeam && injuriesByTeam.get(team) || []).forEach(e => { const k = resolveNorm(e.name); if (startersAll.has(k) || outM.has(k) || gtdM.has(k)) return; const st = String(e.status || ""); if (/^out/i.test(st)) outM.set(k, short(e.name)); else if (/ques|doubt|gtd|day/i.test(st)) gtdM.set(k, short(e.name)); }); } catch (e) {}
+    const outLine = (outM.size || gtdM.size) ? `<div style="margin-top:4px;font-size:10px;color:#8b93a0;line-height:1.4;">${outM.size ? `<span style="color:#f87171;font-weight:800;">OUT</span> ${[...outM.values()].map(n => `<span style="color:#f87171;background:#f8717122;border:1px solid #f8717166;border-radius:5px;padding:0 5px;margin-right:3px;display:inline-block;">${esc(n)}</span>`).join("")}` : ""}${outM.size && gtdM.size ? " &nbsp; " : ""}${gtdM.size ? `<span style="color:#fbbf24;font-weight:800;">GTD</span> ${[...gtdM.values()].map(n => `<span style="color:#fbbf24;background:#fbbf2422;border:1px solid #fbbf2466;border-radius:5px;padding:0 5px;margin-right:3px;display:inline-block;">${esc(n)}</span>`).join("")}` : ""}</div>` : "";
     const logo = logos[team] ? `<img src="${logos[team]}" style="width:22px;height:22px;object-fit:contain;"/>` : "";
-    return `<div style="border:1px solid ${miss.length ? "#2a2410" : "#1a1d22"};border-radius:8px;padding:8px 10px;background:#0a0b0e;"><div style="display:flex;align-items:center;gap:7px;color:#7dd3fc;font-weight:800;letter-spacing:1px;font-size:13px;">${logo}${esc(team)}${miss.length ? `<span style="color:#fbbf24;font-weight:600;font-size:10px;letter-spacing:0;">not posted: ${esc(miss.join(", "))}</span>` : `<span style="color:#4ade80;font-weight:600;font-size:10px;letter-spacing:0;">${views.length}/${views.length} compared</span>`}</div>${rows}</div>`;
+    return `<div style="border:1px solid ${miss.length ? "#2a2410" : "#1a1d22"};border-radius:8px;padding:8px 10px;background:#0a0b0e;"><div style="display:flex;align-items:center;gap:7px;color:#7dd3fc;font-weight:800;letter-spacing:1px;font-size:13px;">${logo}${esc(team)}${miss.length ? `<span style="color:#fbbf24;font-weight:600;font-size:10px;letter-spacing:0;">not posted: ${esc(miss.join(", "))}</span>` : `<span style="color:#4ade80;font-weight:600;font-size:10px;letter-spacing:0;">${views.length}/${views.length} compared</span>`}</div>${rows}${outLine}</div>`;
   };
   const when = new Date().toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
   const state = lc.list.length ? { t: lc.list.length + " CONFLICT" + (lc.list.length === 1 ? "" : "S"), c: "#f87171" } : { t: "ALL " + lc.compared.length + " TEAMS AGREE", c: "#22c55e" };
   const srcs = views.map(v => `<span style="color:${SC[v.key] || "#8b93a0"};font-weight:800;">${esc(v.key)}</span>`).join(" \u00b7 ");
   return `<div class="lcard" style="width:1100px;box-sizing:border-box;background:#0c0d10;padding:22px 24px;font-family:'Plus Jakarta Sans','Inter',sans-serif;color:#e2e8f0;">
     <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;">
-      <div><div style="font-size:24px;font-weight:800;letter-spacing:1px;">NBA LINEUP CHECK</div><div style="font-size:12px;color:#a8b0bb;margin-top:2px;">${srcs} \u00b7 ${esc(when)}</div></div>
+      <div style="display:flex;align-items:center;gap:14px;">${_ballSvg(54)}<div><div style="font-size:28px;font-weight:800;letter-spacing:1.5px;background:linear-gradient(90deg,#fff 0%,#fdba74 55%,#f97316 100%);-webkit-background-clip:text;background-clip:text;color:transparent;-webkit-text-fill-color:transparent;">NBA LINEUP CHECK</div><div style="font-size:12px;color:#a8b0bb;margin-top:2px;">${srcs} \u00b7 ${esc(when)}</div></div></div>
       <div style="font-size:16px;font-weight:800;color:${state.c};border:2px solid ${state.c};border-radius:20px;padding:4px 16px;">${state.t}</div>
     </div>
-    ${lc.list.length ? `<div style="margin-top:14px;border:1px solid #f8717166;border-radius:8px;padding:8px 12px;display:grid;gap:3px;">${lc.list.map(x => `<div style="font-size:12px;color:#fca5a5;font-family:'JetBrains Mono','Menlo',monospace;"><b>${esc(x.team)}</b> \u00b7 ${esc(x.text)}</div>`).join("")}</div>` : ""}
+    ${lc.list.length ? `<div style="margin-top:14px;border:1px solid #f9731666;border-radius:10px;padding:9px 14px;display:grid;gap:4px;background:linear-gradient(135deg,#1a0f08 0%,#0c0d10 70%);">${lc.list.map(x => `<div style="font-size:13px;color:#ffffff;font-family:'JetBrains Mono','Menlo',monospace;"><b style="color:#fdba74;">${esc(x.team)}</b> \u00b7 ${esc(x.text)}</div>`).join("")}</div>` : ""}
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:14px;">${teams.map(block).join("")}</div>
-    <div style="margin-top:12px;font-size:10px;color:#6b7380;">red = lineup conflict (blocked on both sides) \u00b7 amber = GTD / out flag</div>
+    <div style="margin-top:12px;font-size:10px;color:#6b7380;">red = lineup conflict or OUT (blocked) \u00b7 amber = GTD / Q \u00b7 green = probable \u00b7 % = Tabs chance to start</div>
   </div>`;
 }
 async function lineupSharePic() {
@@ -25192,7 +25228,8 @@ function parseRwLineupsPaste(text) {
     } else if (section === "mnp") {
       const m = t.match(STAT); const nm = m ? m[1] : t, st = m ? map(m[2]) : "GTD";
       const r = _resolveAbbrevName(nm, team, slug, pos);
-      teams[team].mnp[resolveNorm(r.name)] = st; players[norm(r.name)] = { name: r.name, displayedName: nm, status: st, starter: false, position: pos, team };
+      const prev = players[norm(r.name)], wasStarter = !!(prev && prev.starter);
+      teams[team].mnp[resolveNorm(r.name)] = st; players[norm(r.name)] = { name: r.name, displayedName: nm, status: st, starter: false, position: wasStarter ? prev.position : pos, team, alsoStarter: wasStarter };   // a starter also on the may-not-play list (S. Curry Prob) stays in the lineup, flagged
       if (r.how === "ambiguous" || r.how === "unresolved") mnpWarn.push(`${team}: ${nm} (${st})`);   // out/GTD player: only matters if he is also a starter somewhere, so it never blocks comparing the team
     }
     pos = null;
@@ -25776,7 +25813,7 @@ function lineupPanelHtml(card, lc) {
   return `<div style="${card}border-color:${lc.list.length ? "#f8717155" : (lc.compared.length ? "#22c55e55" : "#1a1d22")};">
     <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;align-items:center;">
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
-        <div style="font-size:13px;font-weight:800;color:#d4dae3;letter-spacing:1px;text-transform:uppercase;">Lineup check</div>
+        ${_ballSvg(26)}<div style="font-size:15px;font-weight:800;letter-spacing:1.2px;text-transform:uppercase;background:linear-gradient(90deg,#fff,#fdba74 60%,#f97316);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;">Lineup check</div>
         <span style="font-size:9px;color:#4b5260;">build L4</span>
         <span style="font-size:11px;font-weight:800;color:${state.c};border:1px solid ${state.c}66;border-radius:10px;padding:1px 9px;">${state.t}</span>
         ${lc.noOpinion.length ? `<span style="font-size:10px;color:#6b7380;">only one source: ${esc(lc.noOpinion.join(", "))}</span>` : ""}
@@ -25790,7 +25827,7 @@ function lineupPanelHtml(card, lc) {
       ${tile("Tabs", "#f59e0b", "Tabs NBA → Lineups…", tb ? Object.keys(tb.teams).length + " teams · " + ago(tb.at) : "", !!tb)}
     </div>
     ${_lineupReport.length ? `<div style="margin-top:8px;display:grid;gap:2px;">${_lineupReport.map(r => `<div style="font-size:11px;font-family:'JetBrains Mono','Menlo',monospace;color:${r.bad ? "#fbbf24" : "#4ade80"};">${r.bad ? "⚠" : "✓"} ${esc(r.text)}</div>`).join("")}</div>` : ""}
-    ${lc.list.length ? `<div style="margin-top:8px;border:1px solid #f8717144;border-radius:8px;padding:6px 10px;display:grid;gap:3px;">${lc.list.map(x => `<div style="font-size:11px;color:#fca5a5;font-family:'JetBrains Mono','Menlo',monospace;"><b>${esc(x.team)}</b> · ${esc(x.text)}</div>`).join("")}</div>` : ""}
+    ${lc.list.length ? `<div style="margin-top:8px;border:1px solid #f8717144;border-radius:8px;padding:6px 10px;display:grid;gap:3px;">${lc.list.map(x => `<div style="font-size:11px;color:#ffffff;font-family:'JetBrains Mono','Menlo',monospace;"><b style="color:#fdba74;">${esc(x.team)}</b> · ${esc(x.text)}</div>`).join("")}</div>` : ""}
     ${lineupCompareHtml()}
     <details style="margin-top:8px;"><summary style="cursor:pointer;font-size:11px;font-weight:800;color:#d4dae3;letter-spacing:.8px;">RG IMPACT RATINGS ${ri ? `<span style="color:#4ade80;font-weight:600;">✓ ${Object.keys(ri.players).length} players · ${ago(ri.at)}</span>` : `<span style="color:#6b7380;font-weight:600;">not loaded</span>`}</summary>
       <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap;"><button onclick="morningParseRgImpact()" style="background:#34d399;border:none;color:#050507;border-radius:6px;padding:5px 12px;font-size:11px;font-weight:800;cursor:pointer;">PARSE RG IMPACT</button>${ri ? `<button onclick="morningClearRgImpact()" style="background:transparent;border:1px solid #1a1d22;color:#f87171;border-radius:6px;padding:5px 10px;font-size:11px;font-weight:700;cursor:pointer;">CLEAR</button>` : ""}<span style="font-size:10px;color:#8b93a0;align-self:center;">Situation Room injury report — an extra read on how much a teammate’s absence matters.</span></div>
@@ -26594,7 +26631,7 @@ function _rwBuildLineupPlayers(data) {
       const inj = _rwLineupPlayerStatus(o);
       const pos = String(_rwPick(o, ["LineupPosition", "Position", "Pos", "Player.Position"]) || "").trim();
       const key = norm(name);
-      if (starterList) players[key] = { name, displayedName: name, status: inj || "STARTING", starter: !inj, position: pos, team };
+      if (starterList) players[key] = { name, displayedName: name, status: inj || "STARTING", starter: !inj, position: pos, team, alsoStarter: !!inj };
       else if (inj) players[key] = players[key] || { name, displayedName: name, status: inj, starter: false, position: pos, team };   // healthy bench carries no signal
     });
     list(t.Players, true); list(t.Bench, false);
