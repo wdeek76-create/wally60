@@ -26490,8 +26490,56 @@ async function ooSyncInjuries() {
   _injStore.oo = records;
   return _injApplyMerged();
 }
+// NBALineups answers one object per TEAM: { Status, IsHome, Code, Name, Players:[…], Bench:[…] }. Players = the lineup (5 starters),
+// Bench = everyone else listed; a player's own injury/status field marks out / GTD / probable.
+function _rwLineupTeams(data) {
+  const teams = [];
+  (function walk(n) {
+    if (Array.isArray(n)) { n.forEach(walk); return; }
+    if (!n || typeof n !== "object") return;
+    if (Array.isArray(n.Players) && (n.Code || n.Name) && !(n.FirstName || n.LastName)) { teams.push(n); return; }
+    Object.keys(n).forEach(k => { if (n[k] && typeof n[k] === "object") walk(n[k]); });
+  })(data);
+  return teams;
+}
+function _rwLineupPlayerStatus(o) {
+  const fl = _rwFlat(o);
+  for (const k of Object.keys(fl)) {
+    const kk = k.toLowerCase(), sv = String(fl[k] == null ? "" : fl[k]).trim();
+    if (/injur|status|designation/.test(kk) && /^(out|ques|questionable|gtd|doubt|doubtful|prob|probable|dtd|day-to-day)/i.test(sv)) {
+      const m = _rwStatus(sv); return m === "Out" ? "OUT" : /Prob/.test(m) ? "PROBABLE" : /Quest|Doubt/.test(m) ? "GTD" : "DTD";
+    }
+  }
+  return null;
+}
+function _rwBuildLineupPlayers(data) {
+  const teams = _rwLineupTeams(data), players = {}, parsedTeams = [];
+  teams.forEach(t => {
+    const team = normTeamAbbr(String(t.Code || "")) || teamLineToAbbr(String(t.Name || "")) || String(t.Code || "").toUpperCase();
+    const list = (arr, starterList) => (Array.isArray(arr) ? arr : []).forEach((o, i) => {
+      const name = _rwName(o) || ((o.FirstName || "") + " " + (o.LastName || "")).trim(); if (!name) return;
+      const inj = _rwLineupPlayerStatus(o);
+      const pos = String(_rwPick(o, ["LineupPosition", "Position", "Pos", "Player.Position"]) || "").trim();
+      const key = norm(name);
+      if (starterList) players[key] = { name, displayedName: name, status: inj || "STARTING", starter: !inj, position: pos, team };
+      else if (inj) players[key] = players[key] || { name, displayedName: name, status: inj, starter: false, position: pos, team };   // healthy bench carries no signal
+    });
+    list(t.Players, true); list(t.Bench, false);
+    parsedTeams.push(team);
+  });
+  return { players, teams: parsedTeams };
+}
 async function rwApiSyncLineups() {
-  const { rows, games: nGames, tried } = await _rwFetchLineups();
+  const lf = await _rwFetchLineups();
+  if (lf.data) {
+    const b = _rwBuildLineupPlayers(lf.data), n0 = Object.keys(b.players).length;
+    const starters = Object.values(b.players).filter(p => p.status === "STARTING" || p.starter).length;
+    if (b.teams.length && n0 >= 10) {
+      saveLineupsData({ fetchedAt: Date.now(), players: b.players, gameCount: Math.ceil(b.teams.length / 2), source: "rotowire-api" });
+      return n0;
+    }
+  }
+  const { rows, games: nGames, tried } = lf;
   if (!rows.length) throw new Error(`NBALineups: nothing posted yet (${nGames} game${nGames === 1 ? "" : "s"} listed) — kept the existing lineups. Asked: ${(tried || []).join(" | ")}`);
   const players = {};
   const games = new Set();
@@ -26788,6 +26836,7 @@ async function rwApiTest() {
       let data = await rwApiFetch(feed);
       let rows = feed === "NBADailyProj" ? _rwDeepPlayers(data) : (feed === "NBALineups" || feed === "NBACeilFloor") ? _rwDeepNamed(data) : _rwRows(data);
       if (feed === "NBACeilFloor" && !rows.length) out.push(`NBACeilFloor: no players posted yet · Games listed: ${data && data.Games && typeof data.Games === "object" ? (Array.isArray(data.Games) ? data.Games.length : Object.keys(data.Games).length) : 0} · Date: ${data && data.Date}`);
+      if (feed === "NBALineups" && data) { try { const tt = _rwLineupTeams(data)[0]; if (tt) { const f1 = o => { const fl = _rwFlat(o || {}); return Object.keys(fl).slice(0, 24).map(k => k + "=" + String(fl[k]).slice(0, 20)).join(" | "); }; out.push(`NBALineups team ${tt.Code}: Status=${tt.Status} · Players(${(tt.Players || []).length}) first: ${f1((tt.Players || [])[0])} · Bench(${(tt.Bench || []).length}) first: ${f1((tt.Bench || [])[0])}`); } } catch (e) {} }
       if (feed === "NBALineups" && !rows.length) { const lf = await _rwFetchLineups(); if (lf.rows.length) { rows = lf.rows; data = lf.data; } out.push("NBALineups dates asked: " + lf.tried.join(" | ")); }
       if (feed === "NBADailyProj" && !rows.length) { const r2 = await _rwFetchDailyProj(); if (r2.rows.length) { rows = r2.rows; data = r2.data; } else out.push("NBADailyProj: no games/projections posted for the next 4 days (top-level: " + Object.keys(data || {}).join(", ") + ")"); }
       const keys = rows.length ? Object.keys(rows[0]).filter(k => k !== "__parent").join(", ") : "(no rows)";
