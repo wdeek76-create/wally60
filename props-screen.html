@@ -1144,10 +1144,16 @@ async function runMatrix(p, mkey){
   const ok=Object.entries(by).filter(([,o])=>evOf(o)>=MATRIX_MIN_EV-1e-9)
     .sort((a,b)=>{ const ia=MATRIX_FIRST.indexOf(a[0]), ib=MATRIX_FIRST.indexOf(b[0]); if(ia>=0||ib>=0) return (ia<0?99:ia)-(ib<0?99:ib); return toDec(b[1].price)-toDec(a[1].price); });
   const nm=k=>SUM_NAME[k] || String(k).replace(/\s+/g,'').toLowerCase();
-  const books=ok.map(([k,o])=>`${amt(o.price)} ${nm(k)}`).join(' ');
+  // Exchanges: the money sitting at the play-to price or better (+5% EV or more), best level first.
+  const exOk=[]; const exSeen=new Set();
+  all.forEach(o=>{ const k=canonBook(o.sportsbook); if(sideOf(o)!==sd || !EXCH.has(k) || exSeen.has(k)) return; exSeen.add(k);
+    const lv=levelsOf(o).filter(l=>toDec(l.price)>=toDec(playTo)-1e-9); const $=lv.reduce((a,l)=>a+l.size,0);
+    if($>0) exOk.push({ k, price:lv[0].price, $ }); });
+  exOk.sort((a,b)=>toDec(b.price)-toDec(a.price));
+  const books=[...ok.map(([k,o])=>`${amt(o.price)} ${nm(k)}`), ...exOk.map(x=>`${amt(x.price)} ${nm(x.k)} (${usd(x.$)} to ${amt(playTo)})`)].join(' ');
   const text=`${head} ${books||'(no book at +5% EV)'} · fair ${amt(fairAm)} · play to ${amt(playTo)}`;
   await copyText(text);
-  if(!ok.length){ toast(`No book at +${MATRIX_MIN_EV}% EV -- copied, not tracked`); return; }
+  if(!ok.length && !exOk.length){ toast(`No book at +${MATRIX_MIN_EV}% EV -- copied, not tracked`); return; }
   // track it (once per player/market/side/line) as a Matrix bet at the book you named
   const label=single?(singleSideLabel(mkey)||'Yes'):(sd==='under'?'Under':'Over');
   const dupe=tracked.find(t=>t.src==='matrix' && t.playerKey===p.key && t.fixtureId===p.fixtureId && t.mkey===mkey && t.side===sideKey(label) && (t.line??null)===(single?null:line));
@@ -1808,8 +1814,10 @@ function searchRefresh(){
   if(pendingSearchEnter && openSearchHit()) return;
   if($('.sw')?.classList.contains('open') || document.activeElement===$('#q')) suggest(q);
 }
+// The market you're on right now (searching from Brooks' PRA opens the next player on PRA too).
+const curMkeyNow = () => { if(!current || viewMode!=='sport') return null; const ks=SPORTS[sportKey].markets.map(m=>m[0]).filter(k=>current.marketKeys?.has(k)); return ks[curMktIdx]||null; };
 function openSearchHit(){
-  const {name,mkey}=parseSearchQuery($('#q').value);
+  const q0=parseSearchQuery($('#q').value); const name=q0.name, mkey=q0.mkey||curMkeyNow();
   const hit=players.filter(p=>nameMatches(p.name,name||$('#q').value) && !fixtureIsLive(p.fixtureId))[0];
   if(!hit) return false;
   pendingSearchEnter=false;
@@ -1820,7 +1828,7 @@ function suggest(q){
   const box=$('#sug'); q=String(q||'').trim();
   if(!q){ pendingSearchEnter=false; box.classList.remove('show'); box.innerHTML=''; return; }
   if(!players.length){ box.innerHTML=`<div class="si"><span class="nm dim">Loading ${esc(SPORTS[sportKey].label)} players… "${esc(q)}" will show up here as soon as it's in</span></div>`; box.classList.add('show'); return; }
-  const {name,mkey}=parseSearchQuery(q);
+  const q1=parseSearchQuery(q); const name=q1.name, mkey=q1.mkey||curMkeyNow();
   const hits=players.filter(p=>nameMatches(p.name,name||q) && !fixtureIsLive(p.fixtureId)).slice(0,12);
   if(!hits.length){ box.innerHTML=`<div class="si"><span class="nm dim">${loadedAt?`No ${SPORTS[sportKey].ml?'fighter':'player'} matches "${esc(q)}"`:`Still loading… no match for "${esc(q)}" yet`}</span></div>`; box.classList.add('show'); return; }
   const mhit = mkey ? `<span class="mhit">→ ${esc(marketLabel(sportKey,mkey))}</span> ` : '';
