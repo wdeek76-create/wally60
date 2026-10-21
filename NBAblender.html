@@ -24934,7 +24934,8 @@ function parseTabsLineups(text) {
       if (k && teams[team].starters.length < 5) { teams[team].starters.push(k); players[k] = { name: line, team, role: "starter", pos }; lastStarter = k; }
       pos = null; continue;
     }
-    if ((line === "?" || /^Uncertain$/i.test(line)) && lastStarter) { teams[team].q[lastStarter] = true; continue; }
+    if ((line === "?" || /^Uncertain$/i.test(line)) && lastStarter) { const pc = (lines[idx + 1] || "").match(/^(\d{1,3})%$/); teams[team].q[lastStarter] = pc ? Number(pc[1]) : true; continue; }
+    if (/^Alternative:/i.test(line)) { teams[team].alt = line.replace(/^Alternative:\s*/i, "").replace(/\s*\u00b7?\s*View decision.*$/i, "").split(/\s*\u00b7\s*/).map(x => { const m = x.match(/^(.*?)\s+(\d{1,3})%$/); return m ? { name: m[1].trim(), pct: Number(m[2]) } : null; }).filter(Boolean); continue; }
   }
   return { at: Date.now(), teams, players };
 }
@@ -24975,7 +24976,8 @@ function _lineupViews() {
       Object.entries(d.players).forEach(([k, p]) => { if (p.team === t) e.names[k] = p.name; });
       (v.out || []).forEach(k => { e.status[k] = "OUT"; });
       (v.gtd || []).forEach(k => { e.status[k] = "GTD"; });
-      Object.keys(v.q || {}).forEach(k => { e.status[k] = "GTD"; });
+      e.pct = {}; e.alt = v.alt || [];
+      Object.entries(v.q || {}).forEach(([k, pc]) => { e.status[k] = "GTD"; if (typeof pc === "number") e.pct[k] = pc; });
     });
     views.push({ key, teams: m });
   };
@@ -25004,7 +25006,7 @@ function lineupConflicts() {
         const t = v.teams[team];
         nm = t.names[k] && !/^[A-Z]\.\s/.test(t.names[k]) ? t.names[k] : (t.names[k] && nm === k ? t.names[k] : nm);
         if (t.starters.has(k) && !t.status[k]) clean.push(v.key);
-        else bad.push(v.key + (t.status[k] ? " has him " + t.status[k] : t.starters.has(k) ? "" : " doesn't"));
+        else bad.push(v.key + (t.status[k] ? " has him " + t.status[k] + (t.pct && t.pct[k] != null ? " (" + t.pct[k] + "% to start)" : "") : t.starters.has(k) ? "" : " doesn't"));
       });
       if (!clean.length || !bad.length) return;
       const text = `${nm}: ${clean.join(" + ")} start${clean.length === 1 ? "s" : ""} him; ${bad.join(", ")}`;
@@ -25029,7 +25031,7 @@ function lineupCompareHtml() {
       const cells = t.order.map(k => {
         const bad = lc.byPlayer.has(k), flag = t.status[k];
         const col = bad ? "#f87171" : flag ? "#fbbf24" : "#e2e8f0";
-        return `<td style="padding:3px 8px;color:${col};font-weight:${bad ? 800 : 600};white-space:nowrap;border-bottom:1px solid #14161a;">${esc(short(t.names[k] || k))}${flag ? ` <span style="font-size:9px;">${esc(flag)}</span>` : ""}</td>`;
+        return `<td style="padding:3px 8px;color:${col};font-weight:${bad ? 800 : 600};white-space:nowrap;border-bottom:1px solid #14161a;">${esc(short(t.names[k] || k))}${flag ? ` <span style="font-size:9px;">${t.pct && t.pct[k] != null ? t.pct[k] + "%" : esc(flag)}</span>` : ""}</td>`;
       }).join("");
       const out = Object.entries(t.status).filter(([k]) => !t.starters.has(k)).map(([k, st]) => (t.names[k] ? short(t.names[k]) : k) + " " + st);
       return `<tr><td style="padding:3px 8px;color:#8b93a0;font-weight:800;border-bottom:1px solid #14161a;">${esc(v.key)}</td>${cells}<td style="padding:3px 8px;color:#6b7380;font-size:10px;border-bottom:1px solid #14161a;">${esc(out.join(" \u00b7 "))}</td></tr>`;
@@ -25037,6 +25039,72 @@ function lineupCompareHtml() {
     return `<tr><td colspan="7" style="padding:8px 8px 2px;color:#7dd3fc;font-weight:800;letter-spacing:1px;">${esc(team)}${have.length < 2 ? ` <span style="color:#6b7380;font-weight:600;">only ${esc(have[0].key)} posted</span>` : ""}</td></tr>${body}`;
   }).join("");
   return `<details style="margin-top:10px;"><summary style="cursor:pointer;font-size:11px;font-weight:800;color:#d4dae3;letter-spacing:.8px;">ALL LINEUPS SIDE BY SIDE (${views.map(v => v.key).join(" \u00b7 ")})</summary><div style="overflow-x:auto;margin-top:6px;"><table style="border-collapse:collapse;font:600 11px 'JetBrains Mono','Menlo',monospace;"><tbody>${rows}</tbody></table></div></details>`;
+}
+async function morningRefreshRwLineups() {
+  const b = document.getElementById("lineup-rw-refresh"); if (b) { b.disabled = true; b.textContent = "\u21bb REFRESHING\u2026"; }
+  try {
+    const n = await rwApiSyncLineups();
+    _lineupReport = [{ text: `RW refreshed from the RotoWire API: ${n} players` }];
+    showToast(`RW lineups refreshed (${n} players)`);
+  } catch (e) {
+    _lineupReport = [{ bad: true, text: "RW refresh failed: " + String(e && e.message || e).slice(0, 220) + " \u2014 paste the RW page and PARSE RW instead" }];
+    showToast("RW refresh failed \u2014 see the lineup check");
+  }
+  try { renderLineupsStatus(); } catch (e) {}
+  renderMorning();
+}
+// Share picture of the whole lineup check: conflicts on top, every team's lineup per source below (no textareas / buttons).
+function _lineupShareHtml() {
+  const views = _lineupViews(), lc = lineupConflicts(), esc = _mEsc;
+  const short = n => { const w = String(n || "").trim().split(/\s+/); return w.length > 1 ? w[0][0] + ". " + w.slice(1).join(" ") : n; };
+  const teams = []; views.forEach(v => Object.keys(v.teams).forEach(t => { if (!teams.includes(t)) teams.push(t); }));
+  const SC = { RW: "#93c5fd", RG: "#34d399", Tabs: "#f59e0b" };
+  const block = team => {
+    const have = views.filter(v => v.teams[team]);
+    const rows = have.map(v => {
+      const t = v.teams[team];
+      const names = t.order.map(k => {
+        const bad = lc.byPlayer.has(k), flag = t.status[k];
+        return `<span style="color:${bad ? "#f87171" : flag ? "#fbbf24" : "#e2e8f0"};font-weight:${bad ? 800 : 600};">${esc(short(t.names[k] || k))}${flag ? `<sup style="font-size:8px;"> ${t.pct && t.pct[k] != null ? t.pct[k] + "% to start" : esc(flag)}</sup>` : ""}</span>`;
+      }).join(" \u00b7 ");
+      const alt = t.alt && t.alt.length ? `<div style="font-size:10px;color:#a8b0bb;margin-top:1px;">alt: ${t.alt.map(a => esc(short(a.name)) + " " + a.pct + "%").join(" \u00b7 ")}</div>` : "";
+      return `<div style="display:flex;gap:8px;margin-top:3px;"><span style="width:34px;flex:0 0 34px;color:${SC[v.key] || "#8b93a0"};font-weight:800;font-size:10px;padding-top:1px;">${esc(v.key)}</span><span style="font-size:11px;line-height:1.45;">${names}${alt}</span></div>`;
+    }).join("");
+    return `<div style="border:1px solid #1a1d22;border-radius:8px;padding:8px 10px;background:#0a0b0e;"><div style="color:#7dd3fc;font-weight:800;letter-spacing:1px;font-size:12px;">${esc(team)}${have.length < 2 ? ` <span style="color:#6b7380;font-weight:600;font-size:10px;">only ${esc(have[0].key)}</span>` : ""}</div>${rows}</div>`;
+  };
+  const when = new Date().toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  const state = lc.list.length ? { t: lc.list.length + " CONFLICT" + (lc.list.length === 1 ? "" : "S"), c: "#f87171" } : { t: "ALL " + lc.compared.length + " TEAMS AGREE", c: "#22c55e" };
+  const srcs = views.map(v => `<span style="color:${SC[v.key] || "#8b93a0"};font-weight:800;">${esc(v.key)}</span>`).join(" \u00b7 ");
+  return `<div class="lcard" style="width:1100px;box-sizing:border-box;background:#0c0d10;padding:22px 24px;font-family:'Plus Jakarta Sans','Inter',sans-serif;color:#e2e8f0;">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;">
+      <div><div style="font-size:24px;font-weight:800;letter-spacing:1px;">NBA LINEUP CHECK</div><div style="font-size:12px;color:#a8b0bb;margin-top:2px;">${srcs} \u00b7 ${esc(when)}</div></div>
+      <div style="font-size:16px;font-weight:800;color:${state.c};border:2px solid ${state.c};border-radius:20px;padding:4px 16px;">${state.t}</div>
+    </div>
+    ${lc.list.length ? `<div style="margin-top:14px;border:1px solid #f8717166;border-radius:8px;padding:8px 12px;display:grid;gap:3px;">${lc.list.map(x => `<div style="font-size:12px;color:#fca5a5;font-family:'JetBrains Mono','Menlo',monospace;"><b>${esc(x.team)}</b> \u00b7 ${esc(x.text)}</div>`).join("")}</div>` : ""}
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:14px;">${teams.map(block).join("")}</div>
+    <div style="margin-top:12px;font-size:10px;color:#6b7380;">red = lineup conflict (blocked on both sides) \u00b7 amber = GTD / out flag</div>
+  </div>`;
+}
+async function lineupSharePic() {
+  if (!_lineupViews().length) { showToast("Nothing to share yet \u2014 parse a lineup first"); return; }
+  showToast("Building lineup picture\u2026");
+  let blob;
+  try {
+    try { if (document.fonts && document.fonts.load) { await document.fonts.load("800 16px 'Plus Jakarta Sans'"); await document.fonts.load("700 16px 'JetBrains Mono'"); } } catch (e) {}
+    const h2c = await _ensureHtml2Canvas();
+    const box = document.createElement("div");
+    box.style.cssText = "position:fixed;left:-9999px;top:0;z-index:-1;";
+    box.innerHTML = _lineupShareHtml();
+    document.body.appendChild(box);
+    try { const canvas = await h2c(box.querySelector(".lcard"), { backgroundColor: "#0c0d10", scale: 2, logging: false, useCORS: true }); blob = await new Promise(r => canvas.toBlob(r, "image/png")); }
+    finally { document.body.removeChild(box); }
+  } catch (e) { console.error("[LINEUP pic]", e); showToast("Picture failed \u2014 " + (e && e.message || "see console")); return; }
+  if (!blob) { showToast("Picture failed"); return; }
+  let copied = false;
+  try { if (navigator.clipboard && window.ClipboardItem) { await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]); copied = true; } } catch (e) {}
+  const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `NBA Lineups ${_psDate()} ${_nowClock()}.png`;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a); setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  showToast(copied ? "Lineup picture saved + copied to clipboard" : "Lineup picture saved");
 }
 function lineupConflictFor(player) { try { return lineupConflicts().byPlayer.get(resolveNorm(player || "")) || null; } catch (e) { return null; } }
 
@@ -25697,7 +25765,7 @@ function lineupPanelHtml(card, lc) {
         <span style="font-size:10px;color:${loaded ? "#4ade80" : "#6b7380"};">${loaded ? "✓ " + esc(info) : "not loaded"}</span>
       </div>
       <textarea id="morning-lineups-${src.toLowerCase()}" placeholder="${ph}" spellcheck="false" style="width:100%;height:46px;background:#050507;border:1px solid #1a1d22;border-radius:6px;padding:6px 8px;color:#e2e8f0;font-family:'JetBrains Mono','Menlo',monospace;font-size:10px;outline:none;resize:vertical;box-sizing:border-box;"></textarea>
-      <div style="margin-top:6px;"><button onclick="morningParseLineupsSrc('${src}')" style="background:transparent;border:1px solid ${color};color:${color};border-radius:5px;padding:3px 12px;font-size:11px;font-weight:800;cursor:pointer;">PARSE ${src.toUpperCase()}</button></div>
+      <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;"><button onclick="morningParseLineupsSrc('${src}')" style="background:transparent;border:1px solid ${color};color:${color};border-radius:5px;padding:3px 12px;font-size:11px;font-weight:800;cursor:pointer;">PARSE ${src.toUpperCase()}</button>${src === "RW" ? `<button id="lineup-rw-refresh" onclick="morningRefreshRwLineups()" title="Pull today's lineups straight from the RotoWire API (no paste)" style="background:${color}22;border:1px solid ${color};color:${color};border-radius:5px;padding:3px 12px;font-size:11px;font-weight:800;cursor:pointer;">\u21bb REFRESH RW</button>` : ""}</div>
     </div>`;
   const state = lc.list.length ? { t: lc.list.length + " CONFLICT" + (lc.list.length === 1 ? "" : "S"), c: "#f87171" } : lc.compared.length ? { t: "ALL " + lc.compared.length + " TEAMS AGREE", c: "#22c55e" } : { t: "NOTHING TO COMPARE", c: "#a8b0bb" };
   const ri = getRgImpact();
@@ -25709,7 +25777,7 @@ function lineupPanelHtml(card, lc) {
         <span style="font-size:11px;font-weight:800;color:${state.c};border:1px solid ${state.c}66;border-radius:10px;padding:1px 9px;">${state.t}</span>
         ${lc.noOpinion.length ? `<span style="font-size:10px;color:#6b7380;">only one source: ${esc(lc.noOpinion.join(", "))}</span>` : ""}
       </div>
-      <div style="display:flex;gap:6px;"><button onclick="morningParseLineupsAll()" style="background:#7c3aed;border:none;color:#fff;border-radius:6px;padding:7px 18px;font-size:12px;font-weight:800;cursor:pointer;">PARSE ALL</button>${(rw || rg || tb) ? `<button onclick="morningClearLineupsAll()" style="background:transparent;border:1px solid #f8717166;color:#f87171;border-radius:6px;padding:7px 12px;font-size:11px;font-weight:800;cursor:pointer;">CLEAR ALL</button>` : ""}</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;"><button onclick="lineupSharePic()" title="Save a share picture of this lineup check" style="background:transparent;border:1px solid #7dd3fc;color:#7dd3fc;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:800;cursor:pointer;">\ud83d\udcf8 SHARE PIC</button><button onclick="morningParseLineupsAll()" style="background:#7c3aed;border:none;color:#fff;border-radius:6px;padding:7px 18px;font-size:12px;font-weight:800;cursor:pointer;">PARSE ALL</button>${(rw || rg || tb) ? `<button onclick="morningClearLineupsAll()" style="background:transparent;border:1px solid #f8717166;color:#f87171;border-radius:6px;padding:7px 12px;font-size:11px;font-weight:800;cursor:pointer;">CLEAR ALL</button>` : ""}</div>
     </div>
     <div style="font-size:10px;color:#8b93a0;margin-top:4px;line-height:1.5;">Paste each page in its box, then PARSE ALL (or parse one alone). A player one source starts that another doesn’t is blocked on both sides in the funnel. A source that hasn’t posted a team is no opinion.</div>
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:8px;margin-top:8px;">
