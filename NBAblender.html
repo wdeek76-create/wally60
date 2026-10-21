@@ -14796,7 +14796,7 @@ function updateEosCalc(plPerBet, currentPL) {
 }
 
 function renderTracker() {
-  try { morningCleanOrphans(); } catch (e) {}
+  try { morningCleanOrphans(); _mSyncResults(); } catch (e) {}
   const el = document.getElementById("tracker-tab");
   // Apply kind filter (all | props | totals) to every aggregation in this view
   const kindMatch = (b) => {
@@ -15420,6 +15420,7 @@ function renderTracker() {
         <div class="os-val" style="color:${Number(roi)>=0?'#7dd3fc':'#f87171'}">${roi}${roi!=="—"?"%":""}</div>
         <div class="os-sub">${totalStaked.toFixed(2)}u staked</div>
       </div>
+      ${(() => { const props = bets.filter(b => b && !["GAME_TOTAL", "GAME_SPREAD"].includes((b.stat || "").toUpperCase())); const all = _clvAgg(props), am = _clvAgg(props.filter(b => b.source === "morning")); return `<div class="overview-stat" title="Closing line value vs the close (FanDuel \u2192 Pinnacle \u2192 Prop Builder). Press closing lines to pull more."><div class="os-label">CLV</div><div class="os-val" style="color:${all.n ? (all.beat >= all.lost ? "#22c55e" : "#f87171") : "#fff"}">${all.n ? all.beat + "/" + all.n : "\u2014"}</div><div class="os-sub">${all.n ? (all.avg != null ? (all.avg >= 0 ? "+" : "") + all.avg.toFixed(1) + "% avg" : "beat close") : "no closes yet"}${am.n ? ` \u00b7 AM ${am.beat}/${am.n}` : ""}</div></div>`; })()}
       <div class="overview-stat clickable ${openOnly?'active':''}" onclick="setOpenOnly(${openOnly?'false':'true'})" title="${openOnly?'Show all bets':'Filter to open bets only'}">
         <div class="os-label">Pending</div>
         <div class="os-val" style="color:${pending.length>0?'#7dd3fc':'#fff'};${pending.length>0?'text-shadow:0 0 12px rgba(125,211,252,0.5);':''}">${pending.length}</div>
@@ -25475,6 +25476,38 @@ function morningDeleteBet(id) {
 }
 // Tracker copies of Morning picks whose Morning-log entry is gone (deleted, or dropped by a rule change) are removed while
 // they are still pending; settled ones stay as history.
+// Morning picks and their Tracker copies are the same bet: a grade (auto or manual) on either side is copied to the other
+// while the other is still pending, so grading in the Tracker and on the Morning tab always agree.
+// ── CLV for Morning picks (their Tracker copy carries the closing line) ──────────────────────────────────────────────
+function _mTwin(m) { return bets.find(x => x && x.source === "morning" && (String(x.morningId) === String(m.id) || String(x.id) === String(m.trackerId))) || null; }
+function _clvAgg(list) {
+  const o = { n: 0, beat: 0, lost: 0, flat: 0, sum: 0, np: 0 };
+  list.forEach(b => { const c = computeCLV(b); if (!c) return; o.n++; if (c.favorable === true) o.beat++; else if (c.favorable === false) o.lost++; else o.flat++; if (c.pricePct != null) { o.sum += c.pricePct; o.np++; } });
+  o.avg = o.np ? o.sum / o.np : null;
+  return o;
+}
+function _clvCellHtml(b) {
+  const c = b ? computeCLV(b) : null;
+  if (!c) return `<span style="color:#525a64;" title="No closing line yet \u2014 GRADE PENDING pulls it after the game">\u2014</span>`;
+  const col = c.favorable === true ? "#4ade80" : c.favorable === false ? "#f87171" : "#a8b0bb";
+  const txt = c.pricePct != null ? `${c.pricePct >= 0 ? "+" : ""}${c.pricePct.toFixed(1)}%` : (c.lineDelta ? (c.lineDelta > 0 ? "+" : "") + c.lineDelta + " pts" : "0");
+  return `<span style="color:${col};font-weight:800;" title="${_mEsc(`${b.line} \u2192 ${c.closeLine}  \u00b7  ${b.odds} \u2192 ${c.closePrice}${c.book ? "  \u00b7  " + c.book : ""}`)}">${c.favorable === true ? "\u2713 " : c.favorable === false ? "\u2717 " : ""}${txt}</span>`;
+}
+function _mSyncResults() {
+  try {
+    if (!window._mbLoaded || !Array.isArray(bets) || !Array.isArray(morningBets)) return 0;
+    let n = 0, dirtyB = false, dirtyM = false;
+    morningBets.forEach(m => {
+      const tb = bets.find(x => x && x.source === "morning" && (String(x.morningId) === String(m.id) || String(x.id) === String(m.trackerId)));
+      if (!tb) return;
+      if (m.result !== "pending" && tb.result === "pending") { tb.result = m.result; if (m.actual != null) tb.actual = m.actual; if (m.gradedAt) tb.gradedAt = m.gradedAt; dirtyB = true; n++; }
+      else if (tb.result !== "pending" && m.result === "pending") { m.result = tb.result; m.actual = tb.actual != null ? tb.actual : (tb.actualTotal != null ? tb.actualTotal : m.actual); m.gradedAt = tb.gradedAt || Date.now(); dirtyM = true; n++; }
+    });
+    if (dirtyB) saveBets();
+    if (dirtyM) saveMorningBets();
+    return n;
+  } catch (e) { return 0; }
+}
 function morningCleanOrphans() {
   try {
     if (typeof bets === "undefined" || !Array.isArray(bets) || !Array.isArray(morningBets) || !window._mbLoaded) return 0;   // never prune before the Morning log has loaded
@@ -25498,6 +25531,9 @@ async function morningGradePending() {
     catch (e) { waiting++; }
   }
   saveMorningBets();
+  try { _mSyncResults(); } catch (e) {}
+  // closing lines for the days just graded, so CLV fills in (FanDuel \u2192 Pinnacle \u2192 Prop Builder); skipped quietly if the feed is down
+  try { for (const day of [...new Set(pending.filter(b => b.result !== "pending").map(b => b.gameDate).filter(Boolean))]) await grabClosingLines(day); } catch (e) { console.warn("[MORNING] closing lines skipped", e); }
   let soloGraded = 0;
   try { soloGraded = await morningGradeSolo(); } catch (e) { console.warn("[MORNING solo] grade failed", e); }
   if (btn) { btn.disabled = false; btn.textContent = "GRADE PENDING"; }
@@ -25590,7 +25626,7 @@ function lineupPanelHtml(card, lc) {
   </div>`;
 }
 function renderMorning() {
-  try { morningCleanOrphans(); } catch (e) {}
+  try { morningCleanOrphans(); _mSyncResults(); } catch (e) {}
   const el = document.getElementById("morning-tab");
   if (!el) return;
   pruneMorningPs();
@@ -25749,12 +25785,13 @@ function renderMorning() {
       ${statCard("Units", fmtU(recAll.units), recAll.roi != null ? `ROI ${recAll.roi >= 0 ? "+" : ""}${recAll.roi.toFixed(1)}%` : "", recAll.units >= 0 ? "#4ade80" : "#f87171")}
       ${statCard("Today", fmtRec(recToday), fmtU(recToday.units), recToday.units >= 0 ? "#4ade80" : "#f87171")}
       ${(() => { const d = _mRecord(morningBets.filter(b => b.discordSent)); return d.w + d.l + d.p || morningBets.some(b => b.discordSent) ? statCard("Sent to Discord", fmtRec(d), `${fmtU(d.units)}${d.roi != null ? " · ROI " + (d.roi >= 0 ? "+" : "") + d.roi.toFixed(1) + "%" : ""}`, d.units >= 0 ? "#4ade80" : "#f87171") : ""; })()}
+      ${(() => { const a = _clvAgg(morningBets.map(_mTwin).filter(Boolean)); return statCard("CLV", a.n ? `${a.beat}/${a.n} beat close` : "no closes yet", a.n ? `${a.avg != null ? "avg " + (a.avg >= 0 ? "+" : "") + a.avg.toFixed(1) + "%" : ""}${a.lost ? " \u00b7 " + a.lost + " lost" : ""}` : "GRADE PENDING pulls closing lines", a.n && a.beat >= a.lost ? "#4ade80" : "#f87171"); })()}
       ${byStat.length ? statCard("By market", byStat.map(([s, r]) => `${s} ${fmtRec(r)}`).join(" · "), byStat.map(([s, r]) => `${s} ${fmtU(r.units)}`).join(" · ")) : ""}
     </div>
-    ${logRows.length ? `<div style="overflow-x:auto;"><table style="border-collapse:collapse;width:100%;"><thead><tr>${["DATE", "PLAYER", "STAT", "SIDE", "LINE", "ODDS", "BOOK", "FAIR", "EV", "AGREE", "RESULT", ""].map(th).join("")}</tr></thead><tbody>
+    ${logRows.length ? `<div style="overflow-x:auto;"><table style="border-collapse:collapse;width:100%;"><thead><tr>${["DATE", "PLAYER", "STAT", "SIDE", "LINE", "ODDS", "BOOK", "FAIR", "EV", "CLV", "AGREE", "RESULT", ""].map(th).join("")}</tr></thead><tbody>
       ${logRows.map(b => `<tr style="border-top:1px solid #1a1d22;">
         ${td(_mEsc((b.gameDate || "").slice(5)))}${td(_mPlayerCell(b.player, b.team))}${td(b.stat, "font-weight:800;color:#fff;")}${td(b.ou.toUpperCase(), `color:${b.ou === "over" ? "#4ade80" : "#f87171"};font-weight:700;`)}${td(b.line)}
-        ${td(_mFmtOdds(b.odds), "color:#fff;")}${td(_mEsc(b.book || "—"))}${td(_mFmtOdds(b.fairOdds))}${td(b.ev != null ? `+${Number(b.ev).toFixed(1)}%` : "—", "color:#4ade80;")}
+        ${td(_mFmtOdds(b.odds), "color:#fff;")}${td(_mEsc(b.book || "—"))}${td(_mFmtOdds(b.fairOdds))}${td(b.ev != null ? `+${Number(b.ev).toFixed(1)}%` : "—", "color:#4ade80;")}${td(_clvCellHtml(_mTwin(b)))}
         ${td(`${(b.sourcesAgreed || []).length}/${b.requiredQual || 4}`, "color:#c4b5fd;font-weight:800;")}
         ${td(`<select onchange="morningSetResult('${b.id}',this.value)" style="background:#050507;border:1px solid ${resColor[b.result] || "#1a1d22"}55;color:${resColor[b.result] || "#d4dae3"};border-radius:4px;padding:2px 4px;font-size:11px;font-weight:800;">${["pending", "hit", "miss", "void"].map(o => `<option value="${o}" ${b.result === o ? "selected" : ""}>${o === "hit" ? "WIN" : o === "miss" ? "LOSS" : o.toUpperCase()}</option>`).join("")}</select>${b.actual != null ? ` <span style="color:#a8b0bb;font-size:11px;">(${b.actual})</span>` : ""}`)}
         ${td(`<button onclick="morningDeleteBet('${b.id}')" style="background:transparent;border:none;color:#525a64;cursor:pointer;font-size:14px;" title="Delete">✕</button>`)}
