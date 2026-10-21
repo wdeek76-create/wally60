@@ -4414,7 +4414,51 @@ function restoreTrackerBackupFile(file){
 const tkBackupHtml = `<div class="ttsum"><div class="ttsumh"><span>Backup &amp; Restore</span></div>
   <div class="tkbkrow"><button id="tkexport" class="rm" style="background:var(--bg2)">Download backup (.json)</button><button id="tkimport" class="rm" style="background:var(--bg2)">Import backup (.json)</button><input id="tkimportfile" type="file" accept="application/json,.json" style="display:none"></div>
 </div>`;
+// Add a bet by hand (NBA player props): counts toward NBA Props 2026 like any tracked bet. A player
+// on today's loaded NBA slate is linked to the game, so it snapshots odds and auto-grades; anyone
+// else is saved as-is and graded from Edit → Result.
+const nbaData = () => sportKey==='nba' && players.length ? { players, fixtures, mainRows } : loadSportCache('nba');
+function tkAddHtml(){
+  const d=nbaData(); const names=[...new Set((d?.players||[]).filter(x=>!x.isTeam&&!x.isGame).map(x=>titleCase(x.name)))].sort();
+  const books=[...new Set([...BOOKS,'Onyx Odds','Courtside','BetRivers','Caesars','Hard Rock Bet','BetMGM','Kambi'])];
+  return `<div class="ttsum"><div class="ttsumh"><span>Add bet</span></div>
+    <div class="tked" id="tkadd" data-ed="__add" style="display:grid">
+      <label>Player<input name="player" list="tkaddnames" autocomplete="off" placeholder="${names.length?'Start typing…':'Player name'}"></label>
+      <datalist id="tkaddnames">${names.map(n=>`<option value="${esc(n)}">`).join('')}</datalist>
+      <label>Prop<select name="mkey">${NBA_MKTS.filter(([k])=>NBA26_ORDER.includes(k)).map(([k,l])=>`<option value="${k}">${esc(l)}</option>`).join('')}</select></label>
+      <label>Side<select name="side"><option value="over">Over</option><option value="under">Under</option></select></label>
+      <label>Line<input name="line" type="text" inputmode="decimal" placeholder="24.5"></label>
+      <label>Price<input name="price" type="text" autocomplete="off" placeholder="-110 or 102"></label>
+      <label>Shop<select name="book">${books.map(b=>`<option value="${esc(b.toLowerCase())}"${b==='FanDuel'?' selected':''}>${esc(b==='Onyx Odds'?'Onyx':b)}</option>`).join('')}</select></label>
+      <div class="note">${names.length?'Players on today\'s NBA slate link to their game and auto-grade.':'Open the NBA tab once today and players will link to their game and auto-grade.'} Anyone else saves as-is -- grade it from Edit → Result.</div>
+      <div class="act"><button class="big p" id="tkaddsave">Add to tracker</button></div>
+    </div></div>`;
+}
+function tkAddSave(){
+  const f=$('#tkadd'); if(!f) return; const v=n=>f.querySelector(`[name=${n}]`).value.trim();
+  const name=v('player'), mkey=v('mkey'), side=v('side'), bk=v('book');
+  if(!name){ toast('Player name'); return; }
+  const line=Number(v('line')); if(v('line')==='' || isNaN(line)){ toast('Line must be a number'); return; }
+  const price=parseAm(v('price')); if(price==null){ toast('Price like -110 or 102'); return; }
+  const d=nbaData(); const key=normName(name);
+  const p=(d?.players||[]).find(x=>x.key===key && !x.isTeam && !x.isGame);
+  const f0=p ? (d.fixtures||[]).find(x=>x.id===p.fixtureId) : null;
+  const rows=p ? (d.mainRows||[]).filter(o=>o._fx===p.fixtureId && marketKeyFor('nba',o.market)===mkey && normName(cleanSel(o.selection||o.name))===key) : [];
+  const info=p?.pid?playerInfo[p.pid]:null;
+  const teamAb=info?.teamId&&f0 ? (f0.home.id===info.teamId?f0.home.ab:f0.away.id===info.teamId?f0.away.ab:'') : '';
+  const bookLbl=bk==='onyx odds'?'Onyx':bk==='courtside'?'Courtside':bookLabel(bk);
+  tracked.unshift({ id:Date.now()+Math.random().toString(36).slice(2,6), src:'manual', sportKey:'nba', fixtureId:p?.fixtureId||null, start:f0?.start||new Date().toISOString(),
+    away:f0?.away.ab||'', home:f0?.home.ab||'', card:null, playerKey:key, playerName:p?.name||name, pid:p?.pid||null, headshot:info?.headshot||'', teamAb, teamLogo:'',
+    mkey, marketLabel:marketLabel('nba',mkey), marketNames:[...new Set(rows.map(o=>o.market))], side, line, price, book:bookLbl, bookKey:canonBook(bk), pinned:true, trackedAt:Date.now(),
+    mainLineAtTrack:rows.length?mainLineOf(rows, side):line, isTeam:false, teamSide:null, favDog:null, stakeUnits:null, isGame:false,
+    snapshots:rows.length?[snapshotFrom(rows, side, line)]:[], live:null, actual:null, result:null, open:null, close:null });
+  document.activeElement?.blur?.(); // the form holds focus, which would hold back the re-render
+  ['player','line','price'].forEach(n=>{ f.querySelector(`[name=${n}]`).value=''; });
+  saveTracked(); toast(`Added ${titleCase(name)} ${side==='over'?'o':'u'}${line} ${marketLabel('nba',mkey)}${p?'':' (not on today\'s slate -- grade it from Edit)'}`);
+  renderTracker(); if(p) refreshTracker();
+}
 function bindTkBackup(){
+  $('#tkaddsave')?.addEventListener('click',tkAddSave);
   $('#tkexport')?.addEventListener('click',downloadTrackerBackup);
   $('#tkimport')?.addEventListener('click',()=>$('#tkimportfile')?.click());
   $('#tkimportfile')?.addEventListener('change',e=>{ const f=e.target.files[0]; if(f) restoreTrackerBackupFile(f); e.target.value=''; });
@@ -4422,7 +4466,7 @@ function bindTkBackup(){
 function renderTracker(){
   clearGstripDock(); const view=$('#view'); $('.sw').style.display='none';
   if(!tracked.length){
-    view.innerHTML=tkBackupHtml+teamTotalsSummaryHtml()+'<div class="empty">Nothing tracked yet.<br>Open a player and tap <b>Track</b> on a side.</div>';
+    view.innerHTML=tkBackupHtml+tkAddHtml()+teamTotalsSummaryHtml()+'<div class="empty">Nothing tracked yet.<br>Open a player and tap <b>Track</b> on a side.</div>';
     bindTkBackup();
     $('#stat').textContent='Tracker · empty'; return;
   }
@@ -4445,7 +4489,7 @@ function renderTracker(){
   const historyHtml = historyList.length
     ? `<div class="tkhist"><button class="tkhisttoggle" id="tkhisttoggle">Bet History (${historyList.length}) ${historyShown?'▴ hide':'▾ show'}</button>${historyShown?bySport(historyList):''}</div>`
     : '';
-  view.innerHTML = tkBackupHtml + dailyRecordHtml() + teamTotalsSummaryHtml() + matrixSummaryHtml() + openHtml + historyHtml;
+  view.innerHTML = tkBackupHtml + tkAddHtml() + dailyRecordHtml() + teamTotalsSummaryHtml() + matrixSummaryHtml() + openHtml + historyHtml;
   // Summary sections start collapsed; tapping a header opens it (remembered until the page reloads).
   view.querySelectorAll('.ttsum').forEach(sec=>{
     const h=sec.querySelector('.ttsumh'); if(!h) return;
