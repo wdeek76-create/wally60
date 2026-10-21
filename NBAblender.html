@@ -4311,7 +4311,9 @@ async function grabClosingLines(isoDate) {
       // yesterday default pulls closing odds for the wrong slate the moment
       // there's a gap in games or a bet gets graded a day or two late, which
       // silently attaches a totally different game's closing line.
-      const needsClose = bets.filter(b => b && b.result && b.result !== "pending" && !b.closing &&
+      // graded bets, or any bet whose game day has passed (a morning pick can still be ungraded when you press this)
+      const todayYmd = localYMD(new Date());
+      const needsClose = bets.filter(b => b && !b.closing && ((b.result && b.result !== "pending") || (betDayLocal(b) && betDayLocal(b) < todayYmd)) &&
         !["GAME_TOTAL", "GAME_SPREAD"].includes((b.stat || "").toUpperCase()));
       const days = [...new Set(needsClose.map(betDayLocal).filter(Boolean))].sort();
       day = days.length ? days[days.length - 1] : localYMD(new Date(Date.now() - 86400000));
@@ -4328,6 +4330,7 @@ async function grabClosingLines(isoDate) {
       return;
     }
     console.log(`[CLV] ${day}: ${rows.length} closing rows`);
+    window._clvDiag = { day, fixtures: (window._clvFixtures != null ? window._clvFixtures : "?"), rows: rows.length, markets: [...new Set(rows.map(r => r && r.market_key))].join(", "), books: [...new Set(rows.map(r => r && r.bookmaker))].join(", ") };
     if (!rows.length) { showToast(`No closing rows returned for ${day}`); return; }
     // Same diagnostic as the fill — shows why a bet failed to match rather than
     // just reporting a count.
@@ -4370,7 +4373,8 @@ async function grabClosingLines(isoDate) {
       matched++;
     });
     if (matched) { saveBets(); renderTracker(); }
-    showToast(`Closing lines: ${matched} of ${todays.length} bets matched`);
+    const dg = window._clvDiag || {};
+    showToast(matched ? `Closing lines: ${matched} of ${todays.length} bets matched` : `Closing lines: 0 of ${todays.length} matched on ${day} \u2014 OpticOdds gave ${dg.fixtures} finished game(s) and ${dg.rows} closing rows${dg.rows ? " (markets: " + (dg.markets || "none") + "; books: " + (dg.books || "none") + ")" : " \u2014 the feed had no closing prices for that day yet"}`);
   } catch (e) {
     showToast("Closing lines failed — see console");
     console.error("grabClosingLines:", e);
@@ -5095,6 +5099,7 @@ async function fetchClosingFromOpticOdds(isoDate) {
     if (!r?.has_more) break; page++;
   }
   const day = raw.filter(f => localYMD(new Date(f.start_date)) === isoDate && f.status !== "unplayed");
+  window._clvFixtures = day.length;
   console.log(`[CLV] OpticOdds fixtures on ${isoDate}:`, day.map(f => `${f.away_team_display} @ ${f.home_team_display} (${f.status})`));
   if (!day.length) return [];
   // CLV_BOOK_PRIORITY keys -> OpticOdds names (max 5 books per call)
@@ -25500,8 +25505,10 @@ function _mSyncResults() {
     morningBets.forEach(m => {
       const tb = bets.find(x => x && x.source === "morning" && (String(x.morningId) === String(m.id) || String(x.id) === String(m.trackerId)));
       if (!tb) return;
-      if (m.result !== "pending" && tb.result === "pending") { tb.result = m.result; if (m.actual != null) tb.actual = m.actual; if (m.gradedAt) tb.gradedAt = m.gradedAt; dirtyB = true; n++; }
-      else if (tb.result !== "pending" && m.result === "pending") { m.result = tb.result; m.actual = tb.actual != null ? tb.actual : (tb.actualTotal != null ? tb.actualTotal : m.actual); m.gradedAt = tb.gradedAt || Date.now(); dirtyM = true; n++; }
+      if (m.actualMin != null && tb.actualMin == null) { tb.actualMin = m.actualMin; dirtyB = true; }
+      if (tb.actualMin != null && m.actualMin == null) { m.actualMin = tb.actualMin; dirtyM = true; }
+      if (m.result !== "pending" && tb.result === "pending") { tb.result = m.result; if (m.actual != null) tb.actual = m.actual; if (m.actualMin != null) tb.actualMin = m.actualMin; if (m.gradedAt) tb.gradedAt = m.gradedAt; dirtyB = true; n++; }
+      else if (tb.result !== "pending" && m.result === "pending") { if (tb.actualMin != null) m.actualMin = tb.actualMin; m.result = tb.result; m.actual = tb.actual != null ? tb.actual : (tb.actualTotal != null ? tb.actualTotal : m.actual); m.gradedAt = tb.gradedAt || Date.now(); dirtyM = true; n++; }
     });
     if (dirtyB) saveBets();
     if (dirtyM) saveMorningBets();
@@ -25527,7 +25534,7 @@ async function morningGradePending() {
   if (btn) { btn.disabled = true; btn.textContent = "GRADING…"; }
   let graded = 0, waiting = 0;
   for (const b of pending) {
-    try { const r = await gradeBet(b); if (r.ok) { b.result = r.result; b.actual = r.total != null ? r.total : null; b.gradedAt = Date.now(); graded++; } else waiting++; }
+    try { const r = await gradeBet(b); if (r.ok) { b.result = r.result; b.actual = r.total != null ? r.total : null; if (r.actualMin != null) b.actualMin = r.actualMin; b.gradedAt = Date.now(); graded++; } else waiting++; }
     catch (e) { waiting++; }
   }
   saveMorningBets();
