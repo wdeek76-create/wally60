@@ -25744,20 +25744,32 @@ function _mAlreadyLogged(r) { const k = _mLoggedKey(r); return morningBets.some(
 const MORNING_TO_TRACKER_KEY = "nba_morning_to_tracker";
 function morningToTrackerOn() { try { return localStorage.getItem(MORNING_TO_TRACKER_KEY) !== "0"; } catch (e) { return true; } }
 function morningToggleTracker() { try { localStorage.setItem(MORNING_TO_TRACKER_KEY, morningToTrackerOn() ? "0" : "1"); } catch (e) {} showToast(morningToTrackerOn() ? "Morning picks will also go into the main Tracker" : "Morning picks stay in the Morning log only"); renderMorning(); }
+// The price a pick is TRACKED at (Tracker copy, COPY summary): the best FanDuel / Prop Builder / Pinnacle price on the line; the headline "best price"
+// on the cards can be a book you don't bet. If none of the three has a price it stays the best available (edit it in the Tracker if it's wrong).
+function _mTrackPrice(m) {
+  const name = bk => { const k = String(bk || "").trim(); return BOOK_CODE_NAMES[k.toUpperCase()] || k; };
+  const KEY = ["FanDuel", "Prop Builder", "Pinnacle"], canon = n => /props? ?builder/i.test(n) ? "Prop Builder" : n;
+  const cands = [{ book: m.book, odds: m.odds }].concat(m.sourcePrices || [], m.altBooks || [])
+    .map(x => ({ book: canon(name(x && x.book)), odds: x && x.odds })).filter(x => KEY.includes(x.book) && x.odds != null && !isNaN(x.odds));
+  if (!cands.length) return { book: m.book || "", odds: m.odds, fallback: true };
+  let best = cands[0]; cands.forEach(x => { if (x.odds > best.odds || (x.odds === best.odds && KEY.indexOf(x.book) < KEY.indexOf(best.book))) best = x; });
+  return { book: best.book, odds: best.odds, fallback: false };
+}
 function _mPushTracker(m, quiet) {
   try {
     if (!m || m.trackerId) return false;
     const dup = bets.find(b => b && resolveNorm(b.player || "") === resolveNorm(m.player) && String(b.stat || "").toUpperCase() === String(m.stat).toUpperCase() && Number(b.line) === Number(m.line) && String(b.ou || "").toLowerCase() === m.ou && (b.gameDate || "") === (m.gameDate || ""));
     if (dup) { m.trackerId = dup.id; return false; }
     const [y, mo, d] = String(m.gameDate || localYMD(new Date())).split("-");
-    const s = calcStake(m.odds) || { stake: m.stake || 1, toWin: m.toWin || 1, type: "dog" };
+    const tp = _mTrackPrice(m);
+    const s = calcStake(tp.odds) || { stake: m.stake || 1, toWin: m.toWin || 1, type: "dog" };
     let pos = ""; try { pos = positionFor(m.player) || ""; } catch (e) {}
-    const altBooks = (m.sourcePrices || []).filter(x => x.book && x.odds && !(x.book === m.book && x.odds === m.odds)).map(x => ({ book: x.book, odds: x.odds, line: m.line, fair: m.fairProb != null ? m.fairProb * 100 : null }));
+    const altBooks = (m.sourcePrices || []).concat(m.book && m.odds != null ? [{ book: m.book, odds: m.odds }] : []).filter(x => x.book && x.odds && !(x.book === tp.book && x.odds === tp.odds)).map(x => ({ book: x.book, odds: x.odds, line: m.line, fair: m.fairProb != null ? m.fairProb * 100 : null }));
     const id = Date.now() + Math.floor(Math.random() * 100000);
     bets.push({
       id, date: `${mo}/${d}/${y}`, gameDate: m.gameDate, timestamp: new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" }) + " " + localYMD(new Date()),
-      player: m.player, pos, team: m.team || "", game: m.game || "", stat: String(m.stat).toUpperCase(), ou: m.ou, line: Number(m.line), odds: m.odds,
-      fair: m.fairProb != null ? m.fairProb * 100 : null, altBooks, book: m.book || "", srcProjs: m.sourceProjs || null, proj: m.proj,
+      player: m.player, pos, team: m.team || "", game: m.game || "", stat: String(m.stat).toUpperCase(), ou: m.ou, line: Number(m.line), odds: tp.odds,
+      fair: m.fairProb != null ? m.fairProb * 100 : null, altBooks, book: tp.book || "", srcProjs: m.sourceProjs || null, proj: m.proj,
       srcMin: m.sourceMins || null, expMin: m.expMin != null ? m.expMin : null, anchorSrc: m.anchorSrc || null, anchorProj: m.anchorProj != null ? m.anchorProj : null, modelProj: m.modelProj != null ? m.modelProj : null, srcEv: m.sourceEvs || null,
       stake: s.stake, toWin: s.toWin, type: s.type, result: "pending", source: "morning", morningId: m.id,
     });
@@ -25951,7 +25963,7 @@ function morningCopyCard() {
   const today = localYMD(new Date());
   const rows = morningBets.filter(b => b.gameDate === today);
   if (!rows.length) { showToast("No morning picks logged for today"); return; }
-  const lines = rows.slice().reverse().map(b => `${displayPlayerName(b.player)} ${b.ou === "over" ? "o" : "u"}${b.line} ${b.stat} ${_mFmtOdds(b.odds)}${b.book ? " (" + b.book + ")" : ""} · ${b.sourcesAgreed.length}/${b.requiredQual}`);
+  const lines = rows.slice().reverse().map(b => `${displayPlayerName(b.player)} ${b.ou === "over" ? "o" : "u"}${b.line} ${b.stat} ${(() => { const tp = _mTrackPrice(b); return _mFmtOdds(tp.odds) + (tp.book ? " (" + tp.book + ")" : ""); })()} \u00b7 ${b.sourcesAgreed.length}/${b.requiredQual}`);
   const text = `NBA morning ensemble (${rows.length})\n` + lines.join("\n");
   try { navigator.clipboard.writeText(text).then(() => showToast("Copied morning card"), () => prompt("Copy:", text)); } catch (e) { prompt("Copy:", text); }
 }
@@ -26504,8 +26516,9 @@ async function morningRefreshPicks(picks) {
     try {
       const tb = bets.find(x => x && x.source === "morning" && (String(x.morningId) === String(b.id) || String(x.id) === String(b.trackerId)));
       if (tb && tb.result === "pending") {
-        const st = calcStake(b.odds) || { stake: tb.stake, toWin: tb.toWin, type: tb.type };
-        Object.assign(tb, { odds: b.odds, book: b.book, stake: st.stake, toWin: st.toWin, type: st.type, altBooks: (b.altBooks || []).map(a => ({ book: a.book, odds: a.odds, line: b.line, fair: tb.fair })) });
+        const tpx = _mTrackPrice(b);
+        const st = calcStake(tpx.odds) || { stake: tb.stake, toWin: tb.toWin, type: tb.type };
+        Object.assign(tb, { odds: tpx.odds, book: tpx.book, stake: st.stake, toWin: st.toWin, type: st.type, altBooks: (b.altBooks || []).map(a => ({ book: a.book, odds: a.odds, line: b.line, fair: tb.fair })) });
       }
     } catch (e) {}
   });
