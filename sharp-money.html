@@ -240,7 +240,7 @@ let toastT; const toast = m => { const t=$('#toast'); t.textContent=m; t.classLi
 async function runPool(jobs, n){ let i=0; await Promise.all(Array.from({length:Math.min(n,jobs.length)},async()=>{ while(i<jobs.length){ const j=jobs[i++]; await j(); } })); }
 const cents = v => { v=Number(v); return isNaN(v)?null:(v>0?v-100:v+100); };
 const LIQ_BAND_CENTS = 20;
-const SM_BUILD = 'Oct 22 · proj any move';
+const SM_BUILD = 'Oct 22 · perf fix';
 const SHARP_MAX_ARB = 8; // % -- anything bigger is treated as bad data
 function levelsOf(o){
   const top=Number(o.price);
@@ -1259,7 +1259,15 @@ const RW_UP = /pick up.*slack|absorb|increased.*role|increased.*involvement|expa
 const RW_RETURN = /expected to play|set to return|return to|making.*debut|season debut|return.*floor|is (?:probable|questionable) but expected/;
 const RW_CUT = /cut into|cut.*playing time|limit.*minutes|reduce.*role|fewer minutes/;
 const rwIsToday = x => { const t=rwTime(x.at); return isNaN(t) || Date.now()-t < 18*3600e3; }; // undated blurbs stay in
+// Cached: the read only changes when RotoWire's news / injuries / projections do, and it's asked for
+// many times per screen (every board player, every projection line) -- recomputing each time froze the page.
+let _rwA=null, _rwAKey='';
 function rwAnalyze(){
+  const key=`${rwNews.at}|${rwNews.items.length}|${rwInj.size}|${rwProj?.at||0}|${rwRoster.size}`;
+  if(_rwA && _rwAKey===key) return _rwA;
+  _rwAKey=key; _rwA=rwAnalyze0(); return _rwA;
+}
+function rwAnalyze0(){
   const items=rwNews.items.filter(rwIsToday);
   // who-benefits reads every blurb in the feed (~48h): an injury note from last night still says who
   // picks up the minutes tonight
@@ -1267,7 +1275,12 @@ function rwAnalyze(){
   const ben=new Map(); // normName -> [{name, kind, causedBy, causedStatus, why}]
   const NAME_RUN=/\b[A-ZÀ-ÖØ-Ý][A-Za-zà-öø-ÿ'.]+(?:-[A-Za-zà-öø-ÿ']+)*(?:\s+[A-ZÀ-ÖØ-Ý][A-Za-zà-öø-ÿ'.]+(?:-[A-Za-zà-öø-ÿ']+)*){1,3}\b/g; // McBride, O'Neale, Gilgeous-Alexander
   // team of a known player: injury report, then today's projections, then his own news
-  const teamOf = k => rwTeamKey(rwInj.get(k)?.team || rwProj?.last?.[k]?.team || (rwNews.items.find(n=>normName(n.name)===k)||{}).team || '');
+  // name -> team built once (was a full news scan per lookup, per player, per blurb)
+  const newsTeam=new Map(); rwNews.items.forEach(n=>{ const k=normName(n.name); if(n.team && !newsTeam.has(k)) newsTeam.set(k, n.team); });
+  const teamCache=new Map();
+  const teamOf = k => { if(teamCache.has(k)) return teamCache.get(k); const t=rwTeamKey(rwInj.get(k)?.team || rwProj?.last?.[k]?.team || newsTeam.get(k) || ''); teamCache.set(k,t); return t; };
+  // each team's players, by last name, built once
+  const byTeamLast=new Map(); [...rwRoster.keys()].forEach(k=>{ const t=teamOf(k); if(!t) return; const last=k.split(' ').slice(-1)[0]; const key=t+'|'+last; (byTeamLast.get(key)||byTeamLast.set(key,[]).get(key)).push(k); });
   // the subject's status decides what a mention means: he's out / iffy -> teammates go up; he's back -> they go down
   const statusOf = (x, k) => rwInj.get(k)?.status || rwStatusOf(x);
   const IF_OUT = /\bif (?:he|she|[A-Z][a-z]+) (?:can't|cannot|is unable|isn't able|doesn't|does not|sits|misses|is out|is ruled out)|\bwithout\b|\bin his absence|\bwith .{0,30} (?:out|sidelined)/i;
@@ -1295,10 +1308,9 @@ function rwAnalyze(){
     // then surname-only mentions ("Jones would see more run"), only against the subject's own team
     if(selfTeam){
       const selfLast=normName(x.name.split(/\s+/).slice(-1)[0]);
-      const mates=[...rwRoster.keys()].filter(k=>k!==self && teamOf(k)===selfTeam);
       for(const m of text.matchAll(/\b[A-Z][A-Za-zà-öø-ÿ'.-]{2,}\b/g)){
         const w=normName(m[0]); if(!w || w===selfLast) continue;
-        const hits=mates.filter(k=>k.split(' ').slice(-1)[0]===w);
+        const hits=(byTeamLast.get(selfTeam+'|'+w)||[]).filter(k=>k!==self);
         if(hits.length===1) add(hits[0], m[0]);
       }
     }
