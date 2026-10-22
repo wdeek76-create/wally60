@@ -241,7 +241,7 @@ let toastT; const toast = m => { const t=$('#toast'); t.textContent=m; t.classLi
 async function runPool(jobs, n){ let i=0; await Promise.all(Array.from({length:Math.min(n,jobs.length)},async()=>{ while(i<jobs.length){ const j=jobs[i++]; await j(); } })); }
 const cents = v => { v=Number(v); return isNaN(v)?null:(v>0?v-100:v+100); };
 const LIQ_BAND_CENTS = 20;
-const SM_BUILD = 'Oct 22 · clear teams';
+const SM_BUILD = 'Oct 22 · pos+team';
 const SHARP_MAX_ARB = 8; // % -- anything bigger is treated as bad data
 function levelsOf(o){
   const top=Number(o.price);
@@ -668,6 +668,16 @@ const httpsLogo = k => k==='fanduel' ? FD_DISCORD_LOGO : [bookLogos[k], bookLogo
 // the next scan tries it again; the last few results show under Last Scan.
 const sharpDcQ = [], sharpDcLog = []; let sharpDcRunning = false;
 const sharpDcNote = (ok, txt) => { sharpDcLog.unshift({ ok, txt, at:Date.now() }); sharpDcLog.length=Math.min(sharpDcLog.length,5); };
+// Position + team for the alert's subtitle (OpticOdds /players), cached per player.
+const smPlayerInfo = {};
+async function smInfo(e){
+  const pid=e.pid; if(!pid) return null;
+  if(smPlayerInfo[pid]!==undefined) return smPlayerInfo[pid];
+  try{ const r=await oo('/players',{id:[pid]}); const d=r?.data?.[0];
+    smPlayerInfo[pid] = d ? { pos:d.position||'', teamId:d.team?.id||null, team:d.team?.name||'' } : null; }
+  catch(err){ smPlayerInfo[pid]=null; }
+  return smPlayerInfo[pid];
+}
 async function sharpDcPump(){
   if(sharpDcRunning) return; sharpDcRunning=true;
   try{
@@ -675,7 +685,7 @@ async function sharpDcPump(){
       const e=sharpDcQ.shift(), name=`${titleCase(e.player)} ${sharpSideLabel(e.side)}${e.line!=null?' '+e.line:''}`;
       let ok=false, why='';
       const tag = e.tgt==='bet105' ? 'b105 · ' : '';
-      try{ ok=await discordPost({ ...sharpDiscordPayload(e), ...roleTag(roleFor(e)) }, m=>{ why=m; }, hookFor(e)); }catch(err){ why=err.message; }
+      try{ e.info=await smInfo(e); ok=await discordPost({ ...sharpDiscordPayload(e), ...roleTag(roleFor(e)) }, m=>{ why=m; }, hookFor(e)); }catch(err){ why=err.message; }
       sharpDcNote(ok, ok ? `sent ${tag}${name}` : `FAILED ${tag}${name}: ${why||'?'}`);
       if(!ok) delete sharpPinged[e.k];
       await new Promise(r=>setTimeout(r,1200));
@@ -688,6 +698,9 @@ function sharpDiscordPayload(e, example){
   const edge=o._edge??0, isArb=edge>1e-7, isDirect=!isArb&&edge>=-1e-7, book=bookLabel(o.sportsbook);
   const mktName= e.mk==='pra' ? 'PRA' : ((e.own.find(x=>x._sd===e.side)||e.own[0])?.market || marketLabel(sk,e.mk));
   const bet=`${titleCase(e.player)} ${sharpSideLabel(e.side)}${e.line!=null?' '+e.line:''}`;
+  // under the name: his position and team (e.g. "RB - CHI") when known, else the market
+  const posTeam=(()=>{ const i=e.info; if(!i) return ''; const ab = f && i.teamId ? (f.home?.id===i.teamId?f.home.ab:f.away?.id===i.teamId?f.away.ab:'') : '';
+    return [i.pos, ab || i.team].filter(Boolean).join(' - '); })();
   // one row per exchange on the other side: its arb money (orders at 0.0% or better) at its price
   // closest to the arb line (the worst one still counted); an exchange with nothing at 0.0% shows
   // its own best price and size instead
@@ -710,10 +723,10 @@ function sharpDiscordPayload(e, example){
     title:`${example?'[EXAMPLE] ':''}[${SPORTS[sk]?.label||sk} ${isArb?'ARB':isDirect?'DIRECT MATCH':'LOW HOLD'} ${fmtAm(o.price)}] - ${bet} ${mktName}`.slice(0,256),
     url:url||undefined, color:isArb?0x22c55e:isDirect?0xeab308:0xf97316,
     thumbnail: httpsLogo(bk) ? { url:httpsLogo(bk) } : undefined,
-    description:`${f?`${f.away.name||f.away.ab} @ ${f.home.name||f.home.ab} · ${when}\n`:''}**${bet}**\n*${mktName}*`,
+    description:`${f?`${f.away.name||f.away.ab} @ ${f.home.name||f.home.ab} · ${when}\n`:''}**${bet}**\n*${posTeam||mktName}*`,
     fields:[
       { name:'Edge Analysis', value:`${book}: ${sharpSideLabel(e.side)} **${fmtAm(o.price)}**\nSharp Fair: ${best?`${bookLabel(best[0])} **${fmtAm(-best[1].opp)}**`:'—'}\n${(fairEdge??0)>1e-7?`Arb **${pctTxt(fairEdge)}** at sharp fair`:(fairEdge??0)>=-1e-7?'**Direct match** at sharp fair':`Hold **${pctTxt(-fairEdge)}** at sharp fair`}\n**${usd(e.L.total)}** at ${holdOkTxt()}` },
-      { name:`Exchange Depth (${usd(e.L.total)} at arb)`, value: '```\n'+[`${'Book'.padEnd(7)} ${'Odds'.padStart(5)} ${'Liq'.padStart(7)} ${'Arb'.padStart(6)}`, ...depthLv.map(l=>`${[...l.books].map(k=>bookShort(k)).join('/').slice(0,7).padEnd(7)} ${fmtAm(l.opp).padStart(5)} ${('$'+Math.round(l.size).toLocaleString()).padStart(7)} ${((-l.hold>=0?'+':'')+(-l.hold).toFixed(1)+'%').padStart(6)}`)].join('\n')+'\n```' },
+      { name:`Exchange Depth (${usd(e.L.total)} at arb)`, value: '```\n'+[`${'Book'.padEnd(6)} ${'Odds'.padStart(5)} ${'Liq'.padStart(6)} ${'Arb'.padStart(5)}`, ...depthLv.map(l=>`${[...l.books].map(k=>bookShort(k)).join('/').slice(0,6).padEnd(6)} ${fmtAm(l.opp).padStart(5)} ${usd(l.size).padStart(6)} ${((-l.hold>=0?'+':'')+(-l.hold).toFixed(1)+'%').padStart(5)}`)].join('\n')+'\n```' },
     ],
     footer:{ text:SPORTS[sk]?.label||sk } }] };
 }
