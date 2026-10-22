@@ -240,7 +240,7 @@ let toastT; const toast = m => { const t=$('#toast'); t.textContent=m; t.classLi
 async function runPool(jobs, n){ let i=0; await Promise.all(Array.from({length:Math.min(n,jobs.length)},async()=>{ while(i<jobs.length){ const j=jobs[i++]; await j(); } })); }
 const cents = v => { v=Number(v); return isNaN(v)?null:(v>0?v-100:v+100); };
 const LIQ_BAND_CENTS = 20;
-const SM_BUILD = 'Oct 22 · board v6';
+const SM_BUILD = 'Oct 22 · proj any move';
 const SHARP_MAX_ARB = 8; // % -- anything bigger is treated as bad data
 function levelsOf(o){
   const top=Number(o.price);
@@ -1156,6 +1156,8 @@ function rwProjRow(o){
 const PROJ_STATS = [['min','MIN',1],['pts','PTS',1],['reb','REB',.7],['ast','AST',.7],['tpm','3PM',.4],['pra','PRA',1.5]];
 let rwProj = (()=>{ try{ return JSON.parse(LS.get('sm_rw_proj','null')); }catch(e){ return null; } })(); // {day, base:{k:row}, last:{k:row}, at}
 let rwProjLog = (()=>{ try{ return JSON.parse(LS.get('sm_rw_projlog','[]')); }catch(e){ return []; } })(); // recent update events
+// every move at all (0.1+), for the "No major moves" post
+const projDeltaAny = (a,b) => { const d={}; let score=0; PROJ_STATS.forEach(([k])=>{ if(k==='pra'||a?.[k]==null||b?.[k]==null) return; const x=Math.round((b[k]-a[k])*10)/10; if(Math.abs(x)>=0.1){ d[k]=x; score+=Math.abs(x)*(k==='min'?1.2:1); } }); return { d, score }; };
 const projDelta = (a,b) => { const d={}; let score=0; PROJ_STATS.forEach(([k,,min])=>{ if(a?.[k]==null||b?.[k]==null) return; const x=Math.round((b[k]-a[k])*10)/10; if(Math.abs(x)>=min){ d[k]=x; score+=Math.abs(x)*(k==='min'?1.2:k==='pra'?0:1); } }); return { d, score }; };
 const projLine = (r, from, d) => `${d.min!=null?(d.min>0?'↑ ':'↓ '):d.pts!=null?(d.pts>0?'↑ ':'↓ '):''}**${r.name}**${r.team?' '+rwTeamKey(r.team):''}: ${PROJ_STATS.filter(([k])=>d[k]!=null).map(([k,l])=>`${l} ${from[k]}→${r[k]} ${d[k]>0?'+':''}${d[k]}`).join(' - ')}`;
 async function rwProjLoad(){
@@ -1166,13 +1168,18 @@ async function rwProjLoad(){
   if(!rwProj || rwProj.day!==today){ rwProj={ day:today, base:cur, last:cur, at:Date.now(), baseAt:Date.now(), lastCheck:Date.now() }; LS.set('sm_rw_proj', JSON.stringify(rwProj)); return; }
   // what moved since the previous read
   const moved=Object.entries(cur).map(([k,r])=>{ const prev=rwProj.last[k]; if(!prev) return null; const {d,score}=projDelta(prev,r); return score>0?{ k, r, prev, d, score }:null; }).filter(Boolean).sort((a,b)=>b.score-a.score);
+  const prevLast=rwProj.last;
   Object.entries(cur).forEach(([k,r])=>{ if(!rwProj.base[k]) rwProj.base[k]=r; });
   rwProj.last=cur; rwProj.at=Date.now(); LS.set('sm_rw_proj', JSON.stringify(rwProj));
-  rwProj.lastCheck=Date.now(); if(moved.length) rwProj.lastMove=Date.now();
-  if(!moved.length) return;
+  // any change at all vs the last read (the last read is kept, so this survives reloads)
+  const small=Object.entries(cur).map(([k,r])=>{ const prev=prevLast?.[k]; if(!prev) return null; const {d,score}=projDeltaAny(prev,r); return score>0?{ k, r, prev, d, score }:null; }).filter(Boolean).filter(m=>onSlate(m.r.team)).sort((a,b)=>b.score-a.score);
+  rwProj.lastCheck=Date.now(); if(small.length) rwProj.lastMove=Date.now();
+  if(!small.length) return;   // RotoWire didn't touch anyone
+  const why=m=>{ const f=rwFlagFor(rwAnalyze().ben, m.r.name); return f&&f.kind!=='mention'?` (${f.causedBy} ${f.causedStatus||''})`.replace(' )',')'):''; };
   const onSl=moved.filter(m=>onSlate(m.r.team));
-  if(!onSl.length) return;
-  const ev={ at:Date.now(), lines:onSl.slice(0,12).map(m=>{ const f=rwFlagFor(rwAnalyze().ben, m.r.name); return projLine(m.r, m.prev, m.d)+(f&&f.kind!=='mention'?` (${f.causedBy} ${f.causedStatus||''})`.replace(' )',')'):''); }) };
+  const ev = onSl.length
+    ? { at:Date.now(), lines:[...onSl.slice(0,12).map(m=>projLine(m.r, m.prev, m.d)+why(m)), ...(small.length>onSl.length?[`+ ${small.length-onSl.length} small moves`]:[])] }
+    : { at:Date.now(), lines:['No major moves', ...small.slice(0,8).map(m=>projLine(m.r, m.prev, m.d)+why(m)), ...(small.length>8?[`+ ${small.length-8} more`]:[])] };
   rwProjLog.unshift(ev); rwProjLog=rwProjLog.slice(0,20); LS.set('sm_rw_projlog', JSON.stringify(rwProjLog));
   projDiscord(ev);
 }
