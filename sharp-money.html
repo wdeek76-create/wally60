@@ -97,6 +97,7 @@ a.shst{text-decoration:none;color:var(--text)}
 .rwcard.new{border-color:rgba(147,197,253,.55)}.rwcard.warn{border-color:rgba(251,191,36,.7)}
 .rwflag{font-size:9.5px;font-weight:900;padding:2px 7px;border-radius:999px;letter-spacing:.3px}
 .rwflag.ceiling{background:rgba(34,197,94,.16);color:#22c55e}.rwflag.floor{background:rgba(245,158,11,.16);color:#f59e0b}.rwflag.mention{background:rgba(148,163,184,.16);color:#94a3b8}
+.dgl{font-size:12px;line-height:1.5;padding:4px 0;border-bottom:1px solid var(--line)}.dgl:last-child{border-bottom:0}.dgu{color:#22c55e;font-size:10.5px;font-weight:800}.dgd{color:#f59e0b;font-size:10.5px;font-weight:800}
 .pjc{display:inline-block;margin:2px 6px 2px 0;font-size:11px}.pjc.up b{color:#22c55e}.pjc.dn b{color:#f87171}
 .rwl{display:grid;gap:4px;font-size:11px;font-weight:700;margin-top:8px}.rwl input{height:36px;border-radius:9px;border:1px solid var(--line2);background:var(--bg);color:var(--text);padding:0 10px;font-size:14px}
 .rwwarn{font-size:10px;font-weight:800;color:#fbbf24}
@@ -239,7 +240,7 @@ let toastT; const toast = m => { const t=$('#toast'); t.textContent=m; t.classLi
 async function runPool(jobs, n){ let i=0; await Promise.all(Array.from({length:Math.min(n,jobs.length)},async()=>{ while(i<jobs.length){ const j=jobs[i++]; await j(); } })); }
 const cents = v => { v=Number(v); return isNaN(v)?null:(v>0?v-100:v+100); };
 const LIQ_BAND_CENTS = 20;
-const SM_BUILD = 'Oct 22 · rw today only';
+const SM_BUILD = 'Oct 22 · rw digest';
 const SHARP_MAX_ARB = 8; // % -- anything bigger is treated as bad data
 function levelsOf(o){
   const top=Number(o.price);
@@ -989,6 +990,20 @@ const rwNormStatus = raw => { const s=String(raw||'').toLowerCase(); if(!s) retu
 let rwDay = (()=>{ try{ return JSON.parse(LS.get('sm_rw_day','null')); }catch(e){ return null; } })();
 const etToday = () => new Intl.DateTimeFormat('en-CA',{timeZone:'America/New_York',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
 let rwStatusChanges = [], rwStatusPending = [];
+// Upside / floor-risk digest, like the NBA model's: one line per player who's out / GTD, then who
+// picks up minutes from it. Built from today's blurbs; only today's projected players.
+function rwDigest(){
+  const A=rwAnalyze(); const by=new Map();
+  [...A.ben.values()].flat().filter(b=>b.kind!=='mention' && inProj(b.name, b.team)).forEach(b=>{
+    const k=normName(b.causedBy); const st=rwInj.get(k)?.status || b.causedStatus || '';
+    const g=by.get(k) || by.set(k,{ name:b.causedBy, team:rwTeamKey(rwInj.get(k)?.team || b.team || ''), status:st, up:[], down:[] }).get(k);
+    (b.kind==='ceiling'?g.up:g.down).includes(b.name) || (b.kind==='ceiling'?g.up:g.down).push(b.name);
+  });
+  return [...by.values()].filter(g=>g.up.length||g.down.length).sort((a,b)=>a.team.localeCompare(b.team));
+}
+const digestLines = (D, md) => D.map(g=>{
+  const b=t=>md?`**${t}**`:t;
+  return `${b(g.team)} ${g.name}${g.status?' '+(md?`*${g.status}*`:g.status):''}${g.up.length?` → more mins: ${g.up.map(b).join(', ')}`:''}${g.down.length?`${g.up.length?' ·':' →'} fewer mins: ${g.down.map(b).join(', ')}`:''}`; });
 // One status post per changed player: the change, then his latest RotoWire blurb with his name and every
 // teammate it names in bold, and who picks up minutes / loses them.
 function statusPostLines(list){
@@ -1004,8 +1019,8 @@ function statusPostLines(list){
       if(names.length) txt=txt.replace(new RegExp(`\\b(${names.map(n=>n.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')).join('|')})\\b`,'g'),'**$1**');
       out.push('> '+txt.slice(0,700));
       const up=named.filter(b=>b.kind==='ceiling').map(b=>`**${b.name}**`), dn=named.filter(b=>b.kind==='floor').map(b=>`**${b.name}**`);
-      if(up.length) out.push(`↑ More mins / usage: ${up.join(', ')}`);
-      if(dn.length) out.push(`↓ Fewer mins: ${dn.join(', ')}`);
+      if(up.length) out.push(`More mins / usage: ${up.join(', ')}`);
+      if(dn.length) out.push(`Fewer mins: ${dn.join(', ')}`);
     }
     out.push('');
   });
@@ -1148,6 +1163,9 @@ async function rwNewsLoad(){
     const fresh=items.filter(x=>!rwNews.items.some(y=>y.id===x.id));
     rwNews={ items:items.slice(0,150), at:Date.now() }; rwErr='';
     if(rwStatusPending.length){ const lines=statusPostLines(rwStatusPending.splice(0)); if(lines.length) statusDiscord(lines); }
+    // the upside / floor digest goes to the status channel whenever it changes
+    { const dl=digestLines(rwDigest(), true), key=etToday()+'|'+dl.join('\n');
+      if(dl.length && LS.get('sm_rw_digest','')!==key && rwProj && rwProj.day===etToday()){ LS.set('sm_rw_digest', key); statusDiscord(['**Upside / floor risk (RotoWire blurbs)**', ...dl]); } }
     LS.set('sm_rw_news', JSON.stringify(rwNews));
     // runs in the background: no banners in the tool, the Today tab and the Discord channels carry it
     rwPrimed=true;
@@ -1232,6 +1250,7 @@ function renderNews(){
       <label class="rwl">Role ID to tag (blank = none)<input id="stRole" type="text" inputmode="numeric" autocomplete="off" value="${esc(statusRole)}"></label>
       <button class="mchip" id="stDcTest">Send test</button></div>
     ${rwErr?`<div class="empty" style="color:#fca5a5">Couldn't load RotoWire news: ${esc(rwErr)}<br><span class="dim">Tap Source to set your /api/rotowire helper (the blender's Vercel address).</span></div>`:''}
+    ${(()=>{ const D=rwDigest(); return sec('Upside / floor risk (RotoWire blurbs)', D.length, `<div class="rwcard">${D.map(g=>`<div class="dgl"><b class="rwteam">${esc(g.team)}</b> ${esc(g.name)}${g.status?` <span class="rwst ${g.status.toLowerCase()}">${esc(g.status)}</span>`:''}${g.up.length?` → <span class="dgu">more mins:</span> ${g.up.map(n=>`<b>${esc(n)}</b>`).join(', ')}`:''}${g.down.length?` <span class="dgd">fewer mins:</span> ${g.down.map(n=>`<b>${esc(n)}</b>`).join(', ')}`:''}</div>`).join('')}</div>`); })()}
     ${sec('RotoWire projection changes today', projMovers.length, projMovers.map(m=>`<div class="rwcard"><div class="rwh"><b>${esc(m.r.name)}</b>${m.r.team?`<span class="rwteam">${esc(rwTeamKey(m.r.team))}</span>`:''}</div><div class="rwtx">${PROJ_STATS.filter(([k])=>m.d[k]!=null).map(([k,l])=>`<span class="pjc ${m.d[k]>0?'up':'dn'}">${l} ${m.base[k]}→${m.r[k]} <b>${m.d[k]>0?'+':''}${m.d[k]}</b></span>`).join(' ')}</div></div>`).join(''))}
     ${sec('Ceiling ↑ today', up.length, up.map(flagRow).join(''))}
     ${sec('Floor risk today', down.length, down.map(flagRow).join(''))}
