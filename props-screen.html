@@ -3489,6 +3489,9 @@ function pinMoveHtml(leg, pin){
 // counts toward liquidity, and Auto Build just PREFERS picks that are arbs / zero-hold vs the
 // exchanges, then low holds. Levels at 0% hold or better are the green (OddsJam) ones.
 let autoHoldPref = LS.get('props_autoholdpref','1')==='1';
+// Like Sharp Money, but looser (parlays get boosted): exchange money only counts as backing when its
+// hold against your price is at or under this %. 0 = Sharp Money's rule (direct match / arb only).
+let parlayMaxHold = (v=>isNaN(v)?2:v)(Number(LS.get('props_parlaymaxhold','2')));
 function legLadder(mine, refPrice, ownOk){
   const ref = refPrice!=null ? cents(Number(refPrice)) : null;
   const levels={}, byBook={}, seen=new Set();
@@ -3503,9 +3506,9 @@ function legLadder(mine, refPrice, ownOk){
       // hold = your price + this order on the other side. At 0% or better (arb / zero-hold) it's the
       // OddsJam-style green level; above that it still counts, it's just a hold.
       const hold = refPrice==null ? null : (toImplied(Number(refPrice)) + toImplied(opp) - 1)*100;
-      const counted = true, zero = hold==null || hold<=1e-7;
+      const counted = hold==null || hold<=parlayMaxHold+1e-7, zero = hold==null || hold<=1e-7;
       const lv=levels[opp]||(levels[opp]={opp, mine:mine$, size:0, books:new Set(), counted, zero, hold});
-      lv.size+=l.size; lv.books.add(k); byBook[k]=(byBook[k]||0)+l.size;
+      lv.size+=l.size; lv.books.add(k); if(counted) byBook[k]=(byBook[k]||0)+l.size;
     });
   });
   const rows=Object.values(levels).sort((a,b)=>b.opp-a.opp);
@@ -3528,7 +3531,7 @@ function ladderHtml(leg, L, hero){
   if(!L.rows.length) return `<div class="plliq"><span class="lbl">Exch liq $0</span> · nothing on the ${opp} book within ${LIQ_BAND_CENTS}¢ of ${tgt}</div>`;
   const max=Math.max(...L.rows.map(l=>l.size));
   return `<div class="plliq"><div class="pllqhead"><span><span class="lbl">${oppTeam?`${esc(titleCase(oppTeam))}${leg.line!=null?' '+(-leg.line>0?'+':'')+(-leg.line):''}`:`${esc(titleCase(leg.playerName))} ${opp}${leg.line!=null?' '+leg.line:''}`}</span> book · vs ${tgt}</span><span class="pllqsum"><b>${fmtAm(L.avgOpp)}</b> avg · <b class="pos">${usd(L.total)}</b> liq</span></div>
-    <div class="pllqzero">${L.zeroTotal?`<b class="pos">${usd(L.zeroTotal)}</b> at 0% hold or better (green)`:'None at 0% hold or better'}${L.bestHold!=null?` · best ${holdTxt(L.bestHold)}`:''}</div>
+    <div class="pllqzero">${L.total?`<b class="pos">${usd(L.total)}</b> at ${parlayMaxHold}% hold or better`:`None at ${parlayMaxHold}% hold or better`}${L.zeroTotal&&parlayMaxHold>0?` · ${usd(L.zeroTotal)} at 0%`:''}${L.bestHold!=null?` · best ${holdTxt(L.bestHold)}`:''}</div>
     <div class="pllad">${L.rows.map(l=>`<div class="pllv${l.zero?'':' off'}"><span class="pllvbk">${[...l.books].map(k=>{ const lg=bookLogo(k); return lg?`<img src="${esc(lg)}" alt="">`:`<span class="rlogotxt">${esc(bookShort(k))}</span>`; }).join('')}</span><span class="pllvp">${fmtAm(l.opp)}</span><span class="pllvbar"><i style="width:${Math.max(4,Math.round(l.size/max*100))}%"></i></span><span class="pllvs">${usd(l.size)}</span></div>`).join('')}</div></div>`;
 }
 // One compact section per leg (not its own card) -- name/bet/remove on top, then every shop
@@ -3642,7 +3645,7 @@ let autoFixture = '';
 let autoFxSrc = []; // the Game picker's current list of upcoming games
 const fxLabel = f => (f.away.name||f.home.name) ? `${f.away.ab||f.away.name} @ ${f.home.ab||f.home.name}` : (f.card||'Event');
 let autoLeague = ''; // '' = whichever sport tab is currently active
-let autoTargetBook = ''; // '' = any (use autoBasis); else only that shop's own price counts
+let autoTargetBook = LS.get('props_autotarget','fanduel'); // '' = any (use autoBasis); else only that shop's own price counts -- FanDuel by default
 let autoOpen = LS.get('props_autoopen','1')==='1';
 let autoScope = LS.get('props_autoscope','both'); // 'props' | 'mains' | 'both'
 let autoMinLiqProps = Number(LS.get('props_autominliqprops','0'))||0;
@@ -3948,6 +3951,9 @@ function autoBuildHtml(){
       <div class="autorow" style="align-items:flex-start"><label style="margin-top:4px">Low hold / arb vs exch<span class="ablbl2">Prefer picks that are arbs or 0%+ low holds against the exchanges. Not required.</span></label><div class="qarbrow qarbpresets" style="border-bottom:none;padding-bottom:0">
         ${[[false,'Off'],[true,'Prefer']].map(([v,t])=>`<button class="qarbchip${autoHoldPref===v?' on':''}" data-holdpref="${v?1:0}">${t}</button>`).join('')}
       </div></div>
+      <div class="autorow" style="align-items:flex-start"><label style="margin-top:4px">Counts as backing<span class="ablbl2">Exchange money on the other side at this hold or better vs your price. 0% = Sharp Money's rule.</span></label><div class="qarbrow qarbpresets" style="border-bottom:none;padding-bottom:0">
+        ${[0,1,2,3].map(v=>`<button class="qarbchip${parlayMaxHold===v?' on':''}" data-maxhold="${v}">≤${v}%</button>`).join('')}
+      </div></div>
       <div class="autorow"><label>Min exch liq · mains</label><input type="text" inputmode="numeric" id="autoLiqMains" placeholder="any" value="${autoMinLiqMains||''}"></div>
       <div class="autorow"><label>Min Pin limit · props</label><input type="text" inputmode="numeric" id="autoPinProps" placeholder="any" value="${autoMinPinProps||''}"></div>
       <div class="autorow"><label>Min Pin limit · mains</label><input type="text" inputmode="numeric" id="autoPinMains" placeholder="any" value="${autoMinPinMains||''}"></div>
@@ -3990,7 +3996,7 @@ function bindAutoBuild(view){
   view.querySelectorAll('[data-scope]').forEach(b=>b.addEventListener('click',()=>{
     autoScope=b.dataset.scope; LS.set('props_autoscope',autoScope); renderParlay();
   }));
-  $('#autoBookSel')?.addEventListener('change',e=>{ autoTargetBook=e.target.value; renderParlay(); });
+  $('#autoBookSel')?.addEventListener('change',e=>{ autoTargetBook=e.target.value; LS.set('props_autotarget',autoTargetBook); renderParlay(); });
   $('#autoLiqProps')?.addEventListener('change',e=>{ autoMinLiqProps=Number(e.target.value)||0; LS.set('props_autominliqprops',String(autoMinLiqProps)); });
   $('#autoLiqMains')?.addEventListener('change',e=>{ autoMinLiqMains=Number(e.target.value)||0; LS.set('props_autominliqmains',String(autoMinLiqMains)); });
   $('#autoPinProps')?.addEventListener('change',e=>{ autoMinPinProps=Number(e.target.value)||0; LS.set('props_autominpinprops',String(autoMinPinProps)); });
@@ -4003,6 +4009,7 @@ function bindAutoBuild(view){
     LS.set('props_autoedge', autoEdge===''?'':String(autoEdge)); renderParlay();
   }));
   view.querySelectorAll('[data-sharpsrc]').forEach(b=>b.addEventListener('click',()=>{ autoSharpSrc=b.dataset.sharpsrc; LS.set('props_autosharpsrc2',autoSharpSrc); renderParlay(); }));
+  view.querySelectorAll('[data-maxhold]').forEach(b=>b.addEventListener('click',()=>{ parlayMaxHold=Number(b.dataset.maxhold); LS.set('props_parlaymaxhold',String(parlayMaxHold)); renderParlay(); }));
   view.querySelectorAll('[data-holdpref]').forEach(b=>b.addEventListener('click',()=>{ autoHoldPref=b.dataset.holdpref==='1'; LS.set('props_autoholdpref',autoHoldPref?'1':'0'); renderParlay(); }));
   view.querySelectorAll('[data-autosharp]').forEach(b=>b.addEventListener('click',()=>{ autoSharpMin=Number(b.dataset.autosharp)||0; LS.set('props_autosharp2',autoSharpMin<0?'prefer':String(autoSharpMin)); renderParlay(); }));
   $('#autoGenerate')?.addEventListener('click',runAutoBuild);
