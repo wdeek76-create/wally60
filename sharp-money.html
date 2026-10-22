@@ -241,7 +241,7 @@ let toastT; const toast = m => { const t=$('#toast'); t.textContent=m; t.classLi
 async function runPool(jobs, n){ let i=0; await Promise.all(Array.from({length:Math.min(n,jobs.length)},async()=>{ while(i<jobs.length){ const j=jobs[i++]; await j(); } })); }
 const cents = v => { v=Number(v); return isNaN(v)?null:(v>0?v-100:v+100); };
 const LIQ_BAND_CENTS = 20;
-const SM_BUILD = 'Oct 22 · sm first';
+const SM_BUILD = 'Oct 22 · fd first';
 const SHARP_MAX_ARB = 8; // % -- anything bigger is treated as bad data
 function levelsOf(o){
   const top=Number(o.price);
@@ -559,7 +559,7 @@ function sharpScan(sk, rows){
   d.top=out.slice().sort((a,b)=>b.L.total-a.L.total).slice(0,6).map(x=>`${titleCase(x.player)} ${sharpSideLabel(x.side)}${x.line!=null?' '+x.line:''} ${x.mk==='pra'?'PRA':marketLabel(sk,x.mk)} ${usd(x.L.total)}`);
   return out;
 }
-function sharpRecord(sk, scan, at, fxList){
+function sharpRecord(sk, scan, at, fxList, tgt){
   const fxById = Object.fromEntries(fxList.map(f=>[f.id,f]));
   const seen = new Set();
   scan.forEach(x=>{
@@ -570,7 +570,7 @@ function sharpRecord(sk, scan, at, fxList){
     while(e.hist.length>2 && e.hist[1].t < at - SHARP_HIST_MS) e.hist.shift();
   });
   // sides of this sport missing from this pull: their arb money is gone
-  Object.entries(sharpTape).forEach(([k,e])=>{ if(e.sk!==sk || seen.has(k)) return; const last=e.hist[e.hist.length-1]; if(last && last.total!==0) e.hist.push({ t:at, total:0 }); e.L={...e.L, total:0, rows:[]}; e.at=at; });
+  Object.entries(sharpTape).forEach(([k,e])=>{ if(e.sk!==sk || seen.has(k) || (tgt && (e.tgt||'fanduel')!==tgt)) return; const last=e.hist[e.hist.length-1]; if(last && last.total!==0) e.hist.push({ t:at, total:0 }); e.L={...e.L, total:0, rows:[]}; e.at=at; });
 }
 const sharpFlow = e => { const first=e.hist[0]?.total||0; return { d: e.L.total-first, since: e.hist[0]?.t||e.at }; };
 // "in 2h 15m" until the game starts
@@ -781,17 +781,19 @@ async function sharpScanSport(sk){
   const rows=[];
   // FanDuel: its main lines. Exchanges: every line they post -- their "main" flag doesn't always
   // land on FanDuel's number, and a line that isn't flagged would otherwise never come back.
-  // bet105 asked on its own so a problem with it can never cost the FanDuel read
-  const reqs=[['FanDuel'],['bet105'],['Novig','Prophet X','Kalshi']];
-  const jobs=[]; for(const fc of chunk(fx,5)) for(const bk of reqs) jobs.push(async()=>{
+  const pull=(books)=>{ const jobs=[]; for(const fc of chunk(fx,5)) for(const bk of books) jobs.push(async()=>{
     const params={fixture_id:fc.map(f=>f.id),sportsbook:bk}; if(bk[0]==='FanDuel'||bk[0]==='bet105') params.is_main=true;
     try{ const r=await oo('/fixtures/odds',params); (r?.data||[]).forEach(d=>(d.odds||[]).forEach(o=>{ o._fx=d.id; rows.push(o); })); }catch(e){ console.warn('[sharp] scan chunk failed', sk, e.message); }
-  });
-  await runPool(jobs, 4);
+  }); return runPool(jobs, 4); };
+  // 1) FanDuel + the exchanges first, and its alerts go out right away
+  await pull([['FanDuel'],['Novig','Prophet X','Kalshi']]);
   if(!rows.length){ sharpDiag[sk]={at:Date.now(), games:fx.length, rows:0, byBook:{}, props:0, withExch:0, sides:0}; return; } // failed pull: keep the last good read instead of zeroing everything
-  const found=sharpScan(sk, rows); sharpDiag[sk].games=fx.length;
-  sharpRecord(sk, found, Date.now(), fx);
-  sharpCheckPings(sk);
+  { const found=sharpScan(sk, rows).filter(x=>x.tgt==='fanduel'); sharpDiag[sk].games=fx.length;
+    sharpRecord(sk, found, Date.now(), fx, 'fanduel'); sharpCheckPings(sk); if(viewMode==='sharp') renderSharp(); }
+  // 2) then bet105 (asked on its own, so it can never slow down or cost the FanDuel read)
+  const before=rows.length; await pull([['bet105']]);
+  if(rows.length>before){ const found=sharpScan(sk, rows); sharpDiag[sk].games=fx.length;
+    sharpRecord(sk, found.filter(x=>x.tgt==='bet105'), Date.now(), fx, 'bet105'); sharpCheckPings(sk); }
 }
 // Every sport scans side by side; each one starts its next scan as soon as its last one is done.
 async function sharpScanOne(sk){
