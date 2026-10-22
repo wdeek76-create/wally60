@@ -239,7 +239,7 @@ let toastT; const toast = m => { const t=$('#toast'); t.textContent=m; t.classLi
 async function runPool(jobs, n){ let i=0; await Promise.all(Array.from({length:Math.min(n,jobs.length)},async()=>{ while(i<jobs.length){ const j=jobs[i++]; await j(); } })); }
 const cents = v => { v=Number(v); return isNaN(v)?null:(v>0?v-100:v+100); };
 const LIQ_BAND_CENTS = 20;
-const SM_BUILD = 'Oct 22 · rw status';
+const SM_BUILD = 'Oct 22 · rw today only';
 const SHARP_MAX_ARB = 8; // % -- anything bigger is treated as bad data
 function levelsOf(o){
   const top=Number(o.price);
@@ -993,11 +993,11 @@ let rwStatusChanges = [], rwStatusPending = [];
 // teammate it names in bold, and who picks up minutes / loses them.
 function statusPostLines(list){
   const A=rwAnalyze(); const out=[];
-  list.filter(x=>onSlate(x.team)).forEach(x=>{
+  list.filter(x=>inProj(x.name, x.team)).forEach(x=>{
     out.push(`**${x.name}**${x.team?' '+rwTeamKey(x.team):''}: ${x.c.from} → **${x.to}**`);
     const blurb=rwNews.items.filter(n=>normName(n.name)===x.k).sort((a,b)=>(Date.parse(b.at)||0)-(Date.parse(a.at)||0))[0];
     if(blurb){
-      const named=[...A.ben.values()].flat().filter(b=>b.id===blurb.id);
+      const named=[...A.ben.values()].flat().filter(b=>b.id===blurb.id && inProj(b.name, b.team));
       let txt=[blurb.notes,blurb.analysis].filter(Boolean).join(' ') || blurb.headline;
       // one pass, longest names first, so "Jalen Brunson" and a bare "Brunson" both go bold without doubling up
       const names=[...new Set([x.name, x.name.split(/\s+/).slice(-1)[0], ...named.map(b=>b.name)].filter(n=>n && n.length>2))].sort((a,b)=>b.length-a.length);
@@ -1149,21 +1149,13 @@ async function rwNewsLoad(){
     rwNews={ items:items.slice(0,150), at:Date.now() }; rwErr='';
     if(rwStatusPending.length){ const lines=statusPostLines(rwStatusPending.splice(0)); if(lines.length) statusDiscord(lines); }
     LS.set('sm_rw_news', JSON.stringify(rwNews));
-    if(rwPrimed) fresh.filter(x=>onSlate(x.team)).slice(0,3).forEach(rwPing);   // first load just fills the list
+    // runs in the background: no banners in the tool, the Today tab and the Discord channels carry it
     rwPrimed=true;
   }catch(e){ rwErr=e.message; console.warn('[sm] RW news', e.message); }
   finally{ rwBusy=false; rwBadge(); if(viewMode==='news'){ if($('#rwDcBox')?.style.display!=='none' && $('#rwDcBox')) return; renderNews(); } else if(viewMode==='sharp') renderSharp(); }
 }
-function rwBadge(){ const n=rwNews.items.filter(x=>!rwSeen.has(x.id) && onSlate(x.team)).length; const b=$('#nwN'); if(b) b.textContent = n ? n : ''; }
+function rwBadge(){ const n=rwNews.items.filter(x=>!rwSeen.has(x.id) && rwIsToday(x) && inProj(x.name, x.team)).length; const b=$('#nwN'); if(b) b.textContent = n ? n : ''; }
 const rwWhen = at => { const t=Date.parse(at); if(isNaN(t)) return at||''; const m=Math.round((Date.now()-t)/60000); return m<1?'just now':m<60?`${m}m ago`:m<1440?`${Math.round(m/60)}h ago`:new Date(t).toLocaleDateString([], {month:'short',day:'numeric'}); };
-function rwPing(x){
-  let wrap=$('#sharpPings'); if(!wrap){ wrap=document.createElement('div'); wrap.id='sharpPings'; document.body.appendChild(wrap); }
-  const el=document.createElement('div'); el.className='sping rwping';
-  el.innerHTML=`<div class="spbody"><div class="sptop" style="color:#93c5fd"><b>RW NEWS</b>${(()=>{ const hit=[...rwAnalyze().ben.values()].flat().filter(b=>b.id===x.id && b.kind==='ceiling'); return hit.length?` · <span style="color:#22c55e">CEILING ↑ ${esc(hit.map(b=>b.name).join(', '))}</span>`:''; })()}${x.team?' · '+esc(x.team):''}</div><div class="spmain">${esc(x.name)}</div><div class="spsub">${esc(x.headline||x.analysis).slice(0,140)}</div></div><span class="spx" data-spx>✕</span>`;
-  el.addEventListener('click',ev=>{ el.remove(); if(!ev.target.closest('[data-spx]')) setView('news'); });
-  wrap.prepend(el); while(wrap.children.length>3) wrap.lastChild.remove();
-  setTimeout(()=>el.remove(), 20000);
-}
 // ── Changes today (same read as the NBA model): each of today's blurbs gives the player's status,
 // and anyone ELSE it names becomes CEILING ↑ (usage boost: "X will see more minutes"), FLOOR RISK
 // (someone returning, "cut into his minutes"), or just "mentioned". On SM that matters most for the
@@ -1212,20 +1204,24 @@ async function rwLoadSlate(){
     rwSlate=t; }catch(e){}
 }
 const onSlate = team => !rwSlate || !rwSlate.size || !team || rwSlate.has(rwTeamKey(team));
+// Only players RotoWire is projecting for today -- a blurb about someone not in today's projections
+// ("quiet in season opener" from last night) isn't news for today. Falls back to today's teams until
+// the projections have loaded.
+const inProj = (name, team) => { if(rwProj && rwProj.day===etToday() && Object.keys(rwProj.last||{}).length) return !!rwProj.last[normName(name)] && onSlate(team); return onSlate(team); };
 function renderNews(){
-  const view=$('#view'); const items=rwNews.items.filter(x=>onSlate(x.team)); const A=rwAnalyze();
-  const flagged=[...A.ben.entries()].map(([k,l])=>({ k, name:l[0].name, team:l[0].team, f:rwFlagFor(A.ben,l[0].name), all:l })).filter(x=>onSlate(x.team));
+  const view=$('#view'); const items=rwNews.items.filter(x=>rwIsToday(x) && inProj(x.name, x.team)); const A=rwAnalyze();
+  const flagged=[...A.ben.entries()].map(([k,l])=>({ k, name:l[0].name, team:l[0].team, f:rwFlagFor(A.ben,l[0].name), all:l })).filter(x=>inProj(x.name, x.team));
   const up=flagged.filter(x=>x.f.kind==='ceiling'), down=flagged.filter(x=>x.f.kind==='floor');
   const flagRow=x=>`<div class="rwcard"><div class="rwh"><b>${esc(x.name)}</b>${x.team?`<span class="rwteam">${esc(rwTeamKey(x.team))}</span>`:''}${rwPill(x.f)}</div><div class="rwtx dim">${esc(x.f.why)}</div></div>`;
-  const newsSt=A.items.filter(x=>rwStatusOf(x) && onSlate(x.team));
-  const changes=rwStatusChanges.filter(c=>onSlate(c.team));
+  const newsSt=A.items.filter(x=>rwStatusOf(x) && inProj(x.name, x.team));
+  const changes=rwStatusChanges.filter(c=>inProj(c.name, c.team));
   const chRow=c=>`<div class="rwcard"><div class="rwh"><b>${esc(c.name)}</b>${c.team?`<span class="rwteam">${esc(rwTeamKey(c.team))}</span>`:''}<span class="rwst">${esc(c.from)}</span>→<span class="rwst ${String(c.to).toLowerCase().replace(/\s+/g,'')}">${esc(c.to)}</span><span class="rwat">${esc(rwWhen(new Date(c.at).toISOString()))}</span></div></div>`;
   const nsRow=x=>`<div class="rwcard"><div class="rwh"><b>${esc(x.name||'—')}</b>${x.team?`<span class="rwteam">${esc(rwTeamKey(x.team))}</span>`:''}<span class="rwst ${rwStatusOf(x).toLowerCase()}">${rwStatusOf(x)}</span><span class="rwat">${esc(rwWhen(x.at))}</span></div>${x.headline?`<div class="rwhl">${esc(x.headline)}</div>`:''}</div>`;
   const card=x=>`<div class="rwcard${rwSeen.has(x.id)?'':' new'}"><div class="rwh"><b>${esc(x.name||'—')}</b>${x.team?`<span class="rwteam">${esc(rwTeamKey(x.team))}</span>`:''}<span class="rwat">${esc(rwWhen(x.at))}</span></div>
     ${x.headline?`<div class="rwhl">${esc(x.headline)}</div>`:''}${x.notes?`<div class="rwtx">${esc(x.notes)}</div>`:''}${x.analysis?`<div class="rwtx dim">${esc(x.analysis)}</div>`:''}</div>`;
   const projMovers = rwProj ? Object.entries(rwProj.last).map(([k,r])=>{ const b=rwProj.base[k]; if(!b) return null; const {d,score}=projDelta(b,r); return score>0 && onSlate(r.team)?{ r, base:b, d, score }:null; }).filter(Boolean).sort((a,b)=>b.score-a.score).slice(0,20) : [];
   const sec=(t,n,html)=>n?`<div class="tksport"><span>${t}</span><b>${n}</b></div>${html}`:'';
-  view.innerHTML=`<div class="sh"><span class="t">Changes Today</span><span class="dim" style="font-size:10.5px">${rwNews.at?`RotoWire · ${rwSlate&&rwSlate.size?`today's slate (${rwSlate.size/2|0} games)`:'all teams'} · updated ${rwWhen(new Date(rwNews.at).toISOString())} · every minute`:'loading…'}</span></div>
+  view.innerHTML=`<div class="sh"><span class="t">Changes Today</span><span class="dim" style="font-size:10.5px">${rwNews.at?`RotoWire · ${rwProj&&rwProj.day===etToday()?`${Object.keys(rwProj.last||{}).length} players in today's projections`:rwSlate&&rwSlate.size?`today's slate (${rwSlate.size/2|0} games)`:'all teams'} · updated ${rwWhen(new Date(rwNews.at).toISOString())} · every minute`:'loading…'}</span></div>
     <div class="mnav" style="position:static"><button class="mchip" id="rwNow">↻ Refresh</button><button class="mchip" id="rwSrc">Source</button><button class="mchip${projHook||statusHook?' on':''}" id="rwDc">${projHook||statusHook?'Discord ✓':'Discord'}</button></div>
     <div class="rwcard" id="rwDcBox" style="display:none"><div class="rwhl">RotoWire updates → Discord</div>
       <label class="rwl">Webhook URL (saves as you type)<input id="rwHook" type="url" autocomplete="off" value="${esc(projHook)}" placeholder="https://discord.com/api/webhooks/…"></label>
@@ -1241,7 +1237,7 @@ function renderNews(){
     ${sec('Floor risk today', down.length, down.map(flagRow).join(''))}
     ${sec('Injury report changes today', changes.length, changes.map(chRow).join(''))}
     ${sec('Status news today', newsSt.length, newsSt.map(nsRow).join(''))}
-    ${items.length?sec('All RotoWire blurbs', items.length, items.map(card).join('')):(!rwErr?'<div class="empty">Loading RotoWire news…</div>':'')}`;
+    ${items.length?sec("Today's RotoWire blurbs", items.length, items.map(card).join('')):(!rwErr?'<div class="empty">Loading RotoWire news…</div>':'')}`;
   $('#rwNow')?.addEventListener('click',()=>{ toast('Checking RotoWire…'); rwNewsLoad(); });
   $('#rwDc')?.addEventListener('click',()=>{ const b=$('#rwDcBox'); b.style.display=b.style.display==='none'?'block':'none'; });
   const saveDc=()=>{ projHook=$('#rwHook').value.trim(); LS.set('sm_proj_hook',projHook); projRole=($('#rwRole').value.match(/\d{15,}/)||[''])[0]; LS.set('sm_proj_role',projRole); const b=$('#rwDc'); b.classList.toggle('on',!!projHook); b.textContent=projHook?'Discord ✓':'Discord'; };
