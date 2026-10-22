@@ -240,7 +240,7 @@ let toastT; const toast = m => { const t=$('#toast'); t.textContent=m; t.classLi
 async function runPool(jobs, n){ let i=0; await Promise.all(Array.from({length:Math.min(n,jobs.length)},async()=>{ while(i<jobs.length){ const j=jobs[i++]; await j(); } })); }
 const cents = v => { v=Number(v); return isNaN(v)?null:(v>0?v-100:v+100); };
 const LIQ_BAND_CENTS = 20;
-const SM_BUILD = 'Oct 22 · rw posts v2';
+const SM_BUILD = 'Oct 22 · injury board';
 const SHARP_MAX_ARB = 8; // % -- anything bigger is treated as bad data
 function levelsOf(o){
   const top=Number(o.price);
@@ -1206,8 +1206,9 @@ async function rwNewsLoad(){
       .filter(x=>x.headline||x.analysis).map(x=>({ ...x, id:normName(x.name)+'|'+x.headline+'|'+x.at }));
     // Roster + statuses straight from RotoWire (nothing to do with the SM board): the injuries feed,
     // and the player list once a day. Both best-effort; the news names alone still work without them.
-    try{ (await rwFetchFeed('NBAInjuries')).forEach(o=>{ const nm=_rwName(o); if(!nm) return; const k=normName(nm);
-      rwRoster.set(k, nm); rwInj.set(k, { name:nm, team:_rwTeam(o), status:rwNormStatus(_rwPick(o,['Injury.Status','InjuryStatus','Status','Injury.Designation','Designation'])) }); }); }catch(e){}
+    // fresh each read, so someone dropped from the report leaves the board
+    try{ const injRows=await rwFetchFeed('NBAInjuries'); rwInj.clear(); injRows.forEach(o=>{ const nm=_rwName(o); if(!nm) return; const k=normName(nm);
+      rwRoster.set(k, nm); rwInj.set(k, { name:nm, team:_rwTeam(o), status:rwNormStatus(_rwPick(o,['Injury.Status','InjuryStatus','Status','Injury.Designation','Designation'])), type:String(_rwPick(o,['Injury.Type','Injury.Location','InjuryType','Injury.Body','Body','Injury.Part'])||'').trim() }); }); }catch(e){}
     if(Date.now()-(rwRosterAt||0)>12*3600e3){ try{ (await rwFetchFeed('NBAPlayers')).forEach(o=>{ const nm=_rwName(o); if(nm) rwRoster.set(normName(nm), nm); }); rwRosterAt=Date.now(); }catch(e){} }
     items.forEach(x=>{ if(x.name) rwRoster.set(normName(x.name), x.name); });
     rwTrackStatus(); await rwLoadSlate(); await rwProjLoad();
@@ -1215,6 +1216,9 @@ async function rwNewsLoad(){
     rwNews={ items:items.slice(0,150), at:Date.now() }; rwErr='';
     if(rwStatusPending.length){ const lines=statusPostLines(rwStatusPending.splice(0)); if(lines.length) statusDiscord(lines); }
     postNewBlurbs();
+    { const bl=rwBoardLines(true), key=etToday()+'|'+bl.join('\n');
+      if(rwGames.length && rwInj.size && statusHook && LS.get('sm_rw_board','')!==key){ LS.set('sm_rw_board', key);
+        let buf=['**Injury board · today**']; bl.forEach(l=>{ if((buf.join('\n')+'\n'+l).length>1850){ statusDiscord(buf); buf=[]; } buf.push(l); }); if(buf.length) statusDiscord(buf); } }
     // the upside / floor digest goes to the status channel whenever it changes
     { const dl=digestLines(rwDigest(), true), key=etToday()+'|'+dl.join('\n');
       if(dl.length && LS.get('sm_rw_digest','')!==key){ LS.set('sm_rw_digest', key); statusDiscord(['**Upside / floor risk (RotoWire blurbs)**', ...dl]); } }
@@ -1276,11 +1280,38 @@ const rwPill = f => !f ? '' : `<span class="rwflag ${f.kind}" title="${esc(f.why
 const RW_TEAM_ALIAS = { GS:'GSW', NO:'NOP', NOR:'NOP', SA:'SAS', NY:'NYK', PHO:'PHX', UTAH:'UTA', UTH:'UTA', WSH:'WAS', BKN:'BKN', BRK:'BKN', CHO:'CHA', NJ:'BKN' };
 const rwTeamKey = t => { const u=String(t||'').toUpperCase().trim(); return RW_TEAM_ALIAS[u]||u; };
 let rwSlate = null; // Set of team codes playing today, or null while unknown
+let rwGames = [];   // today's games (away/home/start)
+// Injury board per game, like the blender's: each team's awaiting statuses (GTD / Q / doubtful /
+// probable) and who's already OUT. Posted as text to the status channel whenever it changes.
+const RW_AWAIT = new Set(['GTD','DOUBTFUL','PROBABLE','DTD']);
+function rwBoard(){
+  return rwGames.map(f=>{
+    const side=c=>{ const code=rwTeamKey(c.ab); const ps=[...rwInj.values()].filter(v=>rwTeamKey(v.team)===code);
+      return { code, wait:ps.filter(v=>RW_AWAIT.has(v.status)||/question/i.test(v.status)), out:ps.filter(v=>v.status==='OUT') }; };
+    return { f, away:side(f.away), home:side(f.home) };
+  });
+}
+function rwBoardLines(md){
+  const b=t=>md?`**${t}**`:t, nm=v=>`${b(v.name)} (${[v.status==='GTD'?'Questionable':titleCase(String(v.status).toLowerCase()), v.type].filter(Boolean).join(' · ')})`;
+  const L=[]; rwBoard().forEach(g=>{
+    const time=new Date(g.f.start).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',timeZone:'America/New_York'});
+    const n=g.away.wait.length+g.home.wait.length;
+    L.push(`${b(`${g.away.code} @ ${g.home.code}`)} · ${time} ET${n?` · ${n} awaiting`:''}`);
+    [g.away,g.home].forEach(t=>{
+      const parts=[];
+      if(t.wait.length) parts.push(`awaiting: ${t.wait.map(nm).join(', ')}`);
+      if(t.out.length) parts.push(`OUT: ${t.out.map(v=>v.name).join(', ')}`);
+      L.push(`${t.code} — ${parts.length?parts.join(' · '):'no pending statuses'}`);
+    });
+    L.push('');
+  });
+  return L;
+}
 async function rwLoadSlate(){
   try{ const fx=await sharpFixtures('nba'); const today=etToday();
     const day=iso=>new Intl.DateTimeFormat('en-CA',{timeZone:'America/New_York',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(iso));
-    const t=new Set(); fx.filter(f=>day(f.start)===today).forEach(f=>{ [f.home,f.away].forEach(c=>{ if(c.ab) t.add(rwTeamKey(c.ab)); }); });
-    rwSlate=t; }catch(e){}
+    const t=new Set(); const g=fx.filter(f=>day(f.start)===today); g.forEach(f=>{ [f.home,f.away].forEach(c=>{ if(c.ab) t.add(rwTeamKey(c.ab)); }); });
+    rwSlate=t; rwGames=g.slice().sort((a,b)=>new Date(a.start)-new Date(b.start)); }catch(e){}
 }
 const onSlate = team => !rwSlate || !rwSlate.size || !team || rwSlate.has(rwTeamKey(team));
 // Only players RotoWire is projecting for today -- a blurb about someone not in today's projections
@@ -1320,6 +1351,7 @@ function renderNews(){
       const ps=x=>!x?'nothing posted yet':x.ok?`last post ${t(x.at)} ✓`:`last post failed: ${esc(x.err)}`;
       return `<div class="rwcard" style="font-size:10.5px;line-height:1.6">${f('NBANews')} · ${f('NBAInjuries')} · ${f('NBADailyProj')}<br>Projections: ${pj}<br>Proj channel: ${projHook?ps(rwPostStat.proj):'<span style="color:#fbbf24">no webhook</span>'} · Status channel: ${statusHook?ps(rwPostStat.status):'<span style="color:#fbbf24">no webhook</span>'}</div>`; })()}
     ${rwErr?`<div class="empty" style="color:#fca5a5">Couldn't load RotoWire news: ${esc(rwErr)}<br><span class="dim">Tap ⚙ Settings → put in your blender's address + /api/rotowire (and your RotoWire key if the blender uses one), then Test RotoWire.</span></div>`:''}
+    ${rwGames.length&&rwInj.size?sec('Injury board · today', rwGames.length, `<div class="rwcard">${rwBoardLines(false).map(l=>l?`<div class="dgl">${esc(l)}</div>`:'').join('')}</div>`):''}
     ${(()=>{ const D=rwDigest(); return sec('Upside / floor risk (RotoWire blurbs)', D.length, `<div class="rwcard">${D.map(g=>`<div class="dgl"><b class="rwteam">${esc(g.team)}</b> ${esc(g.name)}${g.status?` <span class="rwst ${g.status.toLowerCase()}">${esc(g.status)}</span>`:''}${g.up.length?` → <span class="dgu">more mins:</span> ${g.up.map(n=>`<b>${esc(n)}</b>`).join(', ')}`:''}${g.down.length?` <span class="dgd">fewer mins:</span> ${g.down.map(n=>`<b>${esc(n)}</b>`).join(', ')}`:''}</div>`).join('')}</div>`); })()}
     ${sec('RotoWire projection changes today', projMovers.length, projMovers.map(m=>`<div class="rwcard"><div class="rwh"><b>${esc(m.r.name)}</b>${m.r.team?`<span class="rwteam">${esc(rwTeamKey(m.r.team))}</span>`:''}</div><div class="rwtx">${PROJ_STATS.filter(([k])=>m.d[k]!=null).map(([k,l])=>`<span class="pjc ${m.d[k]>0?'up':'dn'}">${l} ${m.base[k]}→${m.r[k]} <b>${m.d[k]>0?'+':''}${m.d[k]}</b></span>`).join(' ')}</div></div>`).join(''))}
     ${sec('Ceiling ↑ today', up.length, up.map(flagRow).join(''))}
