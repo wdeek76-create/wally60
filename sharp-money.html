@@ -97,6 +97,8 @@ a.shst{text-decoration:none;color:var(--text)}
 .rwcard.new{border-color:rgba(147,197,253,.55)}.rwcard.warn{border-color:rgba(251,191,36,.7)}
 .rwflag{font-size:9.5px;font-weight:900;padding:2px 7px;border-radius:999px;letter-spacing:.3px}
 .rwflag.ceiling{background:rgba(34,197,94,.16);color:#22c55e}.rwflag.floor{background:rgba(245,158,11,.16);color:#f59e0b}.rwflag.mention{background:rgba(148,163,184,.16);color:#94a3b8}
+.pjc{display:inline-block;margin:2px 6px 2px 0;font-size:11px}.pjc.up b{color:#22c55e}.pjc.dn b{color:#f87171}
+.rwl{display:grid;gap:4px;font-size:11px;font-weight:700;margin-top:8px}.rwl input{height:36px;border-radius:9px;border:1px solid var(--line2);background:var(--bg);color:var(--text);padding:0 10px;font-size:14px}
 .rwwarn{font-size:10px;font-weight:800;color:#fbbf24}
 .rwst{font-size:9.5px;font-weight:900;padding:2px 7px;border-radius:999px;background:rgba(148,163,184,.16);color:#cbd5e1}
 .rwst.out{background:rgba(239,68,68,.18);color:#f87171}.rwst.doubtful{background:rgba(249,115,22,.18);color:#fb923c}.rwst.gtd{background:rgba(234,179,8,.18);color:#facc15}.rwst.returning,.rwst.probable{background:rgba(34,197,94,.16);color:#22c55e}
@@ -237,7 +239,7 @@ let toastT; const toast = m => { const t=$('#toast'); t.textContent=m; t.classLi
 async function runPool(jobs, n){ let i=0; await Promise.all(Array.from({length:Math.min(n,jobs.length)},async()=>{ while(i<jobs.length){ const j=jobs[i++]; await j(); } })); }
 const cents = v => { v=Number(v); return isNaN(v)?null:(v>0?v-100:v+100); };
 const LIQ_BAND_CENTS = 20;
-const SM_BUILD = 'Oct 22 · changes today';
+const SM_BUILD = 'Oct 22 · rw updates';
 const SHARP_MAX_ARB = 8; // % -- anything bigger is treated as bad data
 function levelsOf(o){
   const top=Number(o.price);
@@ -1024,17 +1026,73 @@ function _rwRows(data){
 const _rwName = o => { const full=_rwPick(o,['Name','PlayerName','FullName','Player.Name','Player.FullName','Player']); if(full) return String(full).trim();
   const f=_rwPick(o,['FirstName','Player.FirstName','First']), l=_rwPick(o,['LastName','Player.LastName','Last']); return f&&l?`${f} ${l}`:''; };
 const _rwTeam = o => String(_rwPick(o,['Team.Code','Team.Abbreviation','Team.Abbr','TeamCode','TeamAbbr','Team.Alias','Team','__parent.Team.Code','__parent.TeamCode','__parent.Team'])||'').trim();
-async function rwFetchFeed(feed){
+async function rwFetchFeed(feed, raw){
   const parse=t=>{ t=String(t||'').trim(); return t.startsWith('<') ? _rwXmlToObj(t) : JSON.parse(t); };
   const tries=[RW_URL()+'?feed='+encodeURIComponent(feed), `${RW_PROXY_URL}?feed=${encodeURIComponent(feed)}&format=json`];
   let last='';
   for(const u of tries){
     try{ const r=await fetch(u,{cache:'no-store'}); const txt=await r.text(); const d=parse(txt);
       if(!r.ok || (d && !Array.isArray(d) && (d.error||d.Error) && Object.keys(d).length<=3)){ last=`${r.status} ${String(d?.error||d?.Error||'').slice(0,80)}`; continue; }
-      const rows=_rwRows(d); if(rows.length) return rows; last='no rows';
+      const rows=raw ? _rwDeepPlayers(d) : _rwRows(d); if(rows.length) return rows; last='no rows';
     }catch(e){ last=e.message; }
   }
   throw new Error(last||'no answer');
+}
+// ── RW projection changes ──
+// NBADailyProj every check: MIN / PTS / REB / AST / 3PM per player. The first read of the day is the
+// baseline (what "changes today" compares to); each later read is compared to the one before it, and
+// when RotoWire moves anyone the biggest movers go out to their own Discord channel.
+function _rwFlat(o, pre, out){ out=out||{}; pre=pre||''; Object.keys(o||{}).forEach(k=>{ if(k==='__parent') return; const v=o[k], key=(pre?pre+'.':'')+k;
+  if(v && typeof v==='object' && !Array.isArray(v)) _rwFlat(v,key,out); else if(!Array.isArray(v)) out[key.toLowerCase()]=v; }); return out; }
+function _rwNum(flat, names){ for(const n of names){ for(const k of Object.keys(flat)){ if(k.split('.').pop()===n){ const v=parseFloat(flat[k]); if(!isNaN(v)) return v; } } } return null; }
+function _rwDeepPlayers(node, team, out){
+  out=out||[]; if(Array.isArray(node)){ node.forEach(n=>_rwDeepPlayers(n,team,out)); return out; }
+  if(!node || typeof node!=='object') return out;
+  const t=_rwPick(node,['Team.Code','Team.Abbreviation','TeamCode','Code','Abbreviation','Team']); const tm=t&&String(t).length<=4?t:team;
+  if(_rwName(node)){ const f=_rwFlat(node); if(Object.keys(f).some(k=>/(^|\.)(points|pts|rebounds|reb|assists|ast|minutes|min|twopointsmade)$/.test(k))){ out.push(Object.assign({ __parent:{ Team:tm } }, node)); return out; } }
+  Object.keys(node).forEach(k=>{ const v=node[k]; if(v && typeof v==='object') _rwDeepPlayers(v,tm,out); }); return out;
+}
+function rwProjRow(o){
+  const name=_rwName(o); if(!name) return null; const f=_rwFlat(o);
+  let pts=_rwNum(f,['points','pts','projpoints','projectedpoints']), reb=_rwNum(f,['rebounds','reb','totalrebounds','projrebounds']);
+  if(pts==null){ const t2=_rwNum(f,['twopointsmade','twopointfieldgoalsmade']), t3=_rwNum(f,['threepointsmade','threepointersmade']), ft=_rwNum(f,['freethrowsmade']); if(t2!=null&&t3!=null&&ft!=null) pts=2*t2+3*t3+ft; }
+  if(reb==null){ const a=_rwNum(f,['offensiverebounds','oreb']), d=_rwNum(f,['defensiverebounds','dreb']); if(a!=null&&d!=null) reb=a+d; }
+  const ast=_rwNum(f,['assists','ast','projassists']), tpm=_rwNum(f,['threepointsmade','threepointersmade','fg3m','3pm']), min=_rwNum(f,['minutes','min','mins','projminutes']);
+  if(pts==null && min==null) return null;
+  const r1=v=>v==null?null:Math.round(v*10)/10;
+  return { name, team:_rwTeam(o), min:r1(min), pts:r1(pts), reb:r1(reb), ast:r1(ast), tpm:r1(tpm), pra:pts!=null&&reb!=null&&ast!=null?r1(pts+reb+ast):null };
+}
+const PROJ_STATS = [['min','MIN',1],['pts','PTS',1],['reb','REB',.7],['ast','AST',.7],['tpm','3PM',.4],['pra','PRA',1.5]];
+let rwProj = (()=>{ try{ return JSON.parse(LS.get('sm_rw_proj','null')); }catch(e){ return null; } })(); // {day, base:{k:row}, last:{k:row}, at}
+let rwProjLog = (()=>{ try{ return JSON.parse(LS.get('sm_rw_projlog','[]')); }catch(e){ return []; } })(); // recent update events
+const projDelta = (a,b) => { const d={}; let score=0; PROJ_STATS.forEach(([k,,min])=>{ if(a?.[k]==null||b?.[k]==null) return; const x=Math.round((b[k]-a[k])*10)/10; if(Math.abs(x)>=min){ d[k]=x; score+=Math.abs(x)*(k==='min'?1.2:k==='pra'?0:1); } }); return { d, score }; };
+const projLine = (r, from, d) => `${r.name}${r.team?' '+rwTeamKey(r.team):''}: ${PROJ_STATS.filter(([k])=>d[k]!=null).map(([k,l])=>`${l} ${from[k]}→${r[k]} (${d[k]>0?'+':''}${d[k]})`).join(' · ')}`;
+async function rwProjLoad(){
+  let rows; try{ rows=(await rwFetchFeed('NBADailyProj', true)).map(rwProjRow).filter(Boolean); }catch(e){ return; }
+  if(rows.length<10) return;
+  const today=etToday(), cur=Object.fromEntries(rows.map(r=>[normName(r.name), r]));
+  if(!rwProj || rwProj.day!==today){ rwProj={ day:today, base:cur, last:cur, at:Date.now() }; LS.set('sm_rw_proj', JSON.stringify(rwProj)); return; }
+  // what moved since the previous read
+  const moved=Object.entries(cur).map(([k,r])=>{ const prev=rwProj.last[k]; if(!prev) return null; const {d,score}=projDelta(prev,r); return score>0?{ k, r, prev, d, score }:null; }).filter(Boolean).sort((a,b)=>b.score-a.score);
+  Object.entries(cur).forEach(([k,r])=>{ if(!rwProj.base[k]) rwProj.base[k]=r; });
+  rwProj.last=cur; rwProj.at=Date.now(); LS.set('sm_rw_proj', JSON.stringify(rwProj));
+  if(!moved.length) return;
+  const onSl=moved.filter(m=>onSlate(m.r.team));
+  if(!onSl.length) return;
+  const ev={ at:Date.now(), lines:onSl.slice(0,12).map(m=>{ const f=rwFlagFor(rwAnalyze().ben, m.r.name); return projLine(m.r, m.prev, m.d)+(f&&f.kind!=='mention'?` (${f.causedBy} ${f.causedStatus||''})`.replace(' )',')'):''); }) };
+  rwProjLog.unshift(ev); rwProjLog=rwProjLog.slice(0,20); LS.set('sm_rw_projlog', JSON.stringify(rwProjLog));
+  projDiscord(ev);
+}
+// RW updates → their own Discord channel (webhook + role set on the Today tab).
+let projHook=LS.get('sm_proj_hook',''), projRole=LS.get('sm_proj_role','');
+async function projDiscord(ev){
+  if(!projHook) return false;
+  const role=/^\d{15,}$/.test(projRole)?projRole:'';
+  const time=new Date(ev.at).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',timeZone:'America/New_York'});
+  const chg=rwStatusChanges.filter(c=>c.at>=Date.now()-2*RW_NEWS_MS && onSlate(c.team)).map(c=>`${c.name} ${rwTeamKey(c.team)}: ${c.from} → ${c.to}`);
+  const content=[`${role?`<@&${role}> `:''}📊 **RotoWire update · ${time} ET** — biggest changes`, ...ev.lines, ...(chg.length?['**Status**', ...chg]:[])].join('\n').slice(0,2000);
+  try{ const r=await fetch(projHook,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ username:'RotoWire', content, allowed_mentions: role?{roles:[role]}:{parse:[]} })}); if(!r.ok){ toast('RW Discord post failed: '+r.status); return false; } return true; }
+  catch(e){ toast('RW Discord post failed: '+e.message); return false; }
 }
 async function rwNewsLoad(){
   if(rwBusy) return; rwBusy=true;
@@ -1050,7 +1108,7 @@ async function rwNewsLoad(){
       rwRoster.set(k, nm); rwInj.set(k, { name:nm, team:_rwTeam(o), status:rwNormStatus(_rwPick(o,['Injury.Status','InjuryStatus','Status','Injury.Designation','Designation'])) }); }); }catch(e){}
     if(Date.now()-(rwRosterAt||0)>12*3600e3){ try{ (await rwFetchFeed('NBAPlayers')).forEach(o=>{ const nm=_rwName(o); if(nm) rwRoster.set(normName(nm), nm); }); rwRosterAt=Date.now(); }catch(e){} }
     items.forEach(x=>{ if(x.name) rwRoster.set(normName(x.name), x.name); });
-    rwTrackStatus(); await rwLoadSlate();
+    rwTrackStatus(); await rwLoadSlate(); await rwProjLoad();
     const fresh=items.filter(x=>!rwNews.items.some(y=>y.id===x.id));
     rwNews={ items:items.slice(0,150), at:Date.now() }; rwErr='';
     LS.set('sm_rw_news', JSON.stringify(rwNews));
@@ -1128,16 +1186,26 @@ function renderNews(){
   const nsRow=x=>`<div class="rwcard"><div class="rwh"><b>${esc(x.name||'—')}</b>${x.team?`<span class="rwteam">${esc(rwTeamKey(x.team))}</span>`:''}<span class="rwst ${rwStatusOf(x).toLowerCase()}">${rwStatusOf(x)}</span><span class="rwat">${esc(rwWhen(x.at))}</span></div>${x.headline?`<div class="rwhl">${esc(x.headline)}</div>`:''}</div>`;
   const card=x=>`<div class="rwcard${rwSeen.has(x.id)?'':' new'}"><div class="rwh"><b>${esc(x.name||'—')}</b>${x.team?`<span class="rwteam">${esc(rwTeamKey(x.team))}</span>`:''}<span class="rwat">${esc(rwWhen(x.at))}</span></div>
     ${x.headline?`<div class="rwhl">${esc(x.headline)}</div>`:''}${x.notes?`<div class="rwtx">${esc(x.notes)}</div>`:''}${x.analysis?`<div class="rwtx dim">${esc(x.analysis)}</div>`:''}</div>`;
+  const projMovers = rwProj ? Object.entries(rwProj.last).map(([k,r])=>{ const b=rwProj.base[k]; if(!b) return null; const {d,score}=projDelta(b,r); return score>0 && onSlate(r.team)?{ r, base:b, d, score }:null; }).filter(Boolean).sort((a,b)=>b.score-a.score).slice(0,20) : [];
   const sec=(t,n,html)=>n?`<div class="tksport"><span>${t}</span><b>${n}</b></div>${html}`:'';
   view.innerHTML=`<div class="sh"><span class="t">Changes Today</span><span class="dim" style="font-size:10.5px">${rwNews.at?`RotoWire · ${rwSlate&&rwSlate.size?`today's slate (${rwSlate.size/2|0} games)`:'all teams'} · updated ${rwWhen(new Date(rwNews.at).toISOString())} · every minute`:'loading…'}</span></div>
-    <div class="mnav" style="position:static"><button class="mchip" id="rwNow">↻ Refresh</button><button class="mchip" id="rwSrc">Source</button></div>
+    <div class="mnav" style="position:static"><button class="mchip" id="rwNow">↻ Refresh</button><button class="mchip" id="rwSrc">Source</button><button class="mchip${projHook?' on':''}" id="rwDc">${projHook?'Discord ✓':'Discord'}</button></div>
+    <div class="rwcard" id="rwDcBox" style="display:none"><div class="rwhl">RotoWire updates → Discord</div>
+      <label class="rwl">Webhook URL (saves as you type)<input id="rwHook" type="url" autocomplete="off" value="${esc(projHook)}" placeholder="https://discord.com/api/webhooks/…"></label>
+      <label class="rwl">Role ID to tag (blank = none)<input id="rwRole" type="text" inputmode="numeric" autocomplete="off" value="${esc(projRole)}"></label>
+      <button class="mchip" id="rwDcTest">Send test</button></div>
     ${rwErr?`<div class="empty" style="color:#fca5a5">Couldn't load RotoWire news: ${esc(rwErr)}<br><span class="dim">Tap Source to set your /api/rotowire helper (the blender's Vercel address).</span></div>`:''}
+    ${sec('RotoWire projection changes today', projMovers.length, projMovers.map(m=>`<div class="rwcard"><div class="rwh"><b>${esc(m.r.name)}</b>${m.r.team?`<span class="rwteam">${esc(rwTeamKey(m.r.team))}</span>`:''}</div><div class="rwtx">${PROJ_STATS.filter(([k])=>m.d[k]!=null).map(([k,l])=>`<span class="pjc ${m.d[k]>0?'up':'dn'}">${l} ${m.base[k]}→${m.r[k]} <b>${m.d[k]>0?'+':''}${m.d[k]}</b></span>`).join(' ')}</div></div>`).join(''))}
     ${sec('Ceiling ↑ today', up.length, up.map(flagRow).join(''))}
     ${sec('Floor risk today', down.length, down.map(flagRow).join(''))}
     ${sec('Injury report changes today', changes.length, changes.map(chRow).join(''))}
     ${sec('Status news today', newsSt.length, newsSt.map(nsRow).join(''))}
     ${items.length?sec('All RotoWire blurbs', items.length, items.map(card).join('')):(!rwErr?'<div class="empty">Loading RotoWire news…</div>':'')}`;
   $('#rwNow')?.addEventListener('click',()=>{ toast('Checking RotoWire…'); rwNewsLoad(); });
+  $('#rwDc')?.addEventListener('click',()=>{ const b=$('#rwDcBox'); b.style.display=b.style.display==='none'?'block':'none'; });
+  const saveDc=()=>{ projHook=$('#rwHook').value.trim(); LS.set('sm_proj_hook',projHook); projRole=($('#rwRole').value.match(/\d{15,}/)||[''])[0]; LS.set('sm_proj_role',projRole); const b=$('#rwDc'); b.classList.toggle('on',!!projHook); b.textContent=projHook?'Discord ✓':'Discord'; };
+  $('#rwHook')?.addEventListener('input',saveDc); $('#rwRole')?.addEventListener('input',saveDc);
+  $('#rwDcTest')?.addEventListener('click',async()=>{ saveDc(); const ok=await projDiscord({ at:Date.now(), lines:['✅ Connected — RotoWire projection changes will post here.'] }); toast(ok?'Sent':'Not sent — check the webhook'); });
   $('#rwSrc')?.addEventListener('click',()=>{ const v=prompt('RotoWire helper URL (ends in /api/rotowire). Leave empty for the default next to your odds backend.', LS.get('sm_rw_url','')); if(v==null) return; LS.set('sm_rw_url', v.trim()); rwNewsLoad(); });
   items.forEach(x=>rwSeen.add(x.id)); LS.set('sm_rw_seen', JSON.stringify([...rwSeen].slice(-500))); rwBadge();
 }
