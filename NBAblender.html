@@ -25176,6 +25176,24 @@ function lineupSetHook() {
   showToast(t ? "Lineup webhook saved" : "Using the Morning webhook"); renderMorning();
 }
 function lineupToggleLive() { try { localStorage.setItem(LINEUP_LIVE_KEY, lineupLiveOn() ? "0" : "1"); } catch (e) {} showToast(lineupLiveOn() ? "LIVE on \u2014 Discord updates after every lineup parse / refresh" : "LIVE off"); renderMorning(); if (lineupLiveOn()) lineupPostDiscord(true); }
+// Today's slate from ESPN's scoreboard (exact matchups, away / home and tip times) — used for the lineup message when it is available;
+// the lineup pages' own times / pairing are the fallback. One small fetch per day, kept in this browser.
+const LINEUP_GAMES_KEY = "nba_lineup_games_v1";
+let _lineupGames = null;
+function _lineupGamesLoad() { if (_lineupGames) return _lineupGames; try { const c = JSON.parse(localStorage.getItem(LINEUP_GAMES_KEY) || "null"); if (c && c.day === localYMD(new Date())) _lineupGames = c.games; } catch (e) {} return _lineupGames; }
+async function _lineupEnsureGames() {
+  if (_lineupGamesLoad()) return _lineupGames;
+  try {
+    const d = new Date(), ymd = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`;
+    const r = await fetch(`https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates=${ymd}`);
+    if (!r.ok) return null;
+    const j = await r.json();
+    const games = (j.events || []).map(ev => { const c = ev.competitions && ev.competitions[0], h = c && c.competitors.find(x => x.homeAway === "home"), a = c && c.competitors.find(x => x.homeAway === "away"); return a && h ? { away: normTeamAbbr(a.team.abbreviation) || a.team.abbreviation, home: normTeamAbbr(h.team.abbreviation) || h.team.abbreviation, at: Date.parse(ev.date) || 0 } : null; }).filter(Boolean).sort((x, y) => x.at - y.at);
+    if (games.length) { _lineupGames = games; try { localStorage.setItem(LINEUP_GAMES_KEY, JSON.stringify({ day: localYMD(new Date()), games })); } catch (e) {} }
+  } catch (e) {}
+  return _lineupGames;
+}
+const _gameClock = at => at ? new Date(at).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", timeZone: "America/New_York" }) : "";
 const _NBA_NICK = { ATL: "Hawks", BOS: "Celtics", BKN: "Nets", CHA: "Hornets", CHI: "Bulls", CLE: "Cavaliers", DAL: "Mavericks", DEN: "Nuggets", DET: "Pistons", GSW: "Warriors", HOU: "Rockets", IND: "Pacers", LAC: "Clippers", LAL: "Lakers", MEM: "Grizzlies", MIA: "Heat", MIL: "Bucks", MIN: "Timberwolves", NOP: "Pelicans", NYK: "Knicks", OKC: "Thunder", ORL: "Magic", PHI: "76ers", PHX: "Suns", POR: "Trail Blazers", SAC: "Kings", SAS: "Spurs", TOR: "Raptors", UTA: "Jazz", WAS: "Wizards" };
 // Lineup message, matchup by matchup (away first, as RG / Tabs list them):  **Hornets** \u2705  /  **Nets** \u274c (who).
 function _lineupDiscordText(diff) {
@@ -25195,7 +25213,15 @@ function _lineupDiscordText(diff) {
     return `**${nick}** ${parts.join(" ")}`;
   };
   const timeOf = team => { for (const v of views) { const x = v.teams[team]; if (x && x.time) return x.time; } return ""; };
-  for (let k = 0; k < teams.length; k += 2) { const tm = timeOf(teams[k]) || (teams[k + 1] ? timeOf(teams[k + 1]) : ""); L.push((tm ? tm + " " : "") + line(teams[k])); if (teams[k + 1]) L.push(line(teams[k + 1])); L.push(""); }
+  const slate = _lineupGamesLoad(), have = new Set(teams);
+  if (slate && slate.some(g => have.has(g.away) || have.has(g.home))) {                       // ESPN: exact matchups + tip times, away first
+    const done = new Set();
+    slate.forEach(g => { if (!have.has(g.away) && !have.has(g.home)) return; [g.away, g.home].forEach(x => done.add(x)); L.push((_gameClock(g.at) ? _gameClock(g.at) + " " : "") + line(g.away)); L.push(line(g.home)); L.push(""); });
+    const rest = teams.filter(x => !done.has(x));                                            // teams on a lineup page that ESPN doesn't list today: paired as the pages list them
+    for (let k = 0; k < rest.length; k += 2) { const tm = timeOf(rest[k]) || (rest[k + 1] ? timeOf(rest[k + 1]) : ""); L.push((tm ? tm + " " : "") + line(rest[k])); if (rest[k + 1]) L.push(line(rest[k + 1])); L.push(""); }
+  } else {
+    for (let k = 0; k < teams.length; k += 2) { const tm = timeOf(teams[k]) || (teams[k + 1] ? timeOf(teams[k + 1]) : ""); L.push((tm ? tm + " " : "") + line(teams[k])); if (teams[k + 1]) L.push(line(teams[k + 1])); L.push(""); }
+  }
   let txt = L.join("\n").replace(/\n+$/, "");
   if (txt.length > 1900) txt = txt.replace(/\n\n/g, "\n");
   if (txt.length > 1900) txt = txt.slice(0, 1890) + "\u2026";
@@ -25247,6 +25273,7 @@ function _lineupSig() {
   } catch (e) { return ""; }
 }
 async function lineupCopyText() {
+  try { await _lineupEnsureGames(); } catch (e) {}
   const txt = _lineupDiscordText().replace(/\*\*/g, "");
   try { await navigator.clipboard.writeText(txt); showToast("Lineup check copied as text"); }
   catch (e) { const ta = document.createElement("textarea"); ta.value = txt; document.body.appendChild(ta); ta.select(); try { document.execCommand("copy"); showToast("Lineup check copied as text"); } catch (e2) { showToast("Couldn't copy"); } document.body.removeChild(ta); }
@@ -25263,6 +25290,7 @@ async function lineupPostDiscord(auto) {
   _lineupPosting = true;
   try {
     if (!auto) { showToast("Syncing RotoWire injuries\u2026"); try { await _mSyncInjuriesQuiet(); } catch (e) {} }
+    try { await _lineupEnsureGames(); } catch (e) {}
     let blob; try { blob = await _lineupPicBlob(true); } catch (e) { console.error("[LINEUP discord]", e); if (!auto) showToast("Picture failed \u2014 " + (e && e.message || "see console")); return; }
     if (!blob) return;
     const base = hook.split("?")[0], today = localYMD(new Date());
