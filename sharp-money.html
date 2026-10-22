@@ -403,15 +403,22 @@ function rowLiquidity(o){
   if(EXCH.has(k)){ const lv=levelsOf(o); return lv.length?lv[0].size:null; }
   return o.limits?.max!=null ? Number(o.limits.max) : null;
 }
+// Tracker by book: FanDuel and bet105 each have their own record (chip filter at the top of the
+// Tracker), and the "All" view splits the record by book too.
+let tkBook = LS.get('sm_tkbook','all');
+const tkBookOf = t => (t.bookKey||canonBook(t.book)||'fanduel');
+const tkBookLabel = k => k==='fanduel'?'FanDuel':k==='bet105'?'bet105':bookLabel(k);
+const tkInBook = t => tkBook==='all' || tkBookOf(t)===tkBook;
 function sharpSummaryHtml(){
-  const all=tracked.filter(t=>t.src==='sharp'); if(!all.length) return '';
+  const all=tracked.filter(t=>t.src==='sharp' && tkInBook(t)); if(!all.length) return '';
   const g=all.filter(t=>t.result); const openN=all.length-g.length;
   const row=(label,r)=>`<div class="ttrow"><span>${esc(label)} <span class="dim">(${r.n})</span></span><span>${r.w}-${r.l}-${r.p}</span><span class="${r.u>0?'pos':r.u<0?'neg':''}">${r.u>=0?'+':''}${r.u.toFixed(2)}u</span><span class="dim">${r.roi!=null?r.roi.toFixed(1)+'% ROI':'—'}</span></div>`;
   const liqB=t=>{ const v=t.sharpLiq||0; return v>=2500?'$2.5k+ arb money':v>=1000?'$1k–2.5k arb money':'Under $1k arb money'; };
   const split=(fn)=>{ const m={}; g.forEach(t=>{ const k=fn(t); (m[k]=m[k]||[]).push(t); }); return Object.entries(m).sort((a,b)=>b[1].length-a[1].length).map(([k,l])=>row(k, ttRecord(l))).join(''); };
   const sub=t=>g.length?`<div class="dim" style="font-size:9.5px;font-weight:800;letter-spacing:.5px;text-transform:uppercase;margin:8px 0 2px">${t}</div>`:'';
-  return `<div class="ttsum"><div class="ttsumh"><span>Sharp Money</span></div>${row('Overall', ttRecord(g))}${openN?`<div class="ttrow dim" style="font-size:10.5px">${openN} open / ungraded not counted</div>`:''}
+  return `<div class="ttsum"><div class="ttsumh"><span>Sharp Money${tkBook==='all'?'':' · '+esc(tkBookLabel(tkBook))}</span></div>${row('Overall', ttRecord(g))}${openN?`<div class="ttrow dim" style="font-size:10.5px">${openN} open / ungraded not counted</div>`:''}
     ${[['under','Unders'],['Yes','Anytime Yes'],['No','Anytime No'],['over','Overs']].map(([k,l])=>{ const L=g.filter(t=>t.side===k); return L.length?row(l, ttRecord(L)):''; }).join('')}
+    ${tkBook==='all'?`${sub('By book')}${split(t=>tkBookLabel(tkBookOf(t)))}`:''}
     ${sub('By sport')}${split(t=>(SPORTS[t.sportKey]?.label)||t.sportKey)}
     ${sub('By prop type')}${split(t=>`${(SPORTS[t.sportKey]?.label)||t.sportKey} · ${t.marketLabel||t.mkey}`)}
     ${sub('By arb money')}${split(liqB)}</div>`;
@@ -948,11 +955,16 @@ function renderTracker(){
   const bySport = list => { const g={}; list.forEach(t=>{ const k=t.sportKey||'other'; (g[k]=g[k]||[]).push(t); });
     return Object.entries(g).map(([k,l])=>[k, l.sort((a,b)=>(b.trackedAt||0)-(a.trackedAt||0))]).sort((a,b)=>(b[1][0].trackedAt||0)-(a[1][0].trackedAt||0))
       .map(([k,l])=>`<div class="tksport"><span>${esc(SPORTS[k]?.label||'Other')}</span><b>${l.length}</b></div>${l.map(trackCardHtml).join('')}`).join(''); };
-  const open=tracked.filter(t=>!t.final), done=tracked.filter(t=>t.final);
-  view.innerHTML = (sharpSummaryHtml()||'<div class="empty">Nothing tracked yet. Every sharp money ping is tracked here automatically, or tap + Track on a card.</div>')
-    + (open.length?bySport(open):'')
-    + (done.length?`<button class="tkhisttoggle" id="tkhist">Bet History (${done.length}) ${historyShown?'▴ hide':'▾ show'}</button>${historyShown?bySport(done):''}`:'');
+  // All books: one block per book, sports inside
+  const byBook = list => tkBook!=='all' ? bySport(list) : [...new Set(list.map(tkBookOf))].map(k=>`<div class="tksport" style="color:#7dd3fc"><span>${esc(tkBookLabel(k))}</span><b>${list.filter(t=>tkBookOf(t)===k).length}</b></div>${bySport(list.filter(t=>tkBookOf(t)===k))}`).join('');
+  const open=tracked.filter(t=>!t.final && tkInBook(t)), done=tracked.filter(t=>t.final && tkInBook(t));
+  const books=[...new Set(tracked.map(tkBookOf))];
+  const chips=`<div class="mnav" style="position:static">${['all',...['fanduel','bet105'].filter(k=>books.includes(k)||k==='fanduel'), ...books.filter(k=>k!=='fanduel'&&k!=='bet105')].map(k=>`<button class="mchip${tkBook===k?' on':''}" data-tkbook="${esc(k)}">${k==='all'?'All books':esc(tkBookLabel(k))} <span class="tcount">${k==='all'?tracked.length:tracked.filter(t=>tkBookOf(t)===k).length}</span></button>`).join('')}</div>`;
+  view.innerHTML = chips + (sharpSummaryHtml()||'<div class="empty">Nothing tracked yet. Every sharp money ping is tracked here automatically, or tap + Track on a card.</div>')
+    + (open.length?byBook(open):'')
+    + (done.length?`<button class="tkhisttoggle" id="tkhist">Bet History (${done.length}) ${historyShown?'▴ hide':'▾ show'}</button>${historyShown?byBook(done):''}`:'');
   $('#tkhist')?.addEventListener('click',()=>{ historyShown=!historyShown; renderTracker(); });
+  view.querySelectorAll('[data-tkbook]').forEach(b=>b.addEventListener('click',()=>{ tkBook=b.dataset.tkbook; LS.set('sm_tkbook',tkBook); renderTracker(); }));
   view.querySelectorAll('[data-tkrm]').forEach(b=>b.addEventListener('click',()=>{ if(!confirm('Remove this bet?')) return; tracked=tracked.filter(t=>t.id!==b.dataset.tkrm); saveTracked(); renderTracker(); }));
   view.querySelectorAll('[data-tkgrade]').forEach(b=>b.addEventListener('click',()=>{ const [id,r]=b.dataset.tkgrade.split('|'); const t=tracked.find(x=>x.id===id); if(!t) return; if(r){ t.result=r; t.final=true; t.manualGrade=true; } else { t.result=null; t.final=false; t.manualGrade=false; } saveTracked(); renderTracker(); }));
   view.querySelectorAll('[data-tkprice]').forEach(b=>b.addEventListener('click',()=>{ const t=tracked.find(x=>x.id===b.dataset.tkprice); if(!t) return; const v=prompt('Price you got (e.g. -115, +105 or 102)', fmtAm(t.price)); if(v==null) return; const p=parseAm(v); if(p==null){ toast('Odds like -110, +120 or 102'); return; } t.price=p; saveTracked(); renderTracker(); }));
