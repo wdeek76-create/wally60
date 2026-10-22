@@ -2219,11 +2219,15 @@ function _extractCellsV2(tokens) {
     }
     sides.push(s);
   }
-  if (sides.length < 3 || sides[2].ev === null) return { gameStr, gameTime, projection, best: null, cells: [] };
+  // Best Line with no EV% (PropShop's best book isn't +EV, but an exchange further along can be):
+  // keep going as long as some book side carries an EV% — the parser takes the best of those.
+  if (sides.length < 3 || (sides[2].ev === null && !sides.slice(3).some(c => c.ev !== null))) return { gameStr, gameTime, projection, best: null, cells: [] };
   const best = sides[2];
+  // A Best Line with no EV% is shown as BOTH sides (over, under) — the book columns start one later
+  const bookStart = best.ev === null && sides[3] && sides[3].line === best.line && sides[3].ev === null ? 4 : 3;
   // pair book sides into columns: same line back-to-back = (over, under); otherwise one-sided, side unknown
   const cells = [];
-  for (let j = 3; j < sides.length; ) {
+  for (let j = bookStart; j < sides.length; ) {
     const a = sides[j], b = sides[j + 1];
     if (b && b.line === a.line) { cells.push({ ...a, side: 'O' }, { ...b, side: 'U' }); j += 2; }
     // one-sided column: side unknown — unless it carries the EV%, which only ever sits on the edge side
@@ -2242,8 +2246,11 @@ function _extractCellsV2(tokens) {
   // Downstream (worst odds, alt lines, Prop Builder replacement) only needs bet-side prices, and the
   // EV% only ever sits on the edge side — so every book price carrying an EV% IS a bet-side price.
   // (Pairing is only trusted for working out the side above: one-sided columns can shift it.)
-  const betCells = sides.slice(3).filter(c => c.ev !== null).map(c => ({ ...c, side }));
-  return { gameStr, gameTime, projection, best: { side, line: best.line, odds: best.odds, ev: best.ev, book: best.book }, cells: betCells };
+  const betCells = sides.slice(bookStart).filter(c => c.ev !== null).map(c => ({ ...c, side }));
+  // Sides we KNOW from a clean over/under pair, with an EV% — the only safe replacements when the Best
+  // Line itself isn't the edge (no EV% / under the min), since then its side says nothing about them.
+  const paired = cells.filter(c => (c.side === 'O' || c.side === 'U') && c.ev !== null);
+  return { gameStr, gameTime, projection, best: { side, line: best.line, odds: best.odds, ev: best.ev, book: best.book }, cells: betCells, paired };
 }
 
 // PropShop v2 footer: "My top bets" list spells the side out —
@@ -2278,7 +2285,7 @@ function parsePropShop(raw, minEdge, marketKey) {
   for (const block of blocks) {
     try {
       const v2 = _isPropShopV2(block.tokens);
-      const { gameStr, gameTime, cells, allCells, projection, best: v2Best } = v2 ? _extractCellsV2(block.tokens) : _extractCells(block.tokens);
+      const { gameStr, gameTime, cells, allCells, projection, best: v2Best, paired: v2Paired } = v2 ? _extractCellsV2(block.tokens) : _extractCells(block.tokens);
       if (!gameStr) continue;
       if (v2 ? !v2Best : allCells.length < 2) continue;
 
@@ -2297,7 +2304,9 @@ function parsePropShop(raw, minEdge, marketKey) {
 
       // The PLAY is the Best Line cell (index 1). Consensus is index 0.
       const bestLineCell = v2 ? v2Best : allCells[1];
-      if (!bestLineCell || bestLineCell.ev === null || bestLineCell.ev < effMinEdge) continue;
+      // (v2: a Best Line under the edge, with no EV%, or on Prop Builder can still be replaced by a
+      //  real book that clears it — handled below)
+      if (!bestLineCell || (!v2 && (bestLineCell.ev === null || bestLineCell.ev < effMinEdge))) continue;
 
       // Determine which side the EV is on. If both sides present, EV goes to the
       // side with more + odds. If only one side present, EV is on that side.
@@ -2324,16 +2333,23 @@ function parsePropShop(raw, minEdge, marketKey) {
       // Best Line is Prop Builder -> drop it and take the best-edge REAL book on the same side
       // (any line). Prop Builder's own column is the cell with the exact same line/odds/edge —
       // remove that one so it can't come back in as the replacement, the worst odds or an alt.
-      if (_isPropBuilder(bestPlay.book)) {
-        const pbIdx = cells.findIndex(c => c.side === bestPlay.side && c.line === bestPlay.line && c.odds === bestPlay.odds && c.ev === bestPlay.ev);
+      const _bestIsPB = _isPropBuilder(bestPlay.book);
+      if (_bestIsPB || (v2 && (bestPlay.ev == null || bestPlay.ev < effMinEdge))) {
+        const pbIdx = !_bestIsPB ? -1 : cells.findIndex(c => c.side === bestPlay.side && c.line === bestPlay.line && c.odds === bestPlay.odds && c.ev === bestPlay.ev);
         if (pbIdx >= 0) cells.splice(pbIdx, 1);
         // best edge within 2 points of Prop Builder's line (same bet, near the line the other sources
         // agree on); nothing that close -> skip rather than turn it into a different bet
-        const alt = cells.filter(c => c.side === bestPlay.side && c.odds && c.line != null && c.ev != null && c.ev >= effMinEdge && Math.abs(c.line - bestPlay.line) <= 2)
+        // Prop Builder IS the edge side, so every EV-bearing book price is on it. Otherwise (Best Line has no
+        // EV% / is under the min) only trust prices whose side is known from their pair AND that agree with
+        // the projection (skipped for TD-size lines, where a 0.98 projection can still make U0.5 the edge).
+        const projOk = c => projection == null || bestPlay.line < 2 || (c.side === 'O' ? projection > c.line : projection < c.line);
+        const pool = _bestIsPB ? cells.filter(c => c.side === bestPlay.side) : (v2Paired || []).filter(projOk);
+        const alt = pool.filter(c => c.odds && c.line != null && c.ev != null && c.ev >= effMinEdge && Math.abs(c.line - bestPlay.line) <= 2)
                          .sort((a, b) => b.ev - a.ev || Math.abs(a.line - bestPlay.line) - Math.abs(b.line - bestPlay.line) || parseInt(b.odds) - parseInt(a.odds))[0];
-        if (!alt) { console.log('[parse] skipped (no real book within 2 of Prop Builder\'s line clears the edge):', block.player, bestPlay.side + bestPlay.line, bestPlay.odds); continue; }
-        console.log('[parse] Prop Builder rejected for', block.player, '→', bestPlay.side + alt.line, alt.odds, alt.ev + '%');
-        bestPlay = { side: bestPlay.side, line: alt.line, odds: alt.odds, ev: alt.ev, book: alt.book && !_isPropBuilder(alt.book) ? alt.book : '' };
+        const why = _bestIsPB ? 'Prop Builder' : bestPlay.ev == null ? 'Best Line has no edge' : 'Best Line ' + bestPlay.ev + '%';
+        if (!alt) { if (_bestIsPB || bestPlay.ev != null) console.log('[parse] skipped (' + why + ', no real book within 2 of its line clears the edge):', block.player, bestPlay.side + bestPlay.line, bestPlay.odds); continue; }
+        console.log('[parse] ' + why + ' for', block.player, '→ took', (_bestIsPB ? bestPlay.side : alt.side) + alt.line, alt.odds, alt.ev + '%', alt.book || alt.liq || '');
+        bestPlay = { side: _bestIsPB ? bestPlay.side : alt.side, line: alt.line, odds: alt.odds, ev: alt.ev, book: alt.book && !_isPropBuilder(alt.book) ? alt.book : '' };
       }
 
       // Worst odds among book cells with same side + same line + EV still >= 5%
