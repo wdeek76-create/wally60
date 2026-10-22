@@ -5488,6 +5488,20 @@ async function copyModelPicks() {
   }
 }
 
+// Event name for the card image: drops bullets/colons, dates in any common
+// format, and status words like "Upcoming".
+function cleanCardTitle(card) {
+  const em = card.espnEventMeta || null;
+  return (card.label || em?.cardName || '')
+      .replace(/[•·|:]/g, ' ')
+      .replace(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+\d{1,2},?\s*\d{4}\b/ig, ' ')
+      .replace(/\b\d{4}-\d{2}-\d{2}\b/g, ' ')
+      // "24th of October 2026" / "24 October 2026" (MMAEye-style event strings)
+      .replace(/\b\d{1,2}(?:st|nd|rd|th)?\s+(?:of\s+)?(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?,?\s*\d{4}\b/ig, ' ')
+      .replace(/\b(upcoming|completed|live|finished)\b/ig, ' ')
+      .replace(/\s+/g, ' ').trim().toUpperCase();
+}
+
 // ── Discord webhook for the card-image export ─────────────────────────────
 const MODEL_WEBHOOK_KEY = 'ufc_model_discord_webhook';
 // Discord role pinged with every card-image post (just the mention, no text).
@@ -5904,7 +5918,9 @@ async function exportModelCardImage() {
   const rowsH = rowLayouts.reduce((s, r) => s + rowH(r), 0)
              + Math.max(0, rowLayouts.length - 1) * 8;
   const _em = card.espnEventMeta;
-  const subtitleReserve = (_em && (_em.city || _em.venueName) ? 17 : 0)
+  const _titleW = tableW - cardPadX * 2;
+  const _titleWraps = measureText(cleanCardTitle(card), `800 13px ${FONT_STACK}`) > _titleW;
+  const subtitleReserve = (_titleWraps ? 17 : 0) + (_em && (_em.city || _em.venueName) ? 17 : 0)
     + ((_em && _em.startISO) || card.date ? 22 : 0) + 8;
   const cardH = cardPadY * 2 + cardTopH + subtitleReserve + 10 + rowsH;
   const H = paddingTop + cardH + paddingBottom;
@@ -6001,11 +6017,7 @@ async function exportModelCardImage() {
   // Event name drops bullets/colons and any trailing date (the date has its
   // own line).
   const em = card.espnEventMeta || null;
-  const cleanLabel = (card.label || em?.cardName || '')
-    .replace(/[•·|:]/g, ' ')
-    .replace(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+\d{1,2},?\s*\d{4}\b/ig, ' ')
-    .replace(/\b\d{4}-\d{2}-\d{2}\b/g, ' ')
-    .replace(/\s+/g, ' ').trim().toUpperCase();
+  const cleanLabel = cleanCardTitle(card);
   let locLine = '';
   if (em) {
     if (em.city) {
@@ -6028,9 +6040,17 @@ async function exportModelCardImage() {
 
   let hy = topY + 12;
   ctx.fillStyle = TEXT;
-  ctx.font = `800 17px ${FONT_STACK}`;
-  ctx.fillText(cleanLabel, cardX + tableW / 2, hy);
-  hy += 22;
+  // Fit the title inside the card: shrink down to 13px, then wrap to 2 lines.
+  const titleMaxW = tableW - cardPadX * 2;
+  let titleSize = 17;
+  while (titleSize > 13 && measureText(cleanLabel, `800 ${titleSize}px ${FONT_STACK}`) > titleMaxW) titleSize--;
+  const titleFont = `800 ${titleSize}px ${FONT_STACK}`;
+  const titleLines = measureText(cleanLabel, titleFont) > titleMaxW ? wrapText(cleanLabel, titleMaxW, titleFont).slice(0, 2) : [cleanLabel];
+  ctx.font = titleFont;
+  titleLines.forEach((ln, i) => {
+    ctx.fillText(ln, cardX + tableW / 2, hy);
+    hy += i < titleLines.length - 1 ? titleSize + 4 : 22;
+  });
   if (locLine) {
     ctx.fillStyle = GREEN;
     ctx.font = `700 12px ${FONT_STACK}`;
