@@ -92,6 +92,12 @@ main{padding:10px 14px calc(var(--sab) + 40px);max-width:720px;margin:0 auto}
 .shbig{font-family:var(--mono);font-size:20px;font-weight:900;color:#22c55e}
 .shsub{font-size:10px;color:var(--sub);margin:3px 0 5px}
 a.shst{text-decoration:none;color:var(--text)}
+.rwping{border-color:rgba(147,197,253,.6)}.rwping .spsub{font-family:inherit;white-space:normal;line-height:1.35}
+.rwcard{padding:10px 12px;border-radius:12px;border:1px solid var(--line);background:var(--bg2);margin:6px 0}
+.rwcard.new{border-color:rgba(147,197,253,.55)}
+.rwh{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:13px}.rwteam{font-size:10px;font-weight:800;color:#7dd3fc}
+.rwon{font-size:9px;font-weight:900;padding:2px 6px;border-radius:999px;background:rgba(34,197,94,.18);color:#22c55e}
+.rwat{margin-left:auto;font-size:10px;color:var(--sub)}.rwhl{font-weight:800;font-size:12px;margin-top:4px}.rwtx{font-size:11.5px;line-height:1.45;margin-top:4px}
 #sharpPings{position:fixed;top:calc(env(safe-area-inset-top,0px) + 8px);left:8px;right:8px;z-index:9999;display:flex;flex-direction:column;gap:6px;pointer-events:none}
 .sping{pointer-events:auto;display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:16px;background:rgba(17,24,39,.97);border:1px solid rgba(34,197,94,.6);box-shadow:0 10px 30px rgba(0,0,0,.5);color:var(--text);text-decoration:none;animation:spIn .35s cubic-bezier(.2,.9,.3,1.2)}
 @keyframes spIn{from{transform:translateY(-120%);opacity:0}to{transform:none;opacity:1}}
@@ -175,7 +181,7 @@ a.shst{text-decoration:none;color:var(--text)}
 </head>
 <body>
 <div class="hdr"><div class="hrow"><div class="logo">Sharp <span>Money</span></div>
-  <div class="htabs"><button class="htab on" id="vFeed">Live</button><button class="htab" id="vTrack">Tracker<b id="tkN"></b></button></div>
+  <div class="htabs"><button class="htab on" id="vFeed">Live</button><button class="htab" id="vTrack">Tracker<b id="tkN"></b></button><button class="htab" id="vNews">News<b id="nwN"></b></button></div>
   <button class="gear" id="gear" title="Backend URL">⚙</button></div></div>
 <main id="view"></main>
 <div class="toast" id="toast"></div>
@@ -226,7 +232,7 @@ let toastT; const toast = m => { const t=$('#toast'); t.textContent=m; t.classLi
 async function runPool(jobs, n){ let i=0; await Promise.all(Array.from({length:Math.min(n,jobs.length)},async()=>{ while(i<jobs.length){ const j=jobs[i++]; await j(); } })); }
 const cents = v => { v=Number(v); return isNaN(v)?null:(v>0?v-100:v+100); };
 const LIQ_BAND_CENTS = 20;
-const SM_BUILD = 'Oct 20 · arb depth';
+const SM_BUILD = 'Oct 22 · rw news';
 const SHARP_MAX_ARB = 8; // % -- anything bigger is treated as bad data
 function levelsOf(o){
   const top=Number(o.price);
@@ -953,13 +959,107 @@ function showTrackPricePop(t){
   inp.addEventListener('keydown',e=>{ if(e.key==='Enter'){ e.preventDefault(); save(); } });
 }
 
+// ───────────────────────── RotoWire news ─────────────────────────
+// The NBA blender's RW blurb updates, live while SM runs: NBANews through the same Vercel helper the
+// FD tracker uses (/api/rotowire next to /api/odds), falling back to RotoWire's own keyless proxy.
+// Checked every 3 minutes; anything new pops a banner and bumps the News count. Players with a
+// sharp play on the board right now are tagged ON SM.
+const RW_PROXY_URL = 'https://rotowire-secrets-ebgmaeh8ecc4huhf.canadaeast-01.azurewebsites.net/api/proxy';
+const RW_URL = () => LS.get('sm_rw_url','') || getBackend().replace(/\/api\/odds\/?$/i,'/api/rotowire');
+const RW_NEWS_MS = 3*60e3;
+let rwNews = (()=>{ try{ return JSON.parse(LS.get('sm_rw_news','null'))||{ items:[], at:0 }; }catch(e){ return { items:[], at:0 }; } })();
+let rwSeen = (()=>{ try{ return new Set(JSON.parse(LS.get('sm_rw_seen','[]'))); }catch(e){ return new Set(); } })();
+let rwErr = '', rwBusy = false, rwPrimed = rwNews.items.length>0;
+function _rwXmlToObj(text){
+  const doc=new DOMParser().parseFromString(text,'application/xml'); if(doc.querySelector('parsererror')) throw new Error('not valid XML');
+  const conv=el=>{ const o={}; for(const a of el.attributes) o[a.name]=a.value; const kids=[...el.children];
+    if(!kids.length){ const t=(el.textContent||'').trim(); if(!Object.keys(o).length) return t===''?null:t; if(t) o['#text']=t; return o; }
+    kids.forEach(k=>{ const v=conv(k); if(k.tagName in o){ if(!Array.isArray(o[k.tagName])) o[k.tagName]=[o[k.tagName]]; o[k.tagName].push(v); } else o[k.tagName]=v; }); return o; };
+  return conv(doc.documentElement);
+}
+function _rwPick(o, paths){
+  for(const p of paths){ let cur=o;
+    for(const part of p.split('.')){ if(cur==null||typeof cur!=='object'){ cur=undefined; break; } const k=Object.keys(cur).find(x=>x.toLowerCase()===part.toLowerCase()); cur=k===undefined?undefined:cur[k]; }
+    if(cur!=null && cur!=='' && typeof cur!=='object') return cur; }
+  return null;
+}
+function _rwRows(data){
+  if(Array.isArray(data)){
+    if(data.length && typeof data[0]==='object' && !Array.isArray(data[0])){
+      const inner=data.map(d=>Object.values(d).find(v=>Array.isArray(v)&&v.length&&typeof v[0]==='object')).filter(Boolean);
+      const grouped=inner.length===data.length && !_rwPick(data[0],['Name','PlayerName','FirstName','Player.Name','Player.FirstName']);
+      return grouped ? data.flatMap((d,i)=>inner[i].map(x=>({ __parent:d, ...x }))) : data;
+    }
+    return [];
+  }
+  if(data && typeof data==='object'){ for(const v of Object.values(data)){ const r=_rwRows(v); if(r.length) return r; } }
+  return [];
+}
+const _rwName = o => { const full=_rwPick(o,['Name','PlayerName','FullName','Player.Name','Player.FullName','Player']); if(full) return String(full).trim();
+  const f=_rwPick(o,['FirstName','Player.FirstName','First']), l=_rwPick(o,['LastName','Player.LastName','Last']); return f&&l?`${f} ${l}`:''; };
+const _rwTeam = o => String(_rwPick(o,['Team.Code','Team.Abbreviation','Team.Abbr','TeamCode','TeamAbbr','Team.Alias','Team','__parent.Team.Code','__parent.TeamCode','__parent.Team'])||'').trim();
+async function rwFetchFeed(feed){
+  const parse=t=>{ t=String(t||'').trim(); return t.startsWith('<') ? _rwXmlToObj(t) : JSON.parse(t); };
+  const tries=[RW_URL()+'?feed='+encodeURIComponent(feed), `${RW_PROXY_URL}?feed=${encodeURIComponent(feed)}&format=json`];
+  let last='';
+  for(const u of tries){
+    try{ const r=await fetch(u,{cache:'no-store'}); const txt=await r.text(); const d=parse(txt);
+      if(!r.ok || (d && !Array.isArray(d) && (d.error||d.Error) && Object.keys(d).length<=3)){ last=`${r.status} ${String(d?.error||d?.Error||'').slice(0,80)}`; continue; }
+      const rows=_rwRows(d); if(rows.length) return rows; last='no rows';
+    }catch(e){ last=e.message; }
+  }
+  throw new Error(last||'no answer');
+}
+async function rwNewsLoad(){
+  if(rwBusy) return; rwBusy=true;
+  try{
+    const rows=await rwFetchFeed('NBANews');
+    const items=rows.map(o=>({ name:_rwName(o), team:_rwTeam(o),
+      headline:String(_rwPick(o,['Headline','Title','News.Headline'])||''), notes:String(_rwPick(o,['Notes','Body'])||''),
+      analysis:String(_rwPick(o,['Analysis','Impact','News.Analysis','Details'])||''), at:String(_rwPick(o,['DateTime','Date','Updated','LastUpdated','Published'])||'') }))
+      .filter(x=>x.headline||x.analysis).map(x=>({ ...x, id:normName(x.name)+'|'+x.headline+'|'+x.at }));
+    const fresh=items.filter(x=>!rwNews.items.some(y=>y.id===x.id));
+    rwNews={ items:items.slice(0,150), at:Date.now() }; rwErr='';
+    LS.set('sm_rw_news', JSON.stringify(rwNews));
+    if(rwPrimed) fresh.slice(0,3).forEach(rwPing);   // first load just fills the list
+    rwPrimed=true;
+  }catch(e){ rwErr=e.message; console.warn('[sm] RW news', e.message); }
+  finally{ rwBusy=false; rwBadge(); if(viewMode==='news') renderNews(); }
+}
+const rwOnSm = name => { const k=normName(name); return !!k && Object.values(sharpTape).some(e=>!sharpLive(e) && normName(e.player)===k); };
+function rwBadge(){ const n=rwNews.items.filter(x=>!rwSeen.has(x.id)).length; const b=$('#nwN'); if(b) b.textContent = n ? n : ''; }
+const rwWhen = at => { const t=Date.parse(at); if(isNaN(t)) return at||''; const m=Math.round((Date.now()-t)/60000); return m<1?'just now':m<60?`${m}m ago`:m<1440?`${Math.round(m/60)}h ago`:new Date(t).toLocaleDateString([], {month:'short',day:'numeric'}); };
+function rwPing(x){
+  let wrap=$('#sharpPings'); if(!wrap){ wrap=document.createElement('div'); wrap.id='sharpPings'; document.body.appendChild(wrap); }
+  const el=document.createElement('div'); el.className='sping rwping';
+  el.innerHTML=`<div class="spbody"><div class="sptop" style="color:#93c5fd"><b>RW NEWS</b>${x.team?' · '+esc(x.team):''}${rwOnSm(x.name)?' · <span style="color:#22c55e">ON SM</span>':''}</div><div class="spmain">${esc(x.name)}</div><div class="spsub">${esc(x.headline||x.analysis).slice(0,140)}</div></div><span class="spx" data-spx>✕</span>`;
+  el.addEventListener('click',ev=>{ el.remove(); if(!ev.target.closest('[data-spx]')) setView('news'); });
+  wrap.prepend(el); while(wrap.children.length>3) wrap.lastChild.remove();
+  setTimeout(()=>el.remove(), 20000);
+}
+function renderNews(){
+  const view=$('#view'); const items=rwNews.items;
+  const onSm=items.filter(x=>rwOnSm(x.name)), rest=items.filter(x=>!rwOnSm(x.name));
+  const card=x=>`<div class="rwcard${rwSeen.has(x.id)?'':' new'}"><div class="rwh"><b>${esc(x.name||'—')}</b>${x.team?`<span class="rwteam">${esc(x.team)}</span>`:''}${rwOnSm(x.name)?'<span class="rwon">ON SM</span>':''}<span class="rwat">${esc(rwWhen(x.at))}</span></div>
+    ${x.headline?`<div class="rwhl">${esc(x.headline)}</div>`:''}${x.notes?`<div class="rwtx">${esc(x.notes)}</div>`:''}${x.analysis?`<div class="rwtx dim">${esc(x.analysis)}</div>`:''}</div>`;
+  view.innerHTML=`<div class="sh"><span class="t">RotoWire News</span><span class="dim" style="font-size:10.5px">${rwNews.at?`updated ${rwWhen(new Date(rwNews.at).toISOString())} · every 3 min`:'loading…'}</span></div>
+    <div class="mnav" style="position:static"><button class="mchip" id="rwNow">↻ Refresh</button><button class="mchip" id="rwSrc">Source</button></div>
+    ${rwErr?`<div class="empty" style="color:#fca5a5">Couldn't load RotoWire news: ${esc(rwErr)}<br><span class="dim">Tap Source to set your /api/rotowire helper (the blender's Vercel address).</span></div>`:''}
+    ${onSm.length?`<div class="tksport"><span>On Sharp Money now</span><b>${onSm.length}</b></div>${onSm.map(card).join('')}`:''}
+    ${rest.length?`<div class="tksport"><span>Latest NBA news</span><b>${rest.length}</b></div>${rest.map(card).join('')}`:(!rwErr&&!items.length?'<div class="empty">Loading RotoWire news…</div>':'')}`;
+  $('#rwNow')?.addEventListener('click',()=>{ toast('Checking RotoWire…'); rwNewsLoad(); });
+  $('#rwSrc')?.addEventListener('click',()=>{ const v=prompt('RotoWire helper URL (ends in /api/rotowire). Leave empty for the default next to your odds backend.', LS.get('sm_rw_url','')); if(v==null) return; LS.set('sm_rw_url', v.trim()); rwNewsLoad(); });
+  // opening the tab marks everything seen (the "new" glow stays on this render)
+  items.forEach(x=>rwSeen.add(x.id)); LS.set('sm_rw_seen', JSON.stringify([...rwSeen].slice(-500))); rwBadge();
+}
 // ───────────────────────── page ─────────────────────────
 function setView(v){
-  viewMode=v; $('#vFeed').classList.toggle('on', v==='sharp'); $('#vTrack').classList.toggle('on', v==='tracker');
-  if(v==='sharp') renderSharp(); else { renderTracker(); refreshTracked(); }
+  viewMode=v; $('#vFeed').classList.toggle('on', v==='sharp'); $('#vTrack').classList.toggle('on', v==='tracker'); $('#vNews').classList.toggle('on', v==='news');
+  if(v==='sharp') renderSharp(); else if(v==='news') renderNews(); else { renderTracker(); refreshTracked(); }
 }
 $('#vFeed').addEventListener('click',()=>setView('sharp'));
 $('#vTrack').addEventListener('click',()=>setView('tracker'));
+$('#vNews').addEventListener('click',()=>setView('news'));
 $('#gear').addEventListener('click',()=>{ const v=prompt('Backend URL (same one PocketMarket uses)', getBackend()); if(v){ LS.set('oo_backend_url', v.trim()); toast('Saved — reloading'); setTimeout(()=>location.reload(),600); } });
 saveTracked();
 loadBookLogos().then(()=>{ if(viewMode==='sharp') renderSharp(); });
@@ -967,6 +1067,8 @@ setView('sharp');
 sharpTick(); sharpSchedule();
 setInterval(()=>{ if(tracked.some(t=>!t.final)) refreshTracked(); }, 120000);
 refreshTracked();
+rwBadge(); setTimeout(rwNewsLoad, 1500); setInterval(()=>{ if(!document.hidden) rwNewsLoad(); }, RW_NEWS_MS);
+document.addEventListener('visibilitychange',()=>{ if(!document.hidden && Date.now()-rwNews.at>RW_NEWS_MS) rwNewsLoad(); });
 
 </script>
 </body>
