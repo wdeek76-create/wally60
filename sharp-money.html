@@ -508,7 +508,6 @@ const sharpPlayerOf = o => {
 };
 const sharpLine = o => o.points==null || o.points==='' ? null : Number(o.points);
 const sharpDiag = {}; // sk -> what the last scan saw (shown on the Live tab)
-const smRoster = new Map(); // normName -> name, every NBA/WNBA player the scans have seen (for the news read)
 function sharpScan(sk, rows){
   const allowed=new Set(SHARP_MARKETS[sk]||[]);
   const groups = {};
@@ -518,7 +517,6 @@ function sharpScan(sk, rows){
     const mk=marketKeyFor(sk,o.market); if(!mk || !allowed.has(mk)) return;
     const s=sharpSideOf(o, mk); if(!s) return; o._sd=s;
     const who=normName(sharpPlayerOf(o)); if(!who) return;
-    if(sk==='nba'||sk==='wnba') smRoster.set(who, sharpPlayerOf(o));
     const g=`${o._fx}|${mk}|${who}`;
     (groups[g]=groups[g]||[]).push(o);
   });
@@ -586,7 +584,6 @@ function sharpCardHtml(e){
   return `<div class="shcard" data-k="${esc(e.k)}">
     <div class="shhd"><span class="shpl"><span class="shsp">${esc(SPORTS[sk]?.label||sk)}</span>${esc(titleCase(e.player))}</span><span class="shgm">${f?`${esc(f.away.ab||f.away.name)} @ ${esc(f.home.ab||f.home.name)} · ${etDay(f.start)} ${etTime(f.start)} · <b>${tillGame(f.start)}</b>`:''}</span></div>
     <div class="shside ${e.side}"><b>${sharpSideLabel(e.side)}${lineTxt}</b> ${esc(marketLabel(sk,e.mk))}${e.tgt==='kambi'?' <span class="shedge match" style="background:rgba(56,189,248,.18);color:#7dd3fc">KAMBI</span>':''} <span class="shedge ${e.soft[0]._edge>1e-7?'arb':'match'}">${edgeTxt(e.soft[0]._edge)}</span></div>
-    ${(()=>{ if(sk!=='nba'&&sk!=='wnba') return ''; const f=rwFlagFor(rwAnalyze().ben, e.player); return f&&f.kind!=='mention'?`<div style="margin:2px 0 4px">${rwPill(f)}${f.kind==='ceiling'&&e.side==='under'?' <span class="rwwarn">⚠ upside vs this under</span>':''}</div>`:''; })()}
     <div class="shmoney"><span class="shbig">${usd(e.L.total)}</span><span class="shlbl">arb money</span>${flow}${best?`<span class="shfair">sharp fair ${esc(bookShort([...best.books][0]))} ${fmtAm(-best.opp)}</span>`:''}</div>
     <div class="shsub">${oppName} book on the exchanges · <b>${usd(e.L.total)}</b> at ${holdOkTxt()} · <b>${usd(e.L.band||0)}</b> around target (within ${LIQ_BAND_CENTS}¢ of FD ${fmtAm(e.ref.price)})</div>
     <div class="pllad">${lad}</div>
@@ -980,10 +977,25 @@ function showTrackPricePop(t){
 // sharp play on the board right now are tagged ON SM.
 const RW_PROXY_URL = 'https://rotowire-secrets-ebgmaeh8ecc4huhf.canadaeast-01.azurewebsites.net/api/proxy';
 const RW_URL = () => LS.get('sm_rw_url','') || getBackend().replace(/\/api\/odds\/?$/i,'/api/rotowire');
-const RW_NEWS_MS = 3*60e3;
+const RW_NEWS_MS = 60e3; // checks RotoWire every minute while the page is open
 let rwNews = (()=>{ try{ return JSON.parse(LS.get('sm_rw_news','null'))||{ items:[], at:0 }; }catch(e){ return { items:[], at:0 }; } })();
 let rwSeen = (()=>{ try{ return new Set(JSON.parse(LS.get('sm_rw_seen','[]'))); }catch(e){ return new Set(); } })();
 let rwErr = '', rwBusy = false, rwPrimed = rwNews.items.length>0;
+const rwRoster = new Map(), rwInj = new Map(); let rwRosterAt = 0;  // normName -> name / {name, team, status}
+const rwNormStatus = raw => { const s=String(raw||'').toLowerCase(); if(!s) return ''; if(/out|suspend|season|il\b|injured reserve/.test(s)) return 'OUT'; if(/doubt/.test(s)) return 'DOUBTFUL'; if(/game[- ]?time|gtd|question/.test(s)) return 'GTD'; if(/probable/.test(s)) return 'PROBABLE'; if(/day[- ]to[- ]day|dtd/.test(s)) return 'DTD'; return String(raw).toUpperCase(); };
+// Status changes today: the injury report as first seen today vs now (new names count as changes too).
+let rwDay = (()=>{ try{ return JSON.parse(LS.get('sm_rw_day','null')); }catch(e){ return null; } })();
+const etToday = () => new Intl.DateTimeFormat('en-CA',{timeZone:'America/New_York',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
+let rwStatusChanges = [];
+function rwTrackStatus(){
+  if(!rwInj.size) return;
+  const today=etToday();
+  if(!rwDay || rwDay.day!==today){ rwDay={ day:today, start:Object.fromEntries([...rwInj].map(([k,v])=>[k,v.status])), changed:{} }; }
+  rwInj.forEach((v,k)=>{ const was=rwDay.start[k]; if(was!==v.status && !rwDay.changed[k]) rwDay.changed[k]={ from:was||'—', at:Date.now() }; if(was===v.status) delete rwDay.changed[k]; });
+  Object.keys(rwDay.start).forEach(k=>{ if(!rwInj.has(k) && !rwDay.changed[k]) rwDay.changed[k]={ from:rwDay.start[k], at:Date.now(), cleared:true }; });
+  LS.set('sm_rw_day', JSON.stringify(rwDay));
+  rwStatusChanges=Object.entries(rwDay.changed).map(([k,c])=>({ k, name:rwInj.get(k)?.name||rwRoster.get(k)||k, team:rwInj.get(k)?.team||'', from:c.from, to:c.cleared?'OFF REPORT':(rwInj.get(k)?.status||''), at:c.at })).sort((a,b)=>b.at-a.at);
+}
 function _rwXmlToObj(text){
   const doc=new DOMParser().parseFromString(text,'application/xml'); if(doc.querySelector('parsererror')) throw new Error('not valid XML');
   const conv=el=>{ const o={}; for(const a of el.attributes) o[a.name]=a.value; const kids=[...el.children];
@@ -1032,21 +1044,27 @@ async function rwNewsLoad(){
       headline:String(_rwPick(o,['Headline','Title','News.Headline'])||''), notes:String(_rwPick(o,['Notes','Body'])||''),
       analysis:String(_rwPick(o,['Analysis','Impact','News.Analysis','Details'])||''), at:String(_rwPick(o,['DateTime','Date','Updated','LastUpdated','Published'])||'') }))
       .filter(x=>x.headline||x.analysis).map(x=>({ ...x, id:normName(x.name)+'|'+x.headline+'|'+x.at }));
+    // Roster + statuses straight from RotoWire (nothing to do with the SM board): the injuries feed,
+    // and the player list once a day. Both best-effort; the news names alone still work without them.
+    try{ (await rwFetchFeed('NBAInjuries')).forEach(o=>{ const nm=_rwName(o); if(!nm) return; const k=normName(nm);
+      rwRoster.set(k, nm); rwInj.set(k, { name:nm, team:_rwTeam(o), status:rwNormStatus(_rwPick(o,['Injury.Status','InjuryStatus','Status','Injury.Designation','Designation'])) }); }); }catch(e){}
+    if(Date.now()-(rwRosterAt||0)>12*3600e3){ try{ (await rwFetchFeed('NBAPlayers')).forEach(o=>{ const nm=_rwName(o); if(nm) rwRoster.set(normName(nm), nm); }); rwRosterAt=Date.now(); }catch(e){} }
+    items.forEach(x=>{ if(x.name) rwRoster.set(normName(x.name), x.name); });
+    rwTrackStatus(); await rwLoadSlate();
     const fresh=items.filter(x=>!rwNews.items.some(y=>y.id===x.id));
     rwNews={ items:items.slice(0,150), at:Date.now() }; rwErr='';
     LS.set('sm_rw_news', JSON.stringify(rwNews));
-    if(rwPrimed) fresh.slice(0,3).forEach(rwPing);   // first load just fills the list
+    if(rwPrimed) fresh.filter(x=>onSlate(x.team)).slice(0,3).forEach(rwPing);   // first load just fills the list
     rwPrimed=true;
   }catch(e){ rwErr=e.message; console.warn('[sm] RW news', e.message); }
   finally{ rwBusy=false; rwBadge(); if(viewMode==='news') renderNews(); else if(viewMode==='sharp') renderSharp(); }
 }
-const rwOnSm = name => { const k=normName(name); return !!k && Object.values(sharpTape).some(e=>!sharpLive(e) && normName(e.player)===k); };
-function rwBadge(){ const n=rwNews.items.filter(x=>!rwSeen.has(x.id)).length; const b=$('#nwN'); if(b) b.textContent = n ? n : ''; }
+function rwBadge(){ const n=rwNews.items.filter(x=>!rwSeen.has(x.id) && onSlate(x.team)).length; const b=$('#nwN'); if(b) b.textContent = n ? n : ''; }
 const rwWhen = at => { const t=Date.parse(at); if(isNaN(t)) return at||''; const m=Math.round((Date.now()-t)/60000); return m<1?'just now':m<60?`${m}m ago`:m<1440?`${Math.round(m/60)}h ago`:new Date(t).toLocaleDateString([], {month:'short',day:'numeric'}); };
 function rwPing(x){
   let wrap=$('#sharpPings'); if(!wrap){ wrap=document.createElement('div'); wrap.id='sharpPings'; document.body.appendChild(wrap); }
   const el=document.createElement('div'); el.className='sping rwping';
-  el.innerHTML=`<div class="spbody"><div class="sptop" style="color:#93c5fd"><b>RW NEWS</b>${(()=>{ const hit=[...rwAnalyze().ben.values()].flat().filter(b=>b.id===x.id && b.kind==='ceiling' && Object.values(sharpTape).some(e=>!sharpLive(e)&&e.side==='under'&&normName(e.player)===normName(b.name))); return hit.length?` · <span style="color:#fbbf24">⚠ CEILING ↑ ${esc(hit.map(b=>b.name).join(', '))} (your under)</span>`:''; })()}${x.team?' · '+esc(x.team):''}${rwOnSm(x.name)?' · <span style="color:#22c55e">ON SM</span>':''}</div><div class="spmain">${esc(x.name)}</div><div class="spsub">${esc(x.headline||x.analysis).slice(0,140)}</div></div><span class="spx" data-spx>✕</span>`;
+  el.innerHTML=`<div class="spbody"><div class="sptop" style="color:#93c5fd"><b>RW NEWS</b>${(()=>{ const hit=[...rwAnalyze().ben.values()].flat().filter(b=>b.id===x.id && b.kind==='ceiling'); return hit.length?` · <span style="color:#22c55e">CEILING ↑ ${esc(hit.map(b=>b.name).join(', '))}</span>`:''; })()}${x.team?' · '+esc(x.team):''}</div><div class="spmain">${esc(x.name)}</div><div class="spsub">${esc(x.headline||x.analysis).slice(0,140)}</div></div><span class="spx" data-spx>✕</span>`;
   el.addEventListener('click',ev=>{ el.remove(); if(!ev.target.closest('[data-spx]')) setView('news'); });
   wrap.prepend(el); while(wrap.children.length>3) wrap.lastChild.remove();
   setTimeout(()=>el.remove(), 20000);
@@ -1077,10 +1095,10 @@ function rwAnalyze(){
     const seen=new Set();
     for(const m of text.matchAll(NAME_RUN)){
       const w=m[0].split(/\s+/); const cands=[w.join(' '), w.slice(-2).join(' '), w.slice(0,2).join(' ')].map(normName);
-      const k=cands.find(c=>smRoster.has(c)); if(!k || k===self || seen.has(k)) continue; seen.add(k);
+      const k=cands.find(c=>rwRoster.has(c)); if(!k || k===self || seen.has(k)) continue; seen.add(k);
       const sentRaw=sentences.find(z=>z.includes(m[0]))||'', sent=sentRaw.toLowerCase();
       const kind = RW_RETURN.test(sent)||RW_CUT.test(sent) ? 'floor' : RW_UP.test(sent) ? 'ceiling' : (st==='OUT'||st==='DOUBTFUL') ? 'ceiling' : 'mention';
-      (ben.get(k)||ben.set(k,[]).get(k)).push({ name:smRoster.get(k), kind, causedBy:x.name, causedStatus:st, why:sentRaw.slice(0,200), id:x.id });
+      (ben.get(k)||ben.set(k,[]).get(k)).push({ name:rwRoster.get(k), team:rwInj.get(k)?.team||x.team||'', kind, causedBy:x.name, causedStatus:st, why:sentRaw.slice(0,200), id:x.id });
     }
   });
   return { items, ben };
@@ -1088,28 +1106,37 @@ function rwAnalyze(){
 // The strongest flag a player has today (ceiling beats floor beats a mention).
 const rwFlagFor = (ben, name) => { const l=ben.get(normName(name)); if(!l) return null; return l.find(b=>b.kind==='ceiling') || l.find(b=>b.kind==='floor') || l[0]; };
 const rwPill = f => !f ? '' : `<span class="rwflag ${f.kind}" title="${esc(f.why)}">${f.kind==='ceiling'?'CEILING ↑':f.kind==='floor'?'FLOOR RISK':'IN NEWS'} · ${esc(f.causedBy)}${f.causedStatus?' '+esc(f.causedStatus):''}</span>`;
+// Today's slate only: teams with an NBA game today (ET), RotoWire codes matched to the fixture ones.
+const RW_TEAM_ALIAS = { GS:'GSW', NO:'NOP', NOR:'NOP', SA:'SAS', NY:'NYK', PHO:'PHX', UTAH:'UTA', UTH:'UTA', WSH:'WAS', BKN:'BKN', BRK:'BKN', CHO:'CHA', NJ:'BKN' };
+const rwTeamKey = t => { const u=String(t||'').toUpperCase().trim(); return RW_TEAM_ALIAS[u]||u; };
+let rwSlate = null; // Set of team codes playing today, or null while unknown
+async function rwLoadSlate(){
+  try{ const fx=await sharpFixtures('nba'); const today=etToday();
+    const day=iso=>new Intl.DateTimeFormat('en-CA',{timeZone:'America/New_York',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(iso));
+    const t=new Set(); fx.filter(f=>day(f.start)===today).forEach(f=>{ [f.home,f.away].forEach(c=>{ if(c.ab) t.add(rwTeamKey(c.ab)); }); });
+    rwSlate=t; }catch(e){}
+}
+const onSlate = team => !rwSlate || !rwSlate.size || !team || rwSlate.has(rwTeamKey(team));
 function renderNews(){
-  const view=$('#view'); const items=rwNews.items; const A=rwAnalyze();
-  const smPlays=Object.values(sharpTape).filter(e=>!sharpLive(e) && e.L.total>=sharpMin);
-  const smFor=name=>smPlays.filter(e=>normName(e.player)===normName(name));
-  // flagged players: ceiling / floor first, the ones with a play on SM at the top
-  const flagged=[...A.ben.entries()].map(([k,l])=>({ k, name:l[0].name, f:rwFlagFor(A.ben,l[0].name), plays:smFor(l[0].name) }))
-    .filter(x=>x.f.kind!=='mention' || x.plays.length)
-    .sort((a,b)=>(b.plays.length>0)-(a.plays.length>0) || (a.f.kind==='ceiling'?0:1)-(b.f.kind==='ceiling'?0:1));
-  const flagRow=x=>{ const warn=x.f.kind==='ceiling' && x.plays.some(e=>e.side==='under');
-    return `<div class="rwcard${warn?' warn':''}"><div class="rwh"><b>${esc(x.name)}</b>${rwPill(x.f)}${x.plays.length?'<span class="rwon">ON SM</span>':''}</div>
-      ${x.plays.map(e=>`<div class="rwtx"><b>${esc(sharpSideLabel(e.side))}${e.line!=null?' '+e.line:''} ${esc(marketLabel(e.sk,e.mk))}</b> on SM · ${usd(e.L.total)}${warn&&e.side==='under'?' <span class="rwwarn">⚠ upside vs your under</span>':''}</div>`).join('')}
-      <div class="rwtx dim">${esc(x.f.why)}</div></div>`; };
-  const changes=A.items.filter(x=>rwStatusOf(x));
-  const chRow=x=>`<div class="rwcard"><div class="rwh"><b>${esc(x.name||'—')}</b>${x.team?`<span class="rwteam">${esc(x.team)}</span>`:''}<span class="rwst ${rwStatusOf(x).toLowerCase()}">${rwStatusOf(x)}</span>${smFor(x.name).length?'<span class="rwon">ON SM</span>':''}<span class="rwat">${esc(rwWhen(x.at))}</span></div>${x.headline?`<div class="rwhl">${esc(x.headline)}</div>`:''}</div>`;
-  const card=x=>`<div class="rwcard${rwSeen.has(x.id)?'':' new'}"><div class="rwh"><b>${esc(x.name||'—')}</b>${x.team?`<span class="rwteam">${esc(x.team)}</span>`:''}${rwOnSm(x.name)?'<span class="rwon">ON SM</span>':''}<span class="rwat">${esc(rwWhen(x.at))}</span></div>
+  const view=$('#view'); const items=rwNews.items.filter(x=>onSlate(x.team)); const A=rwAnalyze();
+  const flagged=[...A.ben.entries()].map(([k,l])=>({ k, name:l[0].name, team:l[0].team, f:rwFlagFor(A.ben,l[0].name), all:l })).filter(x=>onSlate(x.team));
+  const up=flagged.filter(x=>x.f.kind==='ceiling'), down=flagged.filter(x=>x.f.kind==='floor');
+  const flagRow=x=>`<div class="rwcard"><div class="rwh"><b>${esc(x.name)}</b>${x.team?`<span class="rwteam">${esc(rwTeamKey(x.team))}</span>`:''}${rwPill(x.f)}</div><div class="rwtx dim">${esc(x.f.why)}</div></div>`;
+  const newsSt=A.items.filter(x=>rwStatusOf(x) && onSlate(x.team));
+  const changes=rwStatusChanges.filter(c=>onSlate(c.team));
+  const chRow=c=>`<div class="rwcard"><div class="rwh"><b>${esc(c.name)}</b>${c.team?`<span class="rwteam">${esc(rwTeamKey(c.team))}</span>`:''}<span class="rwst">${esc(c.from)}</span>→<span class="rwst ${String(c.to).toLowerCase().replace(/\s+/g,'')}">${esc(c.to)}</span><span class="rwat">${esc(rwWhen(new Date(c.at).toISOString()))}</span></div></div>`;
+  const nsRow=x=>`<div class="rwcard"><div class="rwh"><b>${esc(x.name||'—')}</b>${x.team?`<span class="rwteam">${esc(rwTeamKey(x.team))}</span>`:''}<span class="rwst ${rwStatusOf(x).toLowerCase()}">${rwStatusOf(x)}</span><span class="rwat">${esc(rwWhen(x.at))}</span></div>${x.headline?`<div class="rwhl">${esc(x.headline)}</div>`:''}</div>`;
+  const card=x=>`<div class="rwcard${rwSeen.has(x.id)?'':' new'}"><div class="rwh"><b>${esc(x.name||'—')}</b>${x.team?`<span class="rwteam">${esc(rwTeamKey(x.team))}</span>`:''}<span class="rwat">${esc(rwWhen(x.at))}</span></div>
     ${x.headline?`<div class="rwhl">${esc(x.headline)}</div>`:''}${x.notes?`<div class="rwtx">${esc(x.notes)}</div>`:''}${x.analysis?`<div class="rwtx dim">${esc(x.analysis)}</div>`:''}</div>`;
-  view.innerHTML=`<div class="sh"><span class="t">Changes Today</span><span class="dim" style="font-size:10.5px">${rwNews.at?`RotoWire · updated ${rwWhen(new Date(rwNews.at).toISOString())} · every 3 min`:'loading…'}</span></div>
+  const sec=(t,n,html)=>n?`<div class="tksport"><span>${t}</span><b>${n}</b></div>${html}`:'';
+  view.innerHTML=`<div class="sh"><span class="t">Changes Today</span><span class="dim" style="font-size:10.5px">${rwNews.at?`RotoWire · ${rwSlate&&rwSlate.size?`today's slate (${rwSlate.size/2|0} games)`:'all teams'} · updated ${rwWhen(new Date(rwNews.at).toISOString())} · every minute`:'loading…'}</span></div>
     <div class="mnav" style="position:static"><button class="mchip" id="rwNow">↻ Refresh</button><button class="mchip" id="rwSrc">Source</button></div>
     ${rwErr?`<div class="empty" style="color:#fca5a5">Couldn't load RotoWire news: ${esc(rwErr)}<br><span class="dim">Tap Source to set your /api/rotowire helper (the blender's Vercel address).</span></div>`:''}
-    ${flagged.length?`<div class="tksport"><span>Upside / floor from today's news</span><b>${flagged.length}</b></div>${flagged.map(flagRow).join('')}`:''}
-    ${changes.length?`<div class="tksport"><span>Status changes today</span><b>${changes.length}</b></div>${changes.map(chRow).join('')}`:''}
-    ${items.length?`<div class="tksport"><span>All RotoWire blurbs</span><b>${items.length}</b></div>${items.map(card).join('')}`:(!rwErr?'<div class="empty">Loading RotoWire news…</div>':'')}`;
+    ${sec('Ceiling ↑ today', up.length, up.map(flagRow).join(''))}
+    ${sec('Floor risk today', down.length, down.map(flagRow).join(''))}
+    ${sec('Injury report changes today', changes.length, changes.map(chRow).join(''))}
+    ${sec('Status news today', newsSt.length, newsSt.map(nsRow).join(''))}
+    ${items.length?sec('All RotoWire blurbs', items.length, items.map(card).join('')):(!rwErr?'<div class="empty">Loading RotoWire news…</div>':'')}`;
   $('#rwNow')?.addEventListener('click',()=>{ toast('Checking RotoWire…'); rwNewsLoad(); });
   $('#rwSrc')?.addEventListener('click',()=>{ const v=prompt('RotoWire helper URL (ends in /api/rotowire). Leave empty for the default next to your odds backend.', LS.get('sm_rw_url','')); if(v==null) return; LS.set('sm_rw_url', v.trim()); rwNewsLoad(); });
   items.forEach(x=>rwSeen.add(x.id)); LS.set('sm_rw_seen', JSON.stringify([...rwSeen].slice(-500))); rwBadge();
