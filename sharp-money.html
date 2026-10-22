@@ -98,6 +98,7 @@ a.shst{text-decoration:none;color:var(--text)}
 .rwflag{font-size:9.5px;font-weight:900;padding:2px 7px;border-radius:999px;letter-spacing:.3px}
 .rwflag.ceiling{background:rgba(34,197,94,.16);color:#22c55e}.rwflag.floor{background:rgba(245,158,11,.16);color:#f59e0b}.rwflag.mention{background:rgba(148,163,184,.16);color:#94a3b8}
 .dgl{font-size:12px;line-height:1.5;padding:4px 0;border-bottom:1px solid var(--line)}.dgl:last-child{border-bottom:0}.dgu{color:#22c55e;font-size:10.5px;font-weight:800}.dgd{color:#f59e0b;font-size:10.5px;font-weight:800}
+.rwpre{font-family:var(--mono);font-size:11px;line-height:1.45;white-space:pre-wrap;margin:0}
 .pjc{display:inline-block;margin:2px 6px 2px 0;font-size:11px}.pjc.up b{color:#22c55e}.pjc.dn b{color:#f87171}
 .rwl{display:grid;gap:4px;font-size:11px;font-weight:700;margin-top:8px}.rwl input{height:36px;border-radius:9px;border:1px solid var(--line2);background:var(--bg);color:var(--text);padding:0 10px;font-size:14px}
 .rwwarn{font-size:10px;font-weight:800;color:#fbbf24}
@@ -240,7 +241,7 @@ let toastT; const toast = m => { const t=$('#toast'); t.textContent=m; t.classLi
 async function runPool(jobs, n){ let i=0; await Promise.all(Array.from({length:Math.min(n,jobs.length)},async()=>{ while(i<jobs.length){ const j=jobs[i++]; await j(); } })); }
 const cents = v => { v=Number(v); return isNaN(v)?null:(v>0?v-100:v+100); };
 const LIQ_BAND_CENTS = 20;
-const SM_BUILD = 'Oct 22 · no blip posts';
+const SM_BUILD = 'Oct 22 · board table';
 const SHARP_MAX_ARB = 8; // % -- anything bigger is treated as bad data
 function levelsOf(o){
   const top=Number(o.price);
@@ -1352,9 +1353,10 @@ async function postBoard(force){
   const key=etToday()+'|'+JSON.stringify(rwBoard().map(g=>[g.f.id, ...[g.away,g.home].map(t=>t.wait.map(v=>[normName(v.name), v.status, v.type, (rwNews.items.find(x=>normName(x.name)===normName(v.name))||{}).id||''] ).sort((a,b)=>a[0].localeCompare(b[0])))]));
   if(!force && LS.get('sm_rw_board','')===key) return false;
   if(!force){ const was=rwBoardPrev; rwBoardPrev=key; if(was!==key) return false; }   // wait for the next read to agree
-  let buf=['**Injury board**'], ok=true;
-  for(const l of bl){ if((buf.join('\n')+'\n'+l).length>1850){ ok=(await statusDiscord(buf)) && ok; buf=[]; } buf.push(l); }
-  if(buf.length) ok=(await statusDiscord(buf)) && ok;
+  let ok=true, chunk=[];
+  const send=async c=>{ ok=(await statusDiscord(['**Injury board**', '```', ...c, '```'])) && ok; };
+  for(const l of bl){ if((chunk.join('\n')+'\n'+l).length>1800){ await send(chunk); chunk=[]; } chunk.push(l); }
+  if(chunk.length) await send(chunk);
   if(ok) LS.set('sm_rw_board', key);
   return ok;
 }
@@ -1384,19 +1386,27 @@ const rwNoteFor = name => { const n=rwNews.items.find(x=>normName(x.name)===norm
   const hl=String(n.headline||'').trim(); const head=hl && hl.length<=60 ? hl : '';
   const tags=[...new Set(RW_NOTES.filter(([re])=>re.test(t) && !(head && re.test(head))).map(([,l])=>l))].slice(0,2);
   const out=[head, ...tags].filter(Boolean); return out.length?` (${out.join(', ')})`:''; };
-function rwBoardLines(md){
-  const B=t=>md?`**${t}**`:t, A=rwAnalyze();
+// Lined up like the SM alert's liquidity box: a monospace table, one row per awaiting player
+// (team, name, status, injury) with the summed-up note and any names from his blurb right under it.
+function rwBoardLines(){
+  const A=rwAnalyze();
   const st=v=>SHORT_ST[String(v.status).toUpperCase()]||(/question/i.test(v.status)?'Q':v.status);
   const named=v=>{ const n=rwNews.items.find(x=>normName(x.name)===normName(v.name)); if(!n) return ''; const seen=new Set();
     const who=[...A.ben.values()].flat().filter(b=>b.id===n.id && !seen.has(b.name) && seen.add(b.name));
-    return who.length?' '+who.map(b=>`${b.kind==='floor'?'↓':'↑'} ${b.name}`).join(', '):''; };
-  const L=[]; rwBoard().forEach(g=>{
-    const teams=[g.away,g.home].map(t=>{ const parts=[];
-      if(t.wait.length) parts.push(t.wait.map(v=>`${B(v.name)} ${st(v)}${v.type?' '+v.type:''}${rwNoteFor(v.name)}${named(v)}`).join(', '));
-      return parts.length?`${t.code}: ${parts.join(' - ')}`:null; }).filter(Boolean);
-    if(!teams.length) return;
+    return who.map(b=>`${b.kind==='floor'?'↓':'↑'} ${b.name}`).join(', '); };
+  const games=rwBoard().map(g=>({ g, rows:[g.away,g.home].flatMap(t=>t.wait.map(v=>({ code:t.code, v }))) })).filter(x=>x.rows.length);
+  const nameW=Math.min(18, Math.max(6, ...games.flatMap(x=>x.rows.map(r=>r.v.name.length))));
+  const L=[];
+  games.forEach(({g,rows},i)=>{
     const time=new Date(g.f.start).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',timeZone:'America/New_York'});
-    L.push(B(`${g.away.code} @ ${g.home.code} ${time}`), ...teams);
+    if(i) L.push('');
+    L.push(`${g.away.code} @ ${g.home.code}  ${time}`);
+    rows.forEach(({code,v})=>{
+      L.push(`${code.padEnd(4)}${v.name.slice(0,nameW).padEnd(nameW)} ${String(st(v)).padEnd(3)}${v.type||''}`);
+      const note=rwNoteFor(v.name).replace(/^ \(|\)$/g,''), who=named(v);
+      if(note) L.push(`    ${note}`);
+      if(who) L.push(`    ${who}`);
+    });
   });
   return L;
 }
@@ -1444,7 +1454,7 @@ function renderNews(){
       const ps=x=>!x?'nothing posted yet':x.ok?`last post ${t(x.at)} ✓`:`last post failed: ${esc(x.err)}`;
       return `<div class="rwcard" style="font-size:10.5px;line-height:1.6">${f('NBANews')} · ${f('NBAInjuries')} · ${f('NBADailyProj')}<br>Projections: ${pj}<br>Proj channel: ${projHook?ps(rwPostStat.proj):'<span style="color:#fbbf24">no webhook</span>'} · Status channel: ${statusHook?ps(rwPostStat.status):'<span style="color:#fbbf24">no webhook</span>'}</div>`; })()}
     ${rwErr?`<div class="empty" style="color:#fca5a5">Couldn't load RotoWire news: ${esc(rwErr)}<br><span class="dim">Tap ⚙ Settings → put in your blender's address + /api/rotowire (and your RotoWire key if the blender uses one), then Test RotoWire.</span></div>`:''}
-    ${rwGames.length&&rwInj.size?sec('Injury board · today', rwGames.length, `<div class="rwcard"><button class="mchip" id="stBoard2" style="float:right">Post to Discord</button>${rwBoardLines(false).map(l=>l?`<div class="dgl">${esc(l)}</div>`:'').join('')}</div>`):''}
+    ${rwGames.length&&rwInj.size?sec('Injury board · today', rwGames.length, `<div class="rwcard"><button class="mchip" id="stBoard2" style="float:right">Post to Discord</button><pre class="rwpre">${esc(rwBoardLines().join('\n'))}</pre></div>`):''}
     ${(()=>{ const D=rwDigest(); return sec('Upside / floor risk (RotoWire blurbs)', D.length, `<div class="rwcard">${D.map(g=>`<div class="dgl"><b class="rwteam">${esc(g.team)}</b> ${esc(g.name)}${g.status?` <span class="rwst ${g.status.toLowerCase()}">${esc(g.status)}</span>`:''}${g.up.length?` → <span class="dgu">more mins:</span> ${g.up.map(n=>`<b>${esc(n)}</b>`).join(', ')}`:''}${g.down.length?` <span class="dgd">fewer mins:</span> ${g.down.map(n=>`<b>${esc(n)}</b>`).join(', ')}`:''}</div>`).join('')}</div>`); })()}
     ${sec('RotoWire projection changes today', projMovers.length, projMovers.map(m=>`<div class="rwcard"><div class="rwh"><b>${esc(m.r.name)}</b>${m.r.team?`<span class="rwteam">${esc(rwTeamKey(m.r.team))}</span>`:''}</div><div class="rwtx">${PROJ_STATS.filter(([k])=>m.d[k]!=null).map(([k,l])=>`<span class="pjc ${m.d[k]>0?'up':'dn'}">${l} ${m.base[k]}→${m.r[k]} <b>${m.d[k]>0?'+':''}${m.d[k]}</b></span>`).join(' ')}</div></div>`).join(''))}
     ${sec('Ceiling ↑ today', up.length, up.map(flagRow).join(''))}
