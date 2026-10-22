@@ -1601,7 +1601,10 @@ function levelsOf(o){
     // parsed liquidity/avg price (and firing a false flash) even though nothing real had changed.
     let distA=0, distB=0;
     ob.forEach(l=>{ const a=normP(l[0]), b=normP(l[1]); if(!isNaN(a)) distA+=Math.abs(a-top); if(!isNaN(b)) distB+=Math.abs(b-top); });
-    const pf = distA<=distB;
+    // Strongest signal first: the column that actually contains the row's own quoted price is the
+    // price column (a size column can sit numerically closer to the quote and fool the distance test).
+    const hasTop = i => ob.some(l=>Math.abs(normP(l[i])-top)<=1);
+    const pf = hasTop(0)!==hasTop(1) ? hasTop(0) : distA<=distB;
     if(!window._obLogged){ window._obLogged=true; console.log('[OpticOdds] order_book sample', o.sportsbook, top, JSON.stringify(o.order_book).slice(0,240), '→ priceFirst', pf); }
     // A parsed level has to actually BE a legal American odds price (magnitude >= 100) --
     // anything else (an unconverted percentage, a raw value the decimal-odds heuristic's narrow
@@ -1989,12 +1992,19 @@ async function fetchPlayerInfo(p){
   catch(e){ console.warn('[props] player info failed',e.message); }
   return playerInfo[p.pid]||null;
 }
+// Who a row is about: the selection, or -- when the selection is just "Over"/"Yes" (Kalshi, some
+// exchange feeds) -- the row's name with that part cut off.
+const rowWho = o => { let n=cleanSel(o.selection||''); if(!n || /^(over|under|yes|no)\b/i.test(n)) n=cleanSel(String(o.player?.name||o.name||'').replace(/\s+(over|under|yes|no)\b.*$/i,'')); return normName(n); };
 function rowsFor(p, mkey, rows){
   const m5=mode5On();
   if(p.isGame) return rows.filter(o=>o._fx===p.fixtureId && marketKeyFor(sportKey,o.market)===mkey && (!m5||inMode5(o)));
-  return rows.filter(o=>o._fx===p.fixtureId && marketKeyFor(sportKey,o.market)===mkey && normName(cleanSel(o.selection||o.name))===p.key && (!m5||inMode5(o)));
+  return rows.filter(o=>o._fx===p.fixtureId && marketKeyFor(sportKey,o.market)===mkey && rowWho(o)===p.key && (!m5||inMode5(o)));
 }
-function sideOf(o){ const s=String(o.selection_line||'').toLowerCase(); return s==='over'||s==='under' ? s : 'single'; }
+function sideOf(o){ const s=String(o.selection_line||'').toLowerCase(); if(s==='over'||s==='under') return s;
+  // Kalshi posts props as Yes/No on a threshold ("3+ assists" = Yes at 2.5) -- that's the Over/Under,
+  // so it lands on the same board as everyone else instead of being dropped as single-sided.
+  if(o.points!=null && (s==='yes'||s==='no') && canonBook(o.sportsbook)==='kalshi') return s==='yes'?'over':'under';
+  return 'single'; }
 // Exchanges (Novig/Prophet X/Kalshi) are peer-to-peer order books where the complementary price is
 // mathematically derivable from either side: a zero-vig two-outcome market's complementary
 // American price is always the posted side's own number with the sign reversed (exact, not an
@@ -2193,13 +2203,16 @@ function cellPrice(b, o){
   if(!b.ex) return { price: o.price, size: (o.limits?.max!=null?Number(o.limits.max):null), weighted:false, qualifies:true };
   const levels = levelsOf(o);
   const liqFloor = gridMinLiq>0 ? gridMinLiq : 100;
-  const chosen = levels.find(l=>l.size>=liqFloor) || levels[0] || null;
+  // The price shown is the top of the book (what you'd actually get first), with the size sitting
+  // there; the next level is shown beside it. Walking down to the first level with $100+ used to
+  // turn a thin +115 into a "-306 $120" that no one would ever bet.
+  const chosen = levels[0] || null;
   const chosenQualifies = !!(chosen && chosen.size>=liqFloor);
   // Weighted average kicks in automatically whenever the best clearing level is too thin to
   // trust on its own, not just behind the manual Weighted toggle -- a price with $9 behind it
   // isn't a price anyone can actually get real size at, so averaging across what's really there
   // is more honest than quoting that $9 number like it's the market.
-  if(exWeighted || !chosenQualifies){
+  if(exWeighted){
     const d = depthSummary(o);
     if(d && d.avg!=null) return { price: d.avg, size: d.size, weighted:true, qualifies:true };
   }
