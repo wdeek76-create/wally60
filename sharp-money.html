@@ -240,7 +240,7 @@ let toastT; const toast = m => { const t=$('#toast'); t.textContent=m; t.classLi
 async function runPool(jobs, n){ let i=0; await Promise.all(Array.from({length:Math.min(n,jobs.length)},async()=>{ while(i<jobs.length){ const j=jobs[i++]; await j(); } })); }
 const cents = v => { v=Number(v); return isNaN(v)?null:(v>0?v-100:v+100); };
 const LIQ_BAND_CENTS = 20;
-const SM_BUILD = 'Oct 22 · nbablender rw';
+const SM_BUILD = 'Oct 22 · rw blurb posts';
 const SHARP_MAX_ARB = 8; // % -- anything bigger is treated as bad data
 function levelsOf(o){
   const top=Number(o.price);
@@ -1022,12 +1022,36 @@ const digestLines = (D, md) => D.map(g=>{
   return `${b(g.team)} ${g.name}${g.status?' '+(md?`*${g.status}*`:g.status):''}${g.up.length?` → more mins: ${g.up.map(b).join(', ')}`:''}${g.down.length?`${g.up.length?' ·':' →'} fewer mins: ${g.down.map(b).join(', ')}`:''}`; });
 // One status post per changed player: the change, then his latest RotoWire blurb with his name and every
 // teammate it names in bold, and who picks up minutes / loses them.
+function blurbPostLines(x, A){
+  const named=[...A.ben.values()].flat().filter(b=>b.id===x.id && b.kind!=='mention' && inProj(b.name, b.team));
+  const st=rwStatusOf(x); if(!st && !named.length) return null;
+  let txt=[x.notes,x.analysis].filter(Boolean).join(' ') || x.headline;
+  const names=[...new Set([x.name, x.name.split(/\s+/).slice(-1)[0], ...named.map(b=>b.name)].filter(n=>n && n.length>2))].sort((a,b)=>b.length-a.length);
+  if(names.length) txt=txt.replace(new RegExp(`\\b(${names.map(n=>n.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')).join('|')})\\b`,'g'),'**$1**');
+  const out=[`**${x.name}**${x.team?' '+rwTeamKey(x.team):''}${st?` · *${st}*`:''}${x.headline?` — ${x.headline}`:''}`, '> '+txt.slice(0,700)];
+  const up=named.filter(b=>b.kind==='ceiling').map(b=>`**${b.name}**`), dn=named.filter(b=>b.kind==='floor').map(b=>`**${b.name}**`);
+  if(up.length) out.push(`More mins / usage: ${up.join(', ')}`);
+  if(dn.length) out.push(`Fewer mins: ${dn.join(', ')}`);
+  out.push(''); return out;
+}
+function postNewBlurbs(){
+  if(!statusHook || !(rwProj && rwProj.day===etToday())) return;
+  const key='sm_rw_posted_'+etToday(); let done; try{ done=new Set(JSON.parse(LS.get(key,'[]'))); }catch(e){ done=new Set(); }
+  const A=rwAnalyze();
+  const todo=A.items.filter(x=>!done.has(x.id) && inProj(x.name, x.team)).sort((a,b)=>(rwTime(a.at)||0)-(rwTime(b.at)||0));
+  const lines=[]; todo.forEach(x=>{ done.add(x.id); const l=blurbPostLines(x, A); if(l) lines.push(...l); });
+  LS.set(key, JSON.stringify([...done]));
+  // Discord caps a message at 2000 characters -- send in chunks
+  let buf=[]; const flush=()=>{ if(buf.length) statusDiscord(buf); buf=[]; };
+  lines.forEach(l=>{ if((buf.join('\n')+'\n'+l).length>1850) flush(); buf.push(l); }); flush();
+}
 function statusPostLines(list){
   const A=rwAnalyze(); const out=[];
   list.filter(x=>inProj(x.name, x.team)).forEach(x=>{
     out.push(`**${x.name}**${x.team?' '+rwTeamKey(x.team):''}: ${x.c.from} → **${x.to}**`);
     const blurb=rwNews.items.filter(n=>normName(n.name)===x.k).sort((a,b)=>(rwTime(b.at)||0)-(rwTime(a.at)||0))[0];
-    if(blurb){
+    let postedIds; try{ postedIds=new Set(JSON.parse(LS.get('sm_rw_posted_'+etToday(),'[]'))); }catch(e){ postedIds=new Set(); }
+    if(blurb && !postedIds.has(blurb.id)){   // a blurb already posted on its own isn't quoted again
       const named=[...A.ben.values()].flat().filter(b=>b.id===blurb.id && inProj(b.name, b.team));
       let txt=[blurb.notes,blurb.analysis].filter(Boolean).join(' ') || blurb.headline;
       // one pass, longest names first, so "Jalen Brunson" and a bare "Brunson" both go bold without doubling up
@@ -1189,6 +1213,7 @@ async function rwNewsLoad(){
     const fresh=items.filter(x=>!rwNews.items.some(y=>y.id===x.id));
     rwNews={ items:items.slice(0,150), at:Date.now() }; rwErr='';
     if(rwStatusPending.length){ const lines=statusPostLines(rwStatusPending.splice(0)); if(lines.length) statusDiscord(lines); }
+    postNewBlurbs();
     // the upside / floor digest goes to the status channel whenever it changes
     { const dl=digestLines(rwDigest(), true), key=etToday()+'|'+dl.join('\n');
       if(dl.length && LS.get('sm_rw_digest','')!==key && rwProj && rwProj.day===etToday()){ LS.set('sm_rw_digest', key); statusDiscord(['**Upside / floor risk (RotoWire blurbs)**', ...dl]); } }
@@ -1259,7 +1284,7 @@ const onSlate = team => !rwSlate || !rwSlate.size || !team || rwSlate.has(rwTeam
 // Only players RotoWire is projecting for today -- a blurb about someone not in today's projections
 // ("quiet in season opener" from last night) isn't news for today. Falls back to today's teams until
 // the projections have loaded.
-const inProj = (name, team) => { if(rwProj && rwProj.day===etToday() && Object.keys(rwProj.last||{}).length) return !!rwProj.last[normName(name)] && onSlate(team); return onSlate(team); };
+const inProj = (name, team) => { if(rwProj && rwProj.day===etToday() && Object.keys(rwProj.last||{}).length) return !!rwProj.last[normName(name)]; return onSlate(team); };
 function renderNews(){
   const view=$('#view'); const items=rwNews.items.filter(x=>rwIsToday(x) && inProj(x.name, x.team)); const A=rwAnalyze();
   const flagged=[...A.ben.entries()].map(([k,l])=>({ k, name:l[0].name, team:l[0].team, f:rwFlagFor(A.ben,l[0].name), all:l })).filter(x=>inProj(x.name, x.team));
