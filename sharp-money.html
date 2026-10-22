@@ -240,7 +240,7 @@ let toastT; const toast = m => { const t=$('#toast'); t.textContent=m; t.classLi
 async function runPool(jobs, n){ let i=0; await Promise.all(Array.from({length:Math.min(n,jobs.length)},async()=>{ while(i<jobs.length){ const j=jobs[i++]; await j(); } })); }
 const cents = v => { v=Number(v); return isNaN(v)?null:(v>0?v-100:v+100); };
 const LIQ_BAND_CENTS = 20;
-const SM_BUILD = 'Oct 22 · board notes';
+const SM_BUILD = 'Oct 22 · no blip posts';
 const SHARP_MAX_ARB = 8; // % -- anything bigger is treated as bad data
 function levelsOf(o){
   const top=Number(o.price);
@@ -1076,7 +1076,12 @@ function rwTrackStatus(){
   LS.set('sm_rw_day', JSON.stringify(rwDay));
   // anything that changed since the last check goes to the status channel (today's slate only)
   const posted=rwDay.posted||(rwDay.posted={});
-  const fresh=Object.entries(rwDay.changed).filter(([k,c])=>posted[k]!==(c.cleared?'OFF':rwInj.get(k)?.status)).map(([k,c])=>({ k, c, to:c.cleared?'OFF REPORT':(rwInj.get(k)?.status||''), team:rwInj.get(k)?.team||'', name:rwInj.get(k)?.name||rwRoster.get(k)||k }));
+  // a change has to show on two reads in a row before it posts (the feed blips: a player missing
+  // from one read and back on the next isn't news)
+  const seenNow=rwDay.seen||(rwDay.seen={}); const prevSeen={...seenNow};
+  Object.keys(seenNow).forEach(k=>delete seenNow[k]);
+  Object.entries(rwDay.changed).forEach(([k,c])=>{ seenNow[k]=c.cleared?'OFF':rwInj.get(k)?.status; });
+  const fresh=Object.entries(rwDay.changed).filter(([k,c])=>{ const now=c.cleared?'OFF':rwInj.get(k)?.status; return posted[k]!==now && prevSeen[k]===now; }).map(([k,c])=>({ k, c, to:c.cleared?'OFF REPORT':(rwInj.get(k)?.status||''), team:rwInj.get(k)?.team||'', name:rwInj.get(k)?.name||rwRoster.get(k)||k }));
   fresh.forEach(x=>{ posted[x.k]=x.c.cleared?'OFF':rwInj.get(x.k)?.status; });
   if(fresh.length){ LS.set('sm_rw_day', JSON.stringify(rwDay)); rwStatusPending.push(...fresh); }
   rwStatusChanges=Object.entries(rwDay.changed).map(([k,c])=>({ k, name:rwInj.get(k)?.name||rwRoster.get(k)||k, team:rwInj.get(k)?.team||'', from:c.from, to:c.cleared?'OFF REPORT':(rwInj.get(k)?.status||''), at:c.at })).sort((a,b)=>b.at-a.at);
@@ -1338,10 +1343,15 @@ function rwBoard(){
 }
 // Posts the board to the status channel when it changed since the last post that went through
 // (force: post it now regardless). The "posted" mark is only kept if Discord took it.
+let rwBoardPrev='';
 async function postBoard(force){
   if(!(rwGames.length && rwInj.size && statusHook)) return false;
-  const bl=rwBoardLines(true), key=etToday()+'|'+bl.join('\n');
+  const bl=rwBoardLines(true);
+  // compare the board's DATA (who's awaiting, status, injury, his latest blurb), not its wording --
+  // so a layout change on our side, or a "3h ago" ticking over, never reposts it
+  const key=etToday()+'|'+JSON.stringify(rwBoard().map(g=>[g.f.id, ...[g.away,g.home].map(t=>t.wait.map(v=>[normName(v.name), v.status, v.type, (rwNews.items.find(x=>normName(x.name)===normName(v.name))||{}).id||''] ).sort((a,b)=>a[0].localeCompare(b[0])))]));
   if(!force && LS.get('sm_rw_board','')===key) return false;
+  if(!force){ const was=rwBoardPrev; rwBoardPrev=key; if(was!==key) return false; }   // wait for the next read to agree
   let buf=['**Injury board**'], ok=true;
   for(const l of bl){ if((buf.join('\n')+'\n'+l).length>1850){ ok=(await statusDiscord(buf)) && ok; buf=[]; } buf.push(l); }
   if(buf.length) ok=(await statusDiscord(buf)) && ok;
