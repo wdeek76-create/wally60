@@ -239,7 +239,7 @@ let toastT; const toast = m => { const t=$('#toast'); t.textContent=m; t.classLi
 async function runPool(jobs, n){ let i=0; await Promise.all(Array.from({length:Math.min(n,jobs.length)},async()=>{ while(i<jobs.length){ const j=jobs[i++]; await j(); } })); }
 const cents = v => { v=Number(v); return isNaN(v)?null:(v>0?v-100:v+100); };
 const LIQ_BAND_CENTS = 20;
-const SM_BUILD = 'Oct 22 · rw updates';
+const SM_BUILD = 'Oct 22 · rw status';
 const SHARP_MAX_ARB = 8; // % -- anything bigger is treated as bad data
 function levelsOf(o){
   const top=Number(o.price);
@@ -988,7 +988,29 @@ const rwNormStatus = raw => { const s=String(raw||'').toLowerCase(); if(!s) retu
 // Status changes today: the injury report as first seen today vs now (new names count as changes too).
 let rwDay = (()=>{ try{ return JSON.parse(LS.get('sm_rw_day','null')); }catch(e){ return null; } })();
 const etToday = () => new Intl.DateTimeFormat('en-CA',{timeZone:'America/New_York',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
-let rwStatusChanges = [];
+let rwStatusChanges = [], rwStatusPending = [];
+// One status post per changed player: the change, then his latest RotoWire blurb with his name and every
+// teammate it names in bold, and who picks up minutes / loses them.
+function statusPostLines(list){
+  const A=rwAnalyze(); const out=[];
+  list.filter(x=>onSlate(x.team)).forEach(x=>{
+    out.push(`**${x.name}**${x.team?' '+rwTeamKey(x.team):''}: ${x.c.from} → **${x.to}**`);
+    const blurb=rwNews.items.filter(n=>normName(n.name)===x.k).sort((a,b)=>(Date.parse(b.at)||0)-(Date.parse(a.at)||0))[0];
+    if(blurb){
+      const named=[...A.ben.values()].flat().filter(b=>b.id===blurb.id);
+      let txt=[blurb.notes,blurb.analysis].filter(Boolean).join(' ') || blurb.headline;
+      // one pass, longest names first, so "Jalen Brunson" and a bare "Brunson" both go bold without doubling up
+      const names=[...new Set([x.name, x.name.split(/\s+/).slice(-1)[0], ...named.map(b=>b.name)].filter(n=>n && n.length>2))].sort((a,b)=>b.length-a.length);
+      if(names.length) txt=txt.replace(new RegExp(`\\b(${names.map(n=>n.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')).join('|')})\\b`,'g'),'**$1**');
+      out.push('> '+txt.slice(0,700));
+      const up=named.filter(b=>b.kind==='ceiling').map(b=>`**${b.name}**`), dn=named.filter(b=>b.kind==='floor').map(b=>`**${b.name}**`);
+      if(up.length) out.push(`↑ More mins / usage: ${up.join(', ')}`);
+      if(dn.length) out.push(`↓ Fewer mins: ${dn.join(', ')}`);
+    }
+    out.push('');
+  });
+  return out;
+}
 function rwTrackStatus(){
   if(!rwInj.size) return;
   const today=etToday();
@@ -996,6 +1018,11 @@ function rwTrackStatus(){
   rwInj.forEach((v,k)=>{ const was=rwDay.start[k]; if(was!==v.status && !rwDay.changed[k]) rwDay.changed[k]={ from:was||'—', at:Date.now() }; if(was===v.status) delete rwDay.changed[k]; });
   Object.keys(rwDay.start).forEach(k=>{ if(!rwInj.has(k) && !rwDay.changed[k]) rwDay.changed[k]={ from:rwDay.start[k], at:Date.now(), cleared:true }; });
   LS.set('sm_rw_day', JSON.stringify(rwDay));
+  // anything that changed since the last check goes to the status channel (today's slate only)
+  const posted=rwDay.posted||(rwDay.posted={});
+  const fresh=Object.entries(rwDay.changed).filter(([k,c])=>posted[k]!==(c.cleared?'OFF':rwInj.get(k)?.status)).map(([k,c])=>({ k, c, to:c.cleared?'OFF REPORT':(rwInj.get(k)?.status||''), team:rwInj.get(k)?.team||'', name:rwInj.get(k)?.name||rwRoster.get(k)||k }));
+  fresh.forEach(x=>{ posted[x.k]=x.c.cleared?'OFF':rwInj.get(x.k)?.status; });
+  if(fresh.length){ LS.set('sm_rw_day', JSON.stringify(rwDay)); rwStatusPending.push(...fresh); }
   rwStatusChanges=Object.entries(rwDay.changed).map(([k,c])=>({ k, name:rwInj.get(k)?.name||rwRoster.get(k)||k, team:rwInj.get(k)?.team||'', from:c.from, to:c.cleared?'OFF REPORT':(rwInj.get(k)?.status||''), at:c.at })).sort((a,b)=>b.at-a.at);
 }
 function _rwXmlToObj(text){
@@ -1085,12 +1112,21 @@ async function rwProjLoad(){
 }
 // RW updates → their own Discord channel (webhook + role set on the Today tab).
 let projHook=LS.get('sm_proj_hook',''), projRole=LS.get('sm_proj_role','');
+// Injury-report status changes → yet another channel of their own.
+let statusHook=LS.get('sm_status_hook',''), statusRole=LS.get('sm_status_role','');
+async function statusDiscord(lines){
+  if(!statusHook || !lines.length) return false;
+  const role=/^\d{15,}$/.test(statusRole)?statusRole:'';
+  const time=new Date().toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',timeZone:'America/New_York'});
+  const content=[`${role?`<@&${role}> `:''}🚑 **RotoWire status · ${time} ET**`, ...lines].join('\n').slice(0,2000);
+  try{ const r=await fetch(statusHook,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ username:'RotoWire Status', content, allowed_mentions: role?{roles:[role]}:{parse:[]} })}); if(!r.ok){ toast('Status Discord post failed: '+r.status); return false; } return true; }
+  catch(e){ toast('Status Discord post failed: '+e.message); return false; }
+}
 async function projDiscord(ev){
   if(!projHook) return false;
   const role=/^\d{15,}$/.test(projRole)?projRole:'';
   const time=new Date(ev.at).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',timeZone:'America/New_York'});
-  const chg=rwStatusChanges.filter(c=>c.at>=Date.now()-2*RW_NEWS_MS && onSlate(c.team)).map(c=>`${c.name} ${rwTeamKey(c.team)}: ${c.from} → ${c.to}`);
-  const content=[`${role?`<@&${role}> `:''}📊 **RotoWire update · ${time} ET** — biggest changes`, ...ev.lines, ...(chg.length?['**Status**', ...chg]:[])].join('\n').slice(0,2000);
+  const content=[`${role?`<@&${role}> `:''}📊 **RotoWire update · ${time} ET** — biggest changes`, ...ev.lines].join('\n').slice(0,2000);
   try{ const r=await fetch(projHook,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ username:'RotoWire', content, allowed_mentions: role?{roles:[role]}:{parse:[]} })}); if(!r.ok){ toast('RW Discord post failed: '+r.status); return false; } return true; }
   catch(e){ toast('RW Discord post failed: '+e.message); return false; }
 }
@@ -1111,6 +1147,7 @@ async function rwNewsLoad(){
     rwTrackStatus(); await rwLoadSlate(); await rwProjLoad();
     const fresh=items.filter(x=>!rwNews.items.some(y=>y.id===x.id));
     rwNews={ items:items.slice(0,150), at:Date.now() }; rwErr='';
+    if(rwStatusPending.length){ const lines=statusPostLines(rwStatusPending.splice(0)); if(lines.length) statusDiscord(lines); }
     LS.set('sm_rw_news', JSON.stringify(rwNews));
     if(rwPrimed) fresh.filter(x=>onSlate(x.team)).slice(0,3).forEach(rwPing);   // first load just fills the list
     rwPrimed=true;
@@ -1189,11 +1226,15 @@ function renderNews(){
   const projMovers = rwProj ? Object.entries(rwProj.last).map(([k,r])=>{ const b=rwProj.base[k]; if(!b) return null; const {d,score}=projDelta(b,r); return score>0 && onSlate(r.team)?{ r, base:b, d, score }:null; }).filter(Boolean).sort((a,b)=>b.score-a.score).slice(0,20) : [];
   const sec=(t,n,html)=>n?`<div class="tksport"><span>${t}</span><b>${n}</b></div>${html}`:'';
   view.innerHTML=`<div class="sh"><span class="t">Changes Today</span><span class="dim" style="font-size:10.5px">${rwNews.at?`RotoWire · ${rwSlate&&rwSlate.size?`today's slate (${rwSlate.size/2|0} games)`:'all teams'} · updated ${rwWhen(new Date(rwNews.at).toISOString())} · every minute`:'loading…'}</span></div>
-    <div class="mnav" style="position:static"><button class="mchip" id="rwNow">↻ Refresh</button><button class="mchip" id="rwSrc">Source</button><button class="mchip${projHook?' on':''}" id="rwDc">${projHook?'Discord ✓':'Discord'}</button></div>
+    <div class="mnav" style="position:static"><button class="mchip" id="rwNow">↻ Refresh</button><button class="mchip" id="rwSrc">Source</button><button class="mchip${projHook||statusHook?' on':''}" id="rwDc">${projHook||statusHook?'Discord ✓':'Discord'}</button></div>
     <div class="rwcard" id="rwDcBox" style="display:none"><div class="rwhl">RotoWire updates → Discord</div>
       <label class="rwl">Webhook URL (saves as you type)<input id="rwHook" type="url" autocomplete="off" value="${esc(projHook)}" placeholder="https://discord.com/api/webhooks/…"></label>
       <label class="rwl">Role ID to tag (blank = none)<input id="rwRole" type="text" inputmode="numeric" autocomplete="off" value="${esc(projRole)}"></label>
-      <button class="mchip" id="rwDcTest">Send test</button></div>
+      <button class="mchip" id="rwDcTest">Send test</button>
+      <div class="rwhl" style="margin-top:12px">Injury status changes → Discord <span class="dim">(its own channel)</span></div>
+      <label class="rwl">Webhook URL<input id="stHook" type="url" autocomplete="off" value="${esc(statusHook)}" placeholder="https://discord.com/api/webhooks/…"></label>
+      <label class="rwl">Role ID to tag (blank = none)<input id="stRole" type="text" inputmode="numeric" autocomplete="off" value="${esc(statusRole)}"></label>
+      <button class="mchip" id="stDcTest">Send test</button></div>
     ${rwErr?`<div class="empty" style="color:#fca5a5">Couldn't load RotoWire news: ${esc(rwErr)}<br><span class="dim">Tap Source to set your /api/rotowire helper (the blender's Vercel address).</span></div>`:''}
     ${sec('RotoWire projection changes today', projMovers.length, projMovers.map(m=>`<div class="rwcard"><div class="rwh"><b>${esc(m.r.name)}</b>${m.r.team?`<span class="rwteam">${esc(rwTeamKey(m.r.team))}</span>`:''}</div><div class="rwtx">${PROJ_STATS.filter(([k])=>m.d[k]!=null).map(([k,l])=>`<span class="pjc ${m.d[k]>0?'up':'dn'}">${l} ${m.base[k]}→${m.r[k]} <b>${m.d[k]>0?'+':''}${m.d[k]}</b></span>`).join(' ')}</div></div>`).join(''))}
     ${sec('Ceiling ↑ today', up.length, up.map(flagRow).join(''))}
@@ -1205,6 +1246,9 @@ function renderNews(){
   $('#rwDc')?.addEventListener('click',()=>{ const b=$('#rwDcBox'); b.style.display=b.style.display==='none'?'block':'none'; });
   const saveDc=()=>{ projHook=$('#rwHook').value.trim(); LS.set('sm_proj_hook',projHook); projRole=($('#rwRole').value.match(/\d{15,}/)||[''])[0]; LS.set('sm_proj_role',projRole); const b=$('#rwDc'); b.classList.toggle('on',!!projHook); b.textContent=projHook?'Discord ✓':'Discord'; };
   $('#rwHook')?.addEventListener('input',saveDc); $('#rwRole')?.addEventListener('input',saveDc);
+  const saveSt=()=>{ statusHook=$('#stHook').value.trim(); LS.set('sm_status_hook',statusHook); statusRole=($('#stRole').value.match(/\d{15,}/)||[''])[0]; LS.set('sm_status_role',statusRole); };
+  $('#stHook')?.addEventListener('input',saveSt); $('#stRole')?.addEventListener('input',saveSt);
+  $('#stDcTest')?.addEventListener('click',async()=>{ saveSt(); const ok=await statusDiscord(['✅ Connected — RotoWire injury status changes will post here.']); toast(ok?'Sent':'Not sent — check the webhook'); });
   $('#rwDcTest')?.addEventListener('click',async()=>{ saveDc(); const ok=await projDiscord({ at:Date.now(), lines:['✅ Connected — RotoWire projection changes will post here.'] }); toast(ok?'Sent':'Not sent — check the webhook'); });
   $('#rwSrc')?.addEventListener('click',()=>{ const v=prompt('RotoWire helper URL (ends in /api/rotowire). Leave empty for the default next to your odds backend.', LS.get('sm_rw_url','')); if(v==null) return; LS.set('sm_rw_url', v.trim()); rwNewsLoad(); });
   items.forEach(x=>rwSeen.add(x.id)); LS.set('sm_rw_seen', JSON.stringify([...rwSeen].slice(-500))); rwBadge();
