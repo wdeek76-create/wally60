@@ -4943,6 +4943,7 @@ async function ooRefreshBetsForPic(list) {
       const altFairByLine = {}; existingAlts.forEach(a => { const k = String(Number(a.line)); if (altFairByLine[k] == null) altFairByLine[k] = a.fair; });
       const allowedAlt = new Set(Object.keys(altFairByLine));
       const fresh = [];
+      b.keyOff = []; b.ooBooks = [...new Set(mine.map(r => r.label).filter(Boolean))];   // FanDuel / Pinnacle / Prop Builder prices that are on the line but under the 5% edge, and every book the feed returned
       mine.forEach(r => {
         if (!r.label || r.label === b.book) return;      // your own bet price stays what you got
         // Same rule as the modal's Fill flow: an exchange (Novig/ProphetX/Kalshi)
@@ -4958,7 +4959,9 @@ async function ooRefreshBetsForPic(list) {
         }
         if (Number(r.line) === Number(b.line)) {
           const p = priceFor(r, ou); if (p == null) return;
-          if ((calcEdge(p, b.fair) ?? -1) >= 5) fresh.push({ book: r.label, odds: p });
+          const eg = calcEdge(p, b.fair);
+          if ((eg ?? -1) >= 5) fresh.push({ book: r.label, odds: p });
+          else if (/fanduel|pinnacle|prop ?builder/i.test(String(r.label))) b.keyOff.push({ book: r.label, odds: p, edge: eg });
           return;
         }
         const lk = String(Number(r.line));
@@ -26457,7 +26460,7 @@ async function morningRefreshPicks(picks) {
   const rank = bk => { const k = MORNING_BOOK_PRIORITY.indexOf(String(BOOK_CODE_NAMES[String(bk || "").toUpperCase()] ? String(bk).toUpperCase() : bk).toUpperCase()); return k < 0 ? 99 : k; };
   shadows.forEach(sh => {
     const b = sh._m; b.book = nameOf(b.book);
-    if (!(sh.liq || (sh.altBooks && sh.altBooks.length))) return;
+    if (!(sh.liq || (sh.altBooks && sh.altBooks.length) || (sh.keyOff && sh.keyOff.length))) return;
     const depthOf = bk => (sh.liq && sh.liq.books && sh.liq.books[bk]) ? sh.liq.books[bk].liq : null;
     const priced = [{ book: b.book, odds: b.odds }].concat((sh.altBooks || []).filter(a => a && a.odds != null && (a.line == null || Number(a.line) === Number(b.line))).map(a => ({ book: a.book, odds: a.odds })));
     priced.forEach(x => { if (_mIsExchange(x.book)) x.liq = depthOf(x.book); });
@@ -26466,7 +26469,11 @@ async function morningRefreshPicks(picks) {
     playable.forEach(x => { if (x.odds > best.odds || (x.odds === best.odds && rank(x.book) < rank(best.book))) best = x; });
     b.odds = best.odds; b.book = best.book;
     b.altBooks = priced.filter(x => x !== best && !(x.book === best.book && x.odds === best.odds)).map(x => ({ book: x.book, odds: x.odds, liq: x.liq != null ? x.liq : null }));
+    // FanDuel / Pinnacle / Prop Builder always show as alt books when they hang this line, even under the 5% edge (never the best price: that stays the highest playable)
+    (sh.keyOff || []).forEach(k => { if (k && k.odds != null && !b.altBooks.some(a => a.book === k.book) && k.book !== b.book) b.altBooks.push({ book: k.book, odds: k.odds, liq: null }); });
+    b.altBooks.sort((x, y) => y.odds - x.odds);
     b.liqBooks = sh.liq && sh.liq.books ? sh.liq.books : null;
+    b.keyOff = sh.keyOff || []; b.ooBooks = sh.ooBooks || null;
     b.liveAt = Date.now();
     // the Tracker copy follows the price the card now shows
     try {
