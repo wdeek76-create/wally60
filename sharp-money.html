@@ -240,7 +240,7 @@ let toastT; const toast = m => { const t=$('#toast'); t.textContent=m; t.classLi
 async function runPool(jobs, n){ let i=0; await Promise.all(Array.from({length:Math.min(n,jobs.length)},async()=>{ while(i<jobs.length){ const j=jobs[i++]; await j(); } })); }
 const cents = v => { v=Number(v); return isNaN(v)?null:(v>0?v-100:v+100); };
 const LIQ_BAND_CENTS = 20;
-const SM_BUILD = 'Oct 22 · lean text';
+const SM_BUILD = 'Oct 22 · board v3';
 const SHARP_MAX_ARB = 8; // % -- anything bigger is treated as bad data
 function levelsOf(o){
   const top=Number(o.price);
@@ -1247,7 +1247,7 @@ const RW_STATUS = [
 ];
 const RW_NEWSY = /\b(start(s|ing)?|lineup|bench|minutes? (restriction|limit|cap)|restriction|rest(ing|ed)?|load management|sit(ting|s)? out|scratch|injur|available|questionable|probable|doubtful|return(s|ing)?|will play|won't play|ruled out|out (for|tonight|thursday|friday|saturday|sunday|monday|tuesday|wednesday)|game-time|role|rotation|usage)\b/i;
 const rwStatusOf = x => { const t=`${x.headline} ${x.notes}`; const hit=RW_STATUS.find(([,re])=>re.test(t)); return hit?hit[0]:''; };
-const RW_UP = /pick up.*slack|absorb|increased.*role|increased.*involvement|expanded.*role|larger.*role|more.*minutes|see.*more|step up|\bstart|replace|fill in|boost|benefit|open.*minutes|open(s)? the door|playing time.*open|candidates?.*increased|increased.*usage|increased.*workload|increased.*opportunit|more involved|greater.*role|primary.*option|featured.*role|see.*increase|increase.*in.*(?:touches|shots|usage|minutes|role)|heavier.*workload|elevated.*role|could see.*uptick|uptick in/;
+const RW_UP = /pick up.*slack|absorb|increased.*role|increased.*involvement|expanded.*role|larger.*role|more.*minutes|see.*more|step up|\bstart|replace|fill in|boost|benefit|open.*minutes|open(s)? the door|playing time.*open|candidates?.*increased|increased.*usage|increased.*workload|increased.*opportunit|more involved|greater.*role|primary.*option|featured.*role|see.*increase|increase.*in.*(?:touches|shots|usage|minutes|role)|heavier.*workload|elevated.*role|could see.*uptick|uptick in|work(?:s|ing)? (?:his|her|their) way into|into the (?:rotation|mix|picture)|take on (?:more|a bigger|an expanded)|workload|more run|next (?:man|woman) up|in line for|more (?:playing time|opportunit)|minutes (?:could|should|will) (?:open|be available)|pick(?:s)? up (?:the )?minutes|stand(?:s)? to benefit|beneficiar|spot start/;
 const RW_RETURN = /expected to play|set to return|return to|making.*debut|season debut|return.*floor|is (?:probable|questionable) but expected/;
 const RW_CUT = /cut into|cut.*playing time|limit.*minutes|reduce.*role|fewer minutes/;
 const rwIsToday = x => { const t=rwTime(x.at); return isNaN(t) || Date.now()-t < 18*3600e3; }; // undated blurbs stay in
@@ -1299,23 +1299,24 @@ async function postBoard(force){
   if(ok) LS.set('sm_rw_board', key);
   return ok;
 }
+// who a player's absence / status affects, from today's blurbs about him
+const rwAffects = name => { const A=rwAnalyze(), k=normName(name), seen=new Set();
+  return [...A.ben.values()].flat().filter(b=>normName(b.causedBy)===k && inProj(b.name, b.team) && !seen.has(b.name) && seen.add(b.name)); };
+const shortName = n => { const w=String(n).trim().split(/\s+/); return w.length>1 ? `${w[0][0]}. ${w.slice(1).join(' ')}` : n; };
+// Every OUT player is listed (short names); rotation-only filtering was tried and dropped.
+const rotationOut = () => true;
 function rwBoardLines(md){
-  const b=t=>md?`**${t}**`:t, nm=v=>`${b(v.name)} ${SHORT_ST[String(v.status).toUpperCase()]||(/question/i.test(v.status)?'Q':v.status)}${v.type?' '+v.type:''}`;
+  const B=t=>md?`**${t}**`:t;
+  const aff=v=>{ const l=rwAffects(v.name); return l.length?' '+l.map(b=>`${b.kind==='floor'?'↓':'↑'} ${B(b.name)}`).join(', '):''; };
+  const st=v=>SHORT_ST[String(v.status).toUpperCase()]||(/question/i.test(v.status)?'Q':v.status);
   const L=[]; rwBoard().forEach(g=>{
+    const teams=[g.away,g.home].map(t=>{ const out=t.out.filter(rotationOut); const parts=[];
+      if(t.wait.length) parts.push(t.wait.map(v=>`${B(v.name)} ${st(v)}${v.type?' '+v.type:''}${aff(v)}`).join(' - '));
+      if(out.length) parts.push(`OUT ${out.map(v=>shortName(v.name)+aff(v)).join(', ')}`);
+      return parts.length?`${t.code}: ${parts.join(' - ')}`:null; }).filter(Boolean);
+    if(!teams.length) return;   // nothing going on in this game
     const time=new Date(g.f.start).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',timeZone:'America/New_York'});
-    const n=g.away.wait.length+g.home.wait.length;
-    L.push(`${b(`${g.away.code} @ ${g.home.code}`)} ${time} ET${n?` - ${n} awaiting`:''}`);
-    [g.away,g.home].forEach(t=>{
-      const parts=[];
-      if(t.wait.length) parts.push(`awaiting ${t.wait.map(nm).join(', ')}`);
-      if(t.out.length) parts.push(`OUT ${t.out.map(v=>v.name).join(', ')}`);
-      L.push(`${t.code}: ${parts.length?parts.join(' - '):'no pending statuses'}`);
-      // each awaiting player's latest RotoWire blurb, right under the team line
-      t.wait.forEach(v=>{ const n=rwNews.items.find(x=>normName(x.name)===normName(v.name)); if(!n) return;
-        const txt=[n.notes,n.analysis].filter(Boolean).join(' ') || n.headline;
-        L.push(`${md?'> ':'   '}${v.name} ${rwWhen(n.at)}: ${txt.length>320?txt.slice(0,317)+'...':txt}`); });
-    });
-    L.push('');
+    L.push(`${B(`${g.away.code} @ ${g.home.code}`)} ${time}`, ...teams, '');
   });
   return L;
 }
