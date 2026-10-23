@@ -31,12 +31,12 @@
 <body>
 <div class="wrap">
   <h1>TABS <span>→</span> UNABATED</h1>
-  <p class="sub">Drop the Tabs projections file, get the file Unabated accepts. Nothing is uploaded anywhere — it all happens in this page.</p>
+  <p class="sub">Drop the Tabs projections file (or any of the other projection files), get the file Unabated accepts. Nothing is uploaded anywhere — it all happens in this page.</p>
 
   <div class="card">
     <label class="drop" id="drop" for="file">
       <b>Drop the Tabs CSV here</b>
-      <small>or click to choose it · you can drop a fresh Unabated player file with it</small>
+      <small>or click to choose it · RG, STOK, Saber and RotoWire files work too (each gets its own file) · a fresh Unabated player file can come with it</small>
     </label>
     <input type="file" id="file" multiple accept=".csv,.txt,text/*">
     <details style="margin-top:12px;"><summary class="mut" style="cursor:pointer;">No CSV? Paste the Tabs projections page instead</summary>
@@ -291,57 +291,72 @@ function _nowClock() { const d = new Date(), h = d.getHours(), m = String(d.getM
 
 // ───────────────────────── page glue ─────────────────────────
 const $ = id => document.getElementById(id);
-let tabsPlayers = null, tabsName = "", lastNote = "";
+let loaded = [];                       // [{ label, name, players }] — the latest file per source
+let lastNote = "";
 const esc = s => String(s == null ? "" : s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-const isUaList = t => /^﻿?\s*"?id"?\s*,[^\n]*first_name/i.test(String(t).slice(0, 400));
+const isUaList = t => /^\uFEFF?\s*"?id"?\s*,[^\n]*first_name/i.test(String(t).slice(0, 400));
 
 function readFile(f) { return new Promise(res => { const rd = new FileReader(); rd.onload = () => res({ name: f.name, text: String(rd.result || "") }); rd.readAsText(f); }); }
 
-function parseTabs(text) {
-  if (/^﻿?\s*"?Player"?\s*,/i.test(text)) return parseSource(text);                      // the Tabs CSV download
-  return parseTabsProjectionsPage(text).map(p => ({ rawName: p.rawName, norm: p.norm, team: p.team, pos: p.pos, pts: p.pts, reb: p.reb, ast: p.ast, threepm: p.threepm, pra: p.pra, min: p.min }));
+// Which of our sources a file is (file name first, then its columns). Anything else is named after the file.
+function srcLabel(name, text) {
+  const n = String(name || "").toLowerCase(), head = String(text || "").slice(0, 600).toLowerCase();
+  if (/tabs/.test(n) || /tabs min/.test(head)) return "TABS";
+  if (/stok|data_hub/.test(n) || /exp pra|proj min,exp pts/.test(head)) return "STOK";
+  if (/saber|dk_main|fd_main/.test(n) || /ss proj/.test(head)) return "SABER";
+  if (/rotowire|(^|[^a-z])rw([^a-z]|$)/.test(n) || /popular stats/.test(head)) return "RW";
+  if (/rotogrinders|(^|[^a-z])rg([^a-z]|$)/.test(n)) return "RG";
+  if (/sharpr/.test(n)) return "SHARPR";
+  if (/dimers/.test(n)) return "DIMERS";
+  return String(name || "FILE").replace(/\.[a-z0-9]+$/i, "").replace(/[^A-Za-z0-9]+/g, " ").trim().slice(0, 16).toUpperCase() || "FILE";
 }
+function parseAny(text) {
+  if (/^\uFEFF?\s*"?Player"?\s*,[^\n]*Tabs Min/i.test(text) || /^\uFEFF?\s*"?Player"?\s*,/i.test(text)) return parseSource(text);   // Tabs / STOK style
+  if (/^\s*(?:\uFEFF)?[^\n]*,/.test(text.split("\n")[0] || "") && /(^|\n)\s*"?(name|player)"?\s*,/i.test(text.slice(0, 3000))) return parseSource(text);                 // any CSV with a Name / Player column
+  return parseSource(text).length ? parseSource(text) : parseTabsProjectionsPage(text).map(p => ({ rawName: p.rawName, norm: p.norm, team: p.team, pos: p.pos, pts: p.pts, reb: p.reb, ast: p.ast, threepm: p.threepm, pra: p.pra, min: p.min }));
+}
+function setLoaded(label, name, players) { loaded = loaded.filter(x => x.label !== label); loaded.push({ label, name, players }); }
 
 async function handleFiles(files) {
-  const list = await Promise.all([...files].map(readFile)); const notes = []; let tabs = null;
-  list.forEach(x => { if (isUaList(x.text)) { const r = _uaIngestText(x.text, x.name); notes.push(r.msg); } else if (!tabs) tabs = x; });
-  lastNote = notes.join(" · ");
-  if (tabs) {
-    const players = parseTabs(tabs.text);
-    if (!players.length) { show(`<b class="bad">Couldn't read any players from "${esc(tabs.name)}".</b><div class="mut">Use the Tabs projections CSV (DraftKings or FanDuel), or paste the page text below it.</div>`); return; }
-    tabsPlayers = players; tabsName = tabs.name;
-  }
-  if (!tabsPlayers) { show(`<b class="warn">${esc(lastNote || "Nothing to do yet")}</b><div class="mut">Now drop the Tabs file.</div>`); uaInfo(); return; }
-  makeFile();
+  const list = await Promise.all([...files].map(readFile)); const notes = [], bad = [];
+  list.forEach(x => { if (isUaList(x.text)) { notes.push(_uaIngestText(x.text, x.name).msg); return; } const pl = parseAny(x.text); if (!pl.length) { bad.push(x.name); return; } setLoaded(srcLabel(x.name, x.text), x.name, pl); });
+  lastNote = notes.join(" \u00b7 ");
+  if (!loaded.length) { show(`<b class="${bad.length ? "bad" : "warn"}">${bad.length ? "Couldn't read players from " + esc(bad.join(", ")) : esc(lastNote || "Nothing to do yet")}</b><div class="mut">Drop the Tabs projections CSV (or an RG / STOK / Saber / RotoWire projections file).</div>`); uaInfo(); return; }
+  makeFiles(bad);
 }
 
-function makeFile() {
-  merged = tabsPlayers.map(p => Object.assign({}, p));
-  const built = _uaBuildCsv(r => ({ tpm: r.threepm, ast: r.ast, pts: r.pts, reb: r.reb }));
-  const name = `TABS UA ${_psDate()} ${_nowClock()}.csv`;
-  const blob = new Blob(["﻿" + built.csv], { type: "text/csv;charset=utf-8" });
-  const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = name; a.style.display = "none";
-  document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 800);
-  const um = built.unmatched;
-  let h = `<b class="ok">✓ ${built.exported} players ready · downloaded "${esc(name)}"</b>`;
-  h += `<div class="mut" style="margin-top:4px;">From ${esc(tabsName)} · ${tabsPlayers.length} players read${lastNote ? " · " + esc(lastNote) : ""}</div>`;
+let _dlTimer = 0;
+function makeFiles(bad) {
+  const blocks = []; let t = 0; const leftAll = new Set();
+  loaded.forEach(src => {
+    merged = src.players.map(p => Object.assign({}, p));
+    const hasStats = merged.some(p => p.pts > 0 || p.reb > 0 || p.ast > 0 || p.threepm > 0);
+    const built = _uaBuildCsv(r => ({ tpm: r.threepm, ast: r.ast, pts: r.pts, reb: r.reb }));
+    const name = `${src.label} UA ${_psDate()} ${_nowClock()}.csv`;
+    if (hasStats) built.unmatched.forEach(n => leftAll.add(n));
+    if (hasStats) setTimeout(() => { const blob = new Blob(["\uFEFF" + built.csv], { type: "text/csv;charset=utf-8" }); const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = name; a.style.display = "none"; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 800); }, t); if (hasStats) t += 450;
+    blocks.push(`<div style="margin-bottom:8px;"><b class="${hasStats ? "ok" : "warn"}">${hasStats ? "\u2713 " + esc(src.label) + " \u2014 " + built.exported + " players ready \u00b7 downloaded \"" + esc(name) + "\"" : "\u26a0 " + esc(src.label) + " \u2014 skipped, nothing to download"}</b><div class="mut" style="font-size:13px;">From ${esc(src.name)} \u00b7 ${src.players.length} players read${hasStats ? "" : " \u00b7 this file has no projections in it yet (re-download it once they are posted)"}</div></div>`);
+  });
+  let h = blocks.join("");
+  if (lastNote) h += `<div class="mut" style="font-size:13px;">${esc(lastNote)}</div>`;
+  if (bad && bad.length) h += `<div class="bad" style="font-size:13px;">Couldn't read: ${esc(bad.join(", "))}</div>`;
+  const um = [...leftAll];
   if (um.length) {
-    h += `<div class="warn" style="margin-top:12px;"><b>⚠ ${um.length} player${um.length === 1 ? "" : "s"} left out</b> — not in the Unabated player list yet:</div><div style="margin-top:6px;">${um.slice(0, 40).map(n => `<span class="pill">${esc(n)}</span>`).join("")}${um.length > 40 ? ` +${um.length - 40} more` : ""}</div>`;
+    h += `<div class="warn" style="margin-top:12px;"><b>\u26a0 ${um.length} player${um.length === 1 ? "" : "s"} left out</b> \u2014 not in the Unabated player list yet:</div><div style="margin-top:6px;">${um.slice(0, 40).map(n => `<span class="pill">${esc(n)}</span>`).join("")}${um.length > 40 ? ` +${um.length - 40} more` : ""}</div>`;
     h += `<div class="row"><label class="btn" for="uaFile2">ADD UNABATED FILE &amp; RE-MAKE</label><input type="file" id="uaFile2" accept=".csv,.txt,text/*"><span class="mut" style="font-size:13px;">Download the current NBA projections file from Unabated and pick it here.</span></div>`;
-  } else {
-    h += `<div class="ok" style="margin-top:8px;">Every player matched an Unabated id — nothing to update.</div>`;
-  }
-  h += `<div class="row"><button class="ghost" id="again">Download again</button></div>`;
+  } else h += `<div class="ok" style="margin-top:8px;">Every player matched an Unabated id \u2014 nothing to update.</div>`;
+  h += `<div class="row"><button class="ghost" id="again">Download again</button><button class="ghost" id="clearLoaded">Start over</button></div>`;
   show(h); uaInfo();
-  const u2 = $("uaFile2"); if (u2) u2.onchange = async () => { if (u2.files[0]) { const x = await readFile(u2.files[0]); lastNote = _uaIngestText(x.text, x.name).msg; makeFile(); } };
-  const ag = $("again"); if (ag) ag.onclick = makeFile;
+  const u2 = $("uaFile2"); if (u2) u2.onchange = async () => { if (u2.files[0]) { const x = await readFile(u2.files[0]); lastNote = _uaIngestText(x.text, x.name).msg; makeFiles(); } };
+  const ag = $("again"); if (ag) ag.onclick = () => makeFiles();
+  const cl = $("clearLoaded"); if (cl) cl.onclick = () => { loaded = []; lastNote = ""; $("result").style.display = "none"; };
 }
 
 function show(html) { const r = $("result"); r.style.display = "block"; r.innerHTML = html; }
 function uaInfo() {
   const ua = getUaIds(), n = ua && ua.players ? Object.keys(ua.players).length : 0, all = _uaTemplate().length;
   const teams = new Set(_uaTemplate().map(t => t.team)).size;
-  $("uaInfo").innerHTML = `Built in: <b style="color:#e6eaf2;">${NBA_TEMPLATE.length}</b> players · ${n ? `added by you: <b style="color:#e6eaf2;">${n}</b> (saved ${esc(new Date(ua.at).toLocaleDateString("en-US", { month: "short", day: "numeric" }))}) · ` : ""}in use: <b style="color:#e6eaf2;">${all}</b> players across ${teams} teams`;
+  $("uaInfo").innerHTML = `Built in: <b style="color:#e6eaf2;">${NBA_TEMPLATE.length}</b> players \u00b7 ${n ? `added by you: <b style="color:#e6eaf2;">${n}</b> (saved ${esc(new Date(ua.at).toLocaleDateString("en-US", { month: "short", day: "numeric" }))}) \u00b7 ` : ""}in use: <b style="color:#e6eaf2;">${all}</b> players across ${teams} teams`;
 }
 
 const drop = $("drop");
@@ -349,9 +364,9 @@ const drop = $("drop");
 ["dragleave", "drop"].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove("over"); }));
 drop.addEventListener("drop", e => { if (e.dataTransfer && e.dataTransfer.files.length) handleFiles(e.dataTransfer.files); });
 $("file").onchange = e => { if (e.target.files.length) handleFiles(e.target.files); e.target.value = ""; };
-$("pasteGo").onclick = () => { const t = $("paste").value; if (!t.trim()) return; const pl = parseTabs(t); if (!pl.length) { show(`<b class="bad">Couldn't find players in that paste.</b><div class="mut">Copy the whole Tabs NBA Projections page.</div>`); return; } tabsPlayers = pl; tabsName = "pasted page"; lastNote = ""; makeFile(); };
-$("uaFile").onchange = async e => { const f = e.target.files[0]; if (!f) return; const x = await readFile(f); lastNote = _uaIngestText(x.text, x.name).msg; e.target.value = ""; uaInfo(); if (tabsPlayers) makeFile(); else show(`<b class="ok">${esc(lastNote)}</b><div class="mut">Now drop the Tabs file.</div>`); };
-$("uaClear").onclick = () => { try { localStorage.removeItem(UA_IDS_KEY); } catch (e) {} uaInfo(); if (tabsPlayers) makeFile(); };
+$("pasteGo").onclick = () => { const t = $("paste").value; if (!t.trim()) return; const pl = parseTabsProjectionsPage(t).map(p => ({ rawName: p.rawName, norm: p.norm, team: p.team, pos: p.pos, pts: p.pts, reb: p.reb, ast: p.ast, threepm: p.threepm, pra: p.pra, min: p.min })); if (!pl.length) { show(`<b class="bad">Couldn't find players in that paste.</b><div class="mut">Copy the whole Tabs NBA Projections page.</div>`); return; } setLoaded("TABS", "pasted page", pl); lastNote = ""; makeFiles(); };
+$("uaFile").onchange = async e => { const f = e.target.files[0]; if (!f) return; const x = await readFile(f); lastNote = _uaIngestText(x.text, x.name).msg; e.target.value = ""; uaInfo(); if (loaded.length) makeFiles(); else show(`<b class="ok">${esc(lastNote)}</b><div class="mut">Now drop the Tabs file.</div>`); };
+$("uaClear").onclick = () => { try { localStorage.removeItem(UA_IDS_KEY); } catch (e) {} uaInfo(); if (loaded.length) makeFiles(); };
 uaInfo();
 </script>
 </body>
