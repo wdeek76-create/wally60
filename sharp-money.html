@@ -241,7 +241,7 @@ let toastT; const toast = m => { const t=$('#toast'); t.textContent=m; t.classLi
 async function runPool(jobs, n){ let i=0; await Promise.all(Array.from({length:Math.min(n,jobs.length)},async()=>{ while(i<jobs.length){ const j=jobs[i++]; await j(); } })); }
 const cents = v => { v=Number(v); return isNaN(v)?null:(v>0?v-100:v+100); };
 const LIQ_BAND_CENTS = 20;
-const SM_BUILD = 'Oct 23 · NFL TD yes FD';
+const SM_BUILD = 'Oct 23 · clear lines';
 const SHARP_MAX_ARB = 8; // % -- anything bigger is treated as bad data
 function levelsOf(o){
   const top=Number(o.price);
@@ -1040,6 +1040,10 @@ function rwDigest(){
   return [...by.values()].filter(g=>g.up.length||g.down.length).sort((a,b)=>a.team.localeCompare(b.team));
 }
 // Lean Discord text: just "-" and ":", arrows for who goes up / down.
+// "DET @ CHI 7:00 PM" for a team on today's slate
+const rwGameOf = team => { const c=rwTeamKey(team||''); const g=rwGames.find(f=>rwTeamKey(f.away.ab)===c||rwTeamKey(f.home.ab)===c); if(!g) return '';
+  return `${g.away.ab} @ ${g.home.ab} ${new Date(g.start).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',timeZone:'America/New_York'})}`; };
+const RW_BACK = new Set(['AVAILABLE','RETURNING','OFF REPORT','ACTIVE','']);   // playing -> just "clear ✅", no ↑ tags
 const affectTxt = named => { const seen=new Set(); return named.filter(b=>!seen.has(b.name)&&seen.add(b.name)).map(b=>`${b.kind==='floor'?'↓':'↑'} **${b.name}**`).join(', '); };
 const SHORT_ST = { AVAILABLE:'IN', GTD:'Q', QUESTIONABLE:'Q', DOUBTFUL:'D', PROBABLE:'P', DTD:'DTD', OUT:'OUT', RETURNING:'RETURNING' };
 const digestLines = (D, md) => D.map(g=>{
@@ -1054,6 +1058,7 @@ function blurbPostLines(x, A){
   // a status, someone gaining / losing minutes, or lineup / minutes / rest news
   if(!st && !named.length && !RW_NEWSY.test(`${x.headline} ${x.notes}`)) return null;
   // summed up: who, status, RotoWire's headline + the key notes; then the ↑ / ↓ names
+  if(st==='AVAILABLE'||st==='RETURNING'){ const gm=rwGameOf(x.team); return [`**${x.name}** ${x.team?rwTeamKey(x.team)+' ':''}clear ✅${gm?' - '+gm:''}`]; }
   const note=rwNoteFor(x.name).replace(/^ \(|\)$/g,'');
   const out=[`**${x.name}** ${x.team?rwTeamKey(x.team)+' ':''}${st?st+' ':''}- ${note || x.headline}`.trim()];
   if(named.length) out.push(affectTxt(named));
@@ -1072,9 +1077,13 @@ function postNewBlurbs(){
 }
 function statusPostLines(list){
   const A=rwAnalyze(); const out=[];
+  let posted; try{ posted=new Set(JSON.parse(LS.get('sm_rw_posted_'+etToday(),'[]'))); }catch(e){ posted=new Set(); }
   list.filter(x=>inProj(x.name, x.team)).forEach(x=>{
-    out.push(`**${x.name}** ${x.team?rwTeamKey(x.team)+' ':''}${x.c.from} → **${x.to||"off report"}**`);
     const blurb=rwNews.items.filter(n=>normName(n.name)===x.k).sort((a,b)=>(rwTime(b.at)||0)-(rwTime(a.at)||0))[0];
+    // its blurb already went out in the last 3 hours with the same news -> don't say it twice
+    if(blurb && posted.has(blurb.id) && Date.now()-(rwTime(blurb.at)||0) < 3*3600e3 && (RW_BACK.has(x.to||'') === RW_BACK.has(rwStatusOf(blurb)))) return;
+    if(RW_BACK.has(x.to||'')){ const tm=x.team||blurb?.team||''; const gm=rwGameOf(tm); out.push(`**${x.name}** ${tm?rwTeamKey(tm)+' ':''}clear ✅${gm?' - '+gm:''}`); return; }
+    out.push(`**${x.name}** ${x.team?rwTeamKey(x.team)+' ':''}${x.c.from} → **${x.to}**`);
     if(blurb && !rwIsRecap(blurb)){
       const named=[...A.ben.values()].flat().filter(b=>b.id===blurb.id && b.kind!=='mention' && inProj(b.name, b.team));
       const note=rwNoteFor(x.name).replace(/^ \(|\)$/g,'');
@@ -1230,7 +1239,8 @@ function rwTeamLines(only){
     return (up.length?' ↑ '+up.join(', '):'')+(dn.length?' ↓ '+dn.join(', '):''); };
   rwBoard().forEach(g=>[g.away,g.home].forEach(t=>{
     if(!only.has(t.code)) return;
-    L.push(t.wait.length ? `**${t.code}:** `+t.wait.map(v=>`${v.name} ${st(v)}${v.type?' '+v.type.toLowerCase():''}${tag(v)}`).join(' - ') : `**${t.code}:** clear ✅`);
+    const gm=`${g.away.code} @ ${g.home.code} ${new Date(g.f.start).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',timeZone:'America/New_York'})}`;
+    L.push(t.wait.length ? `**${t.code}:** `+t.wait.map(v=>`${v.name} ${st(v)}${v.type?' '+v.type.toLowerCase():''}${tag(v)}`).join(' - ')+` - ${gm}` : `**${t.code}:** clear ✅ - ${gm}`);
   }));
   return L;
 }
