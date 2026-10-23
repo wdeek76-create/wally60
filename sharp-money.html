@@ -241,7 +241,7 @@ let toastT; const toast = m => { const t=$('#toast'); t.textContent=m; t.classLi
 async function runPool(jobs, n){ let i=0; await Promise.all(Array.from({length:Math.min(n,jobs.length)},async()=>{ while(i<jobs.length){ const j=jobs[i++]; await j(); } })); }
 const cents = v => { v=Number(v); return isNaN(v)?null:(v>0?v-100:v+100); };
 const LIQ_BAND_CENTS = 20;
-const SM_BUILD = 'Oct 22 · fd first';
+const SM_BUILD = 'Oct 23 · rw summed up';
 const SHARP_MAX_ARB = 8; // % -- anything bigger is treated as bad data
 function levelsOf(o){
   const top=Number(o.price);
@@ -1036,23 +1036,23 @@ function rwDigest(){
 }
 // Lean Discord text: just "-" and ":", arrows for who goes up / down.
 const affectTxt = named => { const seen=new Set(); return named.filter(b=>!seen.has(b.name)&&seen.add(b.name)).map(b=>`${b.kind==='floor'?'↓':'↑'} **${b.name}**`).join(', '); };
-const SHORT_ST = { GTD:'Q', QUESTIONABLE:'Q', DOUBTFUL:'D', PROBABLE:'P', DTD:'DTD', OUT:'OUT', RETURNING:'RETURNING' };
+const SHORT_ST = { AVAILABLE:'IN', GTD:'Q', QUESTIONABLE:'Q', DOUBTFUL:'D', PROBABLE:'P', DTD:'DTD', OUT:'OUT', RETURNING:'RETURNING' };
 const digestLines = (D, md) => D.map(g=>{
   const b=t=>md?`**${t}**`:t;
   return `${b(g.team)} ${g.name}${g.status?' '+(md?`*${g.status}*`:g.status):''}${g.up.length?` → more mins: ${g.up.map(b).join(', ')}`:''}${g.down.length?`${g.up.length?' ·':' →'} fewer mins: ${g.down.map(b).join(', ')}`:''}`; });
 // One status post per changed player: the change, then his latest RotoWire blurb with his name and every
 // teammate it names in bold, and who picks up minutes / loses them.
 function blurbPostLines(x, A){
-  const named=[...A.ben.values()].flat().filter(b=>b.id===x.id && inProj(b.name, b.team));
+  const named=[...A.ben.values()].flat().filter(b=>b.id===x.id && b.kind!=='mention' && inProj(b.name, b.team));
   const st=rwStatusOf(x);
-  // a status, someone gaining / losing minutes, or lineup / minutes / rest news -- not game recaps
+  if(rwIsRecap(x)) return null;   // game recaps never post
+  // a status, someone gaining / losing minutes, or lineup / minutes / rest news
   if(!st && !named.length && !RW_NEWSY.test(`${x.headline} ${x.notes}`)) return null;
-  let txt=[x.notes,x.analysis].filter(Boolean).join(' ') || x.headline;
-  const names=[...new Set([x.name, x.name.split(/\s+/).slice(-1)[0], ...named.map(b=>b.name)].filter(n=>n && n.length>2))].sort((a,b)=>b.length-a.length);
-  if(names.length) txt=txt.replace(new RegExp(`\\b(${names.map(n=>n.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')).join('|')})\\b`,'g'),'**$1**');
-  const out=[`**${x.name}** ${x.team?rwTeamKey(x.team)+' ':''}${st?st+' ':''}${x.headline?`- ${x.headline}`:''}`.trim(), '> '+txt.slice(0,700)];
+  // summed up: who, status, RotoWire's headline + the key notes; then the ↑ / ↓ names
+  const note=rwNoteFor(x.name).replace(/^ \(|\)$/g,'');
+  const out=[`**${x.name}** ${x.team?rwTeamKey(x.team)+' ':''}${st?st+' ':''}- ${note || x.headline}`.trim()];
   if(named.length) out.push(affectTxt(named));
-  out.push(''); return out;
+  return out;
 }
 function postNewBlurbs(){
   if(!statusHook) return;   // projections not in yet -> inProj falls back to today's teams
@@ -1070,16 +1070,12 @@ function statusPostLines(list){
   list.filter(x=>inProj(x.name, x.team)).forEach(x=>{
     out.push(`**${x.name}** ${x.team?rwTeamKey(x.team)+' ':''}${x.c.from} → **${x.to}**`);
     const blurb=rwNews.items.filter(n=>normName(n.name)===x.k).sort((a,b)=>(rwTime(b.at)||0)-(rwTime(a.at)||0))[0];
-    if(blurb){
-      const named=[...A.ben.values()].flat().filter(b=>b.id===blurb.id && inProj(b.name, b.team));
-      let txt=[blurb.notes,blurb.analysis].filter(Boolean).join(' ') || blurb.headline;
-      // one pass, longest names first, so "Jalen Brunson" and a bare "Brunson" both go bold without doubling up
-      const names=[...new Set([x.name, x.name.split(/\s+/).slice(-1)[0], ...named.map(b=>b.name)].filter(n=>n && n.length>2))].sort((a,b)=>b.length-a.length);
-      if(names.length) txt=txt.replace(new RegExp(`\\b(${names.map(n=>n.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')).join('|')})\\b`,'g'),'**$1**');
-      out.push('> '+txt.slice(0,700));
+    if(blurb && !rwIsRecap(blurb)){
+      const named=[...A.ben.values()].flat().filter(b=>b.id===blurb.id && b.kind!=='mention' && inProj(b.name, b.team));
+      const note=rwNoteFor(x.name).replace(/^ \(|\)$/g,'');
+      if(note) out[out.length-1]+=` - ${note}`;
       if(named.length) out.push(affectTxt(named));
     }
-    out.push('');
   });
   return out;
 }
@@ -1278,11 +1274,14 @@ const RW_STATUS = [
   ['DOUBTFUL', /\bdoubtful\b/i],
   ['GTD', /\b(questionable|game-time decision|gtd|uncertain)\b/i],
   ['PROBABLE', /\bprobable\b/i],
+  ['AVAILABLE', /\b(off the injury report|left off (?:the )?injury report|(?:isn't|is not|not) (?:listed|on the injury report)|will be ready|ready to (?:make|go|play)|cleared to play|no longer listed|removed from the injury report)\b/i],
   ['RETURNING', /\b(will play|cleared to play|available|expected to play|set to return|return(s|ing)? (to|from|for)|will start|in the starting lineup|making .*debut)\b/i],
 ];
-const RW_NEWSY = /\b(start(s|ing)?|lineup|bench|minutes? (restriction|limit|cap)|restriction|rest(ing|ed)?|load management|sit(ting|s)? out|scratch|injur|available|questionable|probable|doubtful|return(s|ing)?|will play|won't play|ruled out|out (for|tonight|thursday|friday|saturday|sunday|monday|tuesday|wednesday)|game-time|role|rotation|usage)\b/i;
+const RW_NEWSY = /\b(start(s|ing)?|lineup|bench|minutes? (restriction|limit|cap)|restriction|rest(ing|ed)?|load management|sit(ting|s)? out|scratch|injur\w*|available|questionable|probable|doubtful|return(s|ing)?|will play|won't play|ruled out|out (for|tonight|thursday|friday|saturday|sunday|monday|tuesday|wednesday)|game-time|role|rotation|usage)\b/i;
+// game recaps ("registered five points (0-2 FG...) in 33 minutes during Wednesday's win")
+const rwIsRecap = x => !rwStatusOf(x) && /\(\d+-\d+ FG|\d+-\d+ 3Pt|\b(registered|posted|closed with|provided|finished with|tallied|recorded|totaled|supplied)\b.{0,60}\b(points|rebounds|assists)\b|during \w+'s \d+-\d+ (win|loss|victory|defeat)|\b(posts|stuffs|productive|quiet|struggles|leads|paces)\b.{0,30}\b(opener|win|loss|victory|stat sheet|line)\b/i.test(`${x.headline} ${x.notes}`);
 const rwStatusOf = x => { const t=`${x.headline} ${x.notes}`; const hit=RW_STATUS.find(([,re])=>re.test(t)); return hit?hit[0]:''; };
-const RW_UP = /pick up.*slack|absorb|increased.*role|increased.*involvement|expanded.*role|larger.*role|more.*minutes|see.*more|step up|\bstart|replace|fill in|boost|benefit|open.*minutes|open(s)? the door|playing time.*open|candidates?.*increased|increased.*usage|increased.*workload|increased.*opportunit|more involved|greater.*role|primary.*option|featured.*role|see.*increase|increase.*in.*(?:touches|shots|usage|minutes|role)|heavier.*workload|elevated.*role|could see.*uptick|uptick in|work(?:s|ing)? (?:his|her|their) way into|into the (?:rotation|mix|picture)|take on (?:more|a bigger|an expanded)|workload|more run|next (?:man|woman) up|in line for|more (?:playing time|opportunit)|minutes (?:could|should|will) (?:open|be available)|pick(?:s)? up (?:the )?minutes|stand(?:s)? to benefit|beneficiar|spot start/;
+const RW_UP = /pick up.*slack|absorb|increased.*role|increased.*involvement|expanded.*role|larger.*role|more.*minutes|see.*more|step up|\bstart|replace|fill in|boost|benefit|open.*minutes|open(s)? the door|playing time.*open|candidates?.*increased|increased.*usage|increased.*workload|increased.*opportunit|more involved|greater.*role|primary.*option|featured.*role|see.*increase|increase.*in.*(?:touches|shots|usage|minutes|role)|heavier.*workload|elevated.*role|could see.*uptick|uptick in|work(?:s|ing)? (?:his|her|their) way into|into the (?:rotation|mix|picture)|take on (?:more|a bigger|an expanded)|workload|more run|next (?:man|woman) up|in line for|more (?:playing time|opportunit)|minutes (?:could|should|will) (?:open|be available)|pick(?:s)? up (?:the )?minutes|stand(?:s)? to benefit|beneficiar|spot start|earn (?:the )?(?:backup |extra |more |additional )?(?:minutes|run|playing time|start)|(?:see|get|receive) (?:more|extra|increased|additional) (?:minutes|run|playing time|touches|shots)|likely to (?:start|draw the start|earn)|should (?:start|draw the start)|draw (?:the|a) start/;
 const RW_RETURN = /expected to play|set to return|return to|making.*debut|season debut|return.*floor|is (?:probable|questionable) but expected/;
 const RW_CUT = /cut into|cut.*playing time|limit.*minutes|reduce.*role|fewer minutes/;
 const rwIsToday = x => { const t=rwTime(x.at); return isNaN(t) || Date.now()-t < 18*3600e3; }; // undated blurbs stay in
@@ -1310,21 +1309,24 @@ function rwAnalyze0(){
   const byTeamLast=new Map(); [...rwRoster.keys()].forEach(k=>{ const t=teamOf(k); if(!t) return; const last=k.split(' ').slice(-1)[0]; const key=t+'|'+last; (byTeamLast.get(key)||byTeamLast.set(key,[]).get(key)).push(k); });
   // the subject's status decides what a mention means: he's out / iffy -> teammates go up; he's back -> they go down
   const statusOf = (x, k) => rwInj.get(k)?.status || rwStatusOf(x);
-  const IF_OUT = /\bif (?:he|she|[A-Z][a-z]+) (?:can't|cannot|is unable|isn't able|doesn't|does not|sits|misses|is out|is ruled out)|\bwithout\b|\bin his absence|\bwith .{0,30} (?:out|sidelined)/i;
+  const IF_OUT = /\bif (?:he|she|[A-Z][a-z]+)(?:'s| is)? (?:can't|cannot|unable|isn't able|not able|doesn't|does not|sits|misses|out|ruled out|held out|can't go|doesn't play)|\bwithout\b|\bin his absence|\bwith .{0,30} (?:out|sidelined)/i;
   readFrom.forEach(x=>{
     const self=normName(x.name), st=statusOf(x, self), text=[x.notes,x.analysis].filter(Boolean).join(' ');
     const selfTeam=rwTeamKey(x.team) || teamOf(self);
     const sentences=text.split(/(?<=[.!?])\s+/);
     const seen=new Set();
+    if(rwIsRecap(x)) return;   // a game recap names teammates for their stat lines, not for minutes
     const add=(k, matched)=>{
       if(!k || k===self || seen.has(k)) return; const bt=teamOf(k);
       if(selfTeam && bt && bt!==selfTeam) return;   // a different team's player with the same name
       seen.add(k);
       const sentRaw=sentences.find(z=>z.includes(matched))||'', sent=sentRaw.toLowerCase();
+      // "off the bench behind Luka Doncic" / "backup minutes behind Alperen Sengun": that's the starter
+      // ahead of him, not someone who gains -- never tag a name right after "behind"
+      if(new RegExp(`\\bbehind\\s+(?:the\\s+)?${matched.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')}`,'i').test(sentRaw)) return;
+      // only an explicit reading counts: a teammate just mentioned in the same sentence isn't tagged
       const kind = RW_RETURN.test(sent)||RW_CUT.test(sent) ? 'floor'
-        : RW_UP.test(sent) || IF_OUT.test(sentRaw) ? 'ceiling'
-        : /^(OUT|DOUBTFUL|GTD|DTD)$/.test(st) ? 'ceiling'
-        : /^(RETURNING|PROBABLE)$/.test(st) ? 'floor' : 'mention';
+        : RW_UP.test(sent) || IF_OUT.test(sentRaw) ? 'ceiling' : 'mention';
       (ben.get(k)||ben.set(k,[]).get(k)).push({ name:rwRoster.get(k), team:bt||selfTeam, kind, causedBy:x.name, causedStatus:st, why:sentRaw.slice(0,200), id:x.id });
     };
     // full names first
@@ -1414,7 +1416,7 @@ function rwBoardLines(){
   const A=rwAnalyze();
   const st=v=>SHORT_ST[String(v.status).toUpperCase()]||(/question/i.test(v.status)?'Q':v.status);
   const named=v=>{ const n=rwNews.items.find(x=>normName(x.name)===normName(v.name)); if(!n) return ''; const seen=new Set();
-    const who=[...A.ben.values()].flat().filter(b=>b.id===n.id && !seen.has(b.name) && seen.add(b.name));
+    const who=[...A.ben.values()].flat().filter(b=>b.id===n.id && b.kind!=='mention' && !seen.has(b.name) && seen.add(b.name));
     return who.map(b=>`${b.kind==='floor'?'↓':'↑'} ${b.name}`).join(', '); };
   const games=rwBoard().map(g=>({ g, rows:[g.away,g.home].flatMap(t=>t.wait.map(v=>({ code:t.code, v }))) }));
   const nameW=Math.min(18, Math.max(6, ...games.flatMap(x=>x.rows.map(r=>r.v.name.length))));
