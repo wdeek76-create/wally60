@@ -26096,6 +26096,7 @@ function lineupPanelHtml(card, lc) {
   </div>`;
 }
 function renderMorning() {
+  try { if (localStorage.getItem("nba_dropped_pr_v1") !== "1") { localStorage.setItem("nba_dropped_pr_v1", "1"); const n = morningDropUnbooked(true); if (n) setTimeout(() => showToast(`Dropped ${n} existing bet${n === 1 ? "" : "s"} with no real book (PR / PropShop)`), 600); } } catch (e) {}
   try { morningCleanOrphans(); _mSyncResults(); } catch (e) {}
   const el = document.getElementById("morning-tab");
   if (!el) return;
@@ -26557,7 +26558,9 @@ async function morningRefreshPicks(picks) {
     const b = sh._m; b.book = nameOf(b.book);
     if (!(sh.liq || (sh.altBooks && sh.altBooks.length) || (sh.keyOff && sh.keyOff.length))) return;
     const depthOf = bk => (sh.liq && sh.liq.books && sh.liq.books[bk]) ? sh.liq.books[bk].liq : null;
-    const priced = [{ book: b.book, odds: b.odds }].concat((sh.altBooks || []).filter(a => a && a.odds != null && (a.line == null || Number(a.line) === Number(b.line))).map(a => ({ book: a.book, odds: a.odds })));
+    const pricedAll = [{ book: b.book, odds: b.odds }].concat((sh.altBooks || []).filter(a => a && a.odds != null && (a.line == null || Number(a.line) === Number(b.line))).map(a => ({ book: a.book, odds: a.odds })));
+    const pricedOurs = pricedAll.filter(x => _mOurBook(x.book));
+    const priced = pricedOurs.length ? pricedOurs : pricedAll;     // the headline price comes from our books only (if none has a price the pick is dropped on this run)
     priced.forEach(x => { if (_mIsExchange(x.book)) x.liq = depthOf(x.book); });
     const playable = priced.filter(x => !_mIsExchange(x.book) || (x.liq != null && x.liq >= MORNING_EXCH_MIN_LIQ));
     let best = playable[0] || priced[0];
@@ -26567,6 +26570,7 @@ async function morningRefreshPicks(picks) {
     b.altBooks = priced.filter(x => x !== best && !(x.book === best.book && x.odds === best.odds)).map(x => ({ book: x.book, odds: x.odds, liq: x.liq != null ? x.liq : null }));
     // FanDuel / Pinnacle / Bet105 / Prop Builder show as alt books when they hang this line within range (still +EV), even under the 5% edge (never the best price: that stays the highest playable)
     (sh.keyOff || []).forEach(k => { if (k && k.odds != null && !b.altBooks.some(a => a.book === k.book) && k.book !== b.book) b.altBooks.push({ book: k.book, odds: k.odds, liq: null }); });
+    b.altBooks = b.altBooks.filter(a => _mOurBook(a.book));
     b.altBooks.sort((x, y) => y.odds - x.odds);
     // same cutoff as the card's "play to": an alt book is listed only at that price or better (the pick's qualifying EV vs its fair)
     if (b.fairProb != null) { const fairAm = decimalToAmerican(1 / b.fairProb); b.altBooks = b.altBooks.filter(x => { const e = calcEdge(x.odds, fairAm); return e == null || e >= MORNING_QUAL_EV; }); }
@@ -26586,12 +26590,31 @@ async function morningRefreshPicks(picks) {
   try { saveMorningBets(); saveBets(); } catch (e) {}
   return r;
 }
-// A pick goes on a card only with a real book behind its price. "PropShop" / blank is a placeholder for a board price whose book was not read and
-// the live refresh could not replace, so such picks are dropped from the card on that run (they stay in the log).
-const _mRealBook = b => { const bk = String((BOOK_CODE_NAMES[String(b && b.book || "").trim().toUpperCase()] || (b && b.book) || "")).trim(); return !!bk && !/^(propshop|\?|-|—)$/i.test(bk); };
+// A pick goes on a card only with a price at one of OUR books (the list above). "PropShop" / an unknown book is a placeholder for a board price that the
+// live refresh could not match to our books, and a pick whose best price at our books is past the play-to no longer qualifies: both are dropped on that run (they stay in the log).
+const _mBookName = bk => BOOK_CODE_NAMES[String(bk || "").trim().toUpperCase()] || String(bk || "").trim();
+const _mOurBook = bk => { const n = _mBookName(bk); return !!n && ALT_BOOKS_ORDER.includes(n); };          // FanDuel, Prop Builder, Novig, ProphetX, Kalshi, Fliff, DraftKings, Bookmaker, Pinnacle, Bet105, Kambi
+const _mRealBook = b => _mOurBook(b && b.book);
+// Picks with no real book ("PropShop" / "PR" / blank = a board price whose book was never matched) are removed from the Morning log AND the Tracker
+// (pending ones only; graded bets stay as history).
+const _mPlaceholderBook = bk => /^(propshop|pr|\?|-|—)?$/i.test(String(bk == null ? "" : bk).trim());
+function morningDropUnbooked(quiet) {
+  const badM = b => b.result === "pending" && _mPlaceholderBook(b.book);
+  const nM = morningBets.filter(badM).length;
+  if (nM) { morningBets = morningBets.filter(b => !badM(b)); saveMorningBets(); }
+  const n0 = bets.length;
+  bets = bets.filter(b => !(b && b.result === "pending" && ((b.source === "morning" && _mPlaceholderBook(b.book)) || /^(propshop|pr)$/i.test(String(b.book || "").trim()))));
+  const nT = n0 - bets.length;
+  if (nM || nT) { try { saveBets(); } catch (e) {} try { morningCleanOrphans(); } catch (e) {} }
+  if ((nM || nT) && !quiet) showToast(`Dropped ${nM} Morning pick${nM === 1 ? "" : "s"} and ${nT} Tracker bet${nT === 1 ? "" : "s"} with no real book`);
+  return nM + nT;
+}
 function _mDropUnpriced(picks) {
-  const kept = picks.filter(_mRealBook), dropped = picks.filter(x => !kept.includes(x));
-  if (dropped.length) showToast(`Left off the card (no real price / book on this run): ${dropped.slice(0, 4).map(x => displayPlayerName(x.player)).join(", ")}${dropped.length > 4 ? " +" + (dropped.length - 4) + " more" : ""}`);
+  const unbooked = picks.filter(b => _mPlaceholderBook(b.book));
+  if (unbooked.length) { const ids = new Set(unbooked.map(x => String(x.id))); morningDropUnbooked(true); picks = picks.filter(x => !ids.has(String(x.id))); try { renderMorning(); } catch (e) {} showToast(`Dropped ${unbooked.length} pick${unbooked.length === 1 ? "" : "s"} with no real book (log + Tracker): ${unbooked.slice(0, 4).map(x => displayPlayerName(x.player)).join(", ")}`); }
+  const inRange = b => b.fairProb == null || oddsToDecimal(b.odds) == null || oddsToDecimal(b.odds) >= (1 + MORNING_QUAL_EV / 100) / b.fairProb - 1e-9;   // the price we can actually get is still at the play-to or better
+  const kept = picks.filter(b => _mRealBook(b) && inRange(b)), dropped = picks.filter(x => !kept.includes(x));
+  if (dropped.length) showToast(`Left off the card (no price at one of our books, or past the play-to, on this run): ${dropped.slice(0, 4).map(x => displayPlayerName(x.player)).join(", ")}${dropped.length > 4 ? " +" + (dropped.length - 4) + " more" : ""}`);
   return kept;
 }
 async function morningSendCard(mode) {
