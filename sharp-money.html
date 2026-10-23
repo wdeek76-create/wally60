@@ -241,7 +241,7 @@ let toastT; const toast = m => { const t=$('#toast'); t.textContent=m; t.classLi
 async function runPool(jobs, n){ let i=0; await Promise.all(Array.from({length:Math.min(n,jobs.length)},async()=>{ while(i<jobs.length){ const j=jobs[i++]; await j(); } })); }
 const cents = v => { v=Number(v); return isNaN(v)?null:(v>0?v-100:v+100); };
 const LIQ_BAND_CENTS = 20;
-const SM_BUILD = 'Oct 23 · rw summed up';
+const SM_BUILD = 'Oct 23 · board cards';
 const SHARP_MAX_ARB = 8; // % -- anything bigger is treated as bad data
 function levelsOf(o){
   const top=Number(o.price);
@@ -1213,6 +1213,42 @@ async function statusDiscord(lines){
   try{ const r=await fetch(statusHook,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ username:'RotoWire Status', content, allowed_mentions: role?{roles:[role]}:{parse:[]} })}); if(!r.ok){ rwPostStat.status={ ok:false, err:String(r.status), at:Date.now() }; toast('Status Discord post failed: '+r.status); return false; } rwPostStat.status={ ok:true, at:Date.now() }; return true; }
   catch(e){ toast('Status Discord post failed: '+e.message); return false; }
 }
+// The injury board as Discord cards, like the CFL bot's: one card per team that has players awaiting
+// a decision (title = team + game + tip), one field per player (status + injury, the summed-up note,
+// and a small box with who his blurb says gains / loses minutes). One last card lists the clear teams.
+function rwBoardEmbeds(){
+  const A=rwAnalyze(), out=[], clear=[];
+  const st=v=>SHORT_ST[String(v.status).toUpperCase()]||(/question/i.test(v.status)?'Q':v.status);
+  const tag=v=>{ const n=rwNews.items.find(x=>normName(x.name)===normName(v.name)); if(!n) return []; const seen=new Set();
+    return [...A.ben.values()].flat().filter(b=>b.id===n.id && b.kind!=='mention' && !seen.has(b.name) && seen.add(b.name)); };
+  rwBoard().forEach(g=>{
+    const time=new Date(g.f.start).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',timeZone:'America/New_York'});
+    [g.away,g.home].forEach(t=>{
+      if(!t.wait.length){ clear.push(t.code); return; }
+      const worst=t.wait.some(v=>/OUT|DOUBT/i.test(v.status))?0xf97316:0xeab308;
+      out.push({ title:`${t.code} - ${g.away.code} @ ${g.home.code} ${time} ET`.slice(0,256), color:worst,
+        fields:t.wait.slice(0,25).map(v=>{ const note=rwNoteFor(v.name).replace(/^ \(|\)$/g,''), who=tag(v);
+          return { name:`${v.name} - ${st(v)}${v.type?' '+v.type:''}`.slice(0,256),
+            value:[note||'—', who.length?'```\n'+who.map(b=>`${b.kind==='floor'?'↓':'↑'} ${b.name}`).join('\n')+'\n```':''].filter(Boolean).join('\n').slice(0,1024) }; }) });
+    });
+  });
+  if(clear.length) out.push({ title:'Clear ✅', color:0x22c55e, description:clear.join(' - ') });
+  return out;
+}
+async function statusEmbeds(embeds){
+  if(!statusHook || !embeds.length) return false;
+  const role=/^\d{15,}$/.test(statusRole)?statusRole:'';
+  const time=new Date().toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',timeZone:'America/New_York'});
+  let ok=true;
+  for(let i=0;i<embeds.length;i+=10){   // Discord takes 10 cards per message
+    const body={ username:'RotoWire Status', content: i?undefined:`${role?`<@&${role}> `:''}**Injury board - ${time} ET**`, allowed_mentions: role?{roles:[role]}:{parse:[]}, embeds:embeds.slice(i,i+10) };
+    try{ const r=await fetch(statusHook,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+      if(!r.ok){ ok=false; rwPostStat.status={ ok:false, err:`${r.status} ${(await r.text().catch(()=>'')).slice(0,80)}`, at:Date.now() }; } else rwPostStat.status={ ok:true, at:Date.now() }; }
+    catch(e){ ok=false; rwPostStat.status={ ok:false, err:e.message, at:Date.now() }; }
+    if(i+10<embeds.length) await new Promise(r=>setTimeout(r,1200));
+  }
+  return ok;
+}
 async function projDiscord(ev){
   if(!projHook){ projErr='no webhook pasted in the RotoWire projections box'; return false; }
   const role=/^\d{15,}$/.test(projRole)?projRole:'';
@@ -1375,10 +1411,7 @@ async function postBoard(force){
   const key=etToday()+'|'+JSON.stringify(rwBoard().map(g=>[g.f.id, ...[g.away,g.home].map(t=>t.wait.map(v=>[normName(v.name), v.status, v.type, (rwNews.items.find(x=>normName(x.name)===normName(v.name))||{}).id||''] ).sort((a,b)=>a[0].localeCompare(b[0])))]));
   if(!force && LS.get('sm_rw_board','')===key) return false;
   if(!force){ const was=rwBoardPrev; rwBoardPrev=key; if(was!==key) return false; }   // wait for the next read to agree
-  let ok=true, chunk=[];
-  const send=async c=>{ ok=(await statusDiscord(['**Injury board**', '```', ...c, '```'])) && ok; };
-  for(const l of bl){ if((chunk.join('\n')+'\n'+l).length>1800){ await send(chunk); chunk=[]; } chunk.push(l); }
-  if(chunk.length) await send(chunk);
+  const ok=await statusEmbeds(rwBoardEmbeds());
   if(ok) LS.set('sm_rw_board', key);
   return ok;
 }
