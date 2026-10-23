@@ -241,7 +241,7 @@ let toastT; const toast = m => { const t=$('#toast'); t.textContent=m; t.classLi
 async function runPool(jobs, n){ let i=0; await Promise.all(Array.from({length:Math.min(n,jobs.length)},async()=>{ while(i<jobs.length){ const j=jobs[i++]; await j(); } })); }
 const cents = v => { v=Number(v); return isNaN(v)?null:(v>0?v-100:v+100); };
 const LIQ_BAND_CENTS = 20;
-const SM_BUILD = 'Oct 23 · board cards';
+const SM_BUILD = 'Oct 23 · changes only';
 const SHARP_MAX_ARB = 8; // % -- anything bigger is treated as bad data
 function levelsOf(o){
   const top=Number(o.price);
@@ -1068,7 +1068,7 @@ function postNewBlurbs(){
 function statusPostLines(list){
   const A=rwAnalyze(); const out=[];
   list.filter(x=>inProj(x.name, x.team)).forEach(x=>{
-    out.push(`**${x.name}** ${x.team?rwTeamKey(x.team)+' ':''}${x.c.from} → **${x.to}**`);
+    out.push(`**${x.name}** ${x.team?rwTeamKey(x.team)+' ':''}${x.c.from} → **${x.to||"off report"}**`);
     const blurb=rwNews.items.filter(n=>normName(n.name)===x.k).sort((a,b)=>(rwTime(b.at)||0)-(rwTime(a.at)||0))[0];
     if(blurb && !rwIsRecap(blurb)){
       const named=[...A.ben.values()].flat().filter(b=>b.id===blurb.id && b.kind!=='mention' && inProj(b.name, b.team));
@@ -1216,7 +1216,7 @@ async function statusDiscord(lines){
 // The injury board as Discord cards, like the CFL bot's: one card per team that has players awaiting
 // a decision (title = team + game + tip), one field per player (status + injury, the summed-up note,
 // and a small box with who his blurb says gains / loses minutes). One last card lists the clear teams.
-function rwBoardEmbeds(){
+function rwBoardEmbeds(only, prefix, clearCards){
   const A=rwAnalyze(), out=[], clear=[];
   const st=v=>SHORT_ST[String(v.status).toUpperCase()]||(/question/i.test(v.status)?'Q':v.status);
   const tag=v=>{ const n=rwNews.items.find(x=>normName(x.name)===normName(v.name)); if(!n) return []; const seen=new Set();
@@ -1224,9 +1224,10 @@ function rwBoardEmbeds(){
   rwBoard().forEach(g=>{
     const time=new Date(g.f.start).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',timeZone:'America/New_York'});
     [g.away,g.home].forEach(t=>{
-      if(!t.wait.length){ clear.push(t.code); return; }
+      if(only && !only.has(t.code)) return;
+      if(!t.wait.length){ if(clearCards) out.push({ title:`${prefix||''}${t.code} clear ✅ - ${g.away.code} @ ${g.home.code} ${time} ET`, color:0x22c55e }); else clear.push(t.code); return; }
       const worst=t.wait.some(v=>/OUT|DOUBT/i.test(v.status))?0xf97316:0xeab308;
-      out.push({ title:`${t.code} - ${g.away.code} @ ${g.home.code} ${time} ET`.slice(0,256), color:worst,
+      out.push({ title:`${prefix||''}${t.code} - ${g.away.code} @ ${g.home.code} ${time} ET`.slice(0,256), color:worst,
         fields:t.wait.slice(0,25).map(v=>{ const note=rwNoteFor(v.name).replace(/^ \(|\)$/g,''), who=tag(v);
           return { name:`${v.name} - ${st(v)}${v.type?' '+v.type:''}`.slice(0,256),
             value:[note||'—', who.length?'```\n'+who.map(b=>`${b.kind==='floor'?'↓':'↑'} ${b.name}`).join('\n')+'\n```':''].filter(Boolean).join('\n').slice(0,1024) }; }) });
@@ -1235,13 +1236,13 @@ function rwBoardEmbeds(){
   if(clear.length) out.push({ title:'Clear ✅', color:0x22c55e, description:clear.join(' - ') });
   return out;
 }
-async function statusEmbeds(embeds){
+async function statusEmbeds(embeds, heading){
   if(!statusHook || !embeds.length) return false;
   const role=/^\d{15,}$/.test(statusRole)?statusRole:'';
   const time=new Date().toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',timeZone:'America/New_York'});
   let ok=true;
   for(let i=0;i<embeds.length;i+=10){   // Discord takes 10 cards per message
-    const body={ username:'RotoWire Status', content: i?undefined:`${role?`<@&${role}> `:''}**Injury board - ${time} ET**`, allowed_mentions: role?{roles:[role]}:{parse:[]}, embeds:embeds.slice(i,i+10) };
+    const body={ username:'RotoWire Status', content: i?undefined:`${role?`<@&${role}> `:''}**${heading||'Injury board'} - ${time} ET**`, allowed_mentions: role?{roles:[role]}:{parse:[]}, embeds:embeds.slice(i,i+10) };
     try{ const r=await fetch(statusHook,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
       if(!r.ok){ ok=false; rwPostStat.status={ ok:false, err:`${r.status} ${(await r.text().catch(()=>'')).slice(0,80)}`, at:Date.now() }; } else rwPostStat.status={ ok:true, at:Date.now() }; }
     catch(e){ ok=false; rwPostStat.status={ ok:false, err:e.message, at:Date.now() }; }
@@ -1400,19 +1401,40 @@ function rwBoard(){
     return { f, away:side(f.away), home:side(f.home) };
   });
 }
-// Posts the board to the status channel when it changed since the last post that went through
-// (force: post it now regardless). The "posted" mark is only kept if Discord took it.
 let rwBoardPrev='';
+// What each team's board entry IS (not how it's worded): awaiting players + status + injury.
+// New blurbs aren't counted here - they already go out as their own one-line posts.
+function rwTeamSigs(){
+  const sig={}; rwBoard().forEach(g=>[g.away,g.home].forEach(t=>{ sig[t.code]=JSON.stringify(t.wait.map(v=>[normName(v.name), v.status, v.type]).sort((a,b)=>a[0].localeCompare(b[0]))); })); return sig;
+}
+// Board posting: the full board once a day (first read), after that only the teams whose entry changed
+// (confirmed on two reads in a row), and ~1 hour before each tip that game's two teams once more.
+// force (the button): the full board right now.
 async function postBoard(force){
   if(!(rwGames.length && rwInj.size && statusHook)) return false;
-  const bl=rwBoardLines(true);
-  // compare the board's DATA (who's awaiting, status, injury, his latest blurb), not its wording --
-  // so a layout change on our side, or a "3h ago" ticking over, never reposts it
-  const key=etToday()+'|'+JSON.stringify(rwBoard().map(g=>[g.f.id, ...[g.away,g.home].map(t=>t.wait.map(v=>[normName(v.name), v.status, v.type, (rwNews.items.find(x=>normName(x.name)===normName(v.name))||{}).id||''] ).sort((a,b)=>a[0].localeCompare(b[0])))]));
-  if(!force && LS.get('sm_rw_board','')===key) return false;
-  if(!force){ const was=rwBoardPrev; rwBoardPrev=key; if(was!==key) return false; }   // wait for the next read to agree
-  const ok=await statusEmbeds(rwBoardEmbeds());
-  if(ok) LS.set('sm_rw_board', key);
+  const day=etToday(), sig=rwTeamSigs(), key=JSON.stringify(sig);
+  let st; try{ st=JSON.parse(LS.get('sm_rw_teamsig','null')); }catch(e){ st=null; }
+  if(force){ const ok=await statusEmbeds(rwBoardEmbeds()); if(ok) LS.set('sm_rw_teamsig', JSON.stringify({ day, sig, pre:st?.day===day?st.pre:[] })); return ok; }
+  if(!st || st.day!==day){
+    // a full board already went out today under the old way -> just remember where things stand
+    if(String(LS.get('sm_rw_board','')).startsWith(day+'|')){ LS.set('sm_rw_teamsig', JSON.stringify({ day, sig, pre:[] })); return false; }
+    const ok=await statusEmbeds(rwBoardEmbeds()); if(ok){ LS.set('sm_rw_teamsig', JSON.stringify({ day, sig, pre:[] })); LS.set('sm_rw_board', day+'|full'); } return ok;
+  }
+  // changed teams, once the change holds on two reads
+  const was=rwBoardPrev; rwBoardPrev=key;
+  const changed=new Set(Object.keys(sig).filter(t=>sig[t]!==st.sig[t]));
+  let ok=true;
+  if(changed.size && was===key){
+    ok=await statusEmbeds(rwBoardEmbeds(changed, 'Update: ', true), 'Injury update');
+    if(ok){ changed.forEach(t=>{ st.sig[t]=sig[t]; }); LS.set('sm_rw_teamsig', JSON.stringify(st)); }
+  }
+  // pregame: each game once, about an hour before tip
+  const soon=rwGames.filter(g=>{ const m=(new Date(g.start)-Date.now())/60000; return m<=60 && m>0 && !(st.pre||[]).includes(g.id); });
+  for(const g of soon){
+    const teams=new Set([rwTeamKey(g.away.ab), rwTeamKey(g.home.ab)]);
+    const ok2=await statusEmbeds(rwBoardEmbeds(teams, 'Pregame: ', true), `Pregame ${g.away.ab} @ ${g.home.ab}`);
+    if(ok2){ st.pre=[...(st.pre||[]), g.id]; LS.set('sm_rw_teamsig', JSON.stringify(st)); }
+  }
   return ok;
 }
 // who a player's absence / status affects, from today's blurbs about him
