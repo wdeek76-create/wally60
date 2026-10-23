@@ -1999,28 +1999,34 @@ function _uaTemplate() {
   if (ua && ua.players) Object.entries(ua.players).forEach(([k, t]) => { if (!have.has(norm(t.name))) base.push(t); else { const b = base.find(x => norm(x.name) === norm(t.name)); if (b && !b.id && t.id) b.id = t.id; } });
   return base;
 }
+// Reads a UA player list (id + name [+ first/last, position, team]) and ADDS it to the saved list. → { ok, added, total, msg }
+function _uaIngestText(text, fname) {
+  const rows = parseCSV(String(text || ""));
+  if (!rows.length) return { ok: false, msg: "Couldn't read that file" };
+  const h = Object.keys(rows[0]);
+  const idC = findCol(h, ["id", "player id", "playerid", "ua id"]), nameC = findCol(h, ["name", "player"]);
+  const fC = findCol(h, ["first_name", "first name", "first"]), lC = findCol(h, ["last_name", "last name", "last"]);
+  const posC = findCol(h, ["position", "pos"]), teamC = findCol(h, ["team"]);
+  if (!idC || !(nameC || (fC && lC))) return { ok: false, msg: "Need an id column and a name (or first/last name) column" };
+  const players = {};
+  rows.forEach(r => {
+    const id = String(r[idC] || "").trim(); const name = (nameC ? r[nameC] : `${r[fC] || ""} ${r[lC] || ""}`).trim();
+    if (!id || !name) return;
+    const parts = name.split(/\s+/);
+    players[resolveNorm(name)] = { id, name, first_name: fC ? r[fC] : parts[0], last_name: lC ? r[lC] : parts.slice(1).join(" "), position: posC ? r[posC] : "", team: teamC ? r[teamC] : "" };
+  });
+  if (!Object.keys(players).length) return { ok: false, msg: "No ids found in that file" };
+  const prev = getUaIds(); const merged2 = Object.assign({}, prev && prev.players ? prev.players : {}, players);   // uploads add to what is already saved
+  try { localStorage.setItem(UA_IDS_KEY, JSON.stringify({ at: Date.now(), name: fname, players: merged2 })); } catch (e) { return { ok: false, msg: "Couldn't save (storage full?)" }; }
+  return { ok: true, added: Object.keys(players).length, total: Object.keys(merged2).length, msg: `UA ids: +${Object.keys(players).length} players (${Object.keys(merged2).length} saved)` };
+}
 function loadUaIds(input) {
   const f = input && input.files && input.files[0]; if (!f) return;
   const rd = new FileReader();
   rd.onload = () => {
-    const rows = parseCSV(String(rd.result || ""));
-    if (!rows.length) { showToast("Couldn't read that file"); return; }
-    const h = Object.keys(rows[0]);
-    const idC = findCol(h, ["id", "player id", "playerid", "ua id"]), nameC = findCol(h, ["name", "player"]);
-    const fC = findCol(h, ["first_name", "first name", "first"]), lC = findCol(h, ["last_name", "last name", "last"]);
-    const posC = findCol(h, ["position", "pos"]), teamC = findCol(h, ["team"]);
-    if (!idC || !(nameC || (fC && lC))) { showToast("Need an id column and a name (or first/last name) column"); return; }
-    const players = {};
-    rows.forEach(r => {
-      const id = String(r[idC] || "").trim(); const name = (nameC ? r[nameC] : `${r[fC] || ""} ${r[lC] || ""}`).trim();
-      if (!id || !name) return;
-      const parts = name.split(/\s+/);
-      players[resolveNorm(name)] = { id, name, first_name: fC ? r[fC] : parts[0], last_name: lC ? r[lC] : parts.slice(1).join(" "), position: posC ? r[posC] : "", team: teamC ? r[teamC] : "" };
-    });
-    if (!Object.keys(players).length) { showToast("No ids found in that file"); return; }
-    const prev = getUaIds(); const merged2 = Object.assign({}, prev && prev.players ? prev.players : {}, players);   // uploads add to what is already saved
-    try { localStorage.setItem(UA_IDS_KEY, JSON.stringify({ at: Date.now(), name: f.name, players: merged2 })); } catch (e) { showToast("Couldn't save (storage full?)"); return; }
-    showToast(`UA ids: +${Object.keys(players).length} players (${Object.keys(merged2).length} saved)`); buildSlots();
+    const r = _uaIngestText(rd.result, f.name);
+    showToast(r.msg);
+    if (r.ok) { buildSlots(); if (window._uaRetryTabs) _tabsExportNow(); }     // a Tabs export was waiting on this list: run it again right away
   };
   rd.readAsText(f); input.value = "";
 }
@@ -2171,12 +2177,21 @@ function _tabsLoad(players, label) {
   slots[idx] = { label, players };
   setLog(`TABS loaded: ${players.length} players`);
   runMerge();
-  _tabsPasteInfo = `${players.length} players · loaded as TABS · downloaded "TABS UA ${_psDate()} ${_nowClock()}.csv"`;
   buildSlots(); updateBadges();
+  _tabsExportNow();
+}
+// Writes TABS UA from whatever Tabs data is loaded, and says (in the TABS PASTE box) who was left out for lack of a UA id.
+function _tabsExportNow() {
+  const idx = SOURCES.findIndex(s => s.key === "tabs"), n = slots[idx] && slots[idx].players ? slots[idx].players.length : 0;
+  if (!n) { showToast("Load the Tabs file first"); return; }
+  const nm = `TABS UA ${_psDate()} ${_nowClock()}.csv`;
+  _tabsPasteInfo = `${n} players \u00b7 loaded as TABS \u00b7 downloaded "${nm}"`;
   window._uaLastUnmatched = [];
-  writeConsensusCsv(["tabs"], `TABS UA ${_psDate()} ${_nowClock()}.csv`, "TABS UA");
+  writeConsensusCsv(["tabs"], nm, "TABS UA");
   const um = window._uaLastUnmatched || [];
-  if (um.length) { _tabsPasteInfo += ` \u00b7 \u26a0 ${um.length} players are not in the UA player list and were left out (${um.slice(0, 12).join(", ")}${um.length > 12 ? "\u2026" : ""}). Download today's NBA projections file from Unabated and upload it on the UA TEMPLATE row (Upload tab) \u2014 it adds the new players, then run this again.`; buildSlots(); }
+  window._uaRetryTabs = um.length > 0;
+  if (um.length) _tabsPasteInfo += ` \u00b7 \u26a0 ${um.length} players have no UA id and were left out (${um.slice(0, 12).join(", ")}${um.length > 12 ? "\u2026" : ""}). Drop today's Unabated NBA projections file here (or on the UA TEMPLATE row) \u2014 Tabs re-exports by itself.`;
+  buildSlots();
 }
 function tabsPasteImport() {
   const ta = document.getElementById("tabs-paste");
@@ -2189,26 +2204,29 @@ function tabsPasteImport() {
 }
 // Or upload the Tabs CSV download (or a saved copy of the page text) — same result.
 function tabsFileImport(input) {
-  const f = input && input.files && input.files[0]; if (!f) return;
-  const rd = new FileReader();
-  rd.onload = () => {
-    const text = String(rd.result || "");
+  const files = input && input.files ? [...input.files] : []; if (!files.length) return;
+  const isUa = t => /^\uFEFF?\s*"?id"?\s*,[^\n]*first_name/i.test(String(t).slice(0, 400));       // a UA player list (id,name,first_name,last_name,...)
+  Promise.all(files.map(f => new Promise(res => { const rd = new FileReader(); rd.onload = () => res({ name: f.name, text: String(rd.result || "") }); rd.readAsText(f); }))).then(list => {
+    let tabs = null; const msgs = [];
+    list.forEach(x => { if (isUa(x.text)) { const r = _uaIngestText(x.text, x.name); msgs.push(r.msg); } else if (!tabs) tabs = x; });
+    if (!tabs) { window._uaRetryTabs ? _tabsExportNow() : (msgs.length && showToast(msgs.join(" \u00b7 "))); buildSlots(); return; }
     let players = [];
-    if (/^﻿?\s*"?Player"?\s*,/i.test(text)) players = parseSource(text);       // the CSV export
-    else players = parseTabsProjectionsPage(text).map(p => ({ rawName: p.rawName, norm: p.norm, team: p.team, pos: p.pos, pts: p.pts, reb: p.reb, ast: p.ast, threepm: p.threepm, pra: p.pra, min: p.min }));
+    if (/^\uFEFF?\s*"?Player"?\s*,/i.test(tabs.text)) players = parseSource(tabs.text);       // the CSV export
+    else players = parseTabsProjectionsPage(tabs.text).map(p => ({ rawName: p.rawName, norm: p.norm, team: p.team, pos: p.pos, pts: p.pts, reb: p.reb, ast: p.ast, threepm: p.threepm, pra: p.pra, min: p.min }));
     if (!players.length) { _tabsPasteInfo = "Couldn't read players from that file."; buildSlots(); showToast("Tabs upload: nothing found"); return; }
-    _tabsLoad(players, f.name);
-  };
-  rd.readAsText(f); input.value = "";
+    _tabsLoad(players, tabs.name);
+  });
+  input.value = "";
 }
 function _tabsPasteHtml() {
   return `<div class="slot" style="display:block;border-color:#f59e0b55;">
     <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:6px;">
       <div><span style="color:#f59e0b;font-weight:800;font-size:13px;letter-spacing:.8px;">TABS PASTE</span> <span style="color:#8b93a0;font-size:11px;">solo tool \u2014 paste the Tabs NBA Projections page or upload the Tabs CSV: it loads TABS and downloads the UA file</span></div>
-      <div style="display:flex;gap:6px;align-items:center;"><label class="upload-label" style="background:#0c0d10;border:1px solid #f59e0b;color:#f59e0b;">UPLOAD + EXPORT TABS UA<input type="file" accept=".csv,.txt,text/*" style="display:none;" onchange="tabsFileImport(this)"/></label><button onclick="tabsPasteImport()" style="background:#f59e0b;border:none;color:#050507;border-radius:6px;padding:7px 16px;font-size:12px;font-weight:800;cursor:pointer;">PARSE PASTE + EXPORT TABS UA</button></div>
+      <div style="display:flex;gap:6px;align-items:center;"><label class="upload-label" style="background:#0c0d10;border:1px solid #f59e0b;color:#f59e0b;">UPLOAD + EXPORT TABS UA<input type="file" multiple accept=".csv,.txt,text/*" style="display:none;" onchange="tabsFileImport(this)"/></label><button onclick="tabsPasteImport()" style="background:#f59e0b;border:none;color:#050507;border-radius:6px;padding:7px 16px;font-size:12px;font-weight:800;cursor:pointer;">PARSE PASTE + EXPORT TABS UA</button></div>
     </div>
     <textarea id="tabs-paste" placeholder="Paste the Tabs NBA Projections page here\u2026" spellcheck="false" style="width:100%;height:56px;background:#050507;border:1px solid #1a1d22;border-radius:6px;padding:8px 10px;color:#e2e8f0;font-family:'JetBrains Mono','Menlo',monospace;font-size:10px;outline:none;resize:vertical;box-sizing:border-box;"></textarea>
-    ${_tabsPasteInfo ? `<div style="font-size:11px;color:${/^Couldn/.test(_tabsPasteInfo) ? "#fbbf24" : "#4ade80"};margin-top:6px;">${_mEsc(_tabsPasteInfo)}</div>` : ""}
+    ${_tabsPasteInfo ? `<div style="font-size:11px;color:${/^Couldn|\u26a0/.test(_tabsPasteInfo) ? "#fbbf24" : "#4ade80"};margin-top:6px;">${_mEsc(_tabsPasteInfo)}</div>` : ""}
+    ${window._uaRetryTabs ? `<label class="upload-label" style="margin-top:6px;display:inline-block;background:#0c0d10;border:1px solid #fbbf24;color:#fbbf24;">ADD UA FILE \u2192 RE-EXPORT TABS UA<input type="file" accept=".csv,.txt,text/*" style="display:none;" onchange="loadUaIds(this)"/></label>` : ""}
   </div>`;
 }
 // Builds a UA upload in the shape the WNBA export uses (which UA accepts): one quoted row per player that has projections, A\u2013Z, with UA's own id,
