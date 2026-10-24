@@ -618,7 +618,8 @@ a.pfgo{text-decoration:none;display:inline-block}
 .pfparh{display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:4px}
 .pfleg{display:flex;gap:8px;align-items:center;padding:7px 0;border-top:1px solid var(--line2)}
 .pfleg .pflg,.pfleg .pflg2{width:28px;height:28px;flex:0 0 28px}
-.pfparb{display:flex;gap:8px;margin-top:8px}
+.pfparb{display:flex;gap:8px;margin-top:8px;align-items:center;flex-wrap:wrap}
+.pflegln{flex:none;width:30px;height:30px;border-radius:50%;border:1px solid var(--line2);display:flex;align-items:center;justify-content:center;color:var(--text);text-decoration:none;font-size:13px}
 .pfrow .pfname,.pfpar .pfname{font-size:14px;font-weight:800;line-height:1.25}
 .pfbet{font-weight:600;color:var(--text);opacity:.85}
 .pfmeta{font-size:11px;color:var(--dim);margin-top:2px}
@@ -4071,7 +4072,7 @@ function bindAutoBuild(view){
 // ── Parlay finder: the Sharp Money idea for parlay legs. Every main line (ML / spread / total) and
 // prop where the target book's price (FanDuel by default) has exchange money on the other side at or
 // under the hold cap, best hold first. Tap + to add it; the slip below is the parlay.
-let pfMin = Number(LS.get('props_pfmin','0'))||0;
+let pfMin = Math.max(250, Number(LS.get('props_pfmin','250'))||250);   // exchange money needed -- never under $250
 let pfBoost = Number(LS.get('props_pfboost','0'))||0;   // profit boost % on the slip price
 let pfLeague = '';   // '' = the sport tab on screen
 let pfGame = '';
@@ -4200,16 +4201,29 @@ function pfAutoParlays(){
     out.push({ legs, price:toAm(dec), boosted:toAm(boosted), fair:toAm(1/fairP), ev:(fairP*boosted-1)*100, sameGame:new Set(legs.map(c=>c.p.fixtureId)).size<legs.length }); } });
   return out.slice(0,5);
 }
+// every book that posts ALL the legs: its own prices multiplied (same-game legs: the book's SGP
+// price will differ), best first
+function pfParlayBooks(P){
+  const books={};
+  P.legs.forEach(c=>(c.cmp||[]).forEach(o=>{ const k=rawBook(o); if(EXCH.has(canonBook(k))) return; (books[k]=books[k]||[]).push(o); }));
+  return Object.entries(books).filter(([,os])=>os.length===P.legs.length).map(([k,os])=>({ k, price:toAm(os.reduce((a,o)=>a*toDec(Number(o.price)),1)), rows:os }))
+    .sort((a,b)=>toDec(b.price)-toDec(a.price));
+}
 function pfParlayCardHtml(P, i){
   const tgt=autoTargetBook||'fanduel';
-  const link = tgt==='fanduel' ? (fdParlayLink(P.legs.map(c=>c.refRow)) || BOOK_HOME.fanduel) : (BOOK_HOME[tgt]||'#');
+  const fdUrl = tgt==='fanduel' ? fdParlayLink(P.legs.map(c=>c.refRow)) : null;
+  const cmp=pfParlayBooks(P);
+  const linkBtn = tgt==='fanduel'
+    ? (fdUrl ? `<a class="pfgo" href="${esc(fdUrl)}" target="_blank" rel="noopener">Open full parlay on FD ↗</a>` : `<span class="pftag">FD didn't send slip links for every leg -- open each below</span>`)
+    : `<a class="pfgo" href="${esc(BOOK_HOME[tgt]||'#')}" target="_blank" rel="noopener">Open ${esc(bookShort(tgt))} ↗</a>`;
   return `<div class="pfpar">
     <div class="pfparh"><div><div class="pfname">Parlay ${i+1} <span class="pfbet">${P.legs.length} legs${P.sameGame?' · same game':''}</span></div>
       <div class="pfmeta">${esc(bookShort(tgt))} ${fmtAm(pfBoost?P.boosted:P.price)}${pfBoost?` (+${pfBoost}% boost, ${fmtAm(P.price)})`:''} · fair ${fmtAm(P.fair)}${P.sameGame?' · SGP: the slip price will be lower':''}</div></div>
       <span class="pftag${P.ev>0?' good':''}" style="font-size:12.5px">${P.ev>0?'+':''}${P.ev.toFixed(1)}% EV</span></div>
-    ${P.legs.map(c=>`<div class="pfleg">${pfLogoHtml(c)}<div class="pfmain"><div class="pfname" style="font-size:13px">${esc(c.p.isGame&&c.fx?fxLabel(c.fx):titleCase(c.p.name))} <span class="pfbet">${esc(pfBetTxt(c))}</span></div>
-      <div class="pfmeta">${pfBookImg(rawBook(c.refRow))}<b>${fmtAm(c.refRow.price)}</b> · ${c.src==='exch' ? `${usd(c.liq)} exch · ${holdTxt(c.hold??0)}` : `${esc((c.sharpBooks||[]).map(bookShort).join('/'))} fair ${fmtAm(c.sharpFair)}`} · <span class="${c.ev>0?'pos':''}">${c.ev>0?'+':''}${c.ev.toFixed(1)}%</span>${c.fx?` · ${esc(fxLabel(c.fx))}`:''}</div></div></div>`).join('')}
-    <div class="pfparb"><a class="pfgo" href="${esc(link)}" target="_blank" rel="noopener">Open ${esc(bookShort(tgt))}${tgt==='fanduel'?' slip':''} ↗</a><button class="pfgo2" data-pfuse="${i}">Use this</button></div>
+    ${P.legs.map(c=>{ const u=deepLinkFor(c.refRow)||BOOK_HOME[rawBook(c.refRow)]; return `<div class="pfleg">${pfLogoHtml(c)}<div class="pfmain"><div class="pfname" style="font-size:13px">${esc(c.p.isGame&&c.fx?fxLabel(c.fx):titleCase(c.p.name))} <span class="pfbet">${esc(pfBetTxt(c))}</span></div>
+      <div class="pfmeta">${pfBookImg(rawBook(c.refRow))}<b>${fmtAm(c.refRow.price)}</b> · ${c.src==='exch' ? `${usd(c.liq)} exch · ${holdTxt(c.hold??0)}` : `${esc((c.sharpBooks||[]).map(bookShort).join('/'))} fair ${fmtAm(c.sharpFair)}`} · <span class="${c.ev>0?'pos':''}">${c.ev>0?'+':''}${c.ev.toFixed(1)}%</span>${c.fx?` · ${esc(fxLabel(c.fx))}`:''}</div></div>${u?`<a class="pflegln" href="${esc(u)}" target="_blank" rel="noopener">↗</a>`:''}</div>`; }).join('')}
+    ${cmp.length?`<div class="pfopt" style="margin-top:8px"><label>Whole parlay by book${P.sameGame?' (legs multiplied)':''}</label><div class="plstrip pfcmp">${cmp.map(b=>bookChipHtml(b.k, b.price, b.k==='fanduel'?(fdParlayLink(b.rows)||BOOK_HOME.fanduel):BOOK_HOME[b.k], b.k===tgt)).join('')}</div></div>`:''}
+    <div class="pfparb">${linkBtn}<button class="pfgo2" data-pfuse="${i}">Use this</button></div>
   </div>`;
 }
 let pfParlays = [];
@@ -4280,7 +4294,7 @@ function pfHtml(){
     <div class="pfopts">
       <div class="pfopt"><label>Markets</label>${seg('data-pfscope',[['both','Both'],['mains','Mains'],['props','Props']],autoScope)}</div>
       <div class="pfopt"><label>Max hold</label>${seg('data-maxhold',[[0,'0%'],[1,'1%'],[2,'2%'],[3,'3%']],parlayMaxHold)}</div>
-      <div class="pfopt"><label>Min money</label>${seg('data-pfmin',[[0,'Any'],[250,'$250'],[500,'$500'],[1000,'$1k']],pfMin)}</div>
+      <div class="pfopt"><label>Min money</label>${seg('data-pfmin',[[250,'$250'],[500,'$500'],[1000,'$1k'],[2500,'$2.5k']],pfMin)}</div>
       ${pfMode==='auto'?'':`<div class="pfopt"><label>Sort</label>${seg('data-pfsort',[['hold','Tightest'],['money','Most $']],pfSort)}</div>`}
       <div class="pfopt"><label>Build</label><div style="display:flex;gap:6px">${seg('data-pfmode',[['pick','Pick'],['auto','Auto']],pfMode)}<div class="seg"><button class="${pfSgp?'on':''}" data-pfsgp="1">SGP</button></div></div></div>
       ${pfMode==='auto'?`<div class="pfopt"><label>Legs</label><div style="display:flex;gap:6px;align-items:center"><div class="seg"><button data-pflegs="-1">−</button><input id="pfLegsIn" type="text" inputmode="numeric" value="${pfLegs}"><button data-pflegs="1">+</button></div></div></div>`:''}
@@ -4310,7 +4324,7 @@ function bindPf(view){
   $('#pfmore')?.addEventListener('click',()=>{ pfShow+=30; renderParlay(); });
   view.querySelectorAll('[data-pfscope]').forEach(b=>b.addEventListener('click',()=>{ autoScope=b.dataset.pfscope; LS.set('props_autoscope',autoScope); renderParlay(); }));
   view.querySelectorAll('[data-maxhold]').forEach(b=>b.addEventListener('click',()=>{ parlayMaxHold=Number(b.dataset.maxhold); LS.set('props_parlaymaxhold',String(parlayMaxHold)); renderParlay(); }));
-  view.querySelectorAll('[data-pfmin]').forEach(b=>b.addEventListener('click',()=>{ pfMin=Number(b.dataset.pfmin)||0; LS.set('props_pfmin',String(pfMin)); renderParlay(); }));
+  view.querySelectorAll('[data-pfmin]').forEach(b=>b.addEventListener('click',()=>{ pfMin=Math.max(250,Number(b.dataset.pfmin)||250); LS.set('props_pfmin',String(pfMin)); renderParlay(); }));
   view.querySelectorAll('[data-pfadd]').forEach(b=>b.addEventListener('click',ev=>{ ev.stopPropagation(); const c=pfList[Number(b.dataset.pfadd)]; if(c) pfAdd(c); }));
   view.querySelectorAll('[data-pfopen]').forEach(r=>r.addEventListener('click',ev=>{ if(ev.target.closest('a,button')) return; const id=r.dataset.pfopen; if(pfOpen.has(id)) pfOpen.delete(id); else pfOpen.add(id); renderParlay(); }));
   view.querySelectorAll('[data-pflegs]').forEach(b=>b.addEventListener('click',()=>{ pfLegs=Math.max(1,pfLegs+Number(b.dataset.pflegs)); LS.set('props_pflegs',String(pfLegs)); renderParlay(); }));
