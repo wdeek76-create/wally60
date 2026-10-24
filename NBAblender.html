@@ -24609,7 +24609,7 @@ const MORNING_STAT_LABEL = { PTS: "Points", REB: "Rebounds", AST: "Assists", "3P
 // Market names PropShop prints in its market picker / board header → our stat key.
 // Longest first so "Points + Rebounds + Assists" isn't read as "Points".
 const MORNING_MARKET_PATTERNS = [
-  [/\b(pts\s*\+\s*reb\s*\+\s*ast|points\s*\+\s*rebounds\s*\+\s*assists|points[\s_]+rebounds[\s_]+assists|pra)\b/i, "PRA"],
+  [/\b(pts\s*\+\s*reb\s*\+\s*ast|points\s*\+\s*rebounds\s*\+\s*assists|points[\s_]+rebounds[\s_]+assists|pts[\s_]+rebs?[\s_]+asts?|pra)\b/i, "PRA"],
   [/\bpoints[\s_]+rebounds\b/i, "PR"],
   [/\bpoints[\s_]+assists\b/i, "PA"],
   [/\brebounds[\s_]+assists\b/i, "RA"],
@@ -24745,10 +24745,50 @@ function _mExtractCells(tokens) {
   return { gameStr, gameTime, allCells, projection, minutes, noProj };
 }
 // Market from the header region of the paste (before the first player block).
-function morningDetectMarket(raw) {
-  const head = raw.split("\n").slice(0, 60).join("\n").replace(/_/g, " ");
+function _mStatOfHeader(text) {
+  const head = String(text || "").replace(/_/g, " ");
   for (const [re, stat] of MORNING_MARKET_PATTERNS) if (re.test(head)) return MORNING_STATS.includes(stat) ? stat : "UNSUPPORTED:" + stat;
   return null;
+}
+// The board header carries the market as a code line ("player_points", "player_threes_made"); that line decides.
+// Only when there is none do we read the page text, and then only if it names ONE market (a market picker lists them all).
+function morningDetectMarket(raw) {
+  const lines = String(raw || "").split("\n").slice(0, 80).map(l => l.trim());
+  const code = lines.find(l => /^player[_ ][a-z0-9_ +]+$/i.test(l));
+  if (code) { const st = _mStatOfHeader(code.replace(/^player[_ ]/i, "")); if (st) return st; }
+  const found = new Set();
+  lines.slice(0, 60).forEach(l => { const st = _mStatOfHeader(l.replace(/_/g, " ")); if (st) found.add(st); });
+  return found.size === 1 ? [...found][0] : null;
+}
+// Sanity checks before a paste is stored: wrong market (header says one thing, the lines look like another) and a board that is
+// line-for-line the same as another source's. Returns a list of plain-English warnings (empty = looks fine).
+const MORNING_LINE_RANGE = { PTS: [4, 40], "3PM": [0.5, 5.5], REB: [1.5, 16], AST: [0.5, 14], PRA: [8, 55] };
+function morningPasteWarnings(raw, results, stat, src) {
+  const w = [];
+  try {
+    const hdr = morningDetectMarket(raw);
+    if (hdr && !hdr.startsWith("UNSUPPORTED") && hdr !== stat) w.push(`the board header says ${hdr}, but the Market box is ${stat}`);
+    if (hdr && hdr.startsWith("UNSUPPORTED")) w.push(`the board header says ${hdr.slice(12)} \u2014 not one of our markets`);
+    const lines = results.map(r => Number(r.line)).filter(x => !isNaN(x)).sort((a, b) => a - b);
+    if (lines.length >= 3) {
+      const med = lines[Math.floor(lines.length / 2)], rg = MORNING_LINE_RANGE[stat];
+      if (rg && (med < rg[0] || med > rg[1])) {
+        const fits = Object.keys(MORNING_LINE_RANGE).filter(k => med >= MORNING_LINE_RANGE[k][0] && med <= MORNING_LINE_RANGE[k][1]);
+        w.push(`the typical line is ${med}, which doesn't look like ${stat}${fits.length ? ` (looks more like ${fits.join(" / ")})` : ""}`);
+      }
+    }
+    if (results.length >= 5) {
+      const sig = r => [resolveNorm(r.player), r.ou, Number(r.line), r.proj != null ? Number(r.proj).toFixed(2) : "", r.ev != null ? Number(r.ev).toFixed(1) : ""].join("|");
+      const mine = new Set(results.map(sig));
+      MORNING_SRC_KEYS.filter(k => k !== src).forEach(k => {
+        const other = (morningPs[k] || []).filter(p => p.stat === stat);
+        if (other.length < 5) return;
+        const os = new Set(other.map(sig)); let same = 0; mine.forEach(x => { if (os.has(x)) same++; });
+        if (same / mine.size >= 0.9) w.push(`this board is identical to ${_mSrc(k).label}'s ${stat} (${same} of ${mine.size} lines match) \u2014 same board pasted twice?`);
+      });
+    }
+  } catch (e) { console.warn("[MORNING] paste check failed", e); }
+  return w;
 }
 // P(X <= k) for a Poisson(lam)
 function _poisCdf(k, lam) { let s0 = 0, term = Math.exp(-lam); for (let i = 0; i <= k; i++) { s0 += term; term *= lam / (i + 1); } return Math.min(1, s0); }
@@ -25923,6 +25963,7 @@ function morningImport() {
   }
   const { results, errors } = parseMorningPropShop(raw, stat);
   if (!results.length) { info.textContent = "No props found in that paste." + (errors.length ? ` ${errors.length} parse error(s) — see console.` : ""); if (errors.length) console.warn("[MORNING]", errors); return; }
+  { const warn = morningPasteWarnings(raw, results, stat, src); if (warn.length && !confirm("Check this paste before it's stored:\n\n\u2022 " + warn.join("\n\u2022 ") + "\n\nImport it anyway?")) { info.textContent = "Not imported \u2014 " + warn[0] + "."; return; } }
   // A paste REPLACES this source's board for this market (re-paste = clean fix).
   // Repeats of one player/side/line collapse to the best price.
   const byKey = {};
@@ -26434,6 +26475,7 @@ function tabsSoloImport() {
   }
   const { results, errors } = parseMorningPropShop(raw, stat);
   if (!results.length) { say("No props found in that paste." + (errors.length ? ` ${errors.length} parse error(s).` : "")); return; }
+  { const warn = morningPasteWarnings(raw, results, stat, "tabs"); if (warn.length && !confirm("Check this paste before it's stored:\n\n\u2022 " + warn.join("\n\u2022 ") + "\n\nImport it anyway?")) { say("Not imported \u2014 " + warn[0] + "."); return; } }
   const now = Date.now(), nowIso = new Date().toISOString(), today = localYMD(new Date());
   let added = 0, upd = 0, late = 0; const seen = { initial: 0, "30min": 0 };
   results.forEach(r => {
