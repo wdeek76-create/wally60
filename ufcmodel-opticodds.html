@@ -762,6 +762,7 @@
       <div style="display:flex; gap:8px; align-items:center;">
         <button onclick="autoOptimizeModelWeights()" class="ghost" style="padding:8px 12px; font-size:13px; white-space:nowrap;" title="Sweep every Saber/Eye weight split and find combinations that maximize units, ROI, or win %">🔍 Auto-optimize</button>
         <button onclick="copyModelPicks()" class="ghost" style="padding:8px 12px; font-size:13px; white-space:nowrap;" title="Copy each fighter with their current-weight model win % to clipboard">📋 Copy picks</button>
+        <button onclick="setModelRecapWebhook()" class="ghost" id="modelRecapWebhookBtn" style="padding:8px 12px; font-size:13px; white-space:nowrap;" title="Set the Discord webhook Copy recap posts to">🔗 Recap</button>
         <button onclick="copyModelRecap()" class="ghost" style="padding:8px 12px; font-size:13px; white-space:nowrap;" title="Copy a results recap of only the picks that were sent out for this card">🧾 Copy recap</button>
         <button onclick="setModelDiscordWebhook()" class="ghost" id="modelWebhookBtn" style="padding:8px 12px; font-size:13px; white-space:nowrap;" title="Set the Discord webhook the card image posts to on export">🔗 Discord</button>
         <button onclick="exportModelCardImage()" class="ghost" style="padding:8px 12px; font-size:13px; white-space:nowrap;">📷 Export card image</button>
@@ -5374,7 +5375,9 @@ async function copyModelRecap() {
       const how = [p.res.method, p.res.round != null ? `R${p.res.round}` : null].filter(Boolean).join(' ');
       return `${icon} ${p.name} ${fmtAm(p.odds)}${how ? ` (${how})` : ''}`;
     });
-  const title = (card.label || '').replace(/[•·|]/g, ' ').replace(/\s+/g, ' ').trim();
+  const title = (card.label || '').replace(/[•·|]/g, ' ')
+    .replace(/\b(upcoming|completed|live|finished)\b/ig, ' ')
+    .replace(/\s+/g, ' ').trim();
   const roi = risked ? (units / risked) * 100 : 0;
   const summary = (w + l)
     ? `${w}-${l}  ${units >= 0 ? '+' : ''}${units.toFixed(2)}u  ROI ${roi >= 0 ? '+' : ''}${roi.toFixed(1)}%`
@@ -5407,6 +5410,42 @@ async function copyModelRecap() {
     : '';
   const text = `${title}\n${summary}${pending && (w + l) ? `  (${pending} pending)` : ''}\n\n${lines.join('\n')}${allTime ? `\n\n${allTime}` : ''}`;
   await copyText(text, 'recap');
+  if (getModelRecapWebhook()) postRecapToDiscord(text);
+}
+
+// ── Discord webhook for Copy recap (separate from the card-image one) ──────
+const MODEL_RECAP_WEBHOOK_KEY = 'ufc_model_recap_webhook';
+function getModelRecapWebhook() {
+  try { return localStorage.getItem(MODEL_RECAP_WEBHOOK_KEY) || ''; } catch (e) { return ''; }
+}
+function refreshRecapWebhookBtn() {
+  const b = document.getElementById('modelRecapWebhookBtn');
+  if (b) b.textContent = getModelRecapWebhook() ? '🔗 Recap ✓' : '🔗 Recap';
+}
+function setModelRecapWebhook() {
+  const v = prompt('Discord webhook URL for recaps — Copy recap also posts the recap here.\nLeave blank to turn it off.', getModelRecapWebhook());
+  if (v === null) return;
+  const url = v.trim();
+  if (url && !/^https:\/\/(?:\w+\.)?discord(?:app)?\.com\/api\/webhooks\//i.test(url)) {
+    toast('That doesn\'t look like a Discord webhook URL', 'error'); return;
+  }
+  try { url ? localStorage.setItem(MODEL_RECAP_WEBHOOK_KEY, url) : localStorage.removeItem(MODEL_RECAP_WEBHOOK_KEY); } catch (e) {}
+  refreshRecapWebhookBtn();
+  toast(url ? 'Recap webhook saved — Copy recap will post there' : 'Recap webhook off');
+}
+setTimeout(refreshRecapWebhookBtn, 0);
+async function postRecapToDiscord(text) {
+  try {
+    const res = await fetch(getModelRecapWebhook(), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: text.slice(0, 2000), allowed_mentions: { parse: [] } }),
+    });
+    if (!res.ok) throw new Error(`Discord ${res.status}`);
+    toast('Recap posted to Discord');
+  } catch (e) {
+    toast(`Recap post failed: ${e.message}`, 'error');
+  }
 }
 
 async function copyModelPicks() {
