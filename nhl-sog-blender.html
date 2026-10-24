@@ -3141,6 +3141,24 @@ async function _nhlModelLogToTracker(rows) {
 }
 // Open model picks from before the ensemble switched over (or from any run that didn't log) go into the
 // tracker as ensemble bets at the price the model logged them at, so every card and the Discord flow see them.
+// Model tab: did this pick make it into the tracker (which is what the cards send), and if not, why.
+function _nhlModelTrackStatus(r) {
+  const tb = bets.find(b => nn(b.player) === nn(r.player) && _ymdLocal(new Date(b.date)) === r.gameDateIso);
+  const k = r.gameDateIso + "|" + nn(r.player) + "|" + r.ou + "|" + r.line;
+  if (tb && tb.ou === r.ou && Number(tb.line) === Number(r.line)) return tb.result === "pending" ? `<span style="color:#22c55e;font-weight:800;">✓ in tracker</span>` : `<span style="color:#9fb8d6;">tracked · ${escapeHtmlBasic(tb.result)}</span>`;
+  if (tb) return `<span style="color:#f59e0b;font-weight:700;" title="One bet per player per day">not tracked — tracker already has ${escapeHtmlBasic(tb.player)} ${tb.ou === "over" ? "O" : "U"}${tb.line} today</span>`;
+  const log = nhlModelLog.find(x => x.key === k);
+  if (log && log.dismissed) return `<span style="color:#f87171;font-weight:700;">not tracked — you deleted it from the tracker</span> <button onclick="_nhlModelTrackAnyway('${k.replace(/'/g, "")}')" style="background:transparent;border:1px solid #00aaff;color:#00aaff;border-radius:4px;padding:1px 8px;font-size:11px;font-weight:700;cursor:pointer;">Track it</button>`;
+  if (_nhlModelPreview || !log) return `<span style="color:#9fb8d6;">check only — hit Run model to log it</span>`;
+  return `<span style="color:#9fb8d6;">not in tracker yet</span> <button onclick="_nhlModelTrackAnyway('${k.replace(/'/g, "")}')" style="background:transparent;border:1px solid #00aaff;color:#00aaff;border-radius:4px;padding:1px 8px;font-size:11px;font-weight:700;cursor:pointer;">Track it</button>`;
+}
+async function _nhlModelTrackAnyway(key) {
+  const x = nhlModelLog.find(y => y.key === key); if (!x) return;
+  delete x.dismissed; _nhlModelSave();
+  const n = await _nhlCarryModelPicks();
+  if (!n) showNhlToast("Couldn't add it — check the tracker for another bet on this player today");
+  renderNhlModelTab();
+}
 async function _nhlCarryModelPicks() {
   const today = _ymdLocal(new Date());
   // Every open model pick that isn't in the tracker right now (so deleting old ensemble bets lets the model's
@@ -3268,9 +3286,9 @@ function renderNhlModelTab() {
     const rowsHtml = _nhlModelRows.map(r => {
       const inPs = psKeys.has(nn(r.player) + "|" + r.ou + "|" + r.line);
       const srcOrder = Object.keys(r.projs).sort((a, b) => r.projs[a] - r.projs[b]);
-      return `<tr>${td(`<b>${escapeHtmlBasic(r.player)}</b> <span style="color:#9fb8d6;font-size:11px;">${escapeHtmlBasic(r.game)}</span>`)}${td(`<span style="color:${r.ou === "over" ? "#fb923c" : "#38bdf8"};font-weight:800;">${r.ou === "over" ? "O" : "U"}${r.line}</span>`)}${td(`${fmt(r.odds)} <span style="color:#9fb8d6;">${escapeHtmlBasic(r.book)}</span>`, "white-space:nowrap;")}${td(r.playTo != null && isFinite(Number(r.playTo)) ? fmt(Number(r.playTo)) : "—")}${td(`<b>${Object.values(r.evs || {}).filter(e => e > 0).length}/${r.of}</b> <span style="color:#9fb8d6;font-size:11px;">${r.agree} at ${NHL_PS_QUAL_EV}%+</span>`)}${td(srcOrder.map(s => chip(s, r)).join(""))}${td(inPs ? `<span style="color:#00cc66;font-weight:800;">✓ PS</span>` : `<span style="color:#eab308;font-weight:800;">model only</span>`)}</tr>`;
+      return `<tr>${td(`<b>${escapeHtmlBasic(r.player)}</b> <span style="color:#9fb8d6;font-size:11px;">${escapeHtmlBasic(r.game)}</span>`)}${td(`<span style="color:${r.ou === "over" ? "#fb923c" : "#38bdf8"};font-weight:800;">${r.ou === "over" ? "O" : "U"}${r.line}</span>`)}${td(`${fmt(r.odds)} <span style="color:#9fb8d6;">${escapeHtmlBasic(r.book)}</span>`, "white-space:nowrap;")}${td(r.playTo != null && isFinite(Number(r.playTo)) ? fmt(Number(r.playTo)) : "—")}${td(`<b>${Object.values(r.evs || {}).filter(e => e > 0).length}/${r.of}</b> <span style="color:#9fb8d6;font-size:11px;">${r.agree} at ${NHL_PS_QUAL_EV}%+</span>`)}${td(srcOrder.map(s => chip(s, r)).join(""))}${td(inPs ? `<span style="color:#00cc66;font-weight:800;">✓ PS</span>` : `<span style="color:#eab308;font-weight:800;">model only</span>`)}${td(_nhlModelTrackStatus(r), "font-size:12px;")}</tr>`;
     }).join("");
-    const head = ["Player", "Side", "Best price", "Play to", "Agree", "Sources (proj · EV at this price)", "PropShop"].map(h => `<th style="padding:6px 9px;font-size:11px;text-align:left;letter-spacing:.5px;text-transform:uppercase;white-space:nowrap;">${h}</th>`).join("");
+    const head = ["Player", "Side", "Best price", "Play to", "Agree", "Sources (proj · EV at this price)", "PropShop", "Tracker"].map(h => `<th style="padding:6px 9px;font-size:11px;text-align:left;letter-spacing:.5px;text-transform:uppercase;white-space:nowrap;">${h}</th>`).join("");
     today = `<div style="font-size:13px;color:#fff;font-weight:700;margin-bottom:8px;">${_nhlModelPreview ? `<span style="color:#00aaff;">CHECK ONLY (nothing logged)</span> · ` : ""}Run at ${_nhlModelRunAt.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}: ${_nhlModelRows.length} model picks · ${both} also PropShop · ${_nhlModelRows.length - both} model only · ${psOnly.length} PropShop only</div>
       ${psOnly.length ? `<div style="font-size:12px;color:#9fb8d6;margin-bottom:10px;">PropShop only: ${psOnly.map(k => { const [n, ou, ln] = k.split("|"); const b = bets.find(x => nn(x.player) === n) || (window._nhlPsEnsembleRows || []).find(x => nn(x.player) === n); return escapeHtmlBasic((b ? b.player : n) + " " + (ou === "over" ? "O" : "U") + ln); }).join(", ")}</div>` : ""}
       ${_nhlModelRows.length ? `<div style="overflow-x:auto;border:1px solid #0d2035;border-radius:8px;"><table style="border-collapse:collapse;color:#fff;width:100%;"><thead style="background:#0a1628;"><tr>${head}</tr></thead><tbody>${rowsHtml}</tbody></table></div>` : `<div style="color:#9fb8d6;font-size:13px;">No line clears the bar at current prices.</div>`}`;
