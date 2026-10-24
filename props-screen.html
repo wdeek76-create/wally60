@@ -1817,7 +1817,7 @@ function saveSportCache(sk){
   sportMem[sk]={ day:todayKey(), data:{ fixtures, mainRows, players, at:loadedAt } };
   try{
     const playersOut=players.map(p=>({...p, pids:[...p.pids], marketKeys:[...p.marketKeys]}));
-    LS.set(sportCacheKey(sk), JSON.stringify({ day:todayKey(), fixtures, mainRows, players:playersOut, at:loadedAt }));
+    LS.set(sportCacheKey(sk), JSON.stringify({ day:todayKey(), fixtures, mainRows, players:playersOut, at:loadedAt }, (k,v)=>(k==='_mk'||k==='_mkS'||k==='_mkN'||k==='_who'||k==='_whoN')?undefined:v));
   }catch(e){ console.warn('[props] cache save failed', e.message); }
 }
 const sportMem={};   // sk -> {day, data}: in-memory copy of each sport's latest load
@@ -1945,7 +1945,7 @@ function saveSportCacheData(sk, d){
   sportMem[sk]={ day:todayKey(), data:d };
   try{
     const playersOut=d.players.map(p=>({...p, pids:[...p.pids], marketKeys:[...p.marketKeys]}));
-    LS.set(sportCacheKey(sk), JSON.stringify({ day:todayKey(), fixtures:d.fixtures, mainRows:d.mainRows, players:playersOut, at:d.at }));
+    LS.set(sportCacheKey(sk), JSON.stringify({ day:todayKey(), fixtures:d.fixtures, mainRows:d.mainRows, players:playersOut, at:d.at }, (k,v)=>(k==='_mk'||k==='_mkS'||k==='_mkN'||k==='_who'||k==='_whoN')?undefined:v));
   }catch(e){ console.warn('[props] cache save failed', e.message); }
 }
 // A sport's data for the parlay tool without opening its tab: today's cache when it's fresher than
@@ -2097,10 +2097,13 @@ async function fetchPlayerInfo(p){
 // Who a row is about: the selection, or -- when the selection is just "Over"/"Yes" (Kalshi, some
 // exchange feeds) -- the row's name with that part cut off.
 const rowWho = o => { let n=cleanSel(o.selection||''); if(!n || /^(over|under|yes|no)\b/i.test(n)) n=cleanSel(String(o.player?.name||o.name||'').replace(/\s+(over|under|yes|no)\b.*$/i,'')); return normName(n); };
+// market key + player of a row, worked out once per row (rowsFor runs over every row many times)
+const rowMk = o => { if(o._mkS!==sportKey || o._mkN!==o.market){ o._mkS=sportKey; o._mkN=o.market; o._mk=marketKeyFor(sportKey,o.market); } return o._mk; };
+const rowWhoC = o => { if(o._whoN!==o.selection){ o._whoN=o.selection; o._who=rowWho(o); } return o._who; };
 function rowsFor(p, mkey, rows){
   const m5=mode5On();
-  if(p.isGame) return rows.filter(o=>o._fx===p.fixtureId && marketKeyFor(sportKey,o.market)===mkey && (!m5||inMode5(o)));
-  return rows.filter(o=>o._fx===p.fixtureId && marketKeyFor(sportKey,o.market)===mkey && rowWho(o)===p.key && (!m5||inMode5(o)));
+  if(p.isGame) return rows.filter(o=>o._fx===p.fixtureId && rowMk(o)===mkey && (!m5||inMode5(o)));
+  return rows.filter(o=>o._fx===p.fixtureId && rowMk(o)===mkey && rowWhoC(o)===p.key && (!m5||inMode5(o)));
 }
 function sideOf(o){ const s=String(o.selection_line||'').toLowerCase(); if(s==='over'||s==='under') return s;
   // Kalshi posts props as Yes/No on a threshold ("3+ assists" = Yes at 2.5) -- that's the Over/Under,
@@ -3647,7 +3650,7 @@ function ladderHtml(leg, L, hero){
 // each leg getting a separate bordered card.
 function parlayLegHtml(leg){
   const rows=rowsForLeg(leg);
-  const mine=bestFirst(myRowsForLeg(leg,rows));
+  const mine=bestFirst(myRowsForLeg(leg,rows).filter(o=>!PF_SKIP_BOOKS.has(rawBook(o))));
   const targetRow = autoTargetBook ? mine.find(o=>rawBook(o)===autoTargetBook) : null;
   const hero = targetRow || mine[0] || null;
   const L = legLadder(mine, hero?.price, SPORTS[leg.sportKey]?.threeWay);
@@ -4069,37 +4072,52 @@ let pfShow = 30;
 const pfLoading = new Set();
 function pfLeagueKey(){ return pfLeague||sportKey; }
 function pfData(sk){ if(sk===sportKey && players?.length) return {fixtures, mainRows, players}; const c=loadSportCache(sk); return c&&c.players ? c : null; }
+// The scan is the heavy part, so it runs once per (lines loaded, markets, target, hold, game) and
+// every other tap (open a play, sort, mode, boost, add/remove) just re-draws from that result.
+// One game at a time too, so each player only searches his own game's lines.
+const PF_SKIP_BOOKS = new Set(['onyx odds','courtside']);   // DK skins -- not shown in the parlay tool
+let pfCache = { key:null, rows:null, list:null };
 function pfScan(){
   const sk=pfLeagueKey(), d=pfData(sk);
   if(!d){ if(!pfLoading.has(sk)){ pfLoading.add(sk); ensureSportData(sk).finally(()=>{ pfLoading.delete(sk); if(viewMode==='parlay') renderParlay(); }); } return null; }
   if(!autoTargetBook){ autoTargetBook='fanduel'; LS.set('props_autotarget','fanduel'); }
+  const key=[sk, autoScope, autoTargetBook, parlayMaxHold, pfGame].join('|');
+  if(pfCache.key===key && pfCache.rows===d.mainRows) return pfCache.list.filter(c=>c.src!=='exch' || c.liq>=pfMin);
+  const byFx={}; d.mainRows.forEach(o=>{ if(PF_SKIP_BOOKS.has(rawBook(o))) return; (byFx[o._fx]=byFx[o._fx]||[]).push(o); });
+  const plByFx={}; d.players.forEach(p=>{ (plByFx[p.fixtureId]=plByFx[p.fixtureId]||[]).push(p); });
   const g=[sportKey,fixtures,mainRows,players], a=[autoFixture,autoMinLiqMains,autoMinLiqProps,autoMinPinMains,autoMinPinProps,autoEdge,autoSharpMin,autoHoldPref,autoWhy];
+  const out=[];
   try{
-    sportKey=sk; fixtures=d.fixtures; mainRows=d.mainRows; players=d.players;
+    sportKey=sk; fixtures=d.fixtures;
     autoFixture=pfGame; autoMinLiqMains=autoMinLiqProps=autoMinPinMains=autoMinPinProps=0; autoEdge=''; autoSharpMin=0; autoHoldPref=true; autoWhy=null;
-    const out=[];
-    buildAutoCandidates().forEach(c=>{
-      const sides=pfSides(c, sk, d.mainRows);
-      const x={ ...c, sk, rows:d.mainRows, fxs:d.fixtures, fx:d.fixtures.find(f=>f.id===c.p.fixtureId), cmp:pfBestByBook(sides.mine) };
-      if(c.liq>0){ if(c.liq>=pfMin) out.push({ ...x, src:'exch' }); return; }
-      // main lines with no exchange money: a sharp book's no-vig fair (Pinnacle first, then BetOnline,
-      // BookMaker) -- counts when the target's price is at or better than it (0%+ EV)
-      if(!c.isMain) return;
-      for(const k of ['pinnacle','betonline','bookmaker']){
-        const m=pfBestByBook(sides.mine.filter(o=>canonBook(o.sportsbook)===k))[0], o2=pfBestByBook(sides.opp.filter(o=>canonBook(o.sportsbook)===k))[0];
-        if(!m || !o2) continue;
-        const pm=toImplied(Number(m.price)), po=toImplied(Number(o2.price)), fairP=pm/(pm+po);
-        const ev=(fairP*toDec(Number(c.refRow.price))-1)*100;
-        if(ev>=-1e-7) out.push({ ...x, src:'sharp', ev, hold:-ev, sharpBook:k, sharpFair:toAm(1/fairP), liq:0 });
-        break;
-      }
+    Object.keys(byFx).forEach(fid=>{
+      if(pfGame && fid!==pfGame) return;
+      const R=byFx[fid]; mainRows=R; players=plByFx[fid]||[]; if(!players.length) return;
+      buildAutoCandidates().forEach(c=>{
+        const sides=pfSides(c, sk, R);
+        const x={ ...c, sk, rows:d.mainRows, fxs:d.fixtures, fx:d.fixtures.find(f=>f.id===c.p.fixtureId), cmp:pfBestByBook(sides.mine) };
+        if(c.liq>0){ out.push({ ...x, src:'exch' }); return; }
+        // main lines with no exchange money: a sharp book's no-vig fair (Pinnacle first, then BetOnline,
+        // BookMaker) -- counts when the target's price is at or better than it (0%+ EV)
+        if(!c.isMain) return;
+        for(const k of ['pinnacle','betonline','bookmaker']){
+          const m=pfBestByBook(sides.mine.filter(o=>canonBook(o.sportsbook)===k))[0], o2=pfBestByBook(sides.opp.filter(o=>canonBook(o.sportsbook)===k))[0];
+          if(!m || !o2) continue;
+          const pm=toImplied(Number(m.price)), po=toImplied(Number(o2.price)), fairP=pm/(pm+po);
+          const ev=(fairP*toDec(Number(c.refRow.price))-1)*100;
+          if(ev>=-1e-7) out.push({ ...x, src:'sharp', ev, hold:-ev, sharpBook:k, sharpFair:toAm(1/fairP), liq:0 });
+          break;
+        }
+      });
     });
-    // exchange-backed first (preferred), then sharp-book ones; best hold first inside each
-    return out.sort((x,y)=>(x.src==='exch'?0:1)-(y.src==='exch'?0:1) || (x.hold??99)-(y.hold??99) || y.liq-x.liq);
   } finally {
     [sportKey,fixtures,mainRows,players]=g;
     [autoFixture,autoMinLiqMains,autoMinLiqProps,autoMinPinMains,autoMinPinProps,autoEdge,autoSharpMin,autoHoldPref,autoWhy]=a;
   }
+  // exchange-backed first (preferred), then sharp-book ones; best hold first inside each
+  const list=out.sort((x,y)=>(x.src==='exch'?0:1)-(y.src==='exch'?0:1) || (x.hold??99)-(y.hold??99) || y.liq-x.liq);
+  pfCache={ key, rows:d.mainRows, list };
+  return list.filter(c=>c.src!=='exch' || c.liq>=pfMin);
 }
 const PF_SHARP = new Set(['pinnacle','betonline','bookmaker']);
 // this pick's own side and the other side, every book (exchanges' mislabeled rows corrected)
@@ -4114,7 +4132,7 @@ function pfSides(c, sk, R){
   return { mine:rows.filter(o=>sideOf(o)===c.side && at(o)), opp:rows.filter(o=>sideOf(o)===(c.side==='over'?'under':'over') && at(o)) };
 }
 // best price per book, best first
-const pfBestByBook = rows => Object.values((rows||[]).reduce((m,o)=>{ const k=rawBook(o); if(!m[k] || toDec(o.price)>toDec(m[k].price)) m[k]=o; return m; },{})).sort((a,b)=>toDec(b.price)-toDec(a.price));
+const pfBestByBook = rows => Object.values((rows||[]).filter(o=>!PF_SKIP_BOOKS.has(rawBook(o))).reduce((m,o)=>{ const k=rawBook(o); if(!m[k] || toDec(o.price)>toDec(m[k].price)) m[k]=o; return m; },{})).sort((a,b)=>toDec(b.price)-toDec(a.price));
 // every book's price for the pick, the target book highlighted -- the market comparison
 const pfCmpHtml = (rows, tgt) => rows.length ? `<div class="plstrip pfcmp">${rows.map(o=>{ const k=rawBook(o); return bookChipHtml(k, o.price, deepLinkFor(o)||BOOK_HOME[k], k===tgt, EXCH.has(canonBook(k))?'<span class="dim" style="font-size:9.5px;margin-left:3px">exch</span>':k!==canonBook(k)?`<span class="dim" style="font-size:9.5px;margin-left:3px">${esc(o.sportsbook)}</span>`:''); }).join('')}</div>` : '<div class="dim" style="font-size:11px">No other books posting this.</div>';
 // the best N by the current sort: one leg per player/team + market, never both teams of a game
