@@ -850,7 +850,7 @@ a.plbk{color:var(--cyan)}
       <polyline class="bline" points="0,42 22,32 44,36 66,14 88,20 100,12" fill="none" stroke="url(#brandLine)" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
       <circle class="bdot" cx="100" cy="12" r="7" fill="#5eead4"/>
     </svg><span class="word"><span class="p1">Pocket</span><span class="p2">Market</span></span></div>
-  <div class="status"><span id="stat">Pick a sport</span><span class="r"><button class="ib" id="themeToggle" title="Switch theme"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor" stroke="none"/></svg></button><button class="ib" id="gridToggle" title="Grid view">⊞</button><button class="ib wide" id="mode5Toggle" title="Only FD, Fliff, Novig, PX, Onyx" style="display:none">5 books</button><button class="ib p" id="reload" title="Reload">⟳</button><button class="ib" id="cfg" title="Settings" style="display:none">⚙</button></span></div>
+  <div class="status"><span id="stat">Pick a sport</span><span class="r"><button class="ib" id="themeToggle" title="Switch theme"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor" stroke="none"/></svg></button><button class="ib wide" id="mode5Toggle" title="Only FD, Fliff, Novig, PX, Onyx" style="display:none">5 books</button><button class="ib p" id="reload" title="Reload">⟳</button><button class="ib" id="cfg" title="Settings" style="display:none">⚙</button></span></div>
 </div>
 
 <main id="view"><div class="loading"><div class="spin"></div><div class="lbl">Loading player props…</div></div></main>
@@ -2682,13 +2682,25 @@ async function openPlayer(p, startAt, keepScroll){
 // and re-render whatever market card(s) are on screen. Self-stops once the board
 // is no longer showing (navigated away, switched sport/tab, etc).
 let boardTimer = null;
-function startBoardTimer(){ clearInterval(boardTimer); boardTimer=setInterval(refreshBoardOdds, 20000); }
+// Player page odds: re-pulled every 4s (all book requests at once) -- main lines for every market,
+// plus every line of the market on screen, so stepped alt lines move live too.
+const BOARD_MS = 4000; let boardBusy = false;
+function startBoardTimer(){ clearInterval(boardTimer); boardTimer=setInterval(()=>{ if(!document.hidden && !boardBusy) refreshBoardOdds(); }, BOARD_MS); }
 async function refreshBoardOdds(){
+  boardBusy=true; try{ await refreshBoardOdds0(); } finally{ boardBusy=false; }
+}
+async function refreshBoardOdds0(){
   const p=current;
   if(!p || viewMode!=='sport' || !document.querySelector('.pcard')){ clearInterval(boardTimer); boardTimer=null; return; }
   const fx=p.fixtureId;
   const rows=[];
-  try{ for(const bk of chunk(bookReqFor(sportKey),5)){ const r=await oo('/fixtures/odds',{fixture_id:[fx],sportsbook:bk,is_main:true}); (r?.data||[]).forEach(d=>(d.odds||[]).forEach(o=>{ o._fx=d.id; if(mainBookRow(sportKey,o)) rows.push(o); })); } }
+  // every market's main lines + all lines of the market on screen, all requests at once
+  const S0=SPORTS[sportKey], mk0=S0.markets.map(m=>m[0]).filter(k=>p.marketKeys.has(k))[curMktIdx];
+  const altNames=mk0?marketNamesFor(p,mk0):[], ack=altNames.length?altKey(p,mk0):null, altRows=[];
+  try{ await Promise.all(chunk(bookReqFor(sportKey),5).flatMap(bk=>[
+      oo('/fixtures/odds',{fixture_id:[fx],sportsbook:bk,is_main:true}).then(r=>(r?.data||[]).forEach(d=>(d.odds||[]).forEach(o=>{ o._fx=d.id; if(mainBookRow(sportKey,o)) rows.push(o); }))),
+      ...(ack && altCache[ack] ? [oo('/fixtures/odds',{fixture_id:[fx],sportsbook:bk,market:altNames}).then(r=>(r?.data?.[0]?.odds||[]).forEach(o=>{ o._fx=fx; if(mainBookRow(sportKey,o)) altRows.push(o); }))] : []) ]));
+    if(ack && altCache[ack] && altRows.length) altCache[ack]=altRows; }
   catch(e){ console.warn('[props] board refresh failed', e.message); return; }
   if(current!==p || viewMode!=='sport' || !document.querySelector('.pcard')) return;
   mainRows = mainRows.filter(o=>o._fx!==fx).concat(rows);
@@ -2998,7 +3010,7 @@ const marketNamesFor = (p,mkey) => [...new Set(rowsFor(p,mkey,mainRows).map(o=>o
 // swiping back to a market already seen doesn't refetch. boardHtml merges whatever comes back
 // into quick arb's own book list alone; nothing else on the card reads this cache.
 const qarbExtraCache = {}, qarbExtraAt = {};
-const QARB_EXTRA_TTL = 30000; // refetch Caesars/HR/Kambi/MGM while quick arb is open, so their prices + liq stay live
+const QARB_EXTRA_TTL = 10000; // refetch Caesars/HR/Kambi/MGM while quick arb is open, so their prices + liq stay live
 const qarbExtraPending = {};
 async function ensureQarbExtras(p, mkey){
   const marketNames=marketNamesFor(p,mkey);
@@ -4821,7 +4833,7 @@ function gameOddsLine(f){
   const html = mlChip(away, f.away.ab||f.away.name)+mlChip(home, f.home.ab||f.home.name)+totChip;
   return html ? `<div class="gmodds">${html}</div>` : '';
 }
-let gridMode = LS.get('props_grid','')==='1';
+let gridMode = false;   // grid / "Classic screen" view removed
 function renderSlate(){ if(gridMode) return renderGrid(); return renderSlateCards(); }
 function renderSlateCards(){
   current=null; clearGstripDock(); const S=SPORTS[sportKey]; const view=$('#view');
@@ -5305,7 +5317,7 @@ $('#clr').addEventListener('click',()=>{ $('#q').value=''; suggest(''); renderSl
 $('#q').addEventListener('keydown',e=>{ if(e.key==='Enter'){ e.preventDefault(); if(!openSearchHit() && !loadedAt) pendingSearchEnter=true; } });
 $('#reload').addEventListener('click',()=>loadSport(true));
 syncGridBtn();
-$('#gridToggle').addEventListener('click',toggleGridMode);
+
 $('#mode5Toggle').addEventListener('click',()=>{
   bookMode=!bookMode; LS.set('props_nba5', bookMode?'1':''); syncMode5Btn();
   toast(bookMode?'NBA: FD · Fliff · Novig · PX · Onyx only':'NBA: all books');
