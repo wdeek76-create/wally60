@@ -1762,11 +1762,11 @@ function nlFind(rows){
     let kal=null;
     g.rows.filter(o=>o._sd===opp && canonBook(o.sportsbook)==='kalshi').forEach(o=>levelsOf(o).forEach(l=>{
       const h=hv(l.price); if(h>1e-7 || h<-SHARP_MAX_ARB) return;
-      kal=kal||{ size:0, best:l.price }; kal.size+=l.size; if(l.price>kal.best) kal.best=l.price; }));
-    if(kal && kal.size>=nlKalMin) sigs.push({ kind:'Kalshi', books:['kalshi'], prices:[kal.best], hold:hv(kal.best), size:kal.size });
+      kal=kal||{ size:0, best:l.price, lv:[], link:sharpLink(o) }; kal.size+=l.size; kal.lv.push({ price:Number(l.price), size:l.size, hold:h }); if(l.price>kal.best) kal.best=l.price; }));
+    if(kal && kal.size>=nlKalMin) sigs.push({ kind:'Kalshi', books:['kalshi'], prices:[kal.best], hold:hv(kal.best), size:kal.size, levels:kal.lv.sort((a,b)=>b.price-a.price), links:[kal.link] });
     const bo=b=>g.rows.filter(o=>o._sd===opp && rawBookSM(o)===b).sort((x,y)=>toDec(y.price)-toDec(x.price))[0];
     NL_PAIRS.forEach(([a,b])=>{ const oa=bo(a), ob=bo(b); if(!oa||!ob) return; const ha=hv(oa.price), hb=hv(ob.price);
-      if(ha<=1e-7 && hb<=1e-7 && ha>=-SHARP_MAX_ARB && hb>=-SHARP_MAX_ARB) sigs.push({ kind:`${NL_LBL[a]}+${NL_LBL[b]}`, books:[a,b], prices:[Number(oa.price),Number(ob.price)], hold:Math.max(ha,hb) }); });
+      if(ha<=1e-7 && hb<=1e-7 && ha>=-SHARP_MAX_ARB && hb>=-SHARP_MAX_ARB) sigs.push({ kind:`${NL_LBL[a]}+${NL_LBL[b]}`, books:[a,b], prices:[Number(oa.price),Number(ob.price)], hold:Math.max(ha,hb), links:[sharpLink(oa),sharpLink(ob)] }); });
     if(!sigs.length) return;
     out.push({ key:`${g.fx}|${g.mk}|${g.who}|${g.line}|${side}`, f:nlGames.find(x=>x.id===g.fx), fid:g.fx, mk:g.mk, who:g.who, name:g.name, line:g.line, side, market:g.market, fd, sigs, best:Math.min(...sigs.map(x=>x.hold)) });
   }));
@@ -1786,14 +1786,26 @@ function nlAlert(){
     if(nlHook) nlPost(p, ns);
   });
 }
+// Discord: laid out like the Sharp Money alerts -- bet first + role, title = FD price + bet (links to
+// FD), matchup, then one block per signal: FD VS. the other side (flipped to FD's side), the
+// Kalshi depth table, and links to every book in the play.
 function nlPost(p, sigs){
-  const title=`${fmtAm(p.fd.price)} ${titleCase(p.name)} ${nlSide(p.side)}${p.line!=null?' '+p.line:''} ${marketLabel('nba',p.mk)}`;
-  const lines=sigs.map(x=>x.kind==='Kalshi' ? `**Kalshi** ${fmtAm(x.prices[0])} ${nlSide(p.side==='over'?'under':'over')} - ${usd(x.size)} - ${nlHold(x.hold)}`
-    : `**${x.kind}** ${x.books.map((b,i)=>`${NL_LBL[b]} ${fmtAm(x.prices[i])}`).join(' / ')} - ${nlHold(x.hold)}`);
-  const role=/^\d{15,}$/.test(nlRole)?nlRole:'', f=p.f;
-  discordPost({ username:'FanDuel', avatar_url:httpsLogo('fanduel'), content:[title.replace(/^(\S+) (.*)$/,'$2 $1'), role?`<@&${role}>`:''].filter(Boolean).join(' '), allowed_mentions: role?{roles:[role]}:{parse:[]},
-    embeds:[{ title, url:sharpLink(p.fd)||undefined, color:sigs.some(x=>x.hold<-0.05)?0x22c55e:0xeab308,
-      description:`${f?`${teamNick(f.away.name)||f.away.ab} @ ${teamNick(f.home.name)||f.home.ab} **LIVE**\n`:''}**FD ${fmtAm(p.fd.price)}** vs:\n${lines.join('\n')}\nSent <t:${Math.floor(Date.now()/1000)}:R>`, footer:{ text:'NBA LIVE' } }] }, null, nlHook);
+  const mk=marketLabel('nba',p.mk), bet=`${titleCase(p.name)} ${nlSide(p.side)}${p.line!=null?' '+p.line:''} ${mk}`;
+  const title=`${fmtAm(p.fd.price)} ${bet}`, opp=nlSide(p.side==='over'?'under':'over');
+  const role=/^\d{15,}$/.test(nlRole)?nlRole:'', f=p.f, fdUrl=sharpLink(p.fd);
+  const fields=sigs.map(x=>{
+    if(x.kind==='Kalshi'){
+      const tbl='```\n'+[`${'Odds'.padEnd(6)} ${'Liq'.padStart(6)} ${'Hold'.padStart(6)}`, ...x.levels.slice(0,6).map(l=>`${fmtAm(l.price).padEnd(6)} ${usd(l.size).padStart(6)} ${(l.hold<-0.05?'+'+(-l.hold).toFixed(1)+'%':'0.0%').padStart(6)}`)].join('\n')+'\n```';
+      return { name:`FD vs Kalshi (${usd(x.size)} at ${x.hold<-0.05?'arb':'0% hold'})`, value:`**${fmtAm(p.fd.price)}** VS. **${fmtAm(-x.prices[0])}**\nKalshi ${opp} ${fmtAm(x.prices[0])}${tbl}` };
+    }
+    return { name:`FD vs ${x.books.map(b=>NL_LBL[b]).join(' + ')} (${x.hold<-0.05?(-x.hold).toFixed(1)+'% arb':'0% hold'})`, value:`**${fmtAm(p.fd.price)}** VS. ${x.books.map((b,i)=>`**${fmtAm(-x.prices[i])}** ${NL_LBL[b]}`).join(' / ')}\n${x.books.map((b,i)=>`${NL_LBL[b]} ${opp} ${fmtAm(x.prices[i])}`).join(' · ')}` };
+  });
+  const links=[`[Bet FD ${fmtAm(p.fd.price)}](${discordUrl(fdUrl)||BOOK_HOME.fanduel})`];
+  sigs.forEach(x=>x.books.forEach((b,i)=>{ const u=discordUrl(x.links?.[i])||BOOK_HOME[b]; const t=`[${NL_LBL[b]} ${opp} ${fmtAm(x.prices[i])}](${u})`; if(u && !links.some(l=>l.startsWith(`[${NL_LBL[b]} `))) links.push(t); }));
+  fields.push({ name:'Links', value:links.join(' · ')+`\nSent <t:${Math.floor(Date.now()/1000)}:R>` });
+  discordPost({ username:'FanDuel', avatar_url:httpsLogo('fanduel'), content:[`${bet} ${fmtAm(p.fd.price)}`, role?`<@&${role}>`:''].filter(Boolean).join(' '), allowed_mentions: role?{roles:[role]}:{parse:[]},
+    embeds:[{ title, url:discordUrl(fdUrl)||undefined, color:sigs.some(x=>x.hold<-0.05)?0x22c55e:0xeab308, thumbnail:httpsLogo('fanduel')?{url:httpsLogo('fanduel')}:undefined,
+      description:`${f?`${teamNick(f.away.name)||f.away.ab} @ ${teamNick(f.home.name)||f.home.ab} **LIVE**\n`:''}**NBA LIVE - ${esc(mk).toUpperCase()}**`, fields, footer:{ text:'NBA LIVE' } }] }, null, nlHook);
 }
 let nlTkBusy=false;
 async function nlRefreshTracked(){
