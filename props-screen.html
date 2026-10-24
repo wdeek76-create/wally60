@@ -4168,8 +4168,17 @@ function pfDetHtml(ref, tgt, L, mine, sharp){
 // and the top few parlays are put together from the best legs (one leg per player/team + market,
 // never both teams of a game; SGP = all from one game). Parlay EV = fair win chance x the target's
 // price (with your boost) - 1, legs treated as independent.
+const PF_FAIR_BOOKS = ['pinnacle','betonline','bookmaker','bet105','props builder','novig','prophet x','kalshi'];
 function pfAutoParlays(){
-  const pool0=(pfCache.all||[]).filter(c=>c.fairP!=null && c.refRow).map(c=>({ ...c, ev:(c.fairP*toDec(Number(c.refRow.price))-1)*100 }))
+  // fair = devig of OUR sharp books + exchanges only (Pinnacle, BetOnline, BookMaker, bet105, Props
+  // Builder, Novig, ProphetX, Kalshi): each one's own two sides at this line, then averaged
+  const pool0=(pfCache.all||[]).filter(c=>c.refRow).map(c=>{
+      const sd=pfSides(c, c.sk, c.rows), ps=[], src=[];
+      PF_FAIR_BOOKS.forEach(k=>{ const m=pfBestByBook(sd.mine.filter(o=>canonBook(o.sportsbook)===k))[0], o2=pfBestByBook(sd.opp.filter(o=>canonBook(o.sportsbook)===k))[0];
+        if(!m||!o2) return; const a=toImplied(Number(m.price)), b=toImplied(Number(o2.price)); if(a+b<0.9 || a+b>1.15) return; ps.push(a/(a+b)); src.push(bookShort(k)); });
+      if(!ps.length) return null;
+      const fairP=ps.reduce((x,y)=>x+y,0)/ps.length;
+      return { ...c, fairP, fairSrc:src, ev:(fairP*toDec(Number(c.refRow.price))-1)*100 }; }).filter(Boolean)
     .filter(c=>c.ev>-3 && Math.abs(Number(c.refRow.price))<1000).sort((a,b)=>b.ev-a.ev);
   // best side only, per player/team + market
   const seen=new Set(), pool=pool0.filter(c=>{ const k=c.p.fixtureId+'|'+c.p.key+'|'+c.mkey; if(seen.has(k)) return false; seen.add(k); return true; });
@@ -4183,6 +4192,18 @@ function pfAutoParlays(){
       out.push(c); }
     return out.length===pfLegs ? out : null; };
   let src=pool;
+  // SGP: legs come from the sharp-money plays (exchange money behind FD's price, best hold first) --
+  // the slip's own SGP price is what pays, so no multiplied EV for these
+  if(pfSgp){
+    const sm=(pfList||[]).filter(c=>c.refRow), g={}; sm.forEach(c=>{ (g[c.p.fixtureId]=g[c.p.fixtureId]||[]).push(c); });
+    const games=Object.values(g).filter(l=>new Set(l.map(c=>c.p.key+c.mkey)).size>=pfLegs).sort((a,b)=>b.length-a.length || a[0].hold-b[0].hold);
+    const out=[], sigs=new Set();
+    games.forEach(l=>{ const seen2=new Set(), uniq=l.filter(c=>{ const k=c.p.key+'|'+c.mkey; if(seen2.has(k)) return false; seen2.add(k); return true; });
+      for(let st=0; st<uniq.length && out.length<5; st++){ const legs=pick(uniq,st); if(!legs) break; const sig=legs.map(c=>c.p.key+c.mkey).sort().join('|'); if(sigs.has(sig)) continue; sigs.add(sig);
+        const dec=legs.reduce((a,c)=>a*toDec(Number(c.refRow.price)),1);
+        out.push({ legs:legs.map(c=>({ ...c, smTag: c.src==='sharp' ? `${bookShort(c.sharpBook)} fair ${fmtAm(c.sharpFair)}` : `${usd(c.liq)} exch · ${holdTxt(c.hold??0)}` })), price:toAm(dec), boosted:toAm(1+(dec-1)*(1+pfBoost/100)), fair:null, ev:null, sameGame:true }); } });
+    return out.slice(0,5);
+  }
   if(pfSgp && !pfGame){ const g={}; pool.forEach(c=>{ (g[c.p.fixtureId]=g[c.p.fixtureId]||[]).push(c); });
     const best=Object.values(g).filter(l=>l.length>=pfLegs).sort((a,b)=>b.slice(0,pfLegs).reduce((x,c)=>x+c.ev,0)-a.slice(0,pfLegs).reduce((x,c)=>x+c.ev,0))[0]; src=best||[]; }
   const out=[], sigs=new Set();
@@ -4198,10 +4219,10 @@ function pfParlayCardHtml(P, i){
   const link = tgt==='fanduel' ? (fdParlayLink(P.legs.map(c=>c.refRow)) || BOOK_HOME.fanduel) : (BOOK_HOME[tgt]||'#');
   return `<div class="pfpar">
     <div class="pfparh"><div><div class="pfname">Parlay ${i+1} <span class="pfbet">${P.legs.length} legs${P.sameGame?' · same game':''}</span></div>
-      <div class="pfmeta">${esc(bookShort(tgt))} ${fmtAm(pfBoost?P.boosted:P.price)}${pfBoost?` (+${pfBoost}% boost, ${fmtAm(P.price)})`:''} · fair ${fmtAm(P.fair)}</div></div>
-      <span class="pftag${P.ev>0?' good':''}" style="font-size:12.5px">${P.ev>0?'+':''}${P.ev.toFixed(1)}% EV</span></div>
+      <div class="pfmeta">${P.ev==null?`SGP · ${esc(bookShort(tgt))} prices it on the slip (legs multiplied ${fmtAm(P.price)})`:`${esc(bookShort(tgt))} ${fmtAm(pfBoost?P.boosted:P.price)}${pfBoost?` (+${pfBoost}% boost, ${fmtAm(P.price)})`:''} · fair ${fmtAm(P.fair)}`}</div></div>
+      ${P.ev==null?'<span class="pftag good" style="font-size:12px">Sharp money</span>':`<span class="pftag${P.ev>0?' good':''}" style="font-size:12.5px">${P.ev>0?'+':''}${P.ev.toFixed(1)}% EV</span>`}</div>
     ${P.legs.map(c=>`<div class="pfleg">${pfLogoHtml(c)}<div class="pfmain"><div class="pfname" style="font-size:13px">${esc(c.p.isGame&&c.fx?fxLabel(c.fx):titleCase(c.p.name))} <span class="pfbet">${esc(pfBetTxt(c))}</span></div>
-      <div class="pfmeta">${pfBookImg(rawBook(c.refRow))}<b>${fmtAm(c.refRow.price)}</b> · fair ${fmtAm(toAm(1/c.fairP))} · <span class="${c.ev>0?'pos':''}">${c.ev>0?'+':''}${c.ev.toFixed(1)}%</span>${c.fx?` · ${esc(fxLabel(c.fx))}`:''}</div></div></div>`).join('')}
+      <div class="pfmeta">${pfBookImg(rawBook(c.refRow))}<b>${fmtAm(c.refRow.price)}</b> · ${c.smTag ? esc(c.smTag) : `fair ${fmtAm(toAm(1/c.fairP))} <span class="dim">(${esc(c.fairSrc.join('/'))})</span> · <span class="${c.ev>0?'pos':''}">${c.ev>0?'+':''}${c.ev.toFixed(1)}%</span>`}${c.fx?` · ${esc(fxLabel(c.fx))}`:''}</div></div></div>`).join('')}
     <div class="pfparb"><a class="pfgo" href="${esc(link)}" target="_blank" rel="noopener">Open ${esc(bookShort(tgt))}${tgt==='fanduel'?' slip':''} ↗</a><button class="pfgo2" data-pfuse="${i}">Use this</button></div>
   </div>`;
 }
@@ -4264,7 +4285,7 @@ function pfHtml(){
           det: open?pfDetHtml(c.refRow, autoTargetBook, c.ladder, c.cmp, c.src==='sharp'?{book:c.sharpBook, fair:c.sharpFair}:null):'', btn:`<button class="pfadd${on?' on':''}" data-pfadd="${i}">${on?'✓':'+'}</button>` }); }).join('')
       + (list.length>pfShow?`<button class="tkhisttoggle" id="pfmore">Show more (${list.length-pfShow})</button>`:'');
   return `<div class="pfcard">
-    <div class="pfhead"><div><div class="pftitle">Parlay finder</div><div class="pfsub">${!d?'loading…':pfMode==='auto'?`${pfParlays.length||'no'} parlays · legs devigged vs market average · ${esc(bookShort(autoTargetBook))}`:`${list.length} play${list.length===1?'':'s'} · ${esc(bookShort(autoTargetBook))} vs exchanges${autoScope!=='props'?' + sharps':''}`}</div></div><button class="pfround" id="pfRefresh" title="Refresh lines">↻</button></div>
+    <div class="pfhead"><div><div class="pftitle">Parlay finder</div><div class="pfsub">${!d?'loading…':pfMode==='auto'?`${pfParlays.length||'no'} parlays · ${pfSgp?'same game, sharp-money legs':'legs devigged vs sharps + exchanges'} · ${esc(bookShort(autoTargetBook))}`:`${list.length} play${list.length===1?'':'s'} · ${esc(bookShort(autoTargetBook))} vs exchanges${autoScope!=='props'?' + sharps':''}`}</div></div><button class="pfround" id="pfRefresh" title="Refresh lines">↻</button></div>
     <div class="pfsel">
       <select id="pfLeague">${Object.entries(SPORTS).map(([k,v])=>`<option value="${k}"${k===sk?' selected':''}>${esc(v.label)}</option>`).join('')}</select>
       <select id="pfGame"><option value="">All games</option>${games.map(f=>`<option value="${esc(f.id)}"${f.id===pfGame?' selected':''}>${esc(fxLabel(f))} · ${esc(etTime(f.start))}</option>`).join('')}</select>
