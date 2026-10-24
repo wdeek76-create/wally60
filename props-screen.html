@@ -406,6 +406,12 @@ main{flex:1;padding:12px calc(var(--sar) + 12px) max(160px, calc(var(--ftrh,76px
 .gsetreset{width:100%;margin-top:16px;padding:10px;border-radius:10px;border:1px dashed var(--line2);background:transparent;color:var(--text);font-size:12px;font-weight:700}
 .gsetbackuprow{display:flex;gap:8px}
 .gsetbk{flex:1;padding:10px;border-radius:10px;border:1px solid rgba(34,197,94,.45);background:rgba(34,197,94,.1);color:var(--purple);font-size:12px;font-weight:800}
+.gmboard{display:grid;grid-template-columns:auto 1fr 1fr .8fr;gap:5px 6px;margin-top:8px;align-items:center;font-size:12px}
+.gmh{font-size:10px;color:var(--dim);text-align:center;font-weight:700;letter-spacing:.3px}
+.gmtm{display:flex;align-items:center;gap:5px;font-weight:800;font-size:12.5px}
+.gmtm img{width:18px;height:18px;object-fit:contain}
+.gmcell{border:1px solid var(--line2);border-radius:8px;padding:5px 4px;text-align:center;background:var(--bg3);font-family:ui-monospace,Menlo,monospace;font-size:11.5px;white-space:nowrap;cursor:pointer}
+.gmcell.dim{cursor:default;opacity:.5}
 .gmwrap{border:1px solid var(--line2);border-radius:14px;background:var(--bg2);overflow:hidden}
 .gm{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px;cursor:pointer}
 .gm .tmwrap{min-width:0}
@@ -941,7 +947,7 @@ const has = (m, ...w) => w.every(x=>m.includes(x));
 // Order here is the order you swipe through them on a player: Points → Assists → Rebounds → PRA → 3PM.
 const THREE = /three|3-point|3 point|3pt|3pm/;
 const NBA_MKTS = [
-  ['pts','Points',   m=>has(m,'point')&&!THREE.test(m)&&!has(m,'rebound')&&!has(m,'assist')&&!m.includes('+')],
+  ['pts','Points',   m=>has(m,'point')&&!(has(m,'total')&&!has(m,'player'))&&!has(m,'spread')&&!THREE.test(m)&&!has(m,'rebound')&&!has(m,'assist')&&!m.includes('+')],
   ['ast','Assists',  m=>has(m,'assist')&&!has(m,'point')&&!has(m,'rebound')],
   ['reb','Rebounds', m=>has(m,'rebound')&&!has(m,'point')&&!has(m,'assist')],
   ['pra','PRA',      m=>has(m,'point','rebound','assist')],
@@ -4929,20 +4935,23 @@ function bestML(rows){ const b=bestFirst(rows)[0]; return b?fmtAm(b.price):'—'
 // team's own board, same as tapping a player. Reads off the same 'ml'/'total' team/game entities
 // the rest of the app already indexes (see TEAM_MKS/GAME_MKS), not a separate ad-hoc market-name
 // regex, so this always agrees with what you'd see if you opened that team/total yourself.
+// Every game card, before it's opened: spread / total / moneyline for both teams, like a sportsbook
+// board -- the consensus line, best price across books (tap a cell to open that market).
 function gameOddsLine(f){
-  const away = players.find(p=>p.isTeam && p.teamSide==='away' && p.fixtureId===f.id && p.marketKeys.has('ml'));
-  const home = players.find(p=>p.isTeam && p.teamSide==='home' && p.fixtureId===f.id && p.marketKeys.has('ml'));
+  const team = side => players.find(p=>p.isTeam && p.teamSide===side && p.fixtureId===f.id);
+  const away=team('away'), home=team('home');
   const game = players.find(p=>p.isGame && p.fixtureId===f.id && p.marketKeys.has('total'));
+  const ok = r => Math.abs(Number(r.price))<10000;
+  const common = rows => { const c={}; rows.forEach(o=>{ if(o.points!=null) c[o.points]=(c[o.points]||0)+1; }); const k=Object.keys(c).sort((a,b)=>c[b]-c[a])[0]; return k==null?null:Number(k); };
+  const cell = (p, mk, txt) => p && txt ? `<span class="gmcell" data-fk="${esc(p.key)}" data-fmk="${mk}">${txt}</span>` : '<span class="gmcell dim">—</span>';
+  const spreadTxt = p => { if(!p?.marketKeys.has('spread')) return ''; const rows=rowsFor(p,'spread',mainRows).filter(ok); const ln=common(rows); if(ln==null) return '';
+    const b=bestFirst(rows.filter(o=>Number(o.points)===ln))[0]; return `<b>${ln>0?'+':''}${ln}</b> ${b?fmtAm(b.price):''}`; };
+  const mlTxt = p => { if(!p?.marketKeys.has('ml')) return ''; const b=bestFirst(rowsFor(p,'ml',mainRows).filter(ok))[0]; return b?`<b>${fmtAm(b.price)}</b>`:''; };
+  const totTxt = side => { if(!game) return ''; const line=lineForMarket(game,'total'); if(line==null) return '';
+    const b=bestFirst(rowsFor(game,'total',mainRows).filter(o=>ok(o) && sideOf(o)===side && Number(o.points)===Number(line)))[0]; return `<b>${side==='over'?'o':'u'}${line}</b> ${b?fmtAm(b.price):''}`; };
   if(!away && !home && !game) return '';
-  const mlChip=(p,label)=>{
-    if(!p) return '';
-    const best=bestFirst(rowsFor(p,'ml',mainRows))[0];
-    return `<span class="gmmlchip" data-fk="${esc(p.key)}" data-fmk="ml">${esc(label)} <b>${best?fmtAm(best.price):'—'}</b></span>`;
-  };
-  let totChip='';
-  if(game){ const line=lineForMarket(game,'total'); if(line!=null) totChip=`<span class="gmmlchip" data-fk="${esc(game.key)}" data-fmk="total">O/U <b>${line}</b></span>`; }
-  const html = mlChip(away, f.away.ab||f.away.name)+mlChip(home, f.home.ab||f.home.name)+totChip;
-  return html ? `<div class="gmodds">${html}</div>` : '';
+  const row = (p, c, totSide) => `<span class="gmtm">${c.logo?`<img src="${esc(c.logo)}" alt="">`:''}${esc(c.ab||c.name)}</span>${cell(p,'spread',spreadTxt(p))}${cell(game,'total',totTxt(totSide))}${cell(p,'ml',mlTxt(p))}`;
+  return `<div class="gmboard"><span></span><span class="gmh">Spread</span><span class="gmh">Total</span><span class="gmh">ML</span>${row(away,f.away,'over')}${row(home,f.home,'under')}</div>`;
 }
 let gridMode = false;   // grid / "Classic screen" view removed
 function renderSlate(){ if(gridMode) return renderGrid(); return renderSlateCards(); }
@@ -4987,7 +4996,7 @@ function renderSlateCards(){
   }).join('');
   view.innerHTML=`<div class="slate">${h}</div>`;
   view.querySelectorAll('.gm[data-fid]').forEach(el=>el.addEventListener('click',()=>toggleGame(el.dataset.fid)));
-  view.querySelectorAll('.gmmlchip[data-fk]').forEach(el=>el.addEventListener('click',ev=>{
+  view.querySelectorAll('.gmmlchip[data-fk], .gmcell[data-fk]').forEach(el=>el.addEventListener('click',ev=>{
     ev.stopPropagation();
     const p=players.find(x=>x.key===el.dataset.fk); if(!p) return;
     openPlayer(p, startIdxFor(p, el.dataset.fmk));
