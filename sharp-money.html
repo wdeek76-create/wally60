@@ -207,7 +207,7 @@ a.shst{text-decoration:none;color:var(--text)}
 </head>
 <body>
 <div class="hdr"><div class="hrow"><div class="logo">Sharp <span>Money</span></div>
-  <div class="htabs"><button class="htab on" id="vFeed">Live</button><button class="htab" id="vTrack">Tracker<b id="tkN"></b></button><button class="htab" id="vNbaL">NBA Live<b id="nlN"></b></button><span class="fdn" id="fdN" title="FanDuel alerts sent to Discord today"></span><button class="htab" id="vNews">Today<b id="nwN"></b></button></div>
+  <div class="htabs"><button class="htab on" id="vFeed">Live</button><button class="htab" id="vTrack">Tracker<b id="tkN"></b></button><button class="htab" id="vNbaL">In-game<b id="nlN"></b></button><span class="fdn" id="fdN" title="FanDuel alerts sent to Discord today"></span><button class="htab" id="vNews">Today<b id="nwN"></b></button></div>
   <button class="gear" id="gear" title="Backend URL">⚙</button></div></div>
 <main id="view"></main>
 <div class="toast" id="toast"></div>
@@ -1730,7 +1730,7 @@ function renderNews(){
 let nlHook=LS.get('nbal_hook',''), nlRole=LS.get('nbal_role','');
 let nlKalMin=Number(LS.get('nbal_kalmin','100'))||0;
 const NL_PAIRS=[['draftkings','caesars'],['draftkings','fliff'],['fliff','caesars']];
-const NL_LBL={ draftkings:'DK', caesars:'CZR', fliff:'Fliff', kalshi:'Kalshi' };
+const NL_LBL={ draftkings:'DK', caesars:'CZR', fliff:'Fliff', kalshi:'Kalshi', novig:'Novig', 'prophet x':'PX' };
 const NL_MKS=new Set(['pts','reb','ast','pra','3pm','pr','pa','ra']);
 let nlGames=[], nlPlays=[], nlLast=0, nlErr='', nlBusy=false, nlFresh=new Set();
 let nlTracked=(()=>{ try{ return JSON.parse(LS.get('nbal_tracked','[]'))||[]; }catch(e){ return []; } })();
@@ -1739,9 +1739,14 @@ const nlSent=(()=>{ try{ const o=JSON.parse(LS.get('nbal_sent','null')); if(o &&
 const nlHold=h=>h<-0.05?`${(-h).toFixed(1)}% arb`:'direct (0%)';
 const nlSide=s=>s==='over'?'Over':'Under';
 // games on right now: tipped (NBA tips ~10 min after the listed time) and under ~3h old
+// Live covers NBA and NFL: any game from tip to ~3h (NBA) / ~3.75h (NFL) after
+const NL_SPORTS = { nba:{ hrs:3, mks:new Set(['pts','reb','ast','pra','3pm','pr','pa','ra']) }, nfl:{ hrs:3.75, mks:new Set(['rec_yds','rush_yds','rush_att','rec','pass_cmp','pass_att','pass_yds']) } };
 async function nlActiveGames(){
-  const fx=await sharpFixtures('nba').catch(()=>[]); const now=Date.now();
-  return fx.filter(f=>{ const t=tipAt('nba', f.start); return now>=t-5*60e3 && now<=t+3*3600e3 && f.status!=='completed'; });
+  const now=Date.now(), out=[];
+  for(const sk of Object.keys(NL_SPORTS)){ if(!SPORTS[sk]) continue;
+    const fx=await sharpFixtures(sk).catch(()=>[]);
+    fx.forEach(f=>{ const t=tipAt(sk, f.start); if(now>=t-5*60e3 && now<=t+NL_SPORTS[sk].hrs*3600e3 && f.status!=='completed') out.push({ ...f, sk }); }); }
+  return out;
 }
 async function nlScan(){
   if(nlBusy) return; nlBusy=true;
@@ -1749,8 +1754,9 @@ async function nlScan(){
     nlGames=await nlActiveGames();
     if(!nlGames.length){ nlPlays=[]; nlLast=Date.now(); nlErr=''; return; }
     const rows=[], jobs=[];
-    chunk(nlGames,5).forEach(fc=>[['FanDuel','DraftKings','Caesars','Fliff'],['Kalshi']].forEach(bk=>jobs.push(async()=>{
-      const prm={fixture_id:fc.map(f=>f.id), sportsbook:bk}; if(bk[0]!=='Kalshi') prm.is_main=true;
+    // each book on its own (one name the feed won't take can't sink the rest); exchanges on every line
+    chunk(nlGames,5).forEach(fc=>[['FanDuel'],['Kalshi','Novig','Prophet X'],['DraftKings'],['Caesars'],['Fliff']].forEach(bk=>jobs.push(async()=>{
+      const prm={fixture_id:fc.map(f=>f.id), sportsbook:bk}; if(!EXCH.has(canonBook(bk[0]))) prm.is_main=true;
       try{ const r=await oo('/fixtures/odds',prm); (r?.data||[]).forEach(d=>(d.odds||[]).forEach(o=>{ o._fx=d.id; rows.push(o); })); }catch(e){ nlErr=e.message; }
     })));
     await runPool(jobs,3);
@@ -1767,14 +1773,15 @@ function nlFind(rows){
     const isK=canonBook(o.sportsbook)==='kalshi';
     if(isK){ K.rows++; if(K.sample.length<2) K.sample.push(`${o.market} | ${o.selection} | ${o.selection_line} | ${o.points} | ${o.price} | ob ${JSON.stringify((o.order_book||[]).slice(0,2))}`); }
     if(o.price==null || Math.abs(Number(o.price))>=10000) return; kalNorm(o);
-    const mk=marketKeyFor('nba', o.market); if(!mk || !NL_MKS.has(mk)) return;
+    const gm=nlGames.find(f=>f.id===o._fx), sk=gm?.sk||'nba';
+    const mk=marketKeyFor(sk, o.market); if(!mk || !NL_SPORTS[sk]?.mks.has(mk)) return;
     if(isK) K.mk++;
     const sd=sideOf(o); if(sd!=='over' && sd!=='under') return;
     if(isK) K.side++;
     const nm=sharpPlayerOf(o), who=normName(nm); if(!who) return;
     const line=o.points==null?null:Number(o.points);
     const k=`${o._fx}|${mk}|${who}|${line}`;
-    (G[k]=G[k]||{ fx:o._fx, mk, who, line, name:nm, market:o.market, rows:[] }).rows.push({...o, _sd:sd});
+    (G[k]=G[k]||{ fx:o._fx, sk, mk, who, line, name:nm, market:o.market, rows:[] }).rows.push({...o, _sd:sd});
   });
   Object.values(G).forEach(g=>{ if(g.rows.some(o=>canonBook(o.sportsbook)==='fanduel')) K.fd+=g.rows.filter(o=>canonBook(o.sportsbook)==='kalshi').length; });
   const out=[];
@@ -1783,16 +1790,19 @@ function nlFind(rows){
     const fd=g.rows.filter(o=>o._sd===side && canonBook(o.sportsbook)==='fanduel').sort((a,b)=>toDec(b.price)-toDec(a.price))[0];
     if(!fd) return; const fp=Number(fd.price); if(fp<-400 || fp>400) return;
     const hv=p=>(toImplied(fp)+toImplied(Number(p))-1)*100, sigs=[];
-    let kal=null;
-    g.rows.filter(o=>o._sd===opp && canonBook(o.sportsbook)==='kalshi').forEach(o=>levelsOf(o).forEach(l=>{
-      const h=hv(l.price); if(h>1e-7 || h<-SHARP_MAX_ARB) return;
-      kal=kal||{ size:0, best:l.price, lv:[], link:sharpLink(o) }; kal.size+=l.size; kal.lv.push({ price:Number(l.price), size:l.size, hold:h }); if(l.price>kal.best) kal.best=l.price; }));
-    if(kal && kal.size>=nlKalMin) sigs.push({ kind:'Kalshi', books:['kalshi'], prices:[kal.best], hold:hv(kal.best), size:kal.size, levels:kal.lv.sort((a,b)=>b.price-a.price), links:[kal.link] });
+    // sharp money, same as pregame: every exchange's order on the other side at 0.0% or better vs FD
+    let ex=null;
+    g.rows.filter(o=>o._sd===opp && EXCH.has(canonBook(o.sportsbook))).forEach(o=>levelsOf(o).forEach(l=>{
+      const h=hv(l.price); if(h>1e-7 || h<-SHARP_MAX_ARB) return; const bk=canonBook(o.sportsbook);
+      ex=ex||{ size:0, best:l.price, lv:[], by:{}, link:{} }; ex.size+=l.size; ex.by[bk]=(ex.by[bk]||0)+l.size; ex.link[bk]=ex.link[bk]||sharpLink(o);
+      ex.lv.push({ price:Number(l.price), size:l.size, hold:h, book:bk }); if(l.price>ex.best) ex.best=l.price; }));
+    if(ex && ex.size>=nlKalMin){ const bks=Object.keys(ex.by).sort((a,b)=>ex.by[b]-ex.by[a]);
+      sigs.push({ kind: bks.length===1 && bks[0]==='kalshi' ? 'Kalshi' : 'Exchanges', books:bks, exch:true, prices:bks.map(b=>Math.max(...ex.lv.filter(l=>l.book===b).map(l=>l.price))), hold:hv(ex.best), size:ex.size, by:ex.by, levels:ex.lv.sort((a,b)=>b.price-a.price), links:bks.map(b=>ex.link[b]) }); }
     const bo=b=>g.rows.filter(o=>o._sd===opp && rawBookSM(o)===b).sort((x,y)=>toDec(y.price)-toDec(x.price))[0];
     NL_PAIRS.forEach(([a,b])=>{ const oa=bo(a), ob=bo(b); if(!oa||!ob) return; const ha=hv(oa.price), hb=hv(ob.price);
       if(ha<=1e-7 && hb<=1e-7 && ha>=-SHARP_MAX_ARB && hb>=-SHARP_MAX_ARB) sigs.push({ kind:`${NL_LBL[a]}+${NL_LBL[b]}`, books:[a,b], prices:[Number(oa.price),Number(ob.price)], hold:Math.max(ha,hb), links:[sharpLink(oa),sharpLink(ob)] }); });
     if(!sigs.length) return;
-    out.push({ key:`${g.fx}|${g.mk}|${g.who}|${g.line}|${side}`, f:nlGames.find(x=>x.id===g.fx), fid:g.fx, mk:g.mk, who:g.who, name:g.name, line:g.line, side, market:g.market, fd, sigs, best:Math.min(...sigs.map(x=>x.hold)) });
+    out.push({ key:`${g.fx}|${g.mk}|${g.who}|${g.line}|${side}`, f:nlGames.find(x=>x.id===g.fx), fid:g.fx, sk:g.sk, mk:g.mk, who:g.who, name:g.name, line:g.line, side, market:g.market, fd, sigs, best:Math.min(...sigs.map(x=>x.hold)) });
   }));
   const seen=new Set();
   return out.sort((a,b)=>a.best-b.best).filter(p=>{ const k=`${p.fid}|${p.mk}|${p.who}|${p.line}`; if(seen.has(k)) return false; seen.add(k); return true; });
@@ -1805,7 +1815,7 @@ function nlAlert(){
     nlFresh.add(p.key);
     ns.forEach(x=>{ if(nlTracked.some(t=>t.key===p.key && t.kind===x.kind)) return;
       nlTracked.unshift({ id:Date.now()+Math.random().toString(36).slice(2,6), key:p.key, kind:x.kind, direct:!(x.hold<-0.05), hold:x.hold, size:x.size||null, vs:x.prices,
-        fixtureId:p.fid, away:p.f?.away.ab||'', home:p.f?.home.ab||'', playerKey:p.who, playerName:p.name, mkey:p.mk, marketLabel:marketLabel('nba',p.mk), marketNames:[p.market],
+        fixtureId:p.fid, away:p.f?.away.ab||'', home:p.f?.home.ab||'', playerKey:p.who, playerName:p.name, mkey:p.mk, sk:p.sk||'nba', marketLabel:marketLabel(p.sk||'nba',p.mk), marketNames:[p.market], exBy:x.by||null,
         side:p.side, line:p.line, price:Number(p.fd.price), trackedAt:Date.now(), actual:null, result:null, final:false }); });
     if(nlHook) nlPost(p, ns);
   });
@@ -1814,13 +1824,14 @@ function nlAlert(){
 // FD), matchup, then one block per signal: FD VS. the other side (flipped to FD's side), the
 // Kalshi depth table, and links to every book in the play.
 function nlPost(p, sigs){
-  const mk=marketLabel('nba',p.mk), bet=`${titleCase(p.name)} ${nlSide(p.side)}${p.line!=null?' '+p.line:''} ${mk}`;
+  const lg=(SPORTS[p.sk]?.label||'NBA').toUpperCase(), mk=marketLabel(p.sk||'nba',p.mk), bet=`${titleCase(p.name)} ${nlSide(p.side)}${p.line!=null?' '+p.line:''} ${mk}`;
   const title=`${fmtAm(p.fd.price)} ${bet}`, opp=nlSide(p.side==='over'?'under':'over');
   const role=/^\d{15,}$/.test(nlRole)?nlRole:'', f=p.f, fdUrl=sharpLink(p.fd);
   const fields=sigs.map(x=>{
-    if(x.kind==='Kalshi'){
-      const tbl='```\n'+[`${'Odds'.padEnd(6)} ${'Liq'.padStart(6)} ${'Hold'.padStart(6)}`, ...x.levels.slice(0,6).map(l=>`${fmtAm(l.price).padEnd(6)} ${usd(l.size).padStart(6)} ${(l.hold<-0.05?'+'+(-l.hold).toFixed(1)+'%':'0.0%').padStart(6)}`)].join('\n')+'\n```';
-      return { name:`FD vs Kalshi (${usd(x.size)} at ${x.hold<-0.05?'arb':'0% hold'})`, value:`**${fmtAm(p.fd.price)}** VS. **${fmtAm(-x.prices[0])}**\nKalshi ${opp} ${fmtAm(x.prices[0])}${tbl}` };
+    if(x.exch){
+      const tbl='```\n'+[`${'Book'.padEnd(6)} ${'Odds'.padStart(5)} ${'Liq'.padStart(6)} ${'Hold'.padStart(6)}`, ...x.levels.slice(0,6).map(l=>`${(NL_LBL[l.book]||l.book).padEnd(6)} ${fmtAm(l.price).padStart(5)} ${usd(l.size).padStart(6)} ${(l.hold<-0.05?'+'+(-l.hold).toFixed(1)+'%':'0.0%').padStart(6)}`)].join('\n')+'\n```';
+      const nm=x.books.map(b=>NL_LBL[b]||b).join(' / ');
+      return { name:`FD vs ${nm} (${usd(x.size)} at ${x.hold<-0.05?'arb':'0% hold'})`, value:`**${fmtAm(p.fd.price)}** VS. **${fmtAm(-Math.max(...x.prices))}**\n${x.books.map((b,i)=>`${NL_LBL[b]||b} ${opp} ${fmtAm(x.prices[i])}`).join(' · ')}${tbl}` };
     }
     return { name:`FD vs ${x.books.map(b=>NL_LBL[b]).join(' + ')} (${x.hold<-0.05?(-x.hold).toFixed(1)+'% arb':'0% hold'})`, value:`**${fmtAm(p.fd.price)}** VS. ${x.books.map((b,i)=>`**${fmtAm(-x.prices[i])}** ${NL_LBL[b]}`).join(' / ')}\n${x.books.map((b,i)=>`${NL_LBL[b]} ${opp} ${fmtAm(x.prices[i])}`).join(' · ')}` };
   });
@@ -1829,7 +1840,7 @@ function nlPost(p, sigs){
   fields.push({ name:'Links', value:links.join(' · ')+`\nSent <t:${Math.floor(Date.now()/1000)}:R>` });
   discordPost({ username:'FanDuel', avatar_url:httpsLogo('fanduel'), content:[`${bet} ${fmtAm(p.fd.price)}`, role?`<@&${role}>`:''].filter(Boolean).join(' '), allowed_mentions: role?{roles:[role]}:{parse:[]},
     embeds:[{ title, url:discordUrl(fdUrl)||undefined, color:sigs.some(x=>x.hold<-0.05)?0x22c55e:0xeab308, thumbnail:httpsLogo('fanduel')?{url:httpsLogo('fanduel')}:undefined,
-      description:`${f?`${teamNick(f.away.name)||f.away.ab} @ ${teamNick(f.home.name)||f.home.ab} **LIVE**\n`:''}**NBA LIVE - ${esc(mk).toUpperCase()}**`, fields, footer:{ text:'NBA LIVE' } }] }, null, nlHook);
+      description:`${f?`${teamNick(f.away.name)||f.away.ab} @ ${teamNick(f.home.name)||f.home.ab} **LIVE**\n`:''}**${lg} LIVE - ${esc(mk).toUpperCase()}**`, fields, footer:{ text:`${lg} LIVE` } }] }, null, nlHook);
 }
 let nlTkBusy=false;
 async function nlRefreshTracked(){
@@ -1842,7 +1853,7 @@ async function nlRefreshTracked(){
     open.forEach(t=>{ const R=res[t.fixtureId]; if(!R) return; const st=String(R.fixture?.status||''); t.live=/live|half|progress|quarter/i.test(st);
       t.score=R.scores?`${R.scores.away?.total??''}-${R.scores.home?.total??''}`:'';
       const row=(pr[t.fixtureId]?.results||[]).find(x=>normName(cleanSel(x.player?.name||''))===t.playerKey);
-      if(row){ const v=statFor(row, t.mkey, 'nba', t.marketNames); if(v!=null && !isNaN(v) && t.actual!==v){ t.actual=v; ch=true; } }
+      if(row){ const v=statFor(row, t.mkey, t.sk||'nba', t.marketNames); if(v!=null && !isNaN(v) && t.actual!==v){ t.actual=v; ch=true; } }
       if(/completed|final|closed/i.test(st)){ const g=gradeOne(t); if(g){ t.result=g; t.final=true; ch=true; } } });
     if(ch) nlSave();
   } finally { nlTkBusy=false; if(viewMode==='nbalive') renderNbaLive(); }
@@ -1869,24 +1880,25 @@ const bindBackup = v => { v.querySelectorAll('[data-bk]').forEach(b=>b.onclick=(
 let nlHist=false;
 function renderNbaLive(){
   const v=$('#view'), now=Date.now();
-  const nextTip=(sharpFxCache.nba?.list||[]).map(f=>tipAt('nba',f.start)).filter(t=>t>now).sort((a,b)=>a-b)[0];
-  const head=`<div class="sh"><span class="t">NBA Live</span><span class="dim" style="font-size:10.5px">${nlGames.length?`${nlGames.length} game${nlGames.length===1?'':'s'} on · ${nlPlays.length} plays · ${nlLast?Math.round((now-nlLast)/1000)+'s ago':'…'}`:nextTip?`idle · wakes at tip ${etTime(new Date(nextTip).toISOString())}`:'idle · no NBA games today'}</span></div>
+  const nextTip=['nba','nfl'].flatMap(k=>(sharpFxCache[k]?.list||[]).map(f=>tipAt(k,f.start))).filter(t=>t>now).sort((a,b)=>a-b)[0];
+  const head=`<div class="sh"><span class="t">In-game · NBA + NFL</span><span class="dim" style="font-size:10.5px">${nlGames.length?`${nlGames.length} game${nlGames.length===1?'':'s'} on · ${nlPlays.length} plays · ${nlLast?Math.round((now-nlLast)/1000)+'s ago':'…'}`:nextTip?`idle · wakes at tip ${etTime(new Date(nextTip).toISOString())}`:'idle · no NBA / NFL games soon'}</span></div>
     <div class="nlctl"><span class="dim">Kalshi min</span>${[0,100,250,500,1000].map(x=>`<button class="${nlKalMin===x?'on':''}" data-nlk="${x}">${x?usd(x):'Any'}</button>`).join('')}<button class="${nlHook?'on':''}" id="nlDc" style="margin-left:auto">${nlHook?'Discord ✓':'Set Discord'}</button></div>${nlErr?`<div class="dim" style="font-size:11px;color:var(--red)">${esc(nlErr.slice(0,90))}</div>`:''}
     ${nlGames.length&&nlKal?`<div class="smdiagw"><div class="smdiag">${esc(Object.entries(nlKal.books).map(([b,n])=>`${b} ${n}`).join(' · ')||'no odds')}<div class="smdiagtop">Kalshi: ${nlKal.rows} rows · ${nlKal.mk} in our markets · ${nlKal.side} with a side · ${nlKal.fd} on FD's line${nlKal.sample.length?`<br><span style="opacity:.7">${nlKal.sample.map(esc).join('<br>')}</span>`:''}</div></div></div>`:''}`;
-  const cards = !nlGames.length ? '<div class="empty">Runs only while NBA games are live (from tip to ~3h after). Nothing on right now.</div>'
+  const cards = !nlGames.length ? '<div class="empty">Runs only while NBA / NFL games are live (from tip to the final whistle). Nothing on right now.</div>'
     : !nlPlays.length ? '<div class="empty">Watching… nothing at 0.0% or better right now.</div>'
     : nlPlays.map(p=>{ const f=p.f, lg=bookLogo('fanduel'), url=sharpLink(p.fd)||BOOK_HOME.fanduel;
-      return `<div class="nlcard${nlFresh.has(p.key)?' new':''}"><div class="nlh"><div><div class="nlnm">${esc(titleCase(p.name))} <span>${nlSide(p.side)}${p.line!=null?' '+p.line:''} ${esc(marketLabel('nba',p.mk))}</span></div><div class="nlmeta">${f?`${esc(f.away.ab||f.away.name)} @ ${esc(f.home.ab||f.home.name)} · LIVE`:''}</div></div>
+      return `<div class="nlcard${nlFresh.has(p.key)?' new':''}"><div class="nlh"><div><div class="nlnm">${esc(titleCase(p.name))} <span>${nlSide(p.side)}${p.line!=null?' '+p.line:''} ${esc(marketLabel(p.sk||'nba',p.mk))}</span></div><div class="nlmeta">${f?`${esc(SPORTS[p.sk]?.label||'')} · ${esc(f.away.ab||f.away.name)} @ ${esc(f.home.ab||f.home.name)} · LIVE`:''}</div></div>
         <a class="nlpr" href="${esc(url)}" target="_blank" rel="noopener" data-betlink>${lg?`<img src="${esc(lg)}" alt="">`:'FD'}${fmtAm(p.fd.price)}</a></div>
-        ${p.sigs.map(x=>`<div class="nlsig"><span class="nlk${x.kind==='Kalshi'?' kal':''}">${esc(x.kind)}</span><span>${x.books.map((b,i)=>`${NL_LBL[b]} ${fmtAm(x.prices[i])}`).join(' · ')}${x.size?` · ${usd(x.size)}`:''} <span class="nltag${x.hold<-0.05?' arb':''}">${nlHold(x.hold)}</span></span></div>`).join('')}</div>`; }).join('');
+        ${p.sigs.map(x=>`<div class="nlsig"><span class="nlk${x.exch?' kal':''}">${esc(x.exch?x.books.map(b=>NL_LBL[b]||b).join('/'):x.kind)}</span><span>${x.books.map((b,i)=>`${NL_LBL[b]} ${fmtAm(x.prices[i])}`).join(' · ')}${x.size?` · ${usd(x.size)}`:''} <span class="nltag${x.hold<-0.05?' arb':''}">${nlHold(x.hold)}</span></span></div>`).join('')}</div>`; }).join('');
   const row=(l,list)=>{ const r=ttRecord(list.filter(t=>t.final)); return `<div class="ttrow"><span>${esc(l)} <span class="dim">(${r.n})</span></span><span>${r.w}-${r.l}-${r.p}</span><span class="${r.u>0?'pos':r.u<0?'neg':''}">${r.u>=0?'+':''}${r.u.toFixed(2)}u</span><span class="dim">${r.roi!=null?r.roi.toFixed(1)+'%':'—'}</span></div>`; };
   const sub=t=>`<div class="dim" style="font-size:9.5px;font-weight:800;letter-spacing:.5px;text-transform:uppercase;margin:8px 0 2px">${t}</div>`;
-  const kinds=['Kalshi',...NL_PAIRS.map(([a,b])=>`${NL_LBL[a]}+${NL_LBL[b]}`)];
+  const kinds=['Exchanges','Kalshi',...NL_PAIRS.map(([a,b])=>`${NL_LBL[a]}+${NL_LBL[b]}`)];
   const rec=nlTracked.length?`<div class="ttsum" style="margin-top:14px"><div class="ttsumh"><span>NBA Live record</span></div>${row('All signals',nlTracked)}${kinds.map(k=>row(k,nlTracked.filter(t=>t.kind===k))).join('')}
+    ${sub('By sport')}${['nba','nfl'].map(k=>row(SPORTS[k]?.label||k,nlTracked.filter(t=>(t.sk||'nba')===k))).join('')}
     ${sub('Arb vs direct')}${row('Arb (above 0%)',nlTracked.filter(t=>!t.direct))}${row('Direct (0%)',nlTracked.filter(t=>t.direct))}
     ${sub('By side')}${row('Overs',nlTracked.filter(t=>t.side==='over'))}${row('Unders',nlTracked.filter(t=>t.side==='under'))}
     ${sub('By signal + side')}${kinds.flatMap(k=>['over','under'].map(sd=>[k,sd])).filter(([k,sd])=>nlTracked.some(t=>t.kind===k&&t.side===sd)).map(([k,sd])=>row(`${k} ${nlSide(sd)}`,nlTracked.filter(t=>t.kind===k&&t.side===sd))).join('')}
-    ${nlTracked.some(t=>t.kind==='Kalshi')?`${sub('Kalshi by money')}${[['Under $250',t=>t.size<250],['$250–500',t=>t.size>=250&&t.size<500],['$500–1k',t=>t.size>=500&&t.size<1000],['$1k+',t=>t.size>=1000]].map(([l,fn])=>row(l,nlTracked.filter(t=>t.kind==='Kalshi'&&t.size!=null&&fn(t)))).join('')}`:''}
+    ${nlTracked.some(t=>t.kind==='Kalshi'||t.kind==='Exchanges')?`${sub('Exchange money')}${[['Under $250',t=>t.size<250],['$250–500',t=>t.size>=250&&t.size<500],['$500–1k',t=>t.size>=500&&t.size<1000],['$1k+',t=>t.size>=1000]].map(([l,fn])=>row(l,nlTracked.filter(t=>(t.kind==='Kalshi'||t.kind==='Exchanges')&&t.size!=null&&fn(t)))).join('')}`:''}
     ${sub('By arb %')}${[['Direct (0%)',t=>t.direct],['0–1% arb',t=>!t.direct&&-t.hold<1],['1–2% arb',t=>-t.hold>=1&&-t.hold<2],['2%+ arb',t=>-t.hold>=2]].map(([l,fn])=>row(l,nlTracked.filter(fn))).join('')}
     ${sub('By prop')}${[...new Set(nlTracked.map(t=>t.marketLabel))].map(m=>row(m,nlTracked.filter(t=>t.marketLabel===m))).join('')}
     ${sub('By prop + side')}${[...new Set(nlTracked.map(t=>t.marketLabel+'|'+t.side))].map(k=>{ const [m,sd]=k.split('|'); return row(`${m} ${nlSide(sd)}`,nlTracked.filter(t=>t.marketLabel===m&&t.side===sd)); }).join('')}</div>`:'';
@@ -1898,9 +1910,9 @@ function renderNbaLive(){
   v.innerHTML=head+cards+rec+backupHtml()+(open.length?`${sub('Open')}${open.map(tcard).join('')}`:'')+(done.length?`<button class="tkhisttoggle" id="nlHistB">History (${done.length}) ${nlHist?'▴ hide':'▾ show'}</button>${nlHist?done.map(tcard).join(''):''}`:'');
   bindBackup(v);
   v.querySelectorAll('[data-nlk]').forEach(b=>b.onclick=()=>{ nlKalMin=Number(b.dataset.nlk); LS.set('nbal_kalmin',String(nlKalMin)); renderNbaLive(); });
-  $('#nlDc')?.addEventListener('click',()=>{ const u=prompt('NBA Live Discord webhook URL (blank = off)', nlHook); if(u==null) return; nlHook=u.trim(); LS.set('nbal_hook',nlHook);
+  $('#nlDc')?.addEventListener('click',()=>{ const u=prompt('In-game (NBA + NFL live) Discord webhook URL (blank = off)', nlHook); if(u==null) return; nlHook=u.trim(); LS.set('nbal_hook',nlHook);
     const r=prompt('Role ID to tag (optional)', nlRole); if(r!=null){ nlRole=(r.match(/\d{15,}/)||[''])[0]; LS.set('nbal_role',nlRole); }
-    if(nlHook) discordPost({ username:'FanDuel', content:['✅ NBA Live connected', /^\d{15,}$/.test(nlRole)?`<@&${nlRole}>`:''].filter(Boolean).join(' '), allowed_mentions:/^\d{15,}$/.test(nlRole)?{roles:[nlRole]}:{parse:[]} }, null, nlHook).then(ok=>toast(ok?'NBA Live Discord connected':'Discord test failed'));
+    if(nlHook) discordPost({ username:'FanDuel', content:['✅ In-game alerts connected', /^\d{15,}$/.test(nlRole)?`<@&${nlRole}>`:''].filter(Boolean).join(' '), allowed_mentions:/^\d{15,}$/.test(nlRole)?{roles:[nlRole]}:{parse:[]} }, null, nlHook).then(ok=>toast(ok?'NBA Live Discord connected':'Discord test failed'));
     renderNbaLive(); });
   $('#nlHistB')?.addEventListener('click',()=>{ nlHist=!nlHist; renderNbaLive(); });
   v.querySelectorAll('[data-nlg]').forEach(b=>b.onclick=()=>{ const [id,r]=b.dataset.nlg.split('|'); const t=nlTracked.find(x=>x.id===id); if(!t) return; if(r){ t.result=r; t.final=true; } else { t.result=null; t.final=false; } nlSave(); renderNbaLive(); });
