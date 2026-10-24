@@ -4743,6 +4743,10 @@ async function ooNbaFixtures(force) {
   _ooFixW = { at: Date.now(), list };
   return list;
 }
+// Exchange commission OpticOdds does not take off: ProphetX charges 2% of winnings, so its prices (top and every order-book level) are
+// shown net of that fee. American in, American out.
+const OO_BOOK_FEE = { prophetx: 0.02, "prophet x": 0.02 };
+function _ooFeeAdj(am, fee) { const d = oddsToDecimal(am); if (!d || !fee) return am; const net = decimalToAmerican(1 + (d - 1) * (1 - fee)); return net == null ? am : net; }
 // Odds rows -> Parlay-shaped rows (one per book+line, both sides), plus liq per side.
 function ooRowsFromOdds(odds, fixtureId) {
   const g = {};
@@ -4754,7 +4758,12 @@ function ooRowsFromOdds(odds, fixtureId) {
     if (!g[key]) g[key] = { market_key: mk, market: o.market, player: o.selection || o.name, bookmaker: o.sportsbook, label: OO_BOOK_TO_LABEL[bk] || null,
       line: o.points, over_price: null, under_price: null, over_liq: null, under_liq: null, over_book: null, under_book: null, over_link: null, under_link: null, fixture_id: fixtureId, age_seconds: o.timestamp ? Math.round(Date.now() / 1000 - o.timestamp) : null };
     const row = g[key];
-    const price = Number(o.price);
+    let price = Number(o.price), ob = o.order_book;
+    const fee = OO_BOOK_FEE[bk];
+    if (fee && !isNaN(price)) {   // net of the exchange fee, order book included
+      const raw = price; price = _ooFeeAdj(raw, fee);
+      if (Array.isArray(ob) && ob.length) ob = _ooLevelsFromRow(raw, ob, o.limits && o.limits.max).map(l => [_ooFeeAdj(l.price, fee), l.size]);
+    }
     // Keep the raw {ios, android, desktop} shape — resolveShareLink() (below) decides at copy
     // time whether to use a link straight (it's already https, a real universal link) or route
     // it through the /api/go redirector (it's a bare app scheme like novigapp:// with no https
@@ -4762,8 +4771,8 @@ function ooRowsFromOdds(odds, fixtureId) {
     const dl = o.deep_link && typeof o.deep_link === "object"
       ? { ios: o.deep_link.ios || null, android: o.deep_link.android || null, desktop: o.deep_link.desktop || null }
       : (typeof o.deep_link === "string" ? o.deep_link : null);
-    if (side === "over") { if (row.over_price == null || price > row.over_price) { row.over_price = price; row.over_link = dl || row.over_link; } row.over_liq = o.limits?.max ?? row.over_liq; row.over_book = Array.isArray(o.order_book) ? o.order_book : row.over_book; }
-    else { if (row.under_price == null || price > row.under_price) { row.under_price = price; row.under_link = dl || row.under_link; } row.under_liq = o.limits?.max ?? row.under_liq; row.under_book = Array.isArray(o.order_book) ? o.order_book : row.under_book; }
+    if (side === "over") { if (row.over_price == null || price > row.over_price) { row.over_price = price; row.over_link = dl || row.over_link; } row.over_liq = o.limits?.max ?? row.over_liq; row.over_book = Array.isArray(ob) ? ob : row.over_book; }
+    else { if (row.under_price == null || price > row.under_price) { row.under_price = price; row.under_link = dl || row.under_link; } row.under_liq = o.limits?.max ?? row.under_liq; row.under_book = Array.isArray(ob) ? ob : row.under_book; }
   });
   // DraftKings before its clones so the fill lands DK first
   return Object.values(g).sort((a, b) => (a.bookmaker === "DraftKings" ? -1 : 0) - (b.bookmaker === "DraftKings" ? -1 : 0));
