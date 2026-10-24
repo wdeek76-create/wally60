@@ -509,7 +509,7 @@ async function sharpFixtures(sk){
   try{
     const raw=await fetchFixturesRaw(S);
     // Own window (sharpDays), not the sport's display window, so props a few days out get scanned too.
-    const list=filterFixtures({...S, days:sharpDays(sk), ml:false}, raw).map(f=>({ id:f.id, start:f.start_date, status:f.status, live:!!f.is_live,
+    const list=filterFixtures({...S, days:sharpDays(sk)+1, ml:false}, raw).map(f=>({ id:f.id, start:f.start_date, status:f.status, live:!!f.is_live,
       home:{id:f.home_competitors?.[0]?.id, name:f.home_competitors?.[0]?.name||'', ab:f.home_competitors?.[0]?.abbreviation||''},
       away:{id:f.away_competitors?.[0]?.id, name:f.away_competitors?.[0]?.name||'', ab:f.away_competitors?.[0]?.abbreviation||''} }));
     sharpFxCache[sk]={ at:Date.now(), list }; return list;
@@ -824,25 +824,28 @@ function sharpCheckPings(sk){
 }
 async function sharpScanSport(sk){
   const now=Date.now();
-  const fx=(await sharpFixtures(sk)).filter(f=>!f.live && tipAt(sk, f.start)>now && new Date(f.start).getTime()<now+sharpDays(sk)*24*3600e3).slice(0,80);
+  // bet105 looks one day further out than FanDuel
+  const all=(await sharpFixtures(sk)).filter(f=>!f.live && tipAt(sk, f.start)>now && new Date(f.start).getTime()<now+(sharpDays(sk)+1)*24*3600e3).slice(0,100);
+  const fx=all.filter(f=>new Date(f.start).getTime()<now+sharpDays(sk)*24*3600e3).slice(0,80), extra=all.filter(f=>!fx.includes(f));
   sharpLastScan[sk]=Date.now();
-  if(!fx.length){ sharpPrimed[sk]=true; sharpDiag[sk]={at:Date.now(), games:0, rows:0, byBook:{}, props:0, withExch:0, sides:0}; return; }
+  if(!all.length){ sharpPrimed[sk]=true; sharpDiag[sk]={at:Date.now(), games:0, rows:0, byBook:{}, props:0, withExch:0, sides:0}; return; }
   const rows=[];
   // FanDuel: its main lines. Exchanges: every line they post -- their "main" flag doesn't always
   // land on FanDuel's number, and a line that isn't flagged would otherwise never come back.
-  const pull=(books)=>{ const jobs=[]; for(const fc of chunk(fx,5)) for(const bk of books) jobs.push(async()=>{
+  const pull=(books, list=fx)=>{ const jobs=[]; for(const fc of chunk(list,5)) for(const bk of books) jobs.push(async()=>{
     const params={fixture_id:fc.map(f=>f.id),sportsbook:bk}; if(bk[0]==='FanDuel'||bk[0]==='bet105') params.is_main=true;
     try{ const r=await oo('/fixtures/odds',params); (r?.data||[]).forEach(d=>(d.odds||[]).forEach(o=>{ o._fx=d.id; rows.push(o); })); }catch(e){ console.warn('[sharp] scan chunk failed', sk, e.message); }
   }); return runPool(jobs, 4); };
   // 1) FanDuel + the exchanges first, and its alerts go out right away
-  await pull([['FanDuel'],['Novig','Prophet X','Kalshi']]);
-  if(!rows.length){ sharpDiag[sk]={at:Date.now(), games:fx.length, rows:0, byBook:{}, props:0, withExch:0, sides:0}; return; } // failed pull: keep the last good read instead of zeroing everything
+  if(fx.length) await pull([['FanDuel'],['Novig','Prophet X','Kalshi']]);
+  if(fx.length && !rows.length){ sharpDiag[sk]={at:Date.now(), games:fx.length, rows:0, byBook:{}, props:0, withExch:0, sides:0}; return; } // failed pull: keep the last good read instead of zeroing everything
   { const found=sharpScan(sk, rows).filter(x=>x.tgt==='fanduel'); sharpDiag[sk].games=fx.length;
     sharpRecord(sk, found, Date.now(), fx, 'fanduel'); sharpCheckPings(sk); if(viewMode==='sharp') renderSharp(); }
   // 2) then bet105 (asked on its own, so it can never slow down or cost the FanDuel read)
-  const before=rows.length; await pull([['bet105']]);
-  if(rows.length>before){ const found=sharpScan(sk, rows); sharpDiag[sk].games=fx.length;
-    sharpRecord(sk, found.filter(x=>x.tgt==='bet105'), Date.now(), fx, 'bet105'); sharpCheckPings(sk); }
+  // (plus the exchanges for the extra day only bet105 covers)
+  const before=rows.length; await pull([['bet105']], all); if(extra.length) await pull([['Novig','Prophet X','Kalshi']], extra);
+  if(rows.length>before){ const found=sharpScan(sk, rows); if(sharpDiag[sk]) sharpDiag[sk].games=all.length;
+    sharpRecord(sk, found.filter(x=>x.tgt==='bet105'), Date.now(), all, 'bet105'); sharpCheckPings(sk); }
 }
 // Every sport scans side by side; each one starts its next scan as soon as its last one is done.
 async function sharpScanOne(sk){
