@@ -26465,7 +26465,8 @@ function morningSoloHtml(statOk) {
 const TABS_SOLO_KEY = "nba_tabs_solo_v1", TABS_SOLO_META_KEY = "nba_tabs_solo_meta_v1";
 const TABS_SOLO_MIN_EV = 1, TABS_SOLO_WINDOW_MIN = 45;
 const TABS_SOLO_REL = { initial: "INITIAL", "30min": "30 MIN" };
-let tabsSolo = [], tabsSoloMeta = {}, tabsSoloStat = "ALL", tabsSoloRel = "ALL", tabsSoloInfo = "", tabsSoloSelStat = "AUTO", tabsSoloShow = 60;
+let tabsSolo = [], tabsSoloMeta = {}, tabsSoloStat = "ALL", tabsSoloRel = "ALL", tabsSoloInfo = "", tabsSoloSelStat = "AUTO", tabsSoloShow = 60, tabsSoloCtx = "ALL";
+const TABS_CTX = { clean: ["CLEAN", "#e6edf5"], upside: ["UPSIDE", "#4ade80"], downside: ["DOWNSIDE", "#fbbf24"], flagged: ["FLAGGED", "#f87171"] };
 try { tabsSolo = JSON.parse(localStorage.getItem(TABS_SOLO_KEY) || "[]") || []; } catch (e) { tabsSolo = []; }
 try { tabsSoloMeta = JSON.parse(localStorage.getItem(TABS_SOLO_META_KEY) || "{}") || {}; } catch (e) { tabsSoloMeta = {}; }
 function tabsSoloSave() { try { localStorage.setItem(TABS_SOLO_KEY, JSON.stringify(tabsSolo)); localStorage.setItem(TABS_SOLO_META_KEY, JSON.stringify(tabsSoloMeta)); } catch (e) { console.warn("[TABS SOLO] save failed", e); } }
@@ -26475,6 +26476,26 @@ function _tsTipTs(dateIso, timeStr) {
   let h = Number(m[1]) % 12; if (/p/i.test(m[3])) h += 12;
   return new Date(Number(d[1]), Number(d[2]) - 1, Number(d[3]), h, Number(m[2])).getTime();
 }
+// RW logic for a Tabs Solo bet, as a TAG (nothing is dropped): the same injury / lineup / blurb reads the Morning gates use.
+//   flagged  = his own injury / depth-chart status, lineups disagree, not a clean starter, or a lineup toss-up (RW logic would pass on him)
+//   downside = a blurb or teammate situation works AGAINST this side (floor risk on an over, upside for someone else on an under, uncertain teammate)
+//   upside   = a blurb works FOR this side (ceiling on an over, floor risk on an under)
+//   clean    = none of the above
+function tabsSoloContext(player, team, ou) {
+  try {
+    const g = (typeof _wmInjuryGate === "function") ? _wmInjuryGate(player, team) : { both: null, over: null, under: null };
+    if (g.both) return { cls: "flagged", why: g.both };
+    const lc = lineupConflictFor(player); if (lc) return { cls: "flagged", why: "lineups disagree: " + lc };
+    try { const ld = getLineupsData(), me = ld && ld.players ? ld.players[norm(player)] : null, st = me ? String(me.status || "").toUpperCase() : ""; if (st && st !== "STARTING") return { cls: "flagged", why: "lineups: " + st }; } catch (e) {}
+    const tu = lineupTossupFor(player, ou); if (tu) return { cls: "flagged", why: "toss-up: " + tu };
+    const ben = (typeof getBeneficiaryForPlayer === "function") ? getBeneficiaryForPlayer(player) : null;
+    const ceil = !!(ben && /ceiling/i.test(ben.reason || "")), floor = !!(ben && /floor risk/i.test(ben.reason || ""));
+    if (g[ou]) return { cls: "downside", why: g[ou] };
+    if ((ou === "over" && ceil) || (ou === "under" && floor)) return { cls: "upside", why: (ceil ? "ceiling" : "floor risk") + " from " + ben.causedBy + "'s note" };
+    return { cls: "clean", why: "" };
+  } catch (e) { return { cls: "clean", why: "" }; }
+}
+function tabsSoloRetag() { let n = 0; tabsSolo.filter(x => x.result === "pending").forEach(x => { const c = tabsSoloContext(x.player, x.team, x.ou); if (c.cls !== x.ctx) n++; x.ctx = c.cls; x.ctxWhy = c.why; }); tabsSoloSave(); showToast(`Re-tagged pending bets (${n} changed)`); renderTabsSolo(); }
 function tabsSoloImport() {
   const ta = document.getElementById("ts-paste"), info = document.getElementById("ts-info");
   const raw = ta ? ta.value : "", say = t => { tabsSoloInfo = t; if (info) info.textContent = t; };
@@ -26502,8 +26523,9 @@ function tabsSoloImport() {
     const key = [resolveNorm(r.player), stat, r.gameDateIso, r.ou, Number(r.line), rel].join("|");
     const cur = tabsSolo.find(x => x.key === key);
     const mn = r.minutes > 0 ? Number(r.minutes) : _mCsvMin("tabs", r.player);   // projected minutes: from the PropShop board, else the loaded Tabs file
-    if (cur) { if (cur.result === "pending") { Object.assign(cur, { odds, book: r.book, ev: Number(r.ev), proj: r.proj, min: mn }); upd++; } return; }
-    tabsSolo.push({ key, player: r.player, game: r.game || "", team: _mTeamFor(r.player), gameDate: r.gameDateIso, gameTime: r.gameTime || "", stat, ou: r.ou, line: Number(r.line), odds, book: r.book, ev: Number(r.ev), proj: r.proj, min: mn, at: nowIso, release: rel, minToTip: mins, result: "pending", actual: null });
+    const cx = tabsSoloContext(r.player, _mTeamFor(r.player), r.ou);
+    if (cur) { if (cur.result === "pending") { Object.assign(cur, { odds, book: r.book, ev: Number(r.ev), proj: r.proj, min: mn, ctx: cx.cls, ctxWhy: cx.why }); upd++; } return; }
+    tabsSolo.push({ key, player: r.player, game: r.game || "", team: _mTeamFor(r.player), gameDate: r.gameDateIso, gameTime: r.gameTime || "", stat, ou: r.ou, line: Number(r.line), odds, book: r.book, ev: Number(r.ev), proj: r.proj, min: mn, ctx: cx.cls, ctxWhy: cx.why, at: nowIso, release: rel, minToTip: mins, result: "pending", actual: null });
     added++;
   });
   tabsSoloSelStat = _mNextStat(stat);
@@ -26524,12 +26546,12 @@ async function tabsSoloGrade() {
   showToast(graded ? `Tabs Solo: graded ${graded}` : "Tabs Solo: nothing final yet");
   renderTabsSolo();
 }
-function tabsSoloSet(kind, v) { if (kind === "stat") tabsSoloStat = v; else tabsSoloRel = v; renderTabsSolo(); }
+function tabsSoloSet(kind, v) { if (kind === "stat") tabsSoloStat = v; else if (kind === "ctx") tabsSoloCtx = v; else tabsSoloRel = v; renderTabsSolo(); }
 function tabsSoloDelete(key) { tabsSolo = tabsSolo.filter(x => x.key !== key); tabsSoloSave(); renderTabsSolo(); }
 function tabsSoloClear() { if (!confirm(`Delete all ${tabsSolo.length} Tabs Solo bets? This can't be undone.`)) return; tabsSolo = []; tabsSoloMeta = {}; tabsSoloSave(); renderTabsSolo(); }
 function tabsSoloExport() {
   if (!tabsSolo.length) { showToast("Tabs Solo is empty"); return; }
-  const cols = ["gameDate", "gameTime", "release", "minToTip", "player", "team", "stat", "ou", "line", "odds", "book", "ev", "proj", "min", "result", "actual"];
+  const cols = ["gameDate", "gameTime", "release", "minToTip", "player", "team", "stat", "ou", "line", "odds", "book", "ev", "proj", "min", "ctx", "ctxWhy", "result", "actual"];
   const q = v => { const s = v == null ? "" : String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
   const blob = new Blob([cols.join(",") + "\n" + tabsSolo.map(b => cols.map(c => q(b[c])).join(",")).join("\n")], { type: "text/csv" });
   const url = URL.createObjectURL(blob), a = document.createElement("a");
@@ -26542,7 +26564,7 @@ function renderTabsSolo() {
   const card = "background:#0a0b0e;border:1px solid #1a1d22;border-radius:10px;padding:14px;margin-bottom:12px;";
   const C = { over: "#f87171", under: "#4ade80", lab: "#e6edf5" };
   const btn = (label, onclick, on, color) => `<button onclick="${onclick}" style="background:${on ? (color || "#7dd3fc") + "22" : "transparent"};border:1px solid ${on ? (color || "#7dd3fc") : "#1a1d22"};color:${on ? (color || "#7dd3fc") : "#e6edf5"};border-radius:6px;padding:5px 11px;font-size:11px;font-weight:700;cursor:pointer;">${label}</button>`;
-  const rows = tabsSolo.filter(x => (tabsSoloStat === "ALL" || x.stat === tabsSoloStat) && (tabsSoloRel === "ALL" || x.release === tabsSoloRel));
+  const rows = tabsSolo.filter(x => (tabsSoloStat === "ALL" || x.stat === tabsSoloStat) && (tabsSoloRel === "ALL" || x.release === tabsSoloRel) && (tabsSoloCtx === "ALL" || (x.ctx || "clean") === tabsSoloCtx));
   const win = x => x.odds > 0 ? x.odds / 100 : 100 / Math.abs(x.odds);
   const agg = set => { const v = { w: 0, l: 0, p: 0, pl: 0, open: 0 }; set.forEach(x => { if (x.result === "hit") { v.w++; v.pl += win(x); } else if (x.result === "miss") { v.l++; v.pl -= 1; } else if (x.result === "void") v.p++; else v.open++; }); return v; };
   const num = (v, plus) => (plus && v > 0 ? "+" : "") + v.toFixed(2);
@@ -26559,7 +26581,7 @@ function renderTabsSolo() {
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px;"><label style="font-size:11px;color:#e6edf5;">Market <select id="ts-stat" onchange="tabsSoloSelStat=this.value" style="${sel}">${opts}</select></label><label style="font-size:11px;color:#e6edf5;">Release <select id="ts-rel" style="${sel}"><option value="AUTO">Auto (from tip time)</option><option value="initial">Initial</option><option value="30min">30 min</option></select></label>
     <button onclick="tabsSoloImport()" style="background:#7c3aed;border:none;color:#fff;border-radius:6px;padding:7px 16px;font-size:12px;font-weight:800;cursor:pointer;">IMPORT</button><button id="ts-grade-btn" onclick="tabsSoloGrade()" style="background:#1e40af;border:none;color:#fff;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:800;cursor:pointer;">GRADE PENDING</button><button onclick="tabsSoloExport()" style="background:transparent;border:1px solid #1a1d22;color:#e6edf5;border-radius:6px;padding:7px 12px;font-size:11px;font-weight:700;cursor:pointer;">EXPORT CSV</button><button onclick="tabsSoloClear()" style="background:transparent;border:1px solid #7f1d1d;color:#f87171;border-radius:6px;padding:7px 12px;font-size:11px;font-weight:700;cursor:pointer;">CLEAR ALL</button><span id="ts-info" style="font-size:11px;color:#e6edf5;">${esc(tabsSoloInfo)}</span></div>
     <textarea id="ts-paste" placeholder="Paste the Tabs PropShop board here…" spellcheck="false" style="width:100%;min-height:60px;margin-top:8px;background:#050507;border:1px solid #1a1d22;border-radius:6px;padding:8px 10px;color:#e2e8f0;${mono}font-size:11px;outline:none;resize:vertical;box-sizing:border-box;"></textarea></div>`;
-  const filters = `<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:12px;">${["ALL"].concat(MORNING_STATS).map(s => btn(s, `tabsSoloSet('stat','${s}')`, tabsSoloStat === s)).join("")}<span style="width:14px;"></span>${btn("ALL", "tabsSoloSet('rel','ALL')", tabsSoloRel === "ALL", "#c4b5fd")}${Object.keys(TABS_SOLO_REL).map(r => btn(TABS_SOLO_REL[r], `tabsSoloSet('rel','${r}')`, tabsSoloRel === r, "#c4b5fd")).join("")}</div>`;
+  const filters = `<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:12px;">${["ALL"].concat(MORNING_STATS).map(s => btn(s, `tabsSoloSet('stat','${s}')`, tabsSoloStat === s)).join("")}<span style="width:14px;"></span>${btn("ALL", "tabsSoloSet('rel','ALL')", tabsSoloRel === "ALL", "#c4b5fd")}${Object.keys(TABS_SOLO_REL).map(r => btn(TABS_SOLO_REL[r], `tabsSoloSet('rel','${r}')`, tabsSoloRel === r, "#c4b5fd")).join("")}<span style="width:14px;"></span>${btn("ALL", "tabsSoloSet('ctx','ALL')", tabsSoloCtx === "ALL", "#94a3b8")}${Object.keys(TABS_CTX).map(c => btn(TABS_CTX[c][0], `tabsSoloSet('ctx','${c}')`, tabsSoloCtx === c, TABS_CTX[c][1])).join("")}<button onclick="tabsSoloRetag()" title="Re-read RW injuries / lineups / blurbs for the open bets" style="background:transparent;border:1px solid #1a1d22;color:#e6edf5;border-radius:6px;padding:5px 11px;font-size:11px;font-weight:700;cursor:pointer;">RE-TAG OPEN</button></div>`;
   if (!tabsSolo.length) { el.innerHTML = `<div style="max-width:1100px;margin:0 auto;padding:8px;">${paste}<div style="font-size:12px;color:#e6edf5;">Nothing logged yet.</div></div>`; return; }
   // summary tiles
   const tot = agg(rows), n = tot.w + tot.l;
@@ -26568,6 +26590,7 @@ function renderTabsSolo() {
   const relLines = Object.keys(TABS_SOLO_REL).map(r => ({ label: TABS_SOLO_REL[r], set: rows.filter(x => x.release === r) })).concat([{ label: "All", set: rows, total: true }]);
   const edgeLines = MORNING_SOLO_BUCKETS.map(([label, lo, hi]) => ({ label, set: rows.filter(x => x.ev >= lo && x.ev < hi) })).concat([{ label: "All", set: rows, total: true }]);
   const mktLines = MORNING_STATS.map(s => ({ label: `${s}`, set: rows.filter(x => x.stat === s) })).filter(l => l.set.length).concat([{ label: "All", set: rows, total: true }]);
+  const ctxLines = Object.keys(TABS_CTX).map(c => ({ label: `<span style="color:${TABS_CTX[c][1]};">${TABS_CTX[c][0]}</span>`, set: rows.filter(x => (x.ctx || "clean") === c) })).filter(l => l.set.length).concat([{ label: "All", set: rows, total: true }]);
   const minBuckets = [["Under 20", 0, 20], ["20-28", 20, 28], ["28-34", 28, 34], ["34+", 34, 999]];
   const minLines = minBuckets.map(([label, lo, hi]) => ({ label, set: rows.filter(x => x.min != null && x.min >= lo && x.min < hi) })).filter(l => l.set.length).concat([{ label: "No minutes", set: rows.filter(x => x.min == null) }].filter(l => l.set.length)).concat([{ label: "All", set: rows, total: true }]);
   // by day
@@ -26575,8 +26598,8 @@ function renderTabsSolo() {
   const dayLines = days.map(d => ({ label: d.slice(5), set: rows.filter(x => x.gameDate === d) }));
   // bet list
   const resCol = r => r === "hit" ? "#4ade80" : r === "miss" ? "#f87171" : r === "void" ? "#e6edf5" : "#fbbf24";
-  const list = rows.slice().sort((a, b) => (b.gameDate + b.at).localeCompare(a.gameDate + a.at)).slice(0, tabsSoloShow).map(x => `<tr style="border-top:1px solid #1a1d22;"><td style="padding:4px 8px;color:#e6edf5;white-space:nowrap;">${esc(x.gameDate.slice(5))} ${esc(x.gameTime.replace(/^[A-Za-z]+-\d+\s*/, ""))}</td><td style="padding:4px 8px;color:#fff;font-weight:700;white-space:nowrap;">${esc(displayPlayerName(x.player))} <span style="color:#7dd3fc;font-weight:600;">${esc(x.team || "")}</span></td><td style="padding:4px 8px;white-space:nowrap;"><b style="color:${x.ou === "over" ? C.over : C.under};">${x.ou === "over" ? "O" : "U"}${x.line}</b> <span style="color:#fff;">${esc(x.stat)}</span></td><td style="padding:4px 8px;${mono}color:#fff;">${x.odds > 0 ? "+" + x.odds : x.odds}</td><td style="padding:4px 8px;color:#e6edf5;">${esc(x.book || "")}</td><td style="padding:4px 8px;${mono}color:#4ade80;">+${x.ev.toFixed(1)}%</td><td style="padding:4px 8px;${mono}color:#fff;">${x.min != null ? Math.round(x.min) + "m" : "\u2014"}</td><td style="padding:4px 8px;"><span style="border:1px solid #c4b5fd88;color:#c4b5fd;border-radius:5px;padding:1px 6px;font-size:10px;font-weight:800;">${TABS_SOLO_REL[x.release] || x.release}</span>${x.minToTip != null ? ` <span style="color:#e6edf5;font-size:10px;">${x.minToTip}m to tip</span>` : ""}</td><td style="padding:4px 8px;font-weight:800;color:${resCol(x.result)};">${x.result === "pending" ? "OPEN" : x.result.toUpperCase()}${x.actual != null ? ` <span style="color:#e6edf5;font-weight:600;">${x.actual}</span>` : ""}</td><td style="padding:4px 8px;"><a href="#" onclick="tabsSoloDelete('${esc(x.key).replace(/'/g, "")}');return false;" style="color:#6b7380;text-decoration:none;">✕</a></td></tr>`).join("");
-  el.innerHTML = `<div style="max-width:1100px;margin:0 auto;padding:8px;">${paste}${filters}${tiles}${h("By release")}${table("Release", relLines)}${h("By edge")}${table("Edge", edgeLines)}${h("By market")}${table("Market", mktLines)}${h("By projected minutes")}${table("Min", minLines)}${h("By day")}${table("Day", dayLines)}${h(`Bets (showing ${Math.min(rows.length, tabsSoloShow)} of ${rows.length}, newest first)`)}<div style="overflow-x:auto;"><table style="border-collapse:collapse;font-size:12px;width:100%;min-width:760px;"><tbody>${list}</tbody></table></div>${rows.length > tabsSoloShow ? `<div style="margin-top:8px;display:flex;gap:8px;"><button onclick="tabsSoloShow+=100;renderTabsSolo()" style="background:transparent;border:1px solid #1a1d22;color:#e6edf5;border-radius:6px;padding:6px 12px;font-size:11px;font-weight:700;cursor:pointer;">SHOW 100 MORE</button><button onclick="tabsSoloShow=1e9;renderTabsSolo()" style="background:transparent;border:1px solid #1a1d22;color:#e6edf5;border-radius:6px;padding:6px 12px;font-size:11px;font-weight:700;cursor:pointer;">SHOW ALL ${rows.length}</button></div>` : ""}</div>`;
+  const list = rows.slice().sort((a, b) => (b.gameDate + b.at).localeCompare(a.gameDate + a.at)).slice(0, tabsSoloShow).map(x => `<tr style="border-top:1px solid #1a1d22;"><td style="padding:4px 8px;color:#e6edf5;white-space:nowrap;">${esc(x.gameDate.slice(5))} ${esc(x.gameTime.replace(/^[A-Za-z]+-\d+\s*/, ""))}</td><td style="padding:4px 8px;color:#fff;font-weight:700;white-space:nowrap;">${esc(displayPlayerName(x.player))} <span style="color:#7dd3fc;font-weight:600;">${esc(x.team || "")}</span></td><td style="padding:4px 8px;white-space:nowrap;"><b style="color:${x.ou === "over" ? C.over : C.under};">${x.ou === "over" ? "O" : "U"}${x.line}</b> <span style="color:#fff;">${esc(x.stat)}</span></td><td style="padding:4px 8px;${mono}color:#fff;">${x.odds > 0 ? "+" + x.odds : x.odds}</td><td style="padding:4px 8px;color:#e6edf5;">${esc(x.book || "")}</td><td style="padding:4px 8px;${mono}color:#4ade80;">+${x.ev.toFixed(1)}%</td><td style="padding:4px 8px;${mono}color:#fff;">${x.min != null ? Math.round(x.min) + "m" : "\u2014"}</td><td style="padding:4px 8px;white-space:nowrap;"><span title="${esc(x.ctxWhy || "")}" style="border:1px solid ${(TABS_CTX[x.ctx || "clean"] || TABS_CTX.clean)[1]}88;color:${(TABS_CTX[x.ctx || "clean"] || TABS_CTX.clean)[1]};border-radius:5px;padding:1px 6px;font-size:10px;font-weight:800;">${(TABS_CTX[x.ctx || "clean"] || TABS_CTX.clean)[0]}</span>${x.ctxWhy ? ` <span style="color:#e6edf5;font-size:10px;">${esc(String(x.ctxWhy).slice(0, 48))}</span>` : ""}</td><td style="padding:4px 8px;"><span style="border:1px solid #c4b5fd88;color:#c4b5fd;border-radius:5px;padding:1px 6px;font-size:10px;font-weight:800;">${TABS_SOLO_REL[x.release] || x.release}</span>${x.minToTip != null ? ` <span style="color:#e6edf5;font-size:10px;">${x.minToTip}m to tip</span>` : ""}</td><td style="padding:4px 8px;font-weight:800;color:${resCol(x.result)};">${x.result === "pending" ? "OPEN" : x.result.toUpperCase()}${x.actual != null ? ` <span style="color:#e6edf5;font-weight:600;">${x.actual}</span>` : ""}</td><td style="padding:4px 8px;"><a href="#" onclick="tabsSoloDelete('${esc(x.key).replace(/'/g, "")}');return false;" style="color:#6b7380;text-decoration:none;">✕</a></td></tr>`).join("");
+  el.innerHTML = `<div style="max-width:1100px;margin:0 auto;padding:8px;">${paste}${filters}${tiles}${h("By release")}${table("Release", relLines)}${h("By edge")}${table("Edge", edgeLines)}${h("By market")}${table("Market", mktLines)}${h("By RW context (clean vs upside / downside / flagged)")}${table("Context", ctxLines)}${h("By projected minutes")}${table("Min", minLines)}${h("By day")}${table("Day", dayLines)}${h(`Bets (showing ${Math.min(rows.length, tabsSoloShow)} of ${rows.length}, newest first)`)}<div style="overflow-x:auto;"><table style="border-collapse:collapse;font-size:12px;width:100%;min-width:760px;"><tbody>${list}</tbody></table></div>${rows.length > tabsSoloShow ? `<div style="margin-top:8px;display:flex;gap:8px;"><button onclick="tabsSoloShow+=100;renderTabsSolo()" style="background:transparent;border:1px solid #1a1d22;color:#e6edf5;border-radius:6px;padding:6px 12px;font-size:11px;font-weight:700;cursor:pointer;">SHOW 100 MORE</button><button onclick="tabsSoloShow=1e9;renderTabsSolo()" style="background:transparent;border:1px solid #1a1d22;color:#e6edf5;border-radius:6px;padding:6px 12px;font-size:11px;font-weight:700;cursor:pointer;">SHOW ALL ${rows.length}</button></div>` : ""}</div>`;
 }
 
 // ── TABS vs MODEL report ────────────────────────────────────────────────────
