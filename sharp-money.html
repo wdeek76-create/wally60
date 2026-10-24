@@ -461,7 +461,7 @@ function sharpSummaryHtml(){
 // tracked as Sharp Money.
 const SOFT_BOOKS = ['fanduel','bet105']; // targets; bet105 alerts go to their own Discord channel
 const SHARP_REQ_BOOKS = ['Novig','Prophet X','Kalshi','FanDuel'];
-const SHARP_MARKETS = { nfl:['atd','rec_yds','rush_yds','rush_att','rec','pass_cmp','pass_att'], nba:['pts','pra','3pm','reb','ast','total'], wnba:['pts','pra','3pm','reb','ast'], nhl:['sog','ag','sv'] };
+const SHARP_MARKETS = { nfl:['atd','pass_td','rec_yds','rush_yds','rush_att','rec','pass_cmp','pass_att'], nba:['pts','pra','3pm','reb','ast','total'], wnba:['pts','pra','3pm','reb','ast'], nhl:['sog','ag','sv'] };
 const SHARP_YESNO = new Set(['atd','ag']);
 // FanDuel price window: normal props -250 to +200; anytime TD / goal -250 to +500.
 const sharpPriceOk = (mk, price) => { const p=Number(price); return p>=-250 && p<=(SHARP_YESNO.has(mk)?500:200); };
@@ -1737,10 +1737,11 @@ let nlTracked=(()=>{ try{ return JSON.parse(LS.get('nbal_tracked','[]'))||[]; }c
 const nlSave=()=>{ LS.set('nbal_tracked', JSON.stringify(nlTracked)); const n=$('#nlN'); if(n) n.textContent=nlPlays.length||''; };
 const nlSent=(()=>{ try{ const o=JSON.parse(LS.get('nbal_sent','null')); if(o && o.day===etToday()) return o; }catch(e){} return { day:etToday(), keys:[] }; })();
 const nlHold=h=>h<-0.05?`${(-h).toFixed(1)}% arb`:'direct (0%)';
-const nlSide=s=>s==='over'?'Over':'Under';
+const nlSide=s=>s==='over'?'Over':s==='under'?'Under':s==='yes'?'Yes':s==='no'?'No':s;
+const NL_OPP={ over:'under', under:'over', yes:'no', no:'yes' };
 // games on right now: tipped (NBA tips ~10 min after the listed time) and under ~3h old
 // Live covers NBA and NFL: any game from tip to ~3h (NBA) / ~3.75h (NFL) after
-const NL_SPORTS = { nba:{ hrs:3, mks:new Set(['pts','reb','ast','pra','3pm','pr','pa','ra']) }, nfl:{ hrs:3.75, mks:new Set(['rec_yds','rush_yds','rush_att','rec','pass_cmp','pass_att','pass_yds']) } };
+const NL_SPORTS = { nba:{ hrs:3, mks:new Set(['pts','reb','ast','pra','3pm','pr','pa','ra']) }, nfl:{ hrs:3.75, mks:new Set(['rec_yds','rush_yds','rush_att','rec','pass_cmp','pass_att','pass_yds','pass_td','atd']) } };
 async function nlActiveGames(){
   const now=Date.now(), out=[];
   for(const sk of Object.keys(NL_SPORTS)){ if(!SPORTS[sk]) continue;
@@ -1776,7 +1777,8 @@ function nlFind(rows){
     const gm=nlGames.find(f=>f.id===o._fx), sk=gm?.sk||'nba';
     const mk=marketKeyFor(sk, o.market); if(!mk || !NL_SPORTS[sk]?.mks.has(mk)) return;
     if(isK) K.mk++;
-    const sd=sideOf(o); if(sd!=='over' && sd!=='under') return;
+    // anytime TD is Yes / No (FD posts Yes; the exchanges' No is the other side)
+    const sd = mk==='atd' ? (String(o.selection_line||'').toLowerCase()==='no'?'no':'yes') : sideOf(o); if(!NL_OPP[sd]) return;
     if(isK) K.side++;
     const nm=sharpPlayerOf(o), who=normName(nm); if(!who) return;
     const line=o.points==null?null:Number(o.points);
@@ -1785,8 +1787,8 @@ function nlFind(rows){
   });
   Object.values(G).forEach(g=>{ if(g.rows.some(o=>canonBook(o.sportsbook)==='fanduel')) K.fd+=g.rows.filter(o=>canonBook(o.sportsbook)==='kalshi').length; });
   const out=[];
-  Object.values(G).forEach(g=>['over','under'].forEach(side=>{
-    const opp=side==='over'?'under':'over';
+  Object.values(G).forEach(g=>(g.mk==='atd'?['yes']:['over','under']).forEach(side=>{
+    const opp=NL_OPP[side];
     const fd=g.rows.filter(o=>o._sd===side && canonBook(o.sportsbook)==='fanduel').sort((a,b)=>toDec(b.price)-toDec(a.price))[0];
     if(!fd) return; const fp=Number(fd.price); if(fp<-400 || fp>400) return;
     const hv=p=>(toImplied(fp)+toImplied(Number(p))-1)*100, sigs=[];
@@ -1816,7 +1818,7 @@ function nlAlert(){
     ns.forEach(x=>{ if(nlTracked.some(t=>t.key===p.key && t.kind===x.kind)) return;
       nlTracked.unshift({ id:Date.now()+Math.random().toString(36).slice(2,6), key:p.key, kind:x.kind, direct:!(x.hold<-0.05), hold:x.hold, size:x.size||null, vs:x.prices,
         fixtureId:p.fid, away:p.f?.away.ab||'', home:p.f?.home.ab||'', playerKey:p.who, playerName:p.name, mkey:p.mk, sk:p.sk||'nba', marketLabel:marketLabel(p.sk||'nba',p.mk), marketNames:[p.market], exBy:x.by||null,
-        side:p.side, line:p.line, price:Number(p.fd.price), trackedAt:Date.now(), actual:null, result:null, final:false }); });
+        side:p.side==='yes'?'Yes':p.side==='no'?'No':p.side, line:p.line, price:Number(p.fd.price), trackedAt:Date.now(), actual:null, result:null, final:false }); });
     if(nlHook) nlPost(p, ns);
   });
 }
@@ -1825,7 +1827,7 @@ function nlAlert(){
 // Kalshi depth table, and links to every book in the play.
 function nlPost(p, sigs){
   const lg=(SPORTS[p.sk]?.label||'NBA').toUpperCase(), mk=marketLabel(p.sk||'nba',p.mk), bet=`${titleCase(p.name)} ${nlSide(p.side)}${p.line!=null?' '+p.line:''} ${mk}`;
-  const title=`${fmtAm(p.fd.price)} ${bet}`, opp=nlSide(p.side==='over'?'under':'over');
+  const title=`${fmtAm(p.fd.price)} ${bet}`, opp=nlSide(NL_OPP[p.side]);
   const role=/^\d{15,}$/.test(nlRole)?nlRole:'', f=p.f, fdUrl=sharpLink(p.fd);
   const fields=sigs.map(x=>{
     if(x.exch){
