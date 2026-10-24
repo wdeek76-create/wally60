@@ -4041,8 +4041,19 @@ function pfSides(c, sk, R){
 const pfBestByBook = rows => Object.values((rows||[]).reduce((m,o)=>{ const k=canonBook(o.sportsbook); if(!m[k] || toDec(o.price)>toDec(m[k].price)) m[k]=o; return m; },{})).sort((a,b)=>toDec(b.price)-toDec(a.price));
 // every book's price for the pick, the target book highlighted -- the market comparison
 const pfCmpHtml = (rows, tgt) => rows.length ? `<div class="plstrip pfcmp">${rows.map(o=>{ const k=canonBook(o.sportsbook); return bookChipHtml(k, o.price, deepLinkFor(o), k===tgt, EXCH.has(k)?'<span class="dim" style="font-size:9.5px;margin-left:3px">exch</span>':''); }).join('')}</div>` : '<div class="dim" style="font-size:11px">No other books posting this.</div>';
+// the best N by the current sort: one leg per player/team + market, never both teams of a game
+function pfAutoPicks(list){
+  const used=new Set(), team=new Map(), out=[];
+  for(const c of list){ if(out.length>=pfLegs) break;
+    const k=c.p.fixtureId+'|'+c.p.key+'|'+c.mkey; if(used.has(k)) continue;
+    if(c.p.isTeam && SINGLE_SIDED_MKS.has(c.mkey)){ if(team.has(c.p.fixtureId) && team.get(c.p.fixtureId)!==c.p.key) continue; team.set(c.p.fixtureId, c.p.key); }
+    used.add(k); out.push(c); }
+  return out;
+}
 const pfOpen = new Set();
 let pfLegs = Math.max(2, Number(LS.get('props_pflegs','3'))||3);
+let pfSort = LS.get('props_pfsort','hold');   // 'hold' = tightest match first, 'money' = most exchange $ first
+let pfMode = LS.get('props_pfmode','pick');   // 'pick' = choose legs yourself, 'auto' = build the best N
 const pfSideLabel = c => c.side==='single' ? (c.mkey==='ml'?'ML':c.mkey==='ml60'?'ML60':c.mkey==='spread'?'ATS':(SPORTS[c.sk].ml?'ML':'Yes')) : (c.side==='over'?'Over':'Under');
 function pfTitle(c){
   const nm=titleCase(c.p.name);
@@ -4062,7 +4073,10 @@ function pfAdd(c){
 let pfList = [];
 function pfHtml(){
   const sk=pfLeagueKey(), d=pfData(sk);
-  const list = pfList = (pfScan()||[]);
+  let list = pfScan()||[];
+  if(pfSort==='money') list = list.slice().sort((x,y)=>y.liq-x.liq || (x.hold??99)-(y.hold??99));
+  if(pfMode==='auto') list = pfAutoPicks(list);
+  pfList = list;
   const games = (d?.fixtures||[]).filter(f=>!f.live).sort((a,b)=>new Date(a.start)-new Date(b.start));
   const chip=(attr,v,label,on)=>`<button class="qarbchip${on?' on':''}" ${attr}="${v}">${label}</button>`;
   const rows = !d ? `<div class="empty" style="padding:14px">Loading ${esc(SPORTS[sk].label)} lines…</div>`
@@ -4084,7 +4098,8 @@ function pfHtml(){
     </div>
     <div class="pfctl">${[['both','Both'],['mains','Main lines'],['props','Props']].map(([v,t])=>chip('data-pfscope',v,t,autoScope===v)).join('')}</div>
     <div class="pfctl"><span class="dim">Hold</span>${[0,1,2,3].map(v=>chip('data-maxhold',v,`≤${v}%`,parlayMaxHold===v)).join('')}<span class="dim" style="margin-left:6px">Min</span>${[[0,'Any'],[250,'$250'],[500,'$500'],[1000,'$1k']].map(([v,t])=>chip('data-pfmin',v,t,pfMin===v)).join('')}</div>
-    ${list.length?`<div class="pfctl"><span class="dim">Auto</span><button class="qarbchip" data-pflegs="-1">−</button><b>${pfLegs} legs</b><button class="qarbchip" data-pflegs="1">+</button><button class="qarbchip on" id="pfAuto">Build best ${pfLegs}</button></div>`:''}
+    <div class="pfctl">${chip('data-pfmode','pick','Pick my own',pfMode==='pick')}${chip('data-pfmode','auto','Auto build',pfMode==='auto')}<span class="dim" style="margin-left:6px">Sort</span>${chip('data-pfsort','hold','Tightest',pfSort==='hold')}${chip('data-pfsort','money','Most $',pfSort==='money')}</div>
+    ${pfMode==='auto'?`<div class="pfctl"><button class="qarbchip" data-pflegs="-1">−</button><b>${pfLegs} legs</b><button class="qarbchip" data-pflegs="1">+</button><button class="qarbchip on" id="pfAuto"${list.length?'':' disabled'}>Use these ${list.length}</button></div>`:''}
     <div class="pflist">${rows}</div>
   </div>`;
 }
@@ -4101,16 +4116,12 @@ function bindPf(view){
   view.querySelectorAll('[data-pfopen]').forEach(r=>r.addEventListener('click',ev=>{ if(ev.target.closest('a,button')) return; const id=r.dataset.pfopen; if(pfOpen.has(id)) pfOpen.delete(id); else pfOpen.add(id); renderParlay(); }));
   view.querySelectorAll('[data-pflegs]').forEach(b=>b.addEventListener('click',()=>{ pfLegs=Math.max(2,Math.min(8,pfLegs+Number(b.dataset.pflegs))); LS.set('props_pflegs',String(pfLegs)); renderParlay(); }));
   $('#pfAuto')?.addEventListener('click',()=>{
-    // fresh slip from the top of the list: one leg per player/team + market, never both teams of a game
-    parlay=[]; const used=new Set(), team=new Map(); let n=0;
-    for(const c of pfList){ if(n>=pfLegs) break;
-      const k=c.p.fixtureId+'|'+c.p.key+'|'+c.mkey; if(used.has(k)) continue;
-      if(c.p.isTeam && SINGLE_SIDED_MKS.has(c.mkey)){ if(team.has(c.p.fixtureId) && team.get(c.p.fixtureId)!==c.p.key) continue; team.set(c.p.fixtureId, c.p.key); }
-      used.add(k); const g=[sportKey,fixtures,mainRows];
-      try{ sportKey=c.sk; fixtures=c.fxs; mainRows=c.rows; addToParlay(c.p, c.mkey, pfSideLabel(c), c.line, c.rows, canonBook(c.refRow.sportsbook)); n++; } finally{ [sportKey,fixtures,mainRows]=g; }
-    }
+    parlay=[]; let n=0;
+    pfList.forEach(c=>{ const g=[sportKey,fixtures,mainRows]; try{ sportKey=c.sk; fixtures=c.fxs; mainRows=c.rows; addToParlay(c.p, c.mkey, pfSideLabel(c), c.line, c.rows, canonBook(c.refRow.sportsbook)); n++; } finally{ [sportKey,fixtures,mainRows]=g; } });
     saveParlay(); renderTabs(); toast(`Built ${n} leg${n===1?'':'s'}`); renderParlay();
   });
+  view.querySelectorAll('[data-pfmode]').forEach(b=>b.addEventListener('click',()=>{ pfMode=b.dataset.pfmode; LS.set('props_pfmode',pfMode); renderParlay(); }));
+  view.querySelectorAll('[data-pfsort]').forEach(b=>b.addEventListener('click',()=>{ pfSort=b.dataset.pfsort; LS.set('props_pfsort',pfSort); renderParlay(); }));
 }
 let parlayRenderPending=false;
 function renderParlay(){
@@ -4141,7 +4152,10 @@ function renderParlay(){
   const vs = betRow ? `<div class="pfvs"><span>${esc(bookShort(betRow.book))}${sameGame?' SGP':''}${pfBoost?` +${pfBoost}%`:''}</span><b>${fmtAm(boosted)}</b>${pfBoost?`<span class="dim" style="font-size:11px">(${fmtAm(betRow.price)})</span>`:''}<span>VS.</span><span>Fair</span><b>${fairAm!=null?fmtAm(fairAm):'—'}</b>${ev!=null?`<b class="${ev>0?'pos':'neg'}">${ev>0?'+':''}${ev.toFixed(1)}% EV</b>`:''}</div>`
     : sameGame ? `<div class="plwarn">Same game: ${esc(bookShort(autoTargetBook||'fanduel'))} prices it as an SGP (shorter than ${combo!=null?fmtAm(combo):'the legs multiplied'}). Check the slip${fairAm!=null?` vs fair ${fmtAm(fairAm)}`:''}.</div>` : '';
   const realStrip = real.length>1 ? `<div class="plstrip">${real.map((r,i)=>bookChipHtml(canonBook(r.book), r.price, r.url, i===0)).join('')}</div>` : '';
-  const fdAll = fdRow ? `<a class="plfdall" href="${esc(fdRow.url || BOOK_HOME.fanduel)}" rel="noopener">${bookLogo('fanduel')?`<img src="${esc(bookLogo('fanduel'))}" alt="">`:''}Open FD with all legs</a>` : '';
+  const tgtK = autoTargetBook || 'fanduel';
+  const fdAll = tgtK==='fanduel'
+    ? (fdRow ? `<a class="plfdall" href="${esc(fdRow.url || BOOK_HOME.fanduel)}" rel="noopener">${bookLogo('fanduel')?`<img src="${esc(bookLogo('fanduel'))}" alt="">`:''}Open FD with all legs</a>` : '')
+    : `<a class="plfdall" href="${esc((bookRows.find(r=>r.book===tgtK)||{}).url || BOOK_HOME[tgtK] || '#')}" rel="noopener">${bookLogo(tgtK)?`<img src="${esc(bookLogo(tgtK))}" alt="">`:''}Open ${esc(bookShort(tgtK))}</a>`;
   view.innerHTML = pfHtml() + `<div class="plcard">
     <div class="plhd"><span class="plcount">Slip - ${parlay.length} leg${parlay.length===1?'':'s'}</span><button class="plclr" id="plclear">Clear</button></div>
     <div class="pllegs">${parlay.map(parlayLegHtml).join('')}</div>
@@ -4152,7 +4166,7 @@ function renderParlay(){
         <label class="plbox plstakebox">$<input id="plstake" inputmode="decimal" value="${plStake}"><span class="plarr">→</span><b class="pos" id="plwin">${usdFull(plStake*toDec(boosted))}</b></label>
         <a class="plbig" href="${esc(betRow.url||'#')}" rel="noopener">${bookLogo(betRow.book)?`<img src="${esc(bookLogo(betRow.book))}" alt="">`:`<span class="rlogotxt">${esc(bookShort(betRow.book))}</span>`}${fmtAm(betRow.price)}</a>
       </div>`:''}
-      ${betRow?.book!=='fanduel'?fdAll:''}
+      ${betRow?.book!==tgtK?fdAll:''}
     </div>
   </div>`;
   const stakeEl=$('#plstake');
