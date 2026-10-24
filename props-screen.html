@@ -933,6 +933,8 @@ const SHOW_MAX = new Set(['pinnacle','bet105']); // flat-limit books whose max w
 const SHORT = { 'onyx odds':'Onyx','props builder':'PB','fanduel':'FD','novig':'Novig','prophet x':'PX','kalshi':'Kalshi','pinnacle':'Pin','bet105':'b105','draftkings':'DK','fliff':'Fliff','betonline':'BOL','caesars':'Caes','hard rock bet':'HR','betmgm':'MGM','kambi':'Kambi','betrivers':'BR','bookmaker':'BKM','circa':'Circa' };
 const canonBook = n => { const k=String(n||'').toLowerCase(); if(k==='courtside'||k==='onyx odds') return 'draftkings'; if(k==='hard rock'||k==='hardrock') return 'hard rock bet'; return k; };
 const bookLabel = n => { const k=canonBook(n); return BOOKS.find(b=>b.toLowerCase()===k) || n; };
+// the book's own name, not merged (Courtside / Onyx stay themselves, not DraftKings)
+const rawBook = o => { const k=String(o?.sportsbook||'').toLowerCase(); return k==='hard rock'||k==='hardrock' ? 'hard rock bet' : k; };
 const bookShort = n => SHORT[String(n||'').toLowerCase()] || SHORT[canonBook(n)] || n;
 // NBA "5 books" mode: the board only shows FanDuel, Fliff, Novig, Prophet X and Onyx (Onyx gets its
 // own row here instead of folding into DraftKings). Toggled from the top bar on the NBA tab.
@@ -3608,7 +3610,7 @@ function ladderHtml(leg, L, hero){
 function parlayLegHtml(leg){
   const rows=rowsForLeg(leg);
   const mine=bestFirst(myRowsForLeg(leg,rows));
-  const targetRow = autoTargetBook ? mine.find(o=>canonBook(o.sportsbook)===autoTargetBook) : null;
+  const targetRow = autoTargetBook ? mine.find(o=>rawBook(o)===autoTargetBook) : null;
   const hero = targetRow || mine[0] || null;
   const L = legLadder(mine, hero?.price, SPORTS[leg.sportKey]?.threeWay);
   const f=legFixture(leg);
@@ -3740,7 +3742,7 @@ function buildAutoCandidates(){
         if(autoTargetBook){
           // Only this one shop's own price counts -- skip the pick entirely if it doesn't post it,
           // rather than falling back to some other shop (defeats the point of targeting one).
-          refRow = bestFirst(myRows.filter(o=>canonBook(o.sportsbook)===autoTargetBook))[0] || null;
+          refRow = bestFirst(myRows.filter(o=>rawBook(o)===autoTargetBook))[0] || null;
         } else {
           const pinRow = bestFirst(myRows.filter(o=>canonBook(o.sportsbook)==='pinnacle'))[0] || null;
           const exchRow = bestFirst(myRows.filter(o=>EXCH.has(canonBook(o.sportsbook))))[0] || null;
@@ -3846,7 +3848,7 @@ function runAutoBuildNow(){
     if(autoSGP && !crossLeague && !autoFixture){
       // Soonest game the Target shop actually prices (any shop when no Target is set) -- not just
       // the earliest kickoff, which in an every-league sport is often a game nobody you use lists.
-      const priced=new Set(mainRows.filter(o=>!autoTargetBook || canonBook(o.sportsbook)===autoTargetBook).map(o=>o._fx));
+      const priced=new Set(mainRows.filter(o=>!autoTargetBook || rawBook(o)===autoTargetBook).map(o=>o._fx));
       const first=fixtures.filter(f=>!f.live && priced.has(f.id)).sort((a,b)=>new Date(a.start)-new Date(b.start))[0];
       if(!first){ autoLastMsg=`No upcoming ${SPORTS[sportKey].label} game ${autoTargetBook?esc(bookLabel(autoTargetBook))+' prices':'has lines'} right now.`; toast('No game to build from'); return; }
       autoFixture=first.id;
@@ -4073,9 +4075,9 @@ function pfSides(c, sk, R){
   return { mine:rows.filter(o=>sideOf(o)===c.side && at(o)), opp:rows.filter(o=>sideOf(o)===(c.side==='over'?'under':'over') && at(o)) };
 }
 // best price per book, best first
-const pfBestByBook = rows => Object.values((rows||[]).reduce((m,o)=>{ const k=canonBook(o.sportsbook); if(!m[k] || toDec(o.price)>toDec(m[k].price)) m[k]=o; return m; },{})).sort((a,b)=>toDec(b.price)-toDec(a.price));
+const pfBestByBook = rows => Object.values((rows||[]).reduce((m,o)=>{ const k=rawBook(o); if(!m[k] || toDec(o.price)>toDec(m[k].price)) m[k]=o; return m; },{})).sort((a,b)=>toDec(b.price)-toDec(a.price));
 // every book's price for the pick, the target book highlighted -- the market comparison
-const pfCmpHtml = (rows, tgt) => rows.length ? `<div class="plstrip pfcmp">${rows.map(o=>{ const k=canonBook(o.sportsbook); return bookChipHtml(k, o.price, deepLinkFor(o), k===tgt, EXCH.has(k)?'<span class="dim" style="font-size:9.5px;margin-left:3px">exch</span>':''); }).join('')}</div>` : '<div class="dim" style="font-size:11px">No other books posting this.</div>';
+const pfCmpHtml = (rows, tgt) => rows.length ? `<div class="plstrip pfcmp">${rows.map(o=>{ const k=rawBook(o); return bookChipHtml(k, o.price, deepLinkFor(o)||BOOK_HOME[k], k===tgt, EXCH.has(canonBook(k))?'<span class="dim" style="font-size:9.5px;margin-left:3px">exch</span>':k!==canonBook(k)?`<span class="dim" style="font-size:9.5px;margin-left:3px">${esc(o.sportsbook)}</span>`:''); }).join('')}</div>` : '<div class="dim" style="font-size:11px">No other books posting this.</div>';
 // the best N by the current sort: one leg per player/team + market, never both teams of a game
 function pfAutoPicks(list){
   const used=new Set(), team=new Map(), out=[];
@@ -4099,7 +4101,8 @@ function pfDetHtml(ref, tgt, L, mine, sharp){
 const pfOpen = new Set();
 let pfLegs = Math.max(1, Number(LS.get('props_pflegs','3'))||3);
 let pfSort = LS.get('props_pfsort','hold');   // 'hold' = tightest match first, 'money' = most exchange $ first
-let pfMode = LS.get('props_pfmode','pick');   // 'pick' = choose legs yourself, 'auto' = build the best N
+let pfMode = LS.get('props_pfmode','pick');
+let pfSgp = LS.get('props_pfsgp','')==='1';   // same game parlay: every leg from one game   // 'pick' = choose legs yourself, 'auto' = build the best N
 const pfSideLabel = c => c.side==='single' ? (c.mkey==='ml'?'ML':c.mkey==='ml60'?'ML60':c.mkey==='spread'?'ATS':(SPORTS[c.sk].ml?'ML':'Yes')) : (c.side==='over'?'Over':'Under');
 function pfTitle(c){
   const nm=titleCase(c.p.name);
@@ -4121,6 +4124,12 @@ function pfHtml(){
   const sk=pfLeagueKey(), d=pfData(sk);
   let list = pfScan()||[];
   if(pfSort==='money') list = list.slice().sort((x,y)=>y.liq-x.liq || (x.hold??99)-(y.hold??99));
+  if(pfSgp && !pfGame){
+    // same game: once a leg is in, only that game; otherwise (auto) the game with the most / tightest plays
+    const fid = parlay.length ? parlay[0].fixtureId : pfMode==='auto' ? (()=>{ const g={}; list.forEach(c=>{ (g[c.p.fixtureId]=g[c.p.fixtureId]||[]).push(c); });
+      return Object.entries(g).map(([id,l])=>{ const top=l.slice(0,pfLegs); return { id, n:top.length, h:top.reduce((a,c)=>a+(c.hold??0),0)/top.length }; }).sort((a,b)=>b.n-a.n || a.h-b.h)[0]?.id; })() : null;
+    if(fid) list = list.filter(c=>c.p.fixtureId===fid);
+  }
   if(pfMode==='auto') list = pfAutoPicks(list);
   pfList = list;
   const games = (d?.fixtures||[]).filter(f=>!f.live).sort((a,b)=>new Date(a.start)-new Date(b.start));
@@ -4144,7 +4153,7 @@ function pfHtml(){
     </div>
     <div class="pfctl">${[['both','Both'],['mains','Main lines'],['props','Props']].map(([v,t])=>chip('data-pfscope',v,t,autoScope===v)).join('')}</div>
     <div class="pfctl"><span class="dim">Hold</span>${[0,1,2,3].map(v=>chip('data-maxhold',v,`≤${v}%`,parlayMaxHold===v)).join('')}<span class="dim" style="margin-left:6px">Min</span>${[[0,'Any'],[250,'$250'],[500,'$500'],[1000,'$1k']].map(([v,t])=>chip('data-pfmin',v,t,pfMin===v)).join('')}</div>
-    <div class="pfctl">${chip('data-pfmode','pick','Pick my own',pfMode==='pick')}${chip('data-pfmode','auto','Auto build',pfMode==='auto')}<span class="dim" style="margin-left:6px">Sort</span>${chip('data-pfsort','hold','Tightest',pfSort==='hold')}${chip('data-pfsort','money','Most $',pfSort==='money')}</div>
+    <div class="pfctl">${chip('data-pfmode','pick','Pick my own',pfMode==='pick')}${chip('data-pfmode','auto','Auto build',pfMode==='auto')}<span class="dim" style="margin-left:6px">Sort</span>${chip('data-pfsort','hold','Tightest',pfSort==='hold')}${chip('data-pfsort','money','Most $',pfSort==='money')}${chip('data-pfsgp',1,'SGP',pfSgp)}${parlay.length?'<button class="qarbchip" id="pfClear">Clear slip</button>':''}</div>
     ${pfMode==='auto'?`<div class="pfctl"><button class="qarbchip" data-pflegs="-1">−</button><input id="pfLegsIn" type="text" inputmode="numeric" value="${pfLegs}" style="width:38px;text-align:center;background:var(--bg2);color:var(--text);border:1px solid var(--line2);border-radius:999px;padding:4px 0;font-weight:800"><span class="dim">leg${pfLegs===1?'':'s'}</span><button class="qarbchip" data-pflegs="1">+</button><button class="qarbchip on" id="pfAuto"${list.length?'':' disabled'}>Use these ${list.length}</button></div>`:''}
     <div class="pflist">${rows}</div>
   </div>`;
@@ -4168,6 +4177,8 @@ function bindPf(view){
   });
   $('#pfLegsIn')?.addEventListener('change',e=>{ const v=Math.max(1, parseInt(e.target.value,10)||1); if(v===pfLegs) return; pfLegs=v; LS.set('props_pflegs',String(pfLegs)); setTimeout(renderParlay,0); });
   view.querySelectorAll('[data-pfmode]').forEach(b=>b.addEventListener('click',()=>{ pfMode=b.dataset.pfmode; LS.set('props_pfmode',pfMode); renderParlay(); }));
+  view.querySelectorAll('[data-pfsgp]').forEach(b=>b.addEventListener('click',()=>{ pfSgp=!pfSgp; LS.set('props_pfsgp',pfSgp?'1':''); renderParlay(); }));
+  $('#pfClear')?.addEventListener('click',()=>{ parlay=[]; saveParlay(); renderTabs(); renderParlay(); });
   view.querySelectorAll('[data-pfsort]').forEach(b=>b.addEventListener('click',()=>{ pfSort=b.dataset.pfsort; LS.set('props_pfsort',pfSort); renderParlay(); }));
 }
 let parlayRenderPending=false;
@@ -4202,7 +4213,7 @@ function renderParlay(){
   const tgtK = autoTargetBook || 'fanduel';
   const fdAll = tgtK==='fanduel'
     ? (fdRow ? `<a class="plfdall" href="${esc(fdRow.url || BOOK_HOME.fanduel)}" rel="noopener">${bookLogo('fanduel')?`<img src="${esc(bookLogo('fanduel'))}" alt="">`:''}Open FD with all legs</a>` : '')
-    : `<a class="plfdall" href="${esc((bookRows.find(r=>r.book===tgtK)||{}).url || BOOK_HOME[tgtK] || '#')}" rel="noopener">${bookLogo(tgtK)?`<img src="${esc(bookLogo(tgtK))}" alt="">`:''}Open ${esc(bookShort(tgtK))}</a>`;
+    : `<a class="plfdall" href="${esc(BOOK_HOME[tgtK] || '#')}" rel="noopener">${bookLogo(tgtK)?`<img src="${esc(bookLogo(tgtK))}" alt="">`:''}Open ${esc(bookShort(tgtK))}</a>`;
   view.innerHTML = pfHtml() + `<div class="plcard">
     <div class="plhd"><span class="plcount">Slip - ${parlay.length} leg${parlay.length===1?'':'s'}</span><button class="plclr" id="plclear">Clear</button></div>
     <div class="pllegs">${parlay.map(parlayLegHtml).join('')}</div>
