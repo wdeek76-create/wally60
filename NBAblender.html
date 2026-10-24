@@ -377,6 +377,7 @@ table colgroup col.avg-col{width:16%;}
   <button class="tab-btn active" onclick="switchTab('upload')">UPLOAD</button>
   <button class="tab-btn" onclick="switchTab('results')">PROJECTIONS</button>
   <button class="tab-btn" onclick="switchTab('morning')" style="color:#c4b5fd;">MORNING</button>
+  <button class="tab-btn" onclick="switchTab('tabssolo')" style="color:#7dd3fc;">TABS SOLO</button>
   <button class="tab-btn" onclick="switchTab('tracker')">TRACKER</button>
   <button class="tab-btn" onclick="switchTab('gamelog')">GAME LOG</button>
   <button class="tab-btn" onclick="switchTab('expected')">EXPECTED</button>
@@ -526,6 +527,7 @@ table colgroup col.avg-col{width:16%;}
 
   <div id="tracker-tab" style="display:none;"></div>
   <div id="morning-tab" style="display:none;"></div>
+  <div id="tabssolo-tab" style="display:none;"></div>
   <div id="gamelog-tab" style="display:none;"></div>
 
   <div id="srcanalytics-tab" style="display:none;"></div>
@@ -1475,6 +1477,7 @@ function switchTab(tab) {
   document.getElementById("evcalc-tab").style.display = tab==="evcalc"?"block":"none";
   document.getElementById("pace-tab").style.display = tab==="pace"?"block":"none";
   document.getElementById("morning-tab").style.display = tab==="morning"?"block":"none";
+  document.getElementById("tabssolo-tab").style.display = tab==="tabssolo"?"block":"none";
   if (tab==="tracker") renderTracker();
   if (tab==="gamelog") renderGameLog();
   if (tab==="expected") renderExpected();
@@ -1487,6 +1490,7 @@ function switchTab(tab) {
   if (tab==="pace") renderPace();
   if (tab==="captool") renderCapTool();
   if (tab==="evcalc") renderNbaModel();
+  if (tab==="tabssolo") renderTabsSolo();
   if (tab==="morning") {
     renderMorning();
     rwAutoIfStale();
@@ -26391,6 +26395,124 @@ function morningSoloHtml(statOk) {
       return `<div style="margin-bottom:14px;"><div style="font-size:13px;font-weight:800;color:${_mSrc(src).color};margin-bottom:5px;">${_mSrc(src).label} <span style="font-size:11px;color:#a8b0bb;font-weight:600;">${rows.length} lines · ${open} open</span></div>
         <div style="overflow-x:auto;"><table style="border-collapse:collapse;min-width:620px;font-size:12px;"><thead><tr>${th("Edge")}${th("All", 2)}${th('<span style="color:#fb923c;">Over</span>', 2)}${th('<span style="color:#38bdf8;">Under</span>', 2)}</tr></thead><tbody>${body}</tbody></table></div></div>`;
     }).join("");
+}
+
+// ── TABS SOLO ───────────────────────────────────────────────────────────────
+// The Tabs projection set, pasted from PropShop on its own and tracked solo for the rest of the year: every line
+// at TABS_SOLO_MIN_EV%+ is logged flat 1u at the pasted price, same markets as Morning. Each row is tagged by RELEASE from
+// the game's tip time: "30min" when the paste lands within TABS_SOLO_WINDOW_MIN of tip, otherwise "initial" (the first
+// release). Both releases of the same line are kept as separate rows so they can be compared. Own storage, never mixed
+// into the Morning log or the ensemble.
+const TABS_SOLO_KEY = "nba_tabs_solo_v1", TABS_SOLO_META_KEY = "nba_tabs_solo_meta_v1";
+const TABS_SOLO_MIN_EV = 1, TABS_SOLO_WINDOW_MIN = 45;
+const TABS_SOLO_REL = { initial: "INITIAL", "30min": "30 MIN" };
+let tabsSolo = [], tabsSoloMeta = {}, tabsSoloStat = "ALL", tabsSoloRel = "ALL", tabsSoloInfo = "";
+try { tabsSolo = JSON.parse(localStorage.getItem(TABS_SOLO_KEY) || "[]") || []; } catch (e) { tabsSolo = []; }
+try { tabsSoloMeta = JSON.parse(localStorage.getItem(TABS_SOLO_META_KEY) || "{}") || {}; } catch (e) { tabsSoloMeta = {}; }
+function tabsSoloSave() { try { localStorage.setItem(TABS_SOLO_KEY, JSON.stringify(tabsSolo)); localStorage.setItem(TABS_SOLO_META_KEY, JSON.stringify(tabsSoloMeta)); } catch (e) { console.warn("[TABS SOLO] save failed", e); } }
+function _tsTipTs(dateIso, timeStr) {
+  const m = String(timeStr || "").match(/(\d{1,2}):(\d{2})\s*([AP])M/i), d = String(dateIso || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m || !d) return null;
+  let h = Number(m[1]) % 12; if (/p/i.test(m[3])) h += 12;
+  return new Date(Number(d[1]), Number(d[2]) - 1, Number(d[3]), h, Number(m[2])).getTime();
+}
+function tabsSoloImport() {
+  const ta = document.getElementById("ts-paste"), info = document.getElementById("ts-info");
+  const raw = ta ? ta.value : "", say = t => { tabsSoloInfo = t; if (info) info.textContent = t; };
+  if (!raw.trim()) { say("Paste the Tabs PropShop board first."); return; }
+  let stat = document.getElementById("ts-stat").value;
+  const relPick = document.getElementById("ts-rel").value;
+  if (stat === "AUTO") {
+    stat = morningDetectMarket(raw);
+    if (!stat) { say("Couldn't tell which market this is — pick it in the Market box."); return; }
+    if (stat.startsWith("UNSUPPORTED:")) { say(`That looks like a ${stat.slice(12)} board — only PTS, 3PM, REB, AST and PRA are tracked.`); return; }
+  }
+  const { results, errors } = parseMorningPropShop(raw, stat);
+  if (!results.length) { say("No props found in that paste." + (errors.length ? ` ${errors.length} parse error(s).` : "")); return; }
+  const now = Date.now(), nowIso = new Date().toISOString(), today = localYMD(new Date());
+  let added = 0, upd = 0, late = 0; const seen = { initial: 0, "30min": 0 };
+  results.forEach(r => {
+    if (!r.gameDateIso || _mRejected(r.player)) return;
+    const tip = _tsTipTs(r.gameDateIso, r.gameTime), mins = tip != null ? Math.round((tip - now) / 60000) : null;
+    if (mins != null && mins < -5) { late++; return; }                       // already tipped: not a bet
+    const rel = relPick !== "AUTO" ? relPick : (mins != null && mins <= TABS_SOLO_WINDOW_MIN ? "30min" : "initial");
+    seen[rel]++;
+    if (!(Number(r.ev) >= TABS_SOLO_MIN_EV)) return;
+    const odds = parseInt(r.odds, 10); if (isNaN(odds)) return;
+    const key = [resolveNorm(r.player), stat, r.gameDateIso, r.ou, Number(r.line), rel].join("|");
+    const cur = tabsSolo.find(x => x.key === key);
+    if (cur) { if (cur.result === "pending") { Object.assign(cur, { odds, book: r.book, ev: Number(r.ev), proj: r.proj }); upd++; } return; }
+    tabsSolo.push({ key, player: r.player, game: r.game || "", team: _mTeamFor(r.player), gameDate: r.gameDateIso, gameTime: r.gameTime || "", stat, ou: r.ou, line: Number(r.line), odds, book: r.book, ev: Number(r.ev), proj: r.proj, at: nowIso, release: rel, minToTip: mins, result: "pending", actual: null });
+    added++;
+  });
+  Object.keys(seen).forEach(rel => { if (seen[rel]) tabsSoloMeta[today + "|" + rel + "|" + stat] = { n: seen[rel], at: now }; });
+  tabsSoloSave();
+  if (ta) ta.value = "";
+  say(`${stat}: ${added} new${upd ? `, ${upd} updated` : ""} · ${seen.initial} initial / ${seen["30min"]} at 30 min${late ? ` · ${late} already tipped, skipped` : ""}`);
+  showToast(`Tabs Solo ${stat}: ${added} logged`);
+  renderTabsSolo();
+}
+async function tabsSoloGrade() {
+  const btn = document.getElementById("ts-grade-btn"); if (btn) { btn.disabled = true; btn.textContent = "GRADING…"; }
+  const today = localYMD(new Date()); let graded = 0;
+  for (const x of tabsSolo.filter(y => y.result === "pending" && y.gameDate <= today)) {
+    try { const r = await gradeBet(x); if (r.ok) { x.result = r.result; x.actual = r.total != null ? r.total : null; graded++; } } catch (e) {}
+  }
+  if (graded) tabsSoloSave();
+  showToast(graded ? `Tabs Solo: graded ${graded}` : "Tabs Solo: nothing final yet");
+  renderTabsSolo();
+}
+function tabsSoloSet(kind, v) { if (kind === "stat") tabsSoloStat = v; else tabsSoloRel = v; renderTabsSolo(); }
+function tabsSoloDelete(key) { tabsSolo = tabsSolo.filter(x => x.key !== key); tabsSoloSave(); renderTabsSolo(); }
+function tabsSoloClear() { if (!confirm(`Delete all ${tabsSolo.length} Tabs Solo bets? This can't be undone.`)) return; tabsSolo = []; tabsSoloMeta = {}; tabsSoloSave(); renderTabsSolo(); }
+function tabsSoloExport() {
+  if (!tabsSolo.length) { showToast("Tabs Solo is empty"); return; }
+  const cols = ["gameDate", "gameTime", "release", "minToTip", "player", "team", "stat", "ou", "line", "odds", "book", "ev", "proj", "result", "actual"];
+  const q = v => { const s = v == null ? "" : String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+  const blob = new Blob([cols.join(",") + "\n" + tabsSolo.map(b => cols.map(c => q(b[c])).join(",")).join("\n")], { type: "text/csv" });
+  const url = URL.createObjectURL(blob), a = document.createElement("a");
+  a.href = url; a.download = `TabsSolo ${_psDate()} ${_nowClock()}.csv`; a.style.display = "none"; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 500);
+}
+function renderTabsSolo() {
+  const el = document.getElementById("tabssolo-tab"); if (!el) return;
+  const esc = _mEsc, today = localYMD(new Date());
+  const mono = "font-family:'JetBrains Mono','Menlo',monospace;";
+  const card = "background:#0a0b0e;border:1px solid #1a1d22;border-radius:10px;padding:14px;margin-bottom:12px;";
+  const C = { over: "#f87171", under: "#4ade80", lab: "#e6edf5" };
+  const btn = (label, onclick, on, color) => `<button onclick="${onclick}" style="background:${on ? (color || "#7dd3fc") + "22" : "transparent"};border:1px solid ${on ? (color || "#7dd3fc") : "#1a1d22"};color:${on ? (color || "#7dd3fc") : "#e6edf5"};border-radius:6px;padding:5px 11px;font-size:11px;font-weight:700;cursor:pointer;">${label}</button>`;
+  const rows = tabsSolo.filter(x => (tabsSoloStat === "ALL" || x.stat === tabsSoloStat) && (tabsSoloRel === "ALL" || x.release === tabsSoloRel));
+  const win = x => x.odds > 0 ? x.odds / 100 : 100 / Math.abs(x.odds);
+  const agg = set => { const v = { w: 0, l: 0, p: 0, pl: 0, open: 0 }; set.forEach(x => { if (x.result === "hit") { v.w++; v.pl += win(x); } else if (x.result === "miss") { v.l++; v.pl -= 1; } else if (x.result === "void") v.p++; else v.open++; }); return v; };
+  const num = (v, plus) => (plus && v > 0 ? "+" : "") + v.toFixed(2);
+  const cell = v => { const n = v.w + v.l; if (!n) return `<td style="padding:5px 9px;text-align:center;color:#e6edf5;">—</td><td style="padding:5px 9px;text-align:center;color:#e6edf5;">—</td>`; const c = v.pl >= 0 ? "#4ade80" : "#f87171"; return `<td style="padding:5px 9px;text-align:center;white-space:nowrap;color:#fff;">${v.w}-${v.l} <span style="color:#e6edf5;margin-left:6px;">${(v.w / n * 100).toFixed(0)}%</span></td><td style="padding:5px 9px;text-align:center;white-space:nowrap;color:${c};">${num(v.pl, true)}u <span style="opacity:.85;margin-left:6px;">${(v.pl / n * 100).toFixed(0)}%</span></td>`; };
+  const th = (t, span) => `<th${span ? ` colspan="${span}"` : ""} style="padding:6px 9px;font-size:10px;letter-spacing:.5px;text-transform:uppercase;text-align:center;color:#e6edf5;white-space:nowrap;">${t}</th>`;
+  const table = (head, lines) => `<div style="overflow-x:auto;margin-bottom:12px;"><table style="border-collapse:collapse;min-width:620px;font-size:12px;"><thead><tr>${th(head)}${th("All", 2)}${th(`<span style="color:${C.over};">Over</span>`, 2)}${th(`<span style="color:${C.under};">Under</span>`, 2)}</tr></thead><tbody>${lines.map(({ label, set, total }) => { const a = agg(set), o = agg(set.filter(x => x.ou === "over")), u = agg(set.filter(x => x.ou === "under")); return `<tr style="border-top:1px solid #1a1d22;${total ? "background:#0a0d12;font-weight:800;" : ""}"><td style="padding:5px 10px;font-weight:800;color:#fff;white-space:nowrap;">${label}</td>${cell(a)}${cell(o)}${cell(u)}</tr>`; }).join("")}</tbody></table></div>`;
+  const h = t => `<div style="font-size:12px;font-weight:800;color:#fff;letter-spacing:.8px;text-transform:uppercase;margin:6px 0;">${t}</div>`;
+  // paste panel + per-market / per-release check grid for today
+  const gridCell = (stat, rel) => { const m = tabsSoloMeta[today + "|" + rel + "|" + stat]; return m ? `<span title="${m.n} lines seen · pasted ${new Date(m.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}" style="color:#4ade80;font-weight:800;">✓<span style="color:#e6edf5;font-weight:600;font-size:10px;"> ${m.n}</span></span>` : `<span style="color:#6b7380;">○</span>`; };
+  const grid = `<div style="display:grid;grid-template-columns:auto repeat(${MORNING_STATS.length},auto);gap:3px 12px;align-items:center;font-size:11px;"><span></span>${MORNING_STATS.map(s => `<b style="color:#e6edf5;text-align:center;">${s}</b>`).join("")}${Object.keys(TABS_SOLO_REL).map(rel => `<b style="color:#e6edf5;">${TABS_SOLO_REL[rel]}</b>${MORNING_STATS.map(s => `<span style="text-align:center;">${gridCell(s, rel)}</span>`).join("")}`).join("")}</div>`;
+  const opts = `<option value="AUTO">Auto-detect</option>` + MORNING_STATS.map(s => `<option value="${s}">${s} · ${MORNING_STAT_LABEL[s]}</option>`).join("");
+  const sel = "background:#050507;border:1px solid #1a1d22;color:#e2e8f0;border-radius:5px;padding:4px 6px;";
+  const paste = `<div style="${card}"><div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:10px;align-items:flex-start;"><div><div style="font-size:14px;font-weight:800;color:#fff;letter-spacing:1px;">TABS SOLO</div><div style="font-size:11px;color:#e6edf5;margin-top:3px;max-width:620px;line-height:1.5;">Paste the Tabs board from PropShop, one market per paste. Every ${TABS_SOLO_MIN_EV}%+ line is logged 1u flat. Each line is tagged <b>30 MIN</b> if its game tips within ${TABS_SOLO_WINDOW_MIN} min of the paste, otherwise <b>INITIAL</b> (Auto) — per game, so one paste can hold both.</div></div>${grid}</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px;"><label style="font-size:11px;color:#e6edf5;">Market <select id="ts-stat" style="${sel}">${opts}</select></label><label style="font-size:11px;color:#e6edf5;">Release <select id="ts-rel" style="${sel}"><option value="AUTO">Auto (from tip time)</option><option value="initial">Initial</option><option value="30min">30 min</option></select></label>
+    <button onclick="tabsSoloImport()" style="background:#7c3aed;border:none;color:#fff;border-radius:6px;padding:7px 16px;font-size:12px;font-weight:800;cursor:pointer;">IMPORT</button><button id="ts-grade-btn" onclick="tabsSoloGrade()" style="background:#1e40af;border:none;color:#fff;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:800;cursor:pointer;">GRADE PENDING</button><button onclick="tabsSoloExport()" style="background:transparent;border:1px solid #1a1d22;color:#e6edf5;border-radius:6px;padding:7px 12px;font-size:11px;font-weight:700;cursor:pointer;">EXPORT CSV</button><button onclick="tabsSoloClear()" style="background:transparent;border:1px solid #7f1d1d;color:#f87171;border-radius:6px;padding:7px 12px;font-size:11px;font-weight:700;cursor:pointer;">CLEAR ALL</button><span id="ts-info" style="font-size:11px;color:#e6edf5;">${esc(tabsSoloInfo)}</span></div>
+    <textarea id="ts-paste" placeholder="Paste the Tabs PropShop board here…" spellcheck="false" style="width:100%;min-height:60px;margin-top:8px;background:#050507;border:1px solid #1a1d22;border-radius:6px;padding:8px 10px;color:#e2e8f0;${mono}font-size:11px;outline:none;resize:vertical;box-sizing:border-box;"></textarea></div>`;
+  const filters = `<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:12px;">${["ALL"].concat(MORNING_STATS).map(s => btn(s, `tabsSoloSet('stat','${s}')`, tabsSoloStat === s)).join("")}<span style="width:14px;"></span>${btn("ALL", "tabsSoloSet('rel','ALL')", tabsSoloRel === "ALL", "#c4b5fd")}${Object.keys(TABS_SOLO_REL).map(r => btn(TABS_SOLO_REL[r], `tabsSoloSet('rel','${r}')`, tabsSoloRel === r, "#c4b5fd")).join("")}</div>`;
+  if (!tabsSolo.length) { el.innerHTML = `<div style="max-width:1100px;margin:0 auto;padding:8px;">${paste}<div style="font-size:12px;color:#e6edf5;">Nothing logged yet.</div></div>`; return; }
+  // summary tiles
+  const tot = agg(rows), n = tot.w + tot.l;
+  const tile = (lab, val, col) => `<div style="background:#0a0b0e;border:1px solid #1a1d22;border-radius:10px;padding:10px 16px;min-width:110px;"><div style="font-size:10px;letter-spacing:.8px;color:#e6edf5;text-transform:uppercase;">${lab}</div><div style="${mono}font-size:22px;font-weight:800;color:${col || "#fff"};margin-top:2px;">${val}</div></div>`;
+  const tiles = `<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px;">${tile("Record", `${tot.w}-${tot.l}${tot.p ? "-" + tot.p : ""}`)}${tile("Win %", n ? (tot.w / n * 100).toFixed(1) + "%" : "—")}${tile("Units", n ? num(tot.pl, true) + "u" : "—", tot.pl >= 0 ? "#4ade80" : "#f87171")}${tile("ROI", n ? (tot.pl / n * 100).toFixed(1) + "%" : "—", tot.pl >= 0 ? "#4ade80" : "#f87171")}${tile("Open", tot.open)}${tile("Bets", rows.length)}</div>`;
+  const relLines = Object.keys(TABS_SOLO_REL).map(r => ({ label: TABS_SOLO_REL[r], set: rows.filter(x => x.release === r) })).concat([{ label: "All", set: rows, total: true }]);
+  const edgeLines = MORNING_SOLO_BUCKETS.map(([label, lo, hi]) => ({ label, set: rows.filter(x => x.ev >= lo && x.ev < hi) })).concat([{ label: "All", set: rows, total: true }]);
+  const mktLines = MORNING_STATS.map(s => ({ label: `${s}`, set: rows.filter(x => x.stat === s) })).filter(l => l.set.length).concat([{ label: "All", set: rows, total: true }]);
+  // by day
+  const days = [...new Set(rows.map(x => x.gameDate))].sort().reverse().slice(0, 14);
+  const dayLines = days.map(d => ({ label: d.slice(5), set: rows.filter(x => x.gameDate === d) }));
+  // bet list
+  const resCol = r => r === "hit" ? "#4ade80" : r === "miss" ? "#f87171" : r === "void" ? "#e6edf5" : "#fbbf24";
+  const list = rows.slice().sort((a, b) => (b.gameDate + b.at).localeCompare(a.gameDate + a.at)).slice(0, 60).map(x => `<tr style="border-top:1px solid #1a1d22;"><td style="padding:4px 8px;color:#e6edf5;white-space:nowrap;">${esc(x.gameDate.slice(5))} ${esc(x.gameTime.replace(/^[A-Za-z]+-\d+\s*/, ""))}</td><td style="padding:4px 8px;color:#fff;font-weight:700;white-space:nowrap;">${esc(displayPlayerName(x.player))} <span style="color:#7dd3fc;font-weight:600;">${esc(x.team || "")}</span></td><td style="padding:4px 8px;white-space:nowrap;"><b style="color:${x.ou === "over" ? C.over : C.under};">${x.ou === "over" ? "O" : "U"}${x.line}</b> <span style="color:#fff;">${esc(x.stat)}</span></td><td style="padding:4px 8px;${mono}color:#fff;">${x.odds > 0 ? "+" + x.odds : x.odds}</td><td style="padding:4px 8px;color:#e6edf5;">${esc(x.book || "")}</td><td style="padding:4px 8px;${mono}color:#4ade80;">+${x.ev.toFixed(1)}%</td><td style="padding:4px 8px;"><span style="border:1px solid #c4b5fd88;color:#c4b5fd;border-radius:5px;padding:1px 6px;font-size:10px;font-weight:800;">${TABS_SOLO_REL[x.release] || x.release}</span>${x.minToTip != null ? ` <span style="color:#e6edf5;font-size:10px;">${x.minToTip}m</span>` : ""}</td><td style="padding:4px 8px;font-weight:800;color:${resCol(x.result)};">${x.result === "pending" ? "OPEN" : x.result.toUpperCase()}${x.actual != null ? ` <span style="color:#e6edf5;font-weight:600;">${x.actual}</span>` : ""}</td><td style="padding:4px 8px;"><a href="#" onclick="tabsSoloDelete('${esc(x.key).replace(/'/g, "")}');return false;" style="color:#6b7380;text-decoration:none;">✕</a></td></tr>`).join("");
+  el.innerHTML = `<div style="max-width:1100px;margin:0 auto;padding:8px;">${paste}${filters}${tiles}${h("By release")}${table("Release", relLines)}${h("By edge")}${table("Edge", edgeLines)}${h("By market")}${table("Market", mktLines)}${h("By day")}${table("Day", dayLines)}${h(`Bets (latest ${Math.min(rows.length, 60)} of ${rows.length})`)}<div style="overflow-x:auto;"><table style="border-collapse:collapse;font-size:12px;width:100%;min-width:760px;"><tbody>${list}</tbody></table></div></div>`;
 }
 
 // ── SEND TO NICK / SEND TO DISCORD ─────────────────────────────────────────
