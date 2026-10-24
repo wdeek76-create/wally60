@@ -428,6 +428,20 @@ const IS_ANDROID = /Android/.test(navigator.userAgent);
 // keyed by platform — pick whichever this device can actually open, falling back to desktop.
 const deepLink = o => { const d = o?.deep_link; if (!d || typeof d !== 'object') return null; return (IS_ANDROID && d.android) || d.ios || d.desktop || d.android || null; };
 const normName = n => String(n||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/['’.`]/g,'').replace(/[^a-z ]/g,' ').replace(/\s+/g,' ').trim();
+// Kalshi posts props as Yes/No contracts on a threshold ("Name: 60+ receiving yards", Yes at 60):
+// that's Over/Under 59.5 -- FanDuel's line. Without this every Kalshi prop row read as a one-sided
+// "Yes" bet at a different number and never lined up with FD. Anytime TD (no number) stays Yes/No.
+function kalshiNorm(o) {
+  if (!o || String(o.sportsbook || '').toLowerCase() !== 'kalshi' || o._kn) return o;
+  o._kn = 1;
+  if (o.selection) o.selection = String(o.selection).replace(/\s*:.*$/, '');
+  const sl = String(o.selection_line || '').toLowerCase();
+  if (o.points != null && o.points !== '' && (sl === 'yes' || sl === 'no')) {
+    let pt = Number(o.points); if (Number.isInteger(pt)) pt -= 0.5;
+    o.points = pt; o.selection_line = sl === 'yes' ? 'over' : 'under';
+  }
+  return o;
+}
 const cleanSel = n => String(n||'').replace(/\s*\([^)]*\)\s*$/,'').trim();
 const has = (m, s) => m.includes(s);
 async function oo(endpoint, params) {
@@ -817,10 +831,14 @@ function renderTicker() {
 async function loadOdds(fxs) {
   const byFx = {};
   for (const fxBatch of chunk(fxs.map(f => f.id), 5)) {
-    for (const bkBatch of chunk(ALL_BOOKS, 5)) {
+    // Sportsbooks: main lines. Exchanges (Kalshi / Novig / ProphetX): every line -- their "main" flag
+    // rarely lands on FanDuel's number, so asking is_main:true left Kalshi props out entirely.
+    const jobs = [...chunk(ALL_BOOKS.filter(b => !LADDER_EXCHANGES.includes(b)), 5).map(bk => ({ bk, main: true })), { bk: LADDER_EXCHANGES, main: false }];
+    for (const { bk: bkBatch, main } of jobs) {
       try {
-        const r = await oo('/fixtures/odds', { fixture_id: fxBatch, sportsbook: bkBatch, is_main: true });
-        (r?.data || []).forEach(d => { (byFx[d.id] = byFx[d.id] || []).push(...(d.odds || [])); });
+        const prm = { fixture_id: fxBatch, sportsbook: bkBatch }; if (main) prm.is_main = true;
+        const r = await oo('/fixtures/odds', prm);
+        (r?.data || []).forEach(d => { (byFx[d.id] = byFx[d.id] || []).push(...(d.odds || []).map(kalshiNorm)); });
       } catch(e) { console.warn('[fd-sharp] odds fetch failed', e.message); }
     }
   }
@@ -832,7 +850,7 @@ async function loadAltOdds(fxs) {
     for (const bkBatch of chunk(ALL_BOOKS, 5)) {
       try {
         const r = await oo('/fixtures/odds', { fixture_id: fxBatch, sportsbook: bkBatch, is_main: false });
-        (r?.data || []).forEach(d => { (byFx[d.id] = byFx[d.id] || []).push(...(d.odds || [])); });
+        (r?.data || []).forEach(d => { (byFx[d.id] = byFx[d.id] || []).push(...(d.odds || []).map(kalshiNorm)); });
       } catch(e) { console.warn('[fd-sharp] alt odds fetch failed', e.message); }
     }
   }

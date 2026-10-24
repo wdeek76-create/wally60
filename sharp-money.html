@@ -542,10 +542,12 @@ async function sharpFixtures(sk){
 // Who a row is about, by NAME (exchange rows don't always carry FanDuel's player_id): the selection,
 // or -- when the selection is just "Over"/"Under"/"Yes"/"No" -- the name with that part cut off.
 const sharpPlayerOf = o => {
-  let n=cleanSel(o.selection||'');
+  let n=cleanSel(o.selection||'').replace(/\s*:.*$/,'');   // Kalshi: "Player: 25+ points" -> "Player"
   if(!n || /^(over|under|yes|no)\b/i.test(n)) n=cleanSel(String(o.player?.name||o.name||'').replace(/\s+(over|under|yes|no)\b.*$/i,''));
   return n;
 };
+// Kalshi posts "25+" thresholds as Yes/No at 25 -- that's Over/Under 24.5, FanDuel's line
+const kalNorm = o => { if(!o._kpt && canonBook(o.sportsbook)==='kalshi' && o.points!=null && Number.isInteger(Number(o.points)) && /^(yes|no)$/i.test(String(o.selection_line||''))){ o.points=Number(o.points)-0.5; o._kpt=1; } return o; };
 const sharpLine = o => o.points==null || o.points==='' ? null : Number(o.points);
 const sharpDiag = {}; // sk -> what the last scan saw (shown on the Live tab)
 function sharpScan(sk, rows){
@@ -553,14 +555,24 @@ function sharpScan(sk, rows){
   const groups = {};
   const d = sharpDiag[sk] = { at:Date.now(), rows:rows.length, byBook:{}, props:0, withExch:0, sides:0 };
   rows.forEach(o=>{ const b=bookShort(canonBook(o.sportsbook)); d.byBook[b]=(d.byBook[b]||0)+1; });
+  const K = d.kal = { rows:0, mk:0, side:0, fd:0, sample:[] };
   rows.forEach(o=>{
+    const isK = canonBook(o.sportsbook)==='kalshi';
+    if(isK){ K.rows++;
+      // Kalshi posts "25+" thresholds -- that's Over 24.5 (FanDuel's line), not 25
+      kalNorm(o);
+      if(K.sample.length<2) K.sample.push(`${o.market} | ${o.selection} | ${o.selection_line} | ${o.points} | ${o.price} | ob ${JSON.stringify((o.order_book||[]).slice(0,2))}`); }
     const mk=marketKeyFor(sk,o.market); if(!mk || !allowed.has(mk)) return;
+    if(isK) K.mk++;
     const s=sharpSideOf(o, mk); if(!s) return; o._sd=s;
+    if(isK) K.side++;
     const who = mk==='total' ? 'game' : normName(sharpPlayerOf(o)); if(!who) return;
     const g=`${o._fx}|${mk}|${who}`;
     (groups[g]=groups[g]||[]).push(o);
   });
   d.props=Object.keys(groups).length;
+  // Kalshi rows that landed on a line FanDuel also posts (what can actually make a play)
+  Object.values(groups).forEach(own=>{ const lines=new Set(own.filter(o=>canonBook(o.sportsbook)==='fanduel').map(sharpLine)); own.forEach(o=>{ if(canonBook(o.sportsbook)==='kalshi' && lines.has(sharpLine(o))) K.fd++; }); });
   const out=[];
   Object.entries(groups).forEach(([g, own])=>{
     if(!own.some(o=>EXCH.has(canonBook(o.sportsbook)))) return;
@@ -915,7 +927,8 @@ function renderSharp(){
   // What each sport's last scan actually got back -- if a sport shows 0 for the exchanges, the
   // feed isn't returning their odds; if it shows props but 0 sides, nothing arbs FanDuel right now.
   const diag = sports.filter(k=>sharpDiag[k]).map(k=>{ const d=sharpDiag[k]; const bk=Object.entries(d.byBook).map(([b,n])=>`${b} ${n}`).join(' · ')||'no odds';
-    const top = d.top?.length ? `<div class="smdiagtop">${d.top.map(esc).join('<br>')}</div>` : '';
+    const top = (d.top?.length ? `<div class="smdiagtop">${d.top.map(esc).join('<br>')}</div>` : '')
+      + (d.kal ? `<div class="smdiagtop">Kalshi: ${d.kal.rows} rows · ${d.kal.mk} in our markets · ${d.kal.side} with a side · ${d.kal.fd} on FD's line${d.kal.sample.length?`<br><span style="opacity:.7">${d.kal.sample.map(esc).join('<br>')}</span>`:''}</div>` : '');
     return `<div class="smdiag"><b>${esc(SPORTS[k].label)}</b> ${Math.max(0,Math.round((Date.now()-d.at)/1000))}s ago · ${d.games??0} games · ${esc(bk)} · ${d.withExch}/${d.props} props w/ exchange · ${d.sides} with money${d.best!=null?` · best ${d.best<=0?'ARB '+(-d.best).toFixed(1)+'%':(d.best.toFixed(1)+'% hold')}`:''}${d.big!=null?` · ${d.big} at ${usd(sharpMin)}+`:''}${top}</div>`; }).join('');
   const body = list.length ? list.map(sharpCardHtml).join('') : `<div class="empty">${scanned?`Nothing with ${usd(sharpMin)}+ at ${holdOkTxt()} vs FanDuel/bet105 right now. Scanning ${sports.length} sports nonstop.`:'Scanning…'}</div>`;
   view.innerHTML = `<div class="sh"><span class="t">Sharp Money</span><span class="dim" style="font-size:10.5px">scanning ${scanned}/${sports.length} sports · since ${new Date(sharpStarted).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})}</span></div>${chips}<div class="shlist">${body}</div>${diag||sharpDcLog.length?`<div class="smdiagw"><div class="dim" style="font-size:10px;margin-bottom:3px">LAST SCAN · build ${SM_BUILD}</div>${diag}<div class="dim" style="font-size:10px;margin:6px 0 3px">DISCORD ${discordHook?(sharpDcQ.length?`· ${sharpDcQ.length} waiting`:''):'· not connected'}</div>${sharpDcLog.map(x=>`<div class="smdiag" style="color:${x.ok?'#86efac':'#fca5a5'}">${new Date(x.at).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})} ${esc(x.txt)}</div>`).join('')||'<div class="smdiag dim">nothing sent yet</div>'}</div>`:''}`;
@@ -1747,7 +1760,7 @@ async function nlScan(){
 function nlFind(rows){
   const G={};
   rows.forEach(o=>{
-    if(o.price==null || Math.abs(Number(o.price))>=10000) return;
+    if(o.price==null || Math.abs(Number(o.price))>=10000) return; kalNorm(o);
     const mk=marketKeyFor('nba', o.market); if(!mk || !NL_MKS.has(mk)) return;
     const sd=sideOf(o); if(sd!=='over' && sd!=='under') return;
     const nm=sharpPlayerOf(o), who=normName(nm); if(!who) return;
