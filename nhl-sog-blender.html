@@ -5939,7 +5939,8 @@ function _nhlSentTagsHtml(b) {
   const today = _ymdLocal(new Date()), lab = { discord: "Discord", nick: "Nick", me: "My card", model: "Model card" };
   const on = Object.keys(b.sentTo || {}).filter(k => b.sentTo[k] === today);
   if (b.discordSent && !on.includes("discord")) on.push("discord");
-  return on.length ? `<div style="margin-top:2px;">${on.map(k => `<span style="display:inline-block;margin-right:4px;font-size:10px;font-weight:800;color:#cc66ff;border:1px solid #cc66ff66;background:#cc66ff14;border-radius:4px;padding:0 5px;">SENT · ${lab[k] || k}</span>`).join("")}</div>` : "";
+  const sp = b.stillPlay && b.stillPlay.day === today && b.result === "pending" ? `<span style="display:inline-block;margin-right:4px;font-size:10px;font-weight:800;color:#22c55e;border:1px solid #22c55e66;background:#22c55e14;border-radius:4px;padding:0 5px;">STILL A PLAY ${b.stillPlay.at} · ${Number(b.stillPlay.odds) > 0 ? "+" : ""}${b.stillPlay.odds} ${escapeHtmlBasic(b.stillPlay.book || "")}</span>` : "";
+  return on.length || sp ? `<div style="margin-top:2px;">${on.map(k => `<span style="display:inline-block;margin-right:4px;font-size:10px;font-weight:800;color:#cc66ff;border:1px solid #cc66ff66;background:#cc66ff14;border-radius:4px;padding:0 5px;">SENT · ${lab[k] || k}</span>`).join("")}${sp}</div>` : "";
 }
 // ── Discord webhook ──────────────────────────────────────────────────────────
 // Saved in this browser only (never in the file / GitHub). When set, Send to Discord posts the card image
@@ -6033,7 +6034,20 @@ async function sendNhlCard(mode) {
     const freshPicks = mode === "me" ? _nhlMeCardPicks(refreshed) : refreshed.filter(_nhlStillInRange);
     const droppedNeg = refreshed.length - freshPicks.length;
     _nhlLastCardReport = _nhlBuildCardReport(refreshed, freshPicks, mode);
-    if (newOnly && alreadySent.length) _nhlLastCardReport = (_nhlLastCardReport ? _nhlLastCardReport + "\n" : "") + `Already sent earlier today (not re-sent): ` + alreadySent.map(b => `${b.player} ${b.ou === "over" ? "O" : "U"}${b.line}`).join(", ");
+    if (newOnly && alreadySent.length) {
+      // Already-sent picks aren't sent again, but we still check them: still a play at today's price = noted on the bet.
+      let again = []; try { again = await _nhlRefreshPicksForCard(alreadySent); } catch (e) {}
+      const fmtO = n => (Number(n) > 0 ? "+" : "") + n, at = new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+      const still = again.filter(b => b._liveNow && _nhlStillInRange(b)), gone = again.filter(b => !still.includes(b));
+      still.forEach(fp => { const real = bets.find(x => x.id === fp.id); if (real) real.stillPlay = { at, odds: fp.odds, book: fp.book, day: today }; });
+      gone.forEach(fp => { const real = bets.find(x => x.id === fp.id); if (real) delete real.stillPlay; });
+      saveBets();
+      const tag = b => `${b.player} ${b.ou === "over" ? "O" : "U"}${b.line}`;
+      _nhlLastCardReport = (_nhlLastCardReport ? _nhlLastCardReport + "\n" : `Already sent earlier today — not re-sent · ${at}\n`)
+        + (still.length ? `Already bet, still a play now: ${still.map(b => `${tag(b)} ${fmtO(b.odds)} ${b.book}`).join(", ")}` : "")
+        + (still.length && gone.length ? "\n" : "")
+        + (gone.length ? `Already bet, no longer a play at today's price: ${gone.map(tag).join(", ")}` : "");
+    }
     _nhlPaintCardReport();
     if (droppedNeg) console.log("[NHL card] left off " + droppedNeg + " pick(s):", refreshed.filter(b => !freshPicks.some(f => f.id === b.id)).map(b => b.player + " " + b.odds));
     if (!freshPicks.length) { alert(mode === "me" ? "No open bet has FanDuel, Novig or ProphetX within 10 cents of play-to right now." : "No pending pick is still in range at the current price — nothing to send."); if (btn) { btn.textContent = orig; btn.disabled = false; } return; }
