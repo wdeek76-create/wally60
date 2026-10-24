@@ -4012,11 +4012,17 @@ function pfScan(){
       const sides=pfSides(c, sk, d.mainRows);
       const x={ ...c, sk, rows:d.mainRows, fxs:d.fixtures, fx:d.fixtures.find(f=>f.id===c.p.fixtureId), cmp:pfBestByBook(sides.mine) };
       if(c.liq>0){ if(c.liq>=pfMin) out.push({ ...x, src:'exch' }); return; }
-      // main lines: no exchange money -> a sharp book's (Pinnacle / BetOnline / BookMaker) other side
+      // main lines with no exchange money: a sharp book's no-vig fair (Pinnacle first, then BetOnline,
+      // BookMaker) -- counts when the target's price is at or better than it (0%+ EV)
       if(!c.isMain) return;
-      const sb=pfBestByBook(sides.opp.filter(o=>PF_SHARP.has(canonBook(o.sportsbook))))[0]; if(!sb) return;
-      const hold=(toImplied(Number(c.refRow.price))+toImplied(Number(sb.price))-1)*100;
-      if(hold<=parlayMaxHold+1e-7) out.push({ ...x, src:'sharp', hold, sharpOpp:sb, liq:0 });
+      for(const k of ['pinnacle','betonline','bookmaker']){
+        const m=pfBestByBook(sides.mine.filter(o=>canonBook(o.sportsbook)===k))[0], o2=pfBestByBook(sides.opp.filter(o=>canonBook(o.sportsbook)===k))[0];
+        if(!m || !o2) continue;
+        const pm=toImplied(Number(m.price)), po=toImplied(Number(o2.price)), fairP=pm/(pm+po);
+        const ev=(fairP*toDec(Number(c.refRow.price))-1)*100;
+        if(ev>=-1e-7) out.push({ ...x, src:'sharp', ev, hold:-ev, sharpBook:k, sharpFair:toAm(1/fairP), liq:0 });
+        break;
+      }
     });
     // exchange-backed first (preferred), then sharp-book ones; best hold first inside each
     return out.sort((x,y)=>(x.src==='exch'?0:1)-(y.src==='exch'?0:1) || (x.hold??99)-(y.hold??99) || y.liq-x.liq);
@@ -4083,7 +4089,7 @@ function pfHtml(){
     : !list.length ? `<div class="empty" style="padding:14px">Nothing with exchange money at ≤${parlayMaxHold}% hold vs ${esc(bookShort(autoTargetBook))} right now.</div>`
     : list.slice(0,pfShow).map((c,i)=>{ const on=pfInSlip(c), f=c.fx;
         const id=`${c.p.fixtureId}|${c.p.key}|${c.mkey}|${c.side}|${c.line}`, open=pfOpen.has(id);
-        const src = c.src==='sharp' ? `<b>${esc(bookShort(canonBook(c.sharpOpp.sportsbook)))} ${fmtAm(c.sharpOpp.price)}</b> other side - ${holdTxt(c.hold??0)}` : `<b class="${(c.hold??1)<=1e-7?'pos':''}">${usd(c.liq)}</b> exch at ${holdTxt(c.hold??0)}`;
+        const src = c.src==='sharp' ? `${esc(bookShort(c.sharpBook))} fair <b>${fmtAm(c.sharpFair)}</b> - <b class="pos">+${c.ev.toFixed(1)}% EV</b>` : `<b class="${(c.hold??1)<=1e-7?'pos':''}">${usd(c.liq)}</b> exch at ${holdTxt(c.hold??0)}`;
         return `<div class="pfrow${on?' on':''}" data-pfopen="${esc(id)}"><div class="pfmain"><div class="pft"><b>${fmtAm(c.refRow.price)}</b> ${esc(pfTitle(c))}<span class="dim" style="font-size:11px"> ${open?'▴':'▾'}</span></div>
           <div class="pfs">${src}${f?` - ${esc(fxLabel(f))} ${esc(etDay(f.start))} ${esc(etTime(f.start))}`:''}</div>${open?pfCmpHtml(c.cmp, autoTargetBook):''}</div>
           <button class="pfadd${on?' on':''}" data-pfadd="${i}">${on?'✓':'+'}</button></div>`; }).join('')
