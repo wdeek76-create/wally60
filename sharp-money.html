@@ -580,7 +580,10 @@ function sharpRecord(sk, scan, at, fxList, tgt){
 const sharpFlow = e => { const first=e.hist[0]?.total||0; return { d: e.L.total-first, since: e.hist[0]?.t||e.at }; };
 // "in 2h 15m" until the game starts
 const tillGame = iso => { const m=Math.round((new Date(iso).getTime()-Date.now())/60000); if(isNaN(m)) return ''; if(m<=0) return 'starting'; return m<60?`in ${m}m`:m<1440?`in ${Math.floor(m/60)}h ${m%60}m`:`in ${Math.floor(m/1440)}d ${Math.floor(m%1440/60)}h`; };
-const sharpLive = e => e.f ? (e.f.live || new Date(e.f.start).getTime() <= Date.now()) : false;
+// NBA tips ~10 minutes after the listed time: count it as started only then
+const TIP_LAG = { nba:10*60e3, wnba:10*60e3 };
+const tipAt = (sk, start) => new Date(start).getTime() + (TIP_LAG[sk]||0);
+const sharpLive = e => e.f ? (e.f.live || tipAt(e.sk, e.f.start) <= Date.now()) : false;
 function sharpList(){
   return Object.values(sharpTape).filter(e=>e.L.total>=sharpMin && !sharpLive(e) && (sharpSportF==='all'||e.sk===sharpSportF));
 }
@@ -599,7 +602,7 @@ function sharpCardHtml(e){
   const lineTxt = e.line!=null ? ' '+e.line : '';
   const best = e.L.rows[0];
   return `<div class="shcard" data-k="${esc(e.k)}">
-    <div class="shhd"><span class="shpl"><span class="shsp">${esc(SPORTS[sk]?.label||sk)}</span>${esc(titleCase(e.player))}</span><span class="shgm">${f?`${esc(f.away.ab||f.away.name)} @ ${esc(f.home.ab||f.home.name)} · ${etDay(f.start)} ${etTime(f.start)} · <b>${tillGame(f.start)}</b>`:''}</span></div>
+    <div class="shhd"><span class="shpl"><span class="shsp">${esc(SPORTS[sk]?.label||sk)}</span>${esc(titleCase(e.player))}</span><span class="shgm">${f?`${esc(f.away.ab||f.away.name)} @ ${esc(f.home.ab||f.home.name)} · ${etDay(f.start)} ${etTime(f.start)} · <b>${tillGame(new Date(tipAt(sk, f.start)).toISOString())}</b>`:''}</span></div>
     <div class="shside ${e.side}"><b>${sharpSideLabel(e.side)}${lineTxt}</b> ${esc(marketLabel(sk,e.mk))}${e.tgt==='bet105'?' <span class="shedge match" style="background:rgba(56,189,248,.18);color:#7dd3fc">B105</span>':''} <span class="shedge ${e.soft[0]._edge>1e-7?'arb':'match'}">${edgeTxt(e.soft[0]._edge)}</span></div>
     <div class="shmoney"><span class="shbig">${usd(e.L.total)}</span><span class="shlbl">arb money</span>${flow}${best?`<span class="shfair">sharp fair ${esc(bookShort([...best.books][0]))} ${fmtAm(-best.opp)}</span>`:''}</div>
     <div class="shsub">${oppName} book on the exchanges · <b>${usd(e.L.total)}</b> at ${holdOkTxt()} · <b>${usd(e.L.band||0)}</b> around target (within ${LIQ_BAND_CENTS}¢ of FD ${fmtAm(e.ref.price)})</div>
@@ -754,7 +757,7 @@ function sharpDiscordPayload(e, example){
   // "TODAY **10PM ET**" (or "SUN, OCT 25 **7:30PM ET**"), then "starts in 9 hours" on its own line
   const when=f?(()=>{ const d=new Date(f.start); const day=etD(d)===etD(new Date()) ? 'TODAY' : d.toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric',timeZone:'America/New_York'}).toUpperCase();
     const tm=d.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',timeZone:'America/New_York'}).replace(':00','').replace(' ','');
-    return `${day} **${tm} ET**\nstarts <t:${Math.floor(d.getTime()/1000)}:R>`; })():'';
+    return `${day} **${tm} ET**\nstarts <t:${Math.floor(tipAt(sk, f.start)/1000)}:R>`; })():'';
   return { username:book, avatar_url:httpsLogo(bk), content: example ? '🧪 **Example alert** — this is what sharp money pings will look like (not a real bet).' : undefined, embeds:[{
     title:`${example?'[EXAMPLE] ':''}${fmtAm(o.price)} ${bet} ${mktName}`.slice(0,256),
     url:url||undefined, color:isArb?0x22c55e:isDirect?0xeab308:0xf97316,
@@ -811,7 +814,7 @@ function sharpCheckPings(sk){
 }
 async function sharpScanSport(sk){
   const now=Date.now();
-  const fx=(await sharpFixtures(sk)).filter(f=>!f.live && new Date(f.start).getTime()>now && new Date(f.start).getTime()<now+sharpDays(sk)*24*3600e3).slice(0,80);
+  const fx=(await sharpFixtures(sk)).filter(f=>!f.live && tipAt(sk, f.start)>now && new Date(f.start).getTime()<now+sharpDays(sk)*24*3600e3).slice(0,80);
   sharpLastScan[sk]=Date.now();
   if(!fx.length){ sharpPrimed[sk]=true; sharpDiag[sk]={at:Date.now(), games:0, rows:0, byBook:{}, props:0, withExch:0, sides:0}; return; }
   const rows=[];
@@ -920,7 +923,7 @@ function openSharpSheet(e){
   const nm=esc(titleCase(e.player));
   const el=document.createElement('div'); el.id='shSheet'; el.className='ssov';
   el.innerHTML=`<div class="sspanel"><div class="ssgrab"></div>
-    <div class="sshead"><span class="ssbig">${usd(e.L.total)}</span><span class="sswhen">${f?`${etDay(f.start)}, ${etTime(f.start)}<br><b>${tillGame(f.start)}</b>`:''}</span></div>
+    <div class="sshead"><span class="ssbig">${usd(e.L.total)}</span><span class="sswhen">${f?`${etDay(f.start)}, ${etTime(f.start)}<br><b>${tillGame(new Date(tipAt(sk, f.start)).toISOString())}</b>`:''}</span></div>
     <div class="ssmeta">${esc(SPORTS[sk]?.label||sk)}${f?`<br><b>${esc(f.away.name||f.away.ab)} vs ${esc(f.home.name||f.home.ab)}</b>`:''}<br><span class="ssmk">${esc(marketLabel(sk,e.mk))}</span></div>
     <div class="sstgt"><div class="sstgtn"><b>${nm}</b> ${sharpSideLabel(e.side)}${lineTxt}</div>
       <div class="sstgtr"><span class="sstgtlg">${lg(bk)}</span><span class="sstgtv"><b>${fmtAm(o.price)}</b><span>Odds</span></span><span class="sstgtv"><b class="${(o._edge??0)>1e-7?'pos':''}">${edgeTxt(o._edge)}</b><span>Edge</span></span>
