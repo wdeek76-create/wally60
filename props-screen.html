@@ -425,6 +425,22 @@ main{flex:1;padding:12px calc(var(--sar) + 12px) max(160px, calc(var(--ftrh,76px
 .gm-body{display:none;padding:0 10px 12px}
 .gmwrap.open .gm-body{display:block}
 .pgrid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.gpchips{display:flex;gap:6px;overflow-x:auto;padding:4px 0 8px;scrollbar-width:none}
+.gpchips .qarbchip{flex:none;font-size:12px;padding:6px 11px}
+.gprow{border-top:1px solid var(--line)}
+.gphd{display:flex;align-items:center;gap:10px;padding:10px 2px;cursor:pointer}
+.gphd .pgph{width:40px;height:40px;flex:0 0 40px}
+.gpi{min-width:0}
+.gpnm{font-weight:800;font-size:14px}
+.gpmt{font-size:12px;color:var(--dim);display:flex;align-items:center;gap:4px;margin-top:2px}
+.gplg{width:16px;height:16px;object-fit:contain}
+.gpdet{padding:0 0 6px}
+.gpbk{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:8px 4px;border-top:1px solid var(--line);color:var(--text);text-decoration:none}
+.gpmk{font-size:11px;color:var(--dim)}
+.gpbn{display:flex;align-items:center;gap:6px;font-weight:700;font-size:13px;margin-top:2px}
+.gpbn img{width:18px;height:18px;border-radius:4px;object-fit:contain}
+.gpou{text-align:right;font-family:ui-monospace,Menlo,monospace;font-size:12.5px;line-height:1.5}
+.gpfull{display:block;width:100%;margin-top:4px;padding:8px;border-radius:10px;border:1px solid var(--line2);background:var(--bg2);color:var(--text);font-weight:700;font-size:12px}
 .pgc{display:flex;align-items:center;gap:7px;padding:8px;border-radius:12px;border:1px solid var(--line);background:var(--bg3);cursor:pointer;min-width:0}
 .pgph{width:30px;height:30px;border-radius:50%;overflow:hidden;background:var(--bg);display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:800;color:var(--text);flex:0 0 auto}
 .pgph img{width:100%;height:100%;object-fit:cover}
@@ -4932,6 +4948,7 @@ let gridMode = false;   // grid / "Classic screen" view removed
 function renderSlate(){ if(gridMode) return renderGrid(); return renderSlateCards(); }
 function renderSlateCards(){
   current=null; clearGstripDock(); const S=SPORTS[sportKey]; const view=$('#view');
+  { const st=$('#stat'); if(st && /^(Parlay|Tracker|Injur)/i.test(st.textContent)) st.textContent=`${S.label} · ${players.length} players`; }
   if(!fixtures.length){ view.innerHTML=`<div class="empty">No ${S.label} games in the window.</div>`; return; }
   if(S.ml){
     let h=''; let lastCard=null;
@@ -5331,6 +5348,40 @@ function playerPriceCardHtml(p){
   </div>`;
 }
 const gameBodyShown = {}; // fid -> "players without lines" expanded?
+const gameMkt = {};        // fid -> market chip picked ('' = all)
+const gameOpenP = {};      // fid -> Set of player keys opened
+// One book's line for a player/market: that book's own main number (the consensus line when it posts
+// it, else its nearest), with its Over and Under price. Junk prices (±10000+) are dropped.
+function bookLinesFor(p, mkey){
+  const rows=rowsFor(p,mkey,mainRows).filter(o=>Math.abs(Number(o.price))<10000);
+  const cons=mainLineOf(rows,'over') ?? mainLineOf(rows,'under');
+  const by={}; rows.forEach(o=>{ const k=canonBook(o.sportsbook); (by[k]=by[k]||[]).push(o); });
+  return Object.entries(by).map(([k,rs])=>{
+    const pts=[...new Set(rs.map(o=>o.points).filter(x=>x!=null).map(Number))];
+    const line = pts.length ? (cons!=null && pts.includes(Number(cons)) ? Number(cons) : pts.sort((a,b)=>Math.abs(a-(cons??a))-Math.abs(b-(cons??b)))[0]) : null;
+    const at=rs.filter(o=>line==null || Number(o.points)===line);
+    return { k, line, over:bestFirst(at.filter(o=>sideOf(o)==='over'))[0]||null, under:bestFirst(at.filter(o=>sideOf(o)==='under'))[0]||null };
+  }).filter(b=>b.over||b.under).sort((a,b)=>BOOKS.findIndex(x=>x.toLowerCase()===a.k)-BOOKS.findIndex(x=>x.toLowerCase()===b.k));
+}
+// A player's row in an opened game: headshot, name + position, matchup + time. Tapped open: every
+// book's line for each market (or just the picked one), Over / Under on the right.
+function gamePlayerRowHtml(p, f, mk, open){
+  const info=p.pid?playerInfo[p.pid]:null;
+  const hs=info?.headshot||''; const initials=p.name.split(' ').map(w=>w[0]).slice(0,2).join('').toUpperCase();
+  const mine = info?.teamId ? (f.home.id===info.teamId?'home':f.away.id===info.teamId?'away':'') : '';
+  const lg = c => c.logo?`<img class="gplg" src="${esc(c.logo)}" alt="" onerror="this.style.display='none'">`:`<b>${esc(c.ab||'')}</b>`;
+  const match = mine==='home' ? `${lg(f.home)} vs ${lg(f.away)}` : `${lg(f.away)} @ ${lg(f.home)}`;
+  const S=SPORTS[sportKey];
+  const mkeys = mk ? [mk] : S.markets.map(m=>m[0]).filter(k=>p.marketKeys.has(k));
+  const det = open ? mkeys.map(k=>bookLinesFor(p,k).map(b=>{ const lgo=bookLogo(b.k);
+      const side=(o,t)=>o?`<div>${t}${b.line!=null?b.line:''} <span class="${Number(o.price)>0?'pos':''}">(${fmtAm(o.price)})</span></div>`:'';
+      return `<a class="gpbk" href="${esc(deepLinkFor(b.over||b.under)||BOOK_HOME[b.k]||'#')}" rel="noopener"><div><div class="gpmk">${esc(marketLabel(sportKey,k))}</div><div class="gpbn">${lgo?`<img src="${esc(lgo)}" alt="">`:''}${esc(bookLabel(b.k))}</div></div><div class="gpou">${side(b.over,'o')}${side(b.under,'u')}</div></a>`; }).join('')).join('')
+      + `<button class="gpfull" data-full="${esc(p.key)}">Open ${esc(titleCase(p.name))} ›</button>` : '';
+  return `<div class="gprow${open?' open':''}"><div class="gphd" data-gp="${esc(p.key)}">
+    <div class="pgph" data-pid="${esc(p.pid||'')}">${hs?`<img src="${esc(hs)}" alt="">`:`<span>${initials}</span>`}</div>
+    <div class="gpi"><div class="gpnm">${esc(titleCase(p.name))}${info?.pos?`<span class="dim"> • ${esc(info.pos)}</span>`:''}${injPill(p)}</div><div class="gpmt">${match} · ${esc(etTime(f.start))}</div></div>
+  </div>${det?`<div class="gpdet">${det}</div>`:''}</div>`;
+}
 // Loads (first time) and renders a game's player grid straight into its own accordion body --
 // no separate page/back button, the row just expands in place in the slate list.
 async function loadGameBody(fid){
@@ -5339,12 +5390,18 @@ async function loadGameBody(fid){
   const withLines=players.filter(p=>p.fixtureId===fid).sort((a,b)=>a.name.localeCompare(b.name));
   const withKeys=new Set(withLines.map(p=>p.key));
   const draw=(withoutLines)=>{
-    const h=withLines.map(playerPriceCardHtml).join('');
+    const S=SPORTS[sportKey], mk=gameMkt[fid]||'', open=gameOpenP[fid]||(gameOpenP[fid]=new Set());
+    const mks=S.markets.map(m=>m[0]).filter(k=>withLines.some(p=>!p.isTeam&&!p.isGame&&p.marketKeys.has(k)));
+    const chips=`<div class="gpchips">${['',...mks].map(k=>`<button class="qarbchip${mk===k?' on':''}" data-gmk="${esc(k)}">${k?esc(marketLabel(sportKey,k)):'All'}</button>`).join('')}</div>`;
+    const ppl=withLines.filter(p=>!p.isTeam&&!p.isGame && (!mk || p.marketKeys.has(mk)));
+    const h=chips+ppl.map(p=>gamePlayerRowHtml(p, f, mk, open.has(p.key))).join('');
     const shown=!!gameBodyShown[fid];
     const noLinesHtml = withoutLines.length
       ? `<div class="nolines"><button class="nlToggle" data-fid="${esc(fid)}">${withoutLines.length} player${withoutLines.length===1?'':'s'} without lines ${shown?'▴ hide':'▾ show'}</button>${shown?withoutLines.map(n=>`<div class="pl off"><span>${esc(titleCase(n))}</span></div>`).join(''):''}</div>` : '';
-    body.innerHTML=`<div class="pgrid">${h}</div>${withLines.length?'':'<div class="empty">No props posted yet.</div>'}${noLinesHtml}`;
-    body.querySelectorAll('.pgc[data-k]').forEach(el=>el.addEventListener('click',()=>{ const p=players.find(x=>x.key===el.dataset.k); if(p) openPlayer(p); }));
+    body.innerHTML=`<div class="gplist">${h}</div>${withLines.length?'':'<div class="empty">No props posted yet.</div>'}${noLinesHtml}`;
+    body.querySelectorAll('[data-gmk]').forEach(el=>el.addEventListener('click',()=>{ gameMkt[fid]=el.dataset.gmk; draw(withoutLines); }));
+    body.querySelectorAll('[data-gp]').forEach(el=>el.addEventListener('click',()=>{ const k=el.dataset.gp; if(open.has(k)) open.delete(k); else open.add(k); draw(withoutLines); }));
+    body.querySelectorAll('[data-full]').forEach(el=>el.addEventListener('click',()=>{ const p=players.find(x=>x.key===el.dataset.full); if(p) openPlayer(p); }));
     body.querySelector('.nlToggle')?.addEventListener('click',()=>{ gameBodyShown[fid]=!gameBodyShown[fid]; draw(withoutLines); });
     warmHeadshots(body,'.pgph[data-pid]');
   };
