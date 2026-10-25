@@ -4995,6 +4995,9 @@ async function ooRefreshBetsForPic(list) {
       const allowedAlt = new Set(Object.keys(altFairByLine));
       const fresh = [];
       b.keyOff = []; b.ooBooks = [...new Set(mine.map(r => r.label).filter(Boolean))];   // FanDuel / Pinnacle / Prop Builder prices that are on the line but under the 5% edge, and every book the feed returned
+      b.ownLive = null; b.ownGone = false;
+      if (b.refreshOwn) mine.forEach(r => { if (r.label && r.label === b.book && Number(r.line) === Number(b.line)) { const pOwn = priceFor(r, ou); if (pOwn != null) b.ownLive = pOwn; } });   // Morning cards: the headline book's own price is re-read too
+      if (b.refreshOwn && b.ownLive == null && b.book && !_isBlankBook(b.book) && mine.some(r => r.label)) b.ownGone = true;   // the feed is up but that book no longer posts this side / line
       mine.forEach(r => {
         if (!r.label || r.label === b.book) return;      // your own bet price stays what you got
         // Same rule as the modal's Fill flow: an exchange (Novig/ProphetX/Kalshi)
@@ -27029,20 +27032,24 @@ function _mStatusPills(b, esc, nick) {
 async function morningRefreshPicks(picks) {
   await _mSyncInjuriesQuiet();
   const nameOf = bk => BOOK_CODE_NAMES[String(bk || "").trim().toUpperCase()] || bk;
-  const shadows = picks.map(b => ({ _m: b, player: b.player, stat: b.stat, ou: b.ou, line: b.line, odds: b.odds, book: nameOf(b.book), fair: b.fairProb != null ? decimalToAmerican(1 / b.fairProb) : null, altBooks: [], team: b.team }));   // fair as AMERICAN odds, the way calcEdge and the alt-book screen read it (it was a % before, which made every edge wrong and dropped books like FanDuel)
+  const shadows = picks.map(b => ({ _m: b, player: b.player, stat: b.stat, ou: b.ou, line: b.line, odds: b.odds, book: nameOf(b.book), fair: b.fairProb != null ? decimalToAmerican(1 / b.fairProb) : null, altBooks: [], team: b.team, refreshOwn: true }));   // fair as AMERICAN odds, the way calcEdge and the alt-book screen read it (it was a % before, which made every edge wrong and dropped books like FanDuel)
   let r = { refreshed: 0, skipped: picks.length };
   try { r = await ooRefreshBetsForPic(shadows); } catch (e) { console.warn("[MORNING] live refresh failed, using board prices", e); }
   const rank = bk => { const k = MORNING_BOOK_PRIORITY.indexOf(String(BOOK_CODE_NAMES[String(bk || "").toUpperCase()] ? String(bk).toUpperCase() : bk).toUpperCase()); return k < 0 ? 99 : k; };
   shadows.forEach(sh => {
     const b = sh._m; b.book = nameOf(b.book);
+    b.liveMissing = false;
+    if (sh.ownLive != null) b.odds = sh.ownLive;                 // FanDuel / Prop Builder / ... moved: the card shows what the book hangs now
+    else if (sh.ownGone) b.liveMissing = true;                    // the book took the line down
     if (!(sh.liq || (sh.altBooks && sh.altBooks.length) || (sh.keyOff && sh.keyOff.length))) return;
     const depthOf = bk => (sh.liq && sh.liq.books && sh.liq.books[bk]) ? sh.liq.books[bk].liq : null;
-    const pricedAll = [{ book: b.book, odds: b.odds }].concat((sh.altBooks || []).filter(a => a && a.odds != null && (a.line == null || Number(a.line) === Number(b.line))).map(a => ({ book: a.book, odds: a.odds })));
+    const pricedAll = (b.liveMissing ? [] : [{ book: b.book, odds: b.odds }]).concat((sh.altBooks || []).filter(a => a && a.odds != null && (a.line == null || Number(a.line) === Number(b.line))).map(a => ({ book: a.book, odds: a.odds })));
     const pricedOurs = pricedAll.filter(x => _mOurBook(x.book));
     const priced = pricedOurs.length ? pricedOurs : pricedAll;     // the headline price comes from our books only (if none has a price the pick is dropped on this run)
     priced.forEach(x => { if (_mIsExchange(x.book)) x.liq = depthOf(x.book); });
     const playable = priced.filter(x => MORNING_HEADLINE_BOOKS.has(_mBookName(x.book)) || (_mIsExchange(x.book) && x.liq != null && x.liq >= MORNING_EXCH_MIN_LIQ));   // headline = FD / Prop Builder / Pinnacle / Bet105, or an exchange with the size
     let best = playable[0] || priced[0];
+    if (!best) { b.liveMissing = true; return; }
     playable.forEach(x => { if (x.odds > best.odds || (x.odds === best.odds && rank(x.book) < rank(best.book))) best = x; });
     if (!best.book || /^propshop$/i.test(String(best.book).trim())) { const inf = inferBookFromAlts(best.odds, b.line, priced.filter(x => x !== best).map(x => ({ book: x.book, odds: x.odds, line: b.line }))); if (inf) best = priced.find(x => x.book === inf && x.odds === best.odds) || best; }   // "PropShop" is only a placeholder for a board price whose book was not read
     b.odds = best.odds; b.book = best.book;
@@ -27114,9 +27121,9 @@ function _mDropUnpriced(picks) {
   const unbooked = picks.filter(b => _mPlaceholderBook(b.book));
   if (unbooked.length) { const ids = new Set(unbooked.map(x => String(x.id))); morningDropUnbooked(true); picks = picks.filter(x => !ids.has(String(x.id))); try { renderMorning(); } catch (e) {} showToast(`Dropped ${unbooked.length} pick${unbooked.length === 1 ? "" : "s"} with no real book (log + Tracker): ${unbooked.slice(0, 4).map(x => displayPlayerName(x.player)).join(", ")}`); }
   const inRange = b => b.fairProb == null || oddsToDecimal(b.odds) == null || oddsToDecimal(b.odds) >= (1 + MORNING_QUAL_EV / 100) / b.fairProb - 1e-9;   // the price we can actually get is still at the play-to or better
-  const kept = picks.filter(b => _mRealBook(b) && inRange(b)), dropped = picks.filter(x => !kept.includes(x));
+  const kept = picks.filter(b => _mRealBook(b) && inRange(b) && !b.liveMissing), dropped = picks.filter(x => !kept.includes(x));
   kept.forEach(b => { delete b.cardSkip; b.cardAt = Date.now(); });
-  dropped.forEach(b => { b.cardSkip = !_mHeadlineOk(b) ? "no FD / PB / PIN / Bet105 price (or exchange under $" + MORNING_EXCH_MIN_LIQ + ") on this run" : "price is past the play-to"; });
+  dropped.forEach(b => { b.cardSkip = b.liveMissing ? "its book no longer posts this line" : !_mHeadlineOk(b) ? "no FD / PB / PIN / Bet105 price (or exchange under $" + MORNING_EXCH_MIN_LIQ + ") on this run" : "price is past the play-to"; });
   try { saveMorningBets(); } catch (e) {}
   if (dropped.length) showToast(`Left off the card (no FanDuel / Prop Builder / Pinnacle / Bet105 price, or an exchange with the size, at the play-to on this run): ${dropped.slice(0, 4).map(x => displayPlayerName(x.player)).join(", ")}${dropped.length > 4 ? " +" + (dropped.length - 4) + " more" : ""}`);
   return kept;
