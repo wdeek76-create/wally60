@@ -12860,6 +12860,7 @@ function renderSrcAnalytics() {
   // skipped rather than counted with missing data.
   const minAccumBySource = {}; // key -> { n, sumAbsDiff }
   let minAccumTotal = 0;
+  const tabsMinSeen = new Set();   // player|day pairs the tracker bets already counted for Tabs
   settled.forEach(b => {
     if (!b.srcMin || b.actualMin == null) return;
     const entries = Object.entries(b.srcMin).filter(([, v]) => v != null);
@@ -12871,12 +12872,24 @@ function renderSrcAnalytics() {
     const withDiff = entries.map(([key, val]) => ({ key, diff: Math.abs(val - b.actualMin) }));
     if (b.expMin != null) withDiff.push({ key: "__expected", diff: Math.abs(b.expMin - b.actualMin) });
     withDiff.forEach(e => {
+      if (e.key === "tabs") tabsMinSeen.add(resolveNorm(b.player || "") + "|" + (b.gameDate || ""));
       if (!minAccumBySource[e.key]) minAccumBySource[e.key] = { n: 0, sumAbsDiff: 0 };
       const acc = minAccumBySource[e.key];
       acc.n++;
       acc.sumAbsDiff += e.diff;
     });
   });
+  // Tabs Solo bets carry Tabs' own projected minutes + the real minutes at grading: one sample per player-game (not per bet), skipping any the tracker already counted.
+  let tabsMinN = 0;
+  try {
+    const seen = new Set(tabsMinSeen);
+    (typeof tabsSolo !== "undefined" ? tabsSolo : []).forEach(x => {
+      if (!(x.min > 0) || x.actualMin == null) return;
+      const k = resolveNorm(x.player || "") + "|" + (x.gameDate || ""); if (seen.has(k)) return; seen.add(k);
+      if (!minAccumBySource.tabs) minAccumBySource.tabs = { n: 0, sumAbsDiff: 0 };
+      minAccumBySource.tabs.n++; minAccumBySource.tabs.sumAbsDiff += Math.abs(x.min - x.actualMin); tabsMinN++;
+    });
+  } catch (e) {}
   // One metric, one ranking: average minutes off actual. Lowest wins. That's it.
   const minAccumRanked = Object.entries(minAccumBySource)
     .sort((a, b) => (a[1].sumAbsDiff / a[1].n) - (b[1].sumAbsDiff / b[1].n))
@@ -13584,7 +13597,7 @@ function renderSrcAnalytics() {
     </div>
 
     ${section("Sources · Solo", `${SRC_KEYS.length} sources`, tableShell(soloRows, { labelHead: "Source" }), true, `How each individual source (RG/RW/DIMERS/etc) has done on bets where THAT source alone agreed with your pick — not whether you tracked the bet using that source, but whether its projection happened to favor your side. Shows which source's opinion is most worth trusting when you're deciding between conflicting numbers.`)}
-    ${minAccumTotal > 0 ? section("Minutes Accuracy", minAccumHeadline || `${minAccumTotal} graded prop${minAccumTotal===1?"":"s"} with a minutes comparison`, `<div style="display:flex;flex-direction:column;gap:2px;">${minAccumRows}</div>`, true, `Compares each source's pre-game minutes PROJECTION against the REAL minutes the player ended up playing. Tells you which source is more reliable specifically for predicting playing time — separate from whether their stat projections are accurate, since a good minutes call is often the foundation everything else is built on.`) : ""}
+    ${minAccumTotal > 0 || tabsMinN > 0 ? section("Minutes Accuracy", minAccumHeadline || `${minAccumTotal} graded prop${minAccumTotal===1?"":"s"} with a minutes comparison`, `<div style="display:flex;flex-direction:column;gap:2px;">${minAccumRows}</div>`, true, `Compares each source's pre-game minutes PROJECTION against the REAL minutes the player ended up playing. Tells you which source is more reliable specifically for predicting playing time — separate from whether their stat projections are accurate, since a good minutes call is often the foundation everything else is built on.`) : ""}
     ${ladders.length > 0 ? section("Ladders", `${ladders.length} ladder${ladders.length===1?"":"s"} · same player, same game, same direction, 2+ stats`, tableShell(ladderRows, { labelHead: "Ladder Breakdown" }) + tableShell(ladderUnitRows, { labelHead: "Unit Outcome (all legs)" }) + (ladderPlayerRows ? `<div style="padding:8px 10px 2px;font-size:9px;color:#525a64;font-weight:700;letter-spacing:0.8px;text-transform:uppercase;">Most Laddered Players</div>` + tableShell(ladderPlayerRows, { labelHead: "Player" }) : ""), true, `Catches whenever you stacked 2+ props on the same player, same game, same direction (e.g. u22.5 PTS + u3.5 AST + u6.5 REB on one player). "Ladder Breakdown" shows how each individual leg performed; "Unit Outcome" treats the whole stack as one all-or-nothing parlay — did EVERY leg hit together, which is the real test of whether stacking that player was worth it.`) : ""}
     ${section("Sources · Combos", `${sortedCombos.length} combos · sorted by P/L`, tableShell(comboRows, { labelHead: "Combination" }), false, `When TWO OR MORE sources agree on the same pick, how has that combo done? A "RG + RW" combo record separate from either source alone — the idea being that agreement between independent sources should be a stronger signal than any one source by itself.`)}
     ${section("Sources · Fade", "When source disagreed with your pick", tableShell(fadeRows, { labelHead: "Fade" }), false, `The opposite question — how have your bets done specifically when a source's projection DISAGREED with the side you took? A source with a good "Fade" record here suggests you might want to weigh it more heavily, or reconsider betting against it so often.`)}
@@ -26670,7 +26683,7 @@ async function tabsSoloGrade() {
   const btn = document.getElementById("ts-grade-btn"); if (btn) { btn.disabled = true; btn.textContent = "GRADING…"; }
   const today = localYMD(new Date()); let graded = 0;
   for (const x of tabsSolo.filter(y => y.result === "pending" && y.gameDate <= today)) {
-    try { const r = await gradeBet(x); if (r.ok) { x.result = r.result; x.actual = r.total != null ? r.total : null; graded++; } } catch (e) {}
+    try { const r = await gradeBet(x); if (r.ok) { x.result = r.result; x.actual = r.total != null ? r.total : null; if (r.actualMin != null) x.actualMin = r.actualMin; graded++; } } catch (e) {}
   }
   if (graded) tabsSoloSave();
   showToast(graded ? `Tabs Solo: graded ${graded}` : "Tabs Solo: nothing final yet");
@@ -26721,15 +26734,18 @@ function renderTabsSolo() {
   const edgeLines = MORNING_SOLO_BUCKETS.map(([label, lo, hi]) => ({ label, set: rows.filter(x => x.ev >= lo && x.ev < hi) })).concat([{ label: "All", set: rows, total: true }]);
   const mktLines = MORNING_STATS.map(s => ({ label: `${s}`, set: rows.filter(x => x.stat === s) })).filter(l => l.set.length).concat([{ label: "All", set: rows, total: true }]);
   const ctxLines = Object.keys(TABS_CTX).map(c => ({ label: `<span style="color:${TABS_CTX[c][1]};">${TABS_CTX[c][0]}</span>`, set: rows.filter(x => (x.ctx || "clean") === c) })).filter(l => l.set.length).concat([{ label: "All", set: rows, total: true }]);
-  const minBuckets = [["Under 20", 0, 20], ["20-28", 20, 28], ["28-34", 28, 34], ["34+", 34, 999]];
-  const minLines = minBuckets.map(([label, lo, hi]) => ({ label, set: rows.filter(x => x.min != null && x.min >= lo && x.min < hi) })).filter(l => l.set.length).concat([{ label: "No minutes", set: rows.filter(x => x.min == null) }].filter(l => l.set.length)).concat([{ label: "All", set: rows, total: true }]);
+  // projected vs actual: the stat projection against what the player did, per market, plus minutes
+  const pvaRow = (label, pairs) => { const n = pairs.length; if (!n) return null; const ap = pairs.reduce((t, q) => t + q[0], 0) / n, aa = pairs.reduce((t, q) => t + q[1], 0) / n, mae = pairs.reduce((t, q) => t + Math.abs(q[0] - q[1]), 0) / n; return { label, n, ap, aa, mae, bias: ap - aa }; };
+  const pvaRows = MORNING_STATS.map(st => pvaRow(st, rows.filter(x => x.stat === st && x.proj > 0 && x.actual != null && (x.result === "hit" || x.result === "miss")).map(x => [Number(x.proj), Number(x.actual)]))).filter(Boolean);
+  { const mp = []; const seenMin = new Set(); rows.forEach(x => { if (!(x.min > 0) || x.actualMin == null) return; const k = resolveNorm(x.player) + "|" + x.gameDate; if (seenMin.has(k)) return; seenMin.add(k); mp.push([Number(x.min), Number(x.actualMin)]); }); const r = pvaRow("Minutes", mp); if (r) pvaRows.push(r); }
+  const pvaTable = pvaRows.length ? `<div style="overflow-x:auto;margin-bottom:12px;"><table style="border-collapse:collapse;min-width:520px;font-size:12px;"><thead><tr>${["Market", "Graded", "Avg projected", "Avg actual", "Avg miss", "Bias (proj \u2212 actual)"].map(t => th(t)).join("")}</tr></thead><tbody>${pvaRows.map(r => `<tr style="border-top:1px solid #1a1d22;"><td style="padding:5px 10px;font-weight:800;color:#fff;">${r.label}</td><td style="padding:5px 9px;text-align:center;color:#e6edf5;">${r.n}</td><td style="padding:5px 9px;text-align:center;color:#fff;${mono}">${r.ap.toFixed(2)}</td><td style="padding:5px 9px;text-align:center;color:#fff;${mono}">${r.aa.toFixed(2)}</td><td style="padding:5px 9px;text-align:center;color:#fbbf24;${mono}">${r.mae.toFixed(2)}</td><td style="padding:5px 9px;text-align:center;${mono}color:${Math.abs(r.bias) < 0.15 * Math.max(r.aa, 1) ? "#4ade80" : "#f87171"};">${r.bias >= 0 ? "+" : ""}${r.bias.toFixed(2)}</td></tr>`).join("")}</tbody></table></div>` : `<div style="font-size:12px;color:#e6edf5;margin-bottom:12px;">No graded bets with a projection yet \u2014 hit GRADE PENDING after the games.</div>`;
   // by day
   const days = [...new Set(rows.map(x => x.gameDate))].sort().reverse().slice(0, 14);
   const dayLines = days.map(d => ({ label: d.slice(5), set: rows.filter(x => x.gameDate === d) }));
   // bet list
   const resCol = r => r === "hit" ? "#4ade80" : r === "miss" ? "#f87171" : r === "void" ? "#e6edf5" : "#fbbf24";
   const list = rows.slice().sort((a, b) => (b.gameDate + b.at).localeCompare(a.gameDate + a.at)).slice(0, tabsSoloShow).map(x => `<tr style="border-top:1px solid #1a1d22;"><td style="padding:4px 8px;color:#e6edf5;white-space:nowrap;">${esc(x.gameDate.slice(5))} ${esc(x.gameTime.replace(/^[A-Za-z]+-\d+\s*/, ""))}</td><td style="padding:4px 8px;color:#fff;font-weight:700;white-space:nowrap;">${esc(displayPlayerName(x.player))} <span style="color:#7dd3fc;font-weight:600;">${esc(x.team || "")}</span></td><td style="padding:4px 8px;white-space:nowrap;"><b style="color:${x.ou === "over" ? C.over : C.under};">${x.ou === "over" ? "O" : "U"}${x.line}</b> <span style="color:#fff;">${esc(x.stat)}</span></td><td style="padding:4px 8px;${mono}color:#fff;">${x.odds > 0 ? "+" + x.odds : x.odds}</td><td style="padding:4px 8px;color:#e6edf5;">${esc(x.book || "")}</td><td style="padding:4px 8px;${mono}color:#4ade80;white-space:nowrap;">+${x.ev.toFixed(1)}%${x.simFair != null ? ` <span style="color:#e6edf5;">fair ${x.simFair > 0 ? "+" : ""}${x.simFair} (${(100 / oddsToDecimal(x.simFair)).toFixed(0)}%)</span>` : ""}</td><td style="padding:4px 8px;${mono}color:#fff;">${x.min != null ? Math.round(x.min) + "m" : "\u2014"}</td><td style="padding:4px 8px;white-space:nowrap;"><span title="${esc(x.ctxWhy || "")}" style="border:1px solid ${(TABS_CTX[x.ctx || "clean"] || TABS_CTX.clean)[1]}88;color:${(TABS_CTX[x.ctx || "clean"] || TABS_CTX.clean)[1]};border-radius:5px;padding:1px 6px;font-size:10px;font-weight:800;">${(TABS_CTX[x.ctx || "clean"] || TABS_CTX.clean)[0]}</span>${x.ctxWhy ? ` <span style="color:#e6edf5;font-size:10px;">${esc(String(x.ctxWhy).slice(0, 48))}</span>` : ""}</td><td style="padding:4px 8px;"><span style="border:1px solid #c4b5fd88;color:#c4b5fd;border-radius:5px;padding:1px 6px;font-size:10px;font-weight:800;">${TABS_SOLO_REL[x.release] || x.release}</span>${x.minToTip != null ? ` <span style="color:#e6edf5;font-size:10px;">${x.minToTip}m to tip</span>` : ""}</td><td style="padding:4px 8px;font-weight:800;color:${resCol(x.result)};">${x.result === "pending" ? "OPEN" : x.result.toUpperCase()}${x.actual != null ? ` <span style="color:#e6edf5;font-weight:600;">${x.actual}</span>` : ""}</td><td style="padding:4px 8px;"><a href="#" onclick="tabsSoloDelete('${esc(x.key).replace(/'/g, "")}');return false;" style="color:#6b7380;text-decoration:none;">✕</a></td></tr>`).join("");
-  el.innerHTML = `<div style="max-width:1100px;margin:0 auto;padding:8px;">${paste}${filters}${tiles}${h("By release")}${table("Release", relLines)}${h("By edge")}${table("Edge", edgeLines)}${h("By market")}${table("Market", mktLines)}${h("By RW context (clean vs upside / downside / flagged)")}${table("Context", ctxLines)}${h("By projected minutes")}${table("Min", minLines)}${h("By day")}${table("Day", dayLines)}${h(`Bets (showing ${Math.min(rows.length, tabsSoloShow)} of ${rows.length}, newest first)`)}<div style="overflow-x:auto;"><table style="border-collapse:collapse;font-size:12px;width:100%;min-width:760px;"><tbody>${list}</tbody></table></div>${rows.length > tabsSoloShow ? `<div style="margin-top:8px;display:flex;gap:8px;"><button onclick="tabsSoloShow+=100;renderTabsSolo()" style="background:transparent;border:1px solid #1a1d22;color:#e6edf5;border-radius:6px;padding:6px 12px;font-size:11px;font-weight:700;cursor:pointer;">SHOW 100 MORE</button><button onclick="tabsSoloShow=1e9;renderTabsSolo()" style="background:transparent;border:1px solid #1a1d22;color:#e6edf5;border-radius:6px;padding:6px 12px;font-size:11px;font-weight:700;cursor:pointer;">SHOW ALL ${rows.length}</button></div>` : ""}</div>`;
+  el.innerHTML = `<div style="max-width:1100px;margin:0 auto;padding:8px;">${paste}${filters}${tiles}${h("By release")}${table("Release", relLines)}${h("By edge")}${table("Edge", edgeLines)}${h("By market")}${table("Market", mktLines)}${h("By RW context (clean vs upside / downside / flagged)")}${table("Context", ctxLines)}${h("Projected vs actual")}${pvaTable}${h("By day")}${table("Day", dayLines)}${h(`Bets (showing ${Math.min(rows.length, tabsSoloShow)} of ${rows.length}, newest first)`)}<div style="overflow-x:auto;"><table style="border-collapse:collapse;font-size:12px;width:100%;min-width:760px;"><tbody>${list}</tbody></table></div>${rows.length > tabsSoloShow ? `<div style="margin-top:8px;display:flex;gap:8px;"><button onclick="tabsSoloShow+=100;renderTabsSolo()" style="background:transparent;border:1px solid #1a1d22;color:#e6edf5;border-radius:6px;padding:6px 12px;font-size:11px;font-weight:700;cursor:pointer;">SHOW 100 MORE</button><button onclick="tabsSoloShow=1e9;renderTabsSolo()" style="background:transparent;border:1px solid #1a1d22;color:#e6edf5;border-radius:6px;padding:6px 12px;font-size:11px;font-weight:700;cursor:pointer;">SHOW ALL ${rows.length}</button></div>` : ""}</div>`;
 }
 
 // ── TABS vs MODEL report ────────────────────────────────────────────────────
