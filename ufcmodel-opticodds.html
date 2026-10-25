@@ -596,6 +596,7 @@
         <button class="ghost" id="rebuildCombosBtn" style="border-color:rgba(74,222,128,0.4); color:var(--green);" title="Re-derive every consensus bet's source probs + combo from the card's current Eye/Arena/Saber maps. Fixes bets whose sources were added/edited after grading. Never changes prob/edge/W-L on graded bets.">🔧 Rebuild combos</button>
         <button class="ghost" id="recomputeClvBtn" style="border-color:rgba(74,222,128,0.4); color:var(--green);" title="Recompute CLV on every bet using the corrected raw-vs-raw formula (matches Pikkit). Works for cards whose closing odds were already pasted in a previous session.">🔧 Recompute CLV</button>
         <button class="primary" id="sendPartnersBtn" style="padding:9px 14px; font-size:13px;">📤 Send to Partners</button>
+        <button class="ghost" id="consWebhookBtn" onclick="setDiscordDest('consensus')" title="Webhook + role — 📋 CONSENSUS and Copy NEW also post the picks to this Discord channel">🔗 Discord</button>
       </div>
     </div>
     <div id="consTable"></div>
@@ -764,7 +765,8 @@
         <button onclick="copyModelPicks()" class="ghost" style="padding:8px 12px; font-size:13px; white-space:nowrap;" title="Copy each fighter with their current-weight model win % to clipboard">📋 Copy picks</button>
         <button onclick="setModelRecapWebhook()" class="ghost" id="modelRecapWebhookBtn" style="padding:8px 12px; font-size:13px; white-space:nowrap;" title="Set the Discord webhook Copy recap posts to">🔗 Recap</button>
         <button onclick="copyModelRecap()" class="ghost" style="padding:8px 12px; font-size:13px; white-space:nowrap;" title="Copy a results recap of only the picks that were sent out for this card">🧾 Copy recap</button>
-        <button onclick="setModelDiscordWebhook()" class="ghost" id="modelWebhookBtn" style="padding:8px 12px; font-size:13px; white-space:nowrap;" title="Set the Discord webhook the card image posts to on export">🔗 Discord</button>
+        <button onclick="setDiscordDest('model')" class="ghost" id="modelWebhookBtn" style="padding:8px 12px; font-size:13px; white-space:nowrap;" title="Webhook + role for your Discord — the card image posts there on export">🔗 Discord</button>
+        <button onclick="setDiscordDest('modelNick')" class="ghost" id="modelNickWebhookBtn" style="padding:8px 12px; font-size:13px; white-space:nowrap;" title="Webhook + role for Nick's Discord — the card image posts there on export">🔗 Nick</button>
         <button onclick="exportModelCardImage()" class="ghost" style="padding:8px 12px; font-size:13px; white-space:nowrap;">📷 Export card image</button>
         <select id="modelCardFilter" style="background:var(--bg2); border:1px solid var(--border); border-radius:6px; padding:7px 10px; color:var(--text); font-size:13px; min-width:280px;"></select>
       </div>
@@ -5554,48 +5556,85 @@ function cleanCardTitle(card) {
       .replace(/\s+/g, ' ').trim().toUpperCase();
 }
 
-// ── Discord webhook for the card-image export ─────────────────────────────
-const MODEL_WEBHOOK_KEY = 'ufc_model_discord_webhook';
-// Discord role pinged with every card-image post (just the mention, no text).
-const MODEL_DISCORD_ROLE_ID = '1555588577629442267';
-function getModelDiscordWebhook() {
-  try { return localStorage.getItem(MODEL_WEBHOOK_KEY) || ''; } catch (e) { return ''; }
-}
-function refreshModelWebhookBtn() {
-  const b = document.getElementById('modelWebhookBtn');
-  if (b) b.textContent = getModelDiscordWebhook() ? '🔗 Discord ✓' : '🔗 Discord';
-}
-function setModelDiscordWebhook() {
-  const cur = getModelDiscordWebhook();
-  const v = prompt('Discord webhook URL — the card image posts here every time you export.\nLeave blank to turn it off.', cur);
-  if (v === null) return;
-  const url = v.trim();
-  if (url && !/^https:\/\/(?:\w+\.)?discord(?:app)?\.com\/api\/webhooks\//i.test(url)) {
-    toast('That doesn\'t look like a Discord webhook URL', 'error'); return;
+// ── Discord destinations (webhook + role to tag), saved in this browser ──
+//   model      → your Discord, card image on Export
+//   modelNick  → Nick's Discord, card image on Export
+//   consensus  → Consensus copy buttons post the picks text
+const DISCORD_DESTS = {
+  model:     { label: 'your Discord (card image)', btn: 'modelWebhookBtn', text: '🔗 Discord', defaultRole: '1555588577629442267', legacyKey: 'ufc_model_discord_webhook' },
+  modelNick: { label: "Nick's Discord (card image)", btn: 'modelNickWebhookBtn', text: '🔗 Nick' },
+  consensus: { label: 'Consensus picks', btn: 'consWebhookBtn', text: '🔗 Discord' },
+};
+const DISCORD_WEBHOOK_RE = /^https:\/\/(?:\w+\.)?discord(?:app)?\.com\/api\/webhooks\//i;
+function getDiscordDest(id) {
+  const d = DISCORD_DESTS[id];
+  let v = null;
+  try { v = JSON.parse(localStorage.getItem('ufc_discord_' + id) || 'null'); } catch (e) {}
+  if (!v && d.legacyKey) {
+    // carry over the webhook saved before roles were configurable
+    try { const u = localStorage.getItem(d.legacyKey); if (u) v = { url: u, role: d.defaultRole || '' }; } catch (e) {}
   }
-  try { url ? localStorage.setItem(MODEL_WEBHOOK_KEY, url) : localStorage.removeItem(MODEL_WEBHOOK_KEY); } catch (e) {}
-  refreshModelWebhookBtn();
-  toast(url ? 'Discord webhook saved — exports will post there' : 'Discord webhook off');
+  return v && v.url ? v : null;
 }
-setTimeout(refreshModelWebhookBtn, 0);
+function refreshDiscordBtns() {
+  Object.entries(DISCORD_DESTS).forEach(([id, d]) => {
+    const b = document.getElementById(d.btn);
+    if (b) b.textContent = getDiscordDest(id) ? d.text + ' ✓' : d.text;
+  });
+}
+function setDiscordDest(id) {
+  const d = DISCORD_DESTS[id];
+  const cur = getDiscordDest(id) || { url: '', role: d.defaultRole || '' };
+  const url = prompt(`Discord webhook URL for ${d.label}.\nLeave blank to turn it off.`, cur.url);
+  if (url === null) return;
+  const u = url.trim();
+  if (!u) {
+    try { localStorage.removeItem('ufc_discord_' + id); if (d.legacyKey) localStorage.removeItem(d.legacyKey); } catch (e) {}
+    refreshDiscordBtns(); toast(`${d.label}: off`); return;
+  }
+  if (!DISCORD_WEBHOOK_RE.test(u)) { toast('That doesn\'t look like a Discord webhook URL', 'error'); return; }
+  const role = prompt(`Role ID to tag in ${d.label} (blank = no tag).`, cur.role || '');
+  if (role === null) return;
+  const r = role.trim().replace(/[^0-9]/g, '');
+  try { localStorage.setItem('ufc_discord_' + id, JSON.stringify({ url: u, role: r })); if (d.legacyKey) localStorage.removeItem(d.legacyKey); } catch (e) {}
+  refreshDiscordBtns();
+  toast(`${d.label}: saved${r ? ' · tags role' : ''}`);
+}
+setTimeout(refreshDiscordBtns, 0);
 
-// Post the exported PNG to Discord — the image plus the role ping, no other text.
-async function postCardToDiscord(blob, filename) {
-  const url = getModelDiscordWebhook();
-  if (!url) return;
+// Post to a destination: optional text and/or file. Role tag goes first.
+// Long text is split into ≤1900-char messages on line breaks (tag on the first).
+async function postToDiscordDest(id, { text = '', blob = null, filename = null } = {}) {
+  const dest = getDiscordDest(id);
+  if (!dest) return false;
+  const d = DISCORD_DESTS[id];
+  const tag = dest.role ? `<@&${dest.role}>` : '';
+  const chunks = [];
+  let cur = tag;
+  (text ? text.split('\n') : []).forEach(line => {
+    if ((cur + '\n' + line).length > 1900) { chunks.push(cur); cur = line; }
+    else cur = cur ? cur + '\n' + line : line;
+  });
+  if (cur || !chunks.length) chunks.push(cur);
   try {
-    const fd = new FormData();
-    fd.append('payload_json', JSON.stringify({
-      content: MODEL_DISCORD_ROLE_ID ? `<@&${MODEL_DISCORD_ROLE_ID}>` : '',
-      allowed_mentions: { roles: MODEL_DISCORD_ROLE_ID ? [MODEL_DISCORD_ROLE_ID] : [] },
-      attachments: [{ id: 0, filename }],
-    }));
-    fd.append('files[0]', blob, filename);
-    const res = await fetch(url, { method: 'POST', body: fd });
-    if (!res.ok) throw new Error(`Discord ${res.status}`);
-    toast('Posted to Discord');
+    for (let i = 0; i < chunks.length; i++) {
+      const payload = { content: chunks[i], allowed_mentions: { roles: dest.role && i === 0 ? [dest.role] : [] } };
+      let res;
+      if (blob && i === 0) {
+        const fd = new FormData();
+        fd.append('payload_json', JSON.stringify({ ...payload, attachments: [{ id: 0, filename }] }));
+        fd.append('files[0]', blob, filename);
+        res = await fetch(dest.url, { method: 'POST', body: fd });
+      } else {
+        res = await fetch(dest.url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      }
+      if (!res.ok) throw new Error(`Discord ${res.status}`);
+    }
+    toast(`Posted to ${d.label}`);
+    return true;
   } catch (e) {
-    toast(`Discord post failed: ${e.message}`, 'error');
+    toast(`${d.label} post failed: ${e.message}`, 'error');
+    return false;
   }
 }
 
@@ -6418,7 +6457,9 @@ async function exportModelCardImage() {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
     toast(`Exported ${rendered.length} fights · ${topPicks.length} top picks`);
-    if (getModelDiscordWebhook()) postCardToDiscord(blob, filename);
+    // Card image only (plus each destination's role tag).
+    postToDiscordDest('model', { blob, filename });
+    postToDiscordDest('modelNick', { blob, filename });
   }, 'image/png');
 }
 
@@ -9172,7 +9213,9 @@ async function ensureBoardsForCopy() {
   const btn = document.getElementById(id);
   if (btn) btn.addEventListener('click', async () => {
     if (stream === 'consensus') await ensureBoardsForCopy();
-    copyText(buildStreamCopy(stream, false), stream);
+    const text = buildStreamCopy(stream, false);
+    copyText(text, stream);
+    if (stream === 'consensus' && text) postToDiscordDest('consensus', { text });
   });
   const newBtn = document.getElementById(id + '-new');
   if (newBtn) newBtn.addEventListener('click', async () => {
@@ -9180,6 +9223,7 @@ async function ensureBoardsForCopy() {
     const text = buildStreamCopy(stream, true);
     if (!text) { toast('No NEW picks to copy', 'error'); return; }
     copyText(text, stream + ' NEW');
+    if (stream === 'consensus') postToDiscordDest('consensus', { text });
   });
 });
 
