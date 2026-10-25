@@ -1089,7 +1089,7 @@ async function refreshTracked(){
       if(/completed|final|closed/i.test(st)){ const g=gradeOne(t); if(g){ t.result=g; t.final=true; changed=true; } }
     });
     if(changed) saveTracked();
-  } finally { tkBusy=false; if(viewMode==='tracker') renderTracker(); }
+  } finally { tkBusy=false; if(viewMode==='tracker') renderTracker(); smAutoRecap(); }
 }
 const sideTxt = t => t.side==='under'?'Under':t.side==='over'?'Over':t.side;
 function trackCardHtml(t){
@@ -1868,6 +1868,64 @@ function nlPost(p, sigs){
     embeds:[{ title, url:discordUrl(fdUrl)||undefined, color:sigs.some(x=>x.hold<-0.05)?0x22c55e:0xeab308, thumbnail:httpsLogo('fanduel')?{url:httpsLogo('fanduel')}:undefined,
       description:`${f?`${teamNick(f.away.name)||f.away.ab} @ ${teamNick(f.home.name)||f.home.ab} **LIVE**\n`:''}**${lg} LIVE - ${esc(mk).toUpperCase()}**`, fields, footer:{ text:`${lg} LIVE` } }] }, null, nlHook);
 }
+// Recap: once every play tracked on a day is graded and no game is on, post that day's results and the
+// all-time record (by signal, sport) to the in-game channel -- once per day. The tab has a button too.
+const etDayOf = ms => new Intl.DateTimeFormat('en-CA',{timeZone:'America/New_York'}).format(new Date(ms));
+function nlRecapText(day){
+  const today=nlTracked.filter(t=>etDayOf(t.trackedAt)===day), done=today.filter(t=>t.final);
+  const rec=list=>{ const r=ttRecord(list.filter(t=>t.final)); return `${r.w}-${r.l}${r.p?'-'+r.p:''} · ${r.u>=0?'+':''}${r.u.toFixed(2)}u${r.roi!=null?` · ${r.roi>=0?'+':''}${r.roi.toFixed(1)}% ROI`:''}`; };
+  const kinds=[...new Set(nlTracked.map(t=>t.kind))];
+  const by=(list)=>kinds.filter(k=>list.some(t=>t.kind===k&&t.final)).map(k=>`${k}: ${rec(list.filter(t=>t.kind===k))}`).join('\n');
+  const plays=done.map(t=>`${t.result==='win'?'✅':t.result==='loss'?'❌':'➖'} ${titleCase(t.playerName)} ${nlSide(t.side)}${t.line!=null?' '+t.line:''} ${t.marketLabel} ${fmtAm(t.price)} · ${t.kind}${t.actual!=null?` (${t.actual})`:''}`);
+  return { today, done, fields:[
+    { name:`${new Date(day+'T12:00:00').toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'})} · ${rec(done)}`, value:(by(done)||'—').slice(0,1024) },
+    { name:`All-time · ${rec(nlTracked)}`, value:(by(nlTracked)||'—').slice(0,1024) },
+    ...['nba','nfl'].filter(k=>nlTracked.some(t=>(t.sk||'nba')===k&&t.final)).map(k=>({ name:`${SPORTS[k]?.label||k} all-time`, value:rec(nlTracked.filter(t=>(t.sk||'nba')===k)), inline:true })),
+    ...(plays.length?[{ name:'Plays', value:plays.join('\n').slice(0,1024) }]:[]) ] };
+}
+async function nlPostRecap(day, manual){
+  if(!nlHook){ if(manual) toast('Set the in-game Discord first'); return false; }
+  const R=nlRecapText(day); if(!R.done.length){ if(manual) toast('Nothing graded for that day yet'); return false; }
+  const ok=await discordPost({ username:'FanDuel', avatar_url:httpsLogo('fanduel'), content:`**In-game recap**`, allowed_mentions:{parse:[]},
+    embeds:[{ title:'In-game recap · NBA + NFL live', color:0x60a5fa, fields:R.fields, footer:{ text:'graded from box scores' } }] }, null, nlHook);
+  if(ok) LS.set('nbal_recap_'+day, '1');
+  if(manual) toast(ok?'Recap posted':'Recap failed');
+  return ok;
+}
+async function nlAutoRecap(){
+  if(nlGames.length) return;   // games still on
+  const days=[...new Set(nlTracked.map(t=>etDayOf(t.trackedAt)))].sort().slice(-3);
+  for(const day of days){ if(LS.get('nbal_recap_'+day,'')) continue; const list=nlTracked.filter(t=>etDayOf(t.trackedAt)===day);
+    if(list.length && list.every(t=>t.final)) await nlPostRecap(day); }
+}
+// FD Sharp Money recap: when every FanDuel bet on a game date is graded, post that date's results +
+// all-time (by sport and prop) to the FD Sharp Money channel, once.
+function smRecapFields(day){
+  const fd=tracked.filter(t=>t.src==='sharp' && (t.bookKey||'fanduel')==='fanduel');
+  const dayList=fd.filter(t=>t.start && etDayOf(new Date(t.start).getTime())===day);
+  const rec=list=>{ const r=ttRecord(list.filter(t=>t.final&&t.result)); return `${r.w}-${r.l}${r.p?'-'+r.p:''} · ${r.u>=0?'+':''}${r.u.toFixed(2)}u${r.roi!=null?` · ${r.roi>=0?'+':''}${r.roi.toFixed(1)}% ROI`:''}`; };
+  const split=(list,fn)=>{ const m={}; list.filter(t=>t.final&&t.result).forEach(t=>{ const k=fn(t); (m[k]=m[k]||[]).push(t); }); return Object.entries(m).sort((a,b)=>b[1].length-a[1].length).map(([k,l])=>`${k}: ${rec(l)}`).join('\n'); };
+  const lab=t=>`${SPORTS[t.sportKey]?.label||t.sportKey} ${t.marketLabel||t.mkey}`;
+  const plays=dayList.filter(t=>t.final).map(t=>`${t.result==='win'?'✅':t.result==='loss'?'❌':'➖'} ${titleCase(t.playerName)} ${sideTxt(t)}${t.line!=null?' '+t.line:''} ${t.marketLabel||''} ${fmtAm(t.price)}${t.actual!=null?` (${t.actual})`:''}`);
+  return { dayList, fields:[
+    { name:`${new Date(day+'T12:00:00').toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'})} · ${rec(dayList)}`, value:(split(dayList,lab)||'—').slice(0,1024) },
+    { name:`All-time · ${rec(fd)}`, value:(split(fd,t=>SPORTS[t.sportKey]?.label||t.sportKey)||'—').slice(0,1024) },
+    ...(plays.length?[{ name:'Plays', value:plays.join('\n').slice(0,1024) }]:[]) ] };
+}
+async function smPostRecap(day, manual){
+  if(!discordHook){ if(manual) toast('Set the FD Discord first'); return false; }
+  const R=smRecapFields(day); if(!R.dayList.some(t=>t.final)){ if(manual) toast('Nothing graded for that day yet'); return false; }
+  const ok=await discordPost({ username:'FanDuel', avatar_url:httpsLogo('fanduel'), content:'**Sharp Money recap**', allowed_mentions:{parse:[]},
+    embeds:[{ title:'FanDuel Sharp Money recap', color:0x60a5fa, fields:R.fields, footer:{ text:'graded from box scores' } }] }, null, discordHook);
+  if(ok) LS.set('sm_recap_'+day,'1'); if(manual) toast(ok?'Recap posted':'Recap failed'); return ok;
+}
+async function smAutoRecap(){
+  const fd=tracked.filter(t=>t.src==='sharp' && (t.bookKey||'fanduel')==='fanduel' && t.start);
+  const today=etToday();
+  const days=[...new Set(fd.map(t=>etDayOf(new Date(t.start).getTime())))].filter(d=>d<=today).sort().slice(-3);
+  for(const day of days){ if(LS.get('sm_recap_'+day,'')) continue; const list=fd.filter(t=>etDayOf(new Date(t.start).getTime())===day);
+    if(list.length && list.every(t=>t.final)) await smPostRecap(day); }
+}
 let nlTkBusy=false;
 async function nlRefreshTracked(){
   if(nlTkBusy) return; const open=nlTracked.filter(t=>!t.final && t.fixtureId); if(!open.length) return; nlTkBusy=true;
@@ -1882,7 +1940,7 @@ async function nlRefreshTracked(){
       if(row){ const v=statFor(row, t.mkey, t.sk||'nba', t.marketNames); if(v!=null && !isNaN(v) && t.actual!==v){ t.actual=v; ch=true; } }
       if(/completed|final|closed/i.test(st)){ const g=gradeOne(t); if(g){ t.result=g; t.final=true; ch=true; } } });
     if(ch) nlSave();
-  } finally { nlTkBusy=false; if(viewMode==='nbalive') renderNbaLive(); }
+  } finally { nlTkBusy=false; if(viewMode==='nbalive') renderNbaLive(); nlAutoRecap(); }
 }
 // Backup: every setting, webhook, tracked bet and record this page keeps (its whole localStorage),
 // as one .json file; Import puts it all back (same file works on another phone).
@@ -1901,14 +1959,14 @@ function smRestore(){
     }catch(e){ toast('Import failed: '+e.message); } };
   inp.click();
 }
-const backupHtml = () => `<div class="nlctl" style="margin:0 0 12px"><span class="dim">Backup</span><button data-bk="save">⬇ Download backup</button><button data-bk="load">⬆ Import backup</button></div>`;
-const bindBackup = v => { v.querySelectorAll('[data-bk]').forEach(b=>b.onclick=()=>b.dataset.bk==='save'?smBackup():smRestore()); };
+const backupHtml = () => `<div class="nlctl" style="margin:0 0 12px"><button data-bk="recap">Post FD recap</button><span class="dim">Backup</span><button data-bk="save">⬇ Download backup</button><button data-bk="load">⬆ Import backup</button></div>`;
+const bindBackup = v => { v.querySelectorAll('[data-bk]').forEach(b=>b.onclick=()=>b.dataset.bk==='save'?smBackup():b.dataset.bk==='recap'?(()=>{ const days=[...new Set(tracked.filter(t=>t.src==='sharp'&&t.start&&t.final).map(t=>etDayOf(new Date(t.start).getTime())))].sort(); smPostRecap(days[days.length-1]||etToday(), true); })():smRestore()); };
 let nlHist=false;
 function renderNbaLive(){
   const v=$('#view'), now=Date.now();
   const nextTip=['nba','nfl'].flatMap(k=>(sharpFxCache[k]?.list||[]).map(f=>tipAt(k,f.start))).filter(t=>t>now).sort((a,b)=>a-b)[0];
   const head=`<div class="sh"><span class="t">In-game · NBA + NFL</span><span class="dim" style="font-size:10.5px">${nlGames.length?`${nlGames.length} game${nlGames.length===1?'':'s'} on · ${nlPlays.length} plays · ${nlLast?Math.round((now-nlLast)/1000)+'s ago':'…'}`:nextTip?`idle · wakes at tip ${etTime(new Date(nextTip).toISOString())}`:'idle · no NBA / NFL games soon'}</span></div>
-    <div class="nlctl"><span class="dim">Exch min (each)</span>${[0,100,250,500,1000].map(x=>`<button class="${nlKalMin===x?'on':''}" data-nlk="${x}">${x?usd(x):'Any'}</button>`).join('')}<button class="${nlHook?'on':''}" id="nlDc" style="margin-left:auto">${nlHook?'Discord ✓':'Set Discord'}</button></div>${nlErr?`<div class="dim" style="font-size:11px;color:var(--red)">${esc(nlErr.slice(0,90))}</div>`:''}
+    <div class="nlctl"><span class="dim">Exch min (each)</span>${[0,100,250,500,1000].map(x=>`<button class="${nlKalMin===x?'on':''}" data-nlk="${x}">${x?usd(x):'Any'}</button>`).join('')}<button id="nlRecap">Post recap</button><button class="${nlHook?'on':''}" id="nlDc" style="margin-left:auto">${nlHook?'Discord ✓':'Set Discord'}</button></div>${nlErr?`<div class="dim" style="font-size:11px;color:var(--red)">${esc(nlErr.slice(0,90))}</div>`:''}
     ${nlGames.length&&nlKal?`<div class="smdiagw"><div class="smdiag">${esc(Object.entries(nlKal.books).map(([b,n])=>`${b} ${n}`).join(' · ')||'no odds')}<div class="smdiagtop">Kalshi: ${nlKal.rows} rows · ${nlKal.mk} in our markets · ${nlKal.side} with a side · ${nlKal.fd} on FD's line${nlKal.sample.length?`<br><span style="opacity:.7">${nlKal.sample.map(esc).join('<br>')}</span>`:''}</div></div></div>`:''}`;
   const cards = !nlGames.length ? '<div class="empty">Runs only while NBA / NFL games are live (from tip to the final whistle). Nothing on right now.</div>'
     : !nlPlays.length ? '<div class="empty">Watching… nothing at 0.0% or better right now.</div>'
@@ -1940,6 +1998,7 @@ function renderNbaLive(){
     const r=prompt('Role ID to tag (optional)', nlRole); if(r!=null){ nlRole=(r.match(/\d{15,}/)||[''])[0]; LS.set('nbal_role',nlRole); }
     if(nlHook) discordPost({ username:'FanDuel', content:['✅ In-game alerts connected', /^\d{15,}$/.test(nlRole)?`<@&${nlRole}>`:''].filter(Boolean).join(' '), allowed_mentions:/^\d{15,}$/.test(nlRole)?{roles:[nlRole]}:{parse:[]} }, null, nlHook).then(ok=>toast(ok?'NBA Live Discord connected':'Discord test failed'));
     renderNbaLive(); });
+  $('#nlRecap')?.addEventListener('click',()=>{ const days=[...new Set(nlTracked.map(t=>etDayOf(t.trackedAt)))].sort(); nlPostRecap(days[days.length-1]||etToday(), true); });
   $('#nlHistB')?.addEventListener('click',()=>{ nlHist=!nlHist; renderNbaLive(); });
   v.querySelectorAll('[data-nlg]').forEach(b=>b.onclick=()=>{ const [id,r]=b.dataset.nlg.split('|'); const t=nlTracked.find(x=>x.id===id); if(!t) return; if(r){ t.result=r; t.final=true; } else { t.result=null; t.final=false; } nlSave(); renderNbaLive(); });
   v.querySelectorAll('[data-nlrm]').forEach(b=>b.onclick=()=>{ if(!confirm('Remove this play?')) return; nlTracked=nlTracked.filter(x=>x.id!==b.dataset.nlrm); nlSave(); renderNbaLive(); });
@@ -1950,7 +2009,7 @@ let nlTimer=null;
 async function nlTick(){
   const on=(await nlActiveGames()).length>0;
   if(on){ if(!nlTimer){ nlTimer=setInterval(nlScan, 4000); nlScan(); } }
-  else if(nlTimer){ clearInterval(nlTimer); nlTimer=null; nlGames=[]; nlPlays=[]; nlSave(); if(viewMode==='nbalive') renderNbaLive(); }
+  else { if(nlTimer){ clearInterval(nlTimer); nlTimer=null; nlGames=[]; nlPlays=[]; nlSave(); if(viewMode==='nbalive') renderNbaLive(); } nlAutoRecap(); smAutoRecap(); }
 }
 setTimeout(nlTick, 5000); setInterval(nlTick, 60e3);
 setInterval(()=>{ if(nlTracked.some(t=>!t.final)) nlRefreshTracked(); }, 120e3);
