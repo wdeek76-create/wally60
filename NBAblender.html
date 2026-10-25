@@ -12039,19 +12039,30 @@ async function shareOpenPropsAsImageDiscord(betList) {
 
   // Refresh books + liq from OpticOdds for exactly the props going on the pic
   showToast(`Refreshing ${filtered.length} props from OpticOdds…`);
+  filtered.forEach(b => { b.refreshOwn = true; });
   try { const r = await ooRefreshBetsForPic(filtered); showToast(`Refreshed ${r.refreshed}${r.skipped ? ` · ${r.skipped} skipped (started / no feed)` : ""}`); }
   catch (e) { console.warn("[pic refresh] failed, using stored books", e); }
+  filtered.forEach(b => { b.refreshOwn = false; });
 
   // The Discord picture is the same card as Morning's DISCORD card (same look, no sources / agree / edge columns), built from these bets.
   {
+    const dropped = [];
     const picks = filtered.map((b, i) => {
-      const bk = _isBlankBook(b.book) ? inferBookFromAlts(b.odds, b.line, b.altBooks) : b.book;
-      if (!bk) return null;
-      return { id: "t" + i, player: b.player, team: b.team || "", game: b.game || "", gameTime: b.gameTime || "", stat: String(b.stat || "").toUpperCase(), ou: String(b.ou || "over").toLowerCase(), line: Number(b.line), odds: Number(b.odds), book: bk,
-        fairProb: b.fair != null && Number(b.fair) > 0 ? Number(b.fair) / (Number(b.fair) > 1 ? 100 : 1) : null,
-        altBooks: (Array.isArray(b.altBooks) ? b.altBooks : []).filter(a => a && a.book && a.odds != null && (a.line == null || Number(a.line) === Number(b.line))).map(a => ({ book: a.book, odds: Number(a.odds), liq: a.liq != null ? a.liq : null })),
+      const own = b.ownGone ? null : (_isBlankBook(b.book) ? inferBookFromAlts(b.odds, b.line, b.altBooks) : b.book);
+      const liqOf = nm => (b.liq && b.liq.books && b.liq.books[nm]) ? b.liq.books[nm].liq : null;
+      const cands = (own ? [{ book: own, odds: b.ownLive != null ? Number(b.ownLive) : Number(b.odds), liq: liqOf(own) }] : [])
+        .concat((Array.isArray(b.altBooks) ? b.altBooks : []).filter(a => a && a.book && a.odds != null && (a.line == null || Number(a.line) === Number(b.line))).map(a => ({ book: a.book, odds: Number(a.odds), liq: a.liq != null ? a.liq : liqOf(a.book) })));
+      const elig = cands.filter(c => MORNING_HEADLINE_BOOKS.has(_mBookName(c.book)) || (_mIsExchange(c.book) && c.liq != null && c.liq >= MORNING_EXCH_MIN_LIQ));
+      if (!elig.length) { dropped.push(b.player); return null; }
+      const best = elig.reduce((a, c) => c.odds > a.odds ? c : a);
+      const fairProb = b.fair != null && Number(b.fair) > 0 ? Number(b.fair) / (Number(b.fair) > 1 ? 100 : 1) : null;
+      const pick = { id: "t" + i, player: b.player, team: b.team || "", game: b.game || "", gameTime: b.gameTime || "", stat: String(b.stat || "").toUpperCase(), ou: String(b.ou || "over").toLowerCase(), line: Number(b.line), odds: best.odds, book: best.book, fairProb,
+        altBooks: cands.filter(c => c !== best).map(c => ({ book: c.book, odds: c.odds, liq: c.liq })),
         liqBooks: b.liq && b.liq.books ? b.liq.books : null, liqLevels: b.liq && b.liq.levels ? b.liq.levels : null, sourcePrices: [] };
+      if (fairProb != null && oddsToDecimal(best.odds) < (1 + MORNING_QUAL_EV / 100) / fairProb - 1e-9) { dropped.push(b.player); return null; }   // best price is past the play-to: off the card
+      return pick;
     }).filter(Boolean);
+    if (dropped.length) showToast(`Left off the card (no price at the play-to or better on this run): ${dropped.slice(0, 4).join(", ")}${dropped.length > 4 ? " +" + (dropped.length - 4) : ""}`);
     if (!picks.length) { showToast("No open props with a real book to put on the picture"); return; }
     showToast(`Building Discord card (${picks.length})\u2026`);
     let blob; try { blob = await _morningCardBlob(picks, "discord"); } catch (e) { console.error("[discord pic]", e); showToast("Card failed \u2014 " + (e && e.message || "see console")); return; }
@@ -26824,6 +26835,11 @@ function morningCardPicks() {
   const t = open.filter(b => b.gameDate === today);
   return (t.length ? t : open).slice().reverse();
 }
+// "Cents" distance on the American scale (+100 and -100 are both 0): -118 vs -123 is 5 cents. Alt books on a card are shown only at the play-to or better, or at most 5 cents past it.
+const MORNING_ALT_CENTS = 5;
+const _mCents = o => o > 0 ? o - 100 : o + 100;
+function _mPlayToAm(b) { if (b.fairProb == null) return null; return decimalToAmerican((1 + MORNING_QUAL_EV / 100) / b.fairProb); }
+function _mAltInRange(b, odds) { const pt = _mPlayToAm(b); return pt == null || _mCents(Number(odds)) >= _mCents(pt) - MORNING_ALT_CENTS; }
 function morningPlayTo(b) {
   if (b.fairProb == null) return null;
   const am = decimalToAmerican((1 + MORNING_QUAL_EV / 100) / b.fairProb);
@@ -26893,7 +26909,7 @@ async function _morningCardHtml(picks, mode) {
     // Books: every other price on this side/line (boards' + live), best first; exchange alts carry their depth.
     const seenP = new Set([bookN + "|" + b.odds]);
     const rawAlts = (b.sourcePrices || []).map(x => ({ book: nm(x.book), odds: x.odds, liq: x.liq })).concat((b.altBooks || []).map(a => ({ book: nm(a.book), odds: a.odds, liq: a.liq })));
-    const others = rawAlts.filter(x => x.odds && !isNaN(x.odds) && x.book).filter(x => { const k = x.book + "|" + x.odds; if (seenP.has(k)) return false; seenP.add(k); return true; }).sort((x, y) => y.odds - x.odds);
+    const others = rawAlts.filter(x => x.odds && !isNaN(x.odds) && x.book && _mAltInRange(b, x.odds)).filter(x => { const k = x.book + "|" + x.odds; if (seenP.has(k)) return false; seenP.add(k); return true; }).sort((x, y) => y.odds - x.odds);
     const bestPlayLine = _mIsExchange(bookN) ? toPlayLine(b, bookN, exchTo) : "";
     const cell = x => { const ex = _mIsExchange(x.book), dt = ex ? depthTo(b, x.book) : null; const top = ex ? topSize(b, x.book, x.liq != null ? x.liq : depthOf(b, x.book)) : null; return { ex, html: `<span style="display:inline-flex;align-items:center;gap:6px;white-space:nowrap;">${bookLogo(x.book, 24)}<span style="${mono}font-weight:700;font-size:17px;color:#fff;">${odds(x.odds)}</span>${ex ? cents(x.odds) + sz(top != null ? top : (dt ? dt.total : null)) : ""}</span>${ex ? toPlayLine(b, x.book, dt) : ""}` }; };
     const cells = others.map(cell);
