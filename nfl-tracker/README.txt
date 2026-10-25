@@ -37,4 +37,5 @@ SEND TO DISCORD + SENT TRACKER
   price shown on the card. Grades follow the Ensemble automatically; W / L / P on a row
   overrides by hand ("auto" hands it back). Sending the same pick again doesn't double it.
 - "📤 Send Nick Card" posts the Nick Card to its OWN webhook and pings its own role (both asked
-  on the first send; change either on the Sent tab). Nick sends are not logged to Sent.
+  on the first send; change either on the Sent tab). The Nick card MUST tag a role: with no role
+  set it asks, and sends nothing until one is entered. Nick sends are not logged to Sent.
