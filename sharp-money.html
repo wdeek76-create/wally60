@@ -325,6 +325,8 @@ const PERIOD = /quarter|half|1st|2nd|3rd|4th|first|last|overtime|period|double|t
 const THREE = /three|3-point|3 point|3pt|3pm/;
 const NBA_MKTS = [
   ['total','Game Total', m=>/^(total points|points total|total|game total|totals)$/.test(m.trim())],
+  ['ml','Moneyline', m=>/^(moneyline|money line)$/.test(m.trim())],
+  ['spread','Spread', m=>/^(point spread|spread)$/.test(m.trim())],
   ['pts','Points',   m=>has(m,'point')&&!THREE.test(m)&&!has(m,'rebound')&&!has(m,'assist')&&!m.includes('+')],
   ['ast','Assists',  m=>has(m,'assist')&&!has(m,'point')&&!has(m,'rebound')],
   ['reb','Rebounds', m=>has(m,'rebound')&&!has(m,'point')&&!has(m,'assist')],
@@ -461,7 +463,7 @@ function sharpSummaryHtml(){
 // tracked as Sharp Money.
 const SOFT_BOOKS = ['fanduel','bet105']; // targets; bet105 alerts go to their own Discord channel
 const SHARP_REQ_BOOKS = ['Novig','Prophet X','Kalshi','FanDuel'];
-const SHARP_MARKETS = { nfl:['atd','rec_yds','rush_yds','rush_att','rec','pass_cmp','pass_att'], nba:['pts','pra','3pm','reb','ast','total'], wnba:['pts','pra','3pm','reb','ast'], nhl:['sog','ag','sv'] };
+const SHARP_MARKETS = { nfl:['atd','rec_yds','rush_yds','rush_att','rec','pass_cmp','pass_att'], nba:['pts','pra','3pm','reb','ast','total','ml','spread'], wnba:['pts','pra','3pm','reb','ast'], nhl:['sog','ag','sv'] };
 const SHARP_YESNO = new Set(['atd','ag']);
 // FanDuel price window: normal props -250 to +200; anytime TD / goal -250 to +500.
 const sharpPriceOk = (mk, price) => { const p=Number(price); return p>=-250 && p<=(SHARP_YESNO.has(mk)?500:200); };
@@ -474,14 +476,17 @@ const BOOK10 = new Set(['props builder','draftkings','bet105']);   // Onyx/Court
 const BOOK10_C = 10;
 const centsOf = a => a<0 ? -a-100 : 100-a;
 // a play that counts: exchange money at/over the minimum, or a live 10c play
-const sharpQual = e => e.kind==='10c' ? !e.gone : e.L.total>=sharpMin;
+// bet105's main lines (game total / ML / spread) only alert with $10k+ of exchange money behind them
+const SHARP_MAINS = new Set(['total','ml','spread']);
+const sharpMinFor = e => e.tgt==='bet105' && SHARP_MAINS.has(e.mk) ? Math.max(10000, sharpMin) : sharpMin;
+const sharpQual = e => e.kind==='10c' ? !e.gone : e.L.total>=sharpMinFor(e);
 // Bet link that works on a phone and in Discord: FanDuel gets its https addToBetslip link (opens
 // the FD app with the bet in the slip when it's installed, the site otherwise), built from the row's
 // own marketId/selectionId; other books use their https deep link, else the book's home page.
 const sharpLink = o => { const k=canonBook(o?.sportsbook); if(k==='fanduel'){ const u=fdParlayLink([o]); if(u) return u; }
   const d=o?.deep_link||{}; const https=[IS_IOS?d.ios:null, IS_ANDROID?d.android:null, d.desktop, d.ios, d.android].find(u=>u && /^https:\/\//i.test(String(u)));
   return https || deepLinkFor(o) || BOOK_HOME[k] || ''; };
-const sharpSideLabel = side => side==='yes'?'Yes':side==='no'?'No':side==='over'?'Over':'Under';
+const sharpSideLabel = side => side==='yes'?'Yes':side==='no'?'No':side==='over'?'Over':side==='team'?'':'Under';
 const SHARP_TICK_MS = 2000, SHARP_HIST_MS = 3*3600e3, SHARP_PING_STEP = 1000, SHARP_FX_TTL = 20*60e3;
 const SHARP_OFF = new Set(['wnba']); // sports paused for now
 const SHARP_SPORTS = () => Object.keys(SHARP_MARKETS).filter(k=>SPORTS[k] && !SHARP_OFF.has(k));
@@ -564,9 +569,10 @@ function sharpScan(sk, rows){
       if(K.sample.length<2) K.sample.push(`${o.market} | ${o.selection} | ${o.selection_line} | ${o.points} | ${o.price} | ob ${JSON.stringify((o.order_book||[]).slice(0,2))}`); }
     const mk=marketKeyFor(sk,o.market); if(!mk || !allowed.has(mk)) return;
     if(isK) K.mk++;
-    const s=sharpSideOf(o, mk); if(!s) return; o._sd=s;
+    const team = mk==='ml'||mk==='spread';
+    const s = team ? 't:'+normName(cleanSel(o.selection||o.name||'').replace(/\s+[+-]?\d+(\.\d+)?$/,'')) : sharpSideOf(o, mk); if(!s || s==='t:') return; o._sd=s;
     if(isK) K.side++;
-    const who = mk==='total' ? 'game' : normName(sharpPlayerOf(o)); if(!who) return;
+    const who = mk==='total'||team ? 'game' : normName(sharpPlayerOf(o)); if(!who) return;
     const g=`${o._fx}|${mk}|${who}`;
     (groups[g]=groups[g]||[]).push(o);
   });
@@ -578,14 +584,18 @@ function sharpScan(sk, rows){
     if(!own.some(o=>EXCH.has(canonBook(o.sportsbook)))) return;
     d.withExch++;
     const [fx, mk, key] = g.split('|');
-    const sides = SHARP_YESNO.has(mk) ? (mk==='atd' ? ['yes'] : ['yes','no']) : mk==='total' ? ['under','over'] : ['under'];
+    const team = mk==='ml'||mk==='spread';
+    const sides = team ? [...new Set(own.map(o=>o._sd))] : SHARP_YESNO.has(mk) ? (mk==='atd' ? ['yes'] : ['yes','no']) : mk==='total' ? ['under','over'] : ['under'];
     const lines = [...new Set(own.map(sharpLine))];
     sides.forEach(side=>lines.forEach(line=>{
       const at = o => sharpLine(o)===line;
-      const opp = own.filter(o=>o._sd===SHARP_OPP[side] && at(o) && EXCH.has(canonBook(o.sportsbook)));
+      // team markets: the other team (spread at the opposite number); everything else: the other side
+      const opp = team ? own.filter(o=>o._sd!==side && (mk==='ml' || sharpLine(o)===-line) && EXCH.has(canonBook(o.sportsbook)))
+        : own.filter(o=>o._sd===SHARP_OPP[side] && at(o) && EXCH.has(canonBook(o.sportsbook)));
       // each target book is its own play (FanDuel and bet105 alert separately)
       SOFT_BOOKS.forEach(tb=>{
       if((mk==='atd'||mk==='sv') && tb!=='fanduel') return;   // anytime TD Yes / goalie saves Under: FanDuel only
+      if(team && tb!=='bet105') return;                        // ML / spread: bet105 only
       const soft = own.filter(o=>o._sd===side && at(o) && canonBook(o.sportsbook)===tb).sort((a,b)=>toDec(b.price)-toDec(a.price));
       if(!soft.length || !sharpPriceOk(mk, soft[0].price)) return;
       let L = arbLadder(opp, soft[0].price), via=null;
@@ -600,7 +610,12 @@ function sharpScan(sk, rows){
       if(!L.total) return;
       if(via) soft.forEach(o=>{ o._arb$=L.total; o._edge=L.bestHold!=null?-L.bestHold:null; });
       else soft.forEach(o=>{ const a=arbLadder(opp, o.price); o._arb$=a.total; o._edge=a.bestHold!=null?-a.bestHold:null; });
-      out.push({ via, k:`${sk}|${g}|${side}|${line}${tb==='fanduel'?'':'|'+tb}`, tgt:tb, sk, fx, mk, key, pid:own.find(o=>o.player_id)?.player_id||null, player:sharpPlayerOf(soft[0]), side, line, ref:soft[0], soft, L, own });
+      // main lines: Pinnacle's price on the same side + its limit, for context
+      const pinRow = SHARP_MAINS.has(mk) ? own.filter(o=>o._sd===side && at(o) && canonBook(o.sportsbook)==='pinnacle').sort((a,b)=>toDec(b.price)-toDec(a.price))[0] : null;
+      const pin = pinRow ? { price:Number(pinRow.price), limit: pinRow.limits?.max!=null ? Number(pinRow.limits.max) : null } : null;
+      const teamName = team ? cleanSel(soft[0].selection||soft[0].name||'').replace(/\s+[+-]?\d+(\.\d+)?$/,'') : null;
+      out.push({ via, pin, k:`${sk}|${g}|${side}|${line}${tb==='fanduel'?'':'|'+tb}`, tgt:tb, sk, fx, mk, key, pid:own.find(o=>o.player_id)?.player_id||null,
+        player: team ? `${teamName} ${mk==='ml'?'ML':(line>0?'+':'')+line}` : sharpPlayerOf(soft[0]), side: team?'team':side, line: team?null:line, ref:soft[0], soft, L, own });
       });
     }));
   });
@@ -747,7 +762,7 @@ async function sharpDcPump(){
       const e=sharpDcQ.shift(), name=`${titleCase(e.player)} ${sharpSideLabel(e.side)}${e.line!=null?' '+e.line:''}`;
       let ok=false, why='';
       const tag = e.tgt==='bet105' ? 'b105 · ' : '';
-      try{ e.info = e.mk==='total' ? null : await smInfo(e); const pl=sharpDiscordPayload(e), rt=roleTag(roleFor(e));
+      try{ e.info = SHARP_MAINS.has(e.mk) ? null : await smInfo(e); const pl=sharpDiscordPayload(e), rt=roleTag(roleFor(e));
         // the bet first, then the role tag: "Giannis Antetokounmpo Under 4.5 Rebounds -108 @SM"
         const head=String(pl.embeds?.[0]?.title||'').replace(/^(\S+) (.*)$/,'$2 $1');
         ok=await discordPost({ ...pl, ...rt, content:[head, rt.content].filter(Boolean).join(' ') }, m=>{ why=m; }, hookFor(e)); }catch(err){ why=err.message; }
@@ -783,8 +798,8 @@ const teamNick = n => { n=String(n||'').trim(); if(!n) return ''; const m=n.matc
 function sharpDiscordPayload(e, example){
   const o=e.soft[0], bk=canonBook(o.sportsbook), url=sharpLink(o), f=e.f, sk=e.sk;
   const edge=o._edge??0, isArb=edge>1e-7, isDirect=!isArb&&edge>=-1e-7, book=bookLabel(o.sportsbook);
-  const mktName= e.mk==='pra' ? 'PRA' : ((e.own.find(x=>x._sd===e.side)||e.own[0])?.market || marketLabel(sk,e.mk));
-  const bet=`${titleCase(e.player)} ${sharpSideLabel(e.side)}${e.line!=null?' '+e.line:''}`;
+  const mktName= e.mk==='pra' ? 'PRA' : (e.mk==='ml'||e.mk==='spread') ? '' : ((e.own.find(x=>x._sd===e.side)||e.own[0])?.market || marketLabel(sk,e.mk));
+  const bet=`${titleCase(e.player)} ${sharpSideLabel(e.side)}${e.line!=null?' '+e.line:''}`.replace(/\s+/g,' ').trim();
   // under the name: his position and team (e.g. "RB - CHI") when known, else the market
   // full team name ("Miami Heat"): from the game when his team id or abbreviation matches a side
   const posTeam=(()=>{ const i=e.info; if(!i) return ''; const T=String(i.team||'').toUpperCase();
@@ -823,11 +838,12 @@ function sharpDiscordPayload(e, example){
     const tm=d.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',timeZone:TZ}).replace(':00','').replace(' ','');
     return `${day} **${tm} ${TZL}**\nstarts <t:${Math.floor(tipAt(sk, f.start)/1000)}:R>`; })():'';
   return { username:book, avatar_url:httpsLogo(bk), content: example ? '🧪 **Example alert** — this is what sharp money pings will look like (not a real bet).' : undefined, embeds:[{
-    title:`${example?'[EXAMPLE] ':''}${fmtAm(o.price)} ${bet} ${mktName}`.slice(0,256),
+    title:`${example?'[EXAMPLE] ':''}${fmtAm(o.price)} ${bet}${mktName?' '+mktName:''}`.slice(0,256),
     url:url||undefined, color:isArb?0x22c55e:isDirect?0xeab308:0xf97316,
     thumbnail: httpsLogo(bk) ? { url:httpsLogo(bk) } : undefined,
-    description:`${f?`${teamNick(f.away.name)||f.away.ab} @ ${teamNick(f.home.name)||f.home.ab} ${when}\n`:''}**${e.mk==='total' ? `${SPORTS[sk]?.label||sk} GAME TOTAL`.toUpperCase() : (posTeam||mktName)}**`,
+    description:`${f?`${teamNick(f.away.name)||f.away.ab} @ ${teamNick(f.home.name)||f.home.ab} ${when}\n`:''}**${SHARP_MAINS.has(e.mk) ? `${SPORTS[sk]?.label||sk} ${e.mk==='total'?'GAME TOTAL':e.mk==='ml'?'MONEYLINE':'SPREAD'}`.toUpperCase() : (posTeam||mktName)}**`,
     fields:[
+      ...(e.pin ? [{ name:'Pinnacle', value:`**${fmtAm(e.pin.price)}**${e.pin.limit!=null?` · limit **${usd(e.pin.limit)}**`:''}` }] : []),
       ...(e.via ? [{ name:`${bookShort(bk)} vs ${best?bookLabel(best[0]):'exchange'} - via ${bookShort(e.via.book)} ${fmtAm(e.via.price)} (${e.via.cents??0}c)`, value:`**${fmtAm(o.price)}** VS. **${best?fmtAm(-best[1].opp):'—'}**` }]
         : [{ name:`${bookShort(bk)} vs ${best?bookLabel(best[0]):'exchange'}`, value: best ? `**${fmtAm(o.price)}** VS. **${fmtAm(-best[1].opp)}**` : `**${fmtAm(o.price)}**` }]),
       { name:`Exchange Depth (${usd(e.L.total)} at ${anyArb?'arb':'0% hold'})`, value: '```\n'+[`${'Book'.padEnd(6)} ${'Odds'.padStart(5)} ${'Liq'.padStart(6)} ${(anyArb?'Arb':'Hold').padStart(5)}`, ...depthLv.map(l=>`${[...l.books].map(k=>bookShort(k)).join('/').slice(0,6).padEnd(6)} ${fmtAm(l.opp).padStart(5)} ${usd(l.size).padStart(6)} ${(anyArb ? (-l.hold>=0?'+':'')+(-l.hold).toFixed(1)+'%' : Math.max(0,l.hold).toFixed(1)+'%').padStart(5)}`)].join('\n')+'\n```'+`Sent <t:${Math.floor(Date.now()/1000)}:R>` },
@@ -894,7 +910,7 @@ async function sharpScanSport(sk){
   // 1) FanDuel + the exchanges first, and its alerts go out right away
   // bet105 and the via-books each asked on their own: one book name OpticOdds doesn't take for a sport
   // fails the whole request, and bundled with them that silently took bet105 down too
-  if(fx.length) await pull([['FanDuel'],['Novig','Prophet X','Kalshi'],['bet105'],['Props Builder'],['DraftKings'],['Onyx Odds']]);
+  if(fx.length) await pull([['FanDuel'],['Novig','Prophet X','Kalshi'],['bet105'],['Props Builder'],['DraftKings'],['Onyx Odds'],['Pinnacle']]);
   if(fx.length && !rows.length){ sharpDiag[sk]={at:Date.now(), games:fx.length, rows:0, byBook:{}, props:0, withExch:0, sides:0}; return; } // failed pull: keep the last good read instead of zeroing everything
   { const found=sharpScan(sk, rows).filter(x=>x.tgt==='fanduel'); sharpDiag[sk].games=fx.length;
     sharpRecord(sk, found, Date.now(), fx, 'fanduel'); sharpCheckPings(sk); if(viewMode==='sharp') renderSharp(); }
@@ -962,7 +978,7 @@ function renderSharp(){
     const ok=await discordPost({ username:'bet105', content:'✅ bet105 sharp money alerts connected.' }, null, b105Hook); toast(ok?'bet105 Discord connected':'Discord test failed — check the URL');
     if(ok){ await new Promise(r=>setTimeout(r,600)); const exE=sharpExampleEntry(); exE.tgt='bet105'; exE.soft=[{ ...exE.soft[0], sportsbook:'bet105' }]; const ex=sharpDiscordPayload(exE, true); const tag=roleTag(b105Role); discordPost({ ...ex, ...tag, content:[tag.content, ex.content].filter(Boolean).join(' ') }, null, b105Hook); }
     // plays already on the board for bet105 go out now
-    Object.values(sharpTape).filter(e=>e.tgt==='bet105' && e.L.total>=sharpMin && !sharpLive(e) && !sharpPinged[e.k]).forEach(e=>{ sharpPinged[e.k]={ $:e.L.total, at:Date.now() }; sharpDiscord(e); sharpAutoTrack(e); });
+    Object.values(sharpTape).filter(e=>e.tgt==='bet105' && sharpQual(e) && !sharpLive(e) && !sharpPinged[e.k]).forEach(e=>{ sharpPinged[e.k]={ $:e.L.total, at:Date.now() }; sharpDiscord(e); sharpAutoTrack(e); });
   });
   view.querySelectorAll('.shcard').forEach(el=>el.addEventListener('click',ev=>{
     if(ev.target.closest('a')) return;
@@ -1030,7 +1046,7 @@ const SPORTS = {
   wnba: { label:'WNBA', sport:'basketball', league:'wnba', days:2, markets:NBA_MKTS },
   nhl:  { label:'NHL',  sport:'hockey',     league:'nhl',  days:2, markets:NHL_MKTS },
 };
-const marketKeyFor = (sk, name) => { const m=String(name||'').toLowerCase(); if(PERIOD.test(m)) return null; const hit=SPORTS[sk]?.markets.find(([,,t])=>t(m)); return hit?hit[0]:null; };
+const marketKeyFor = (sk, name) => { const m=String(name||'').toLowerCase(); if(PERIOD.test(m) && !/^(point spread|spread)$/.test(m.trim())) return null; const hit=SPORTS[sk]?.markets.find(([,,t])=>t(m)); return hit?hit[0]:null; };
 const marketLabel = (sk, key) => (SPORTS[sk]?.markets.find(m=>m[0]===key)||[])[1] || key;
 
 // Page state the scanner code reads. This page has no "current sport" -- it always scans them all.
