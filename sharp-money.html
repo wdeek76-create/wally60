@@ -1799,12 +1799,14 @@ async function nlScan(){
     })));
     await runPool(jobs,3);
     nlPlays=nlFind(rows); nlLast=Date.now(); nlErr='';
-    nlAlert();
+    nlAlert(); nlWatchFd();
   }catch(e){ nlErr=e.message; }
   finally{ nlBusy=false; nlSave(); if(viewMode==='nbalive') renderNbaLive(); }
 }
 let nlKal = null;   // what Kalshi sent on the last scan (shown on the tab)
+const nlFdNow = new Map(), nlFdFx = new Set();   // FD's price on every bet this scan + games FD answered for
 function nlFind(rows){
+  nlFdNow.clear(); nlFdFx.clear(); rows.forEach(o=>{ if(canonBook(o.sportsbook)==='fanduel') nlFdFx.add(o._fx); });
   const G={}, K=nlKal={ rows:0, mk:0, side:0, fd:0, books:{}, sample:[] };
   rows.forEach(o=>{ const b=bookShort(canonBook(o.sportsbook)); K.books[b]=(K.books[b]||0)+1; });
   rows.forEach(o=>{
@@ -1827,7 +1829,7 @@ function nlFind(rows){
   Object.values(G).forEach(g=>(g.mk==='atd'?['yes']:['over','under']).forEach(side=>{
     const opp=NL_OPP[side];
     const fd=g.rows.filter(o=>o._sd===side && canonBook(o.sportsbook)==='fanduel').sort((a,b)=>toDec(b.price)-toDec(a.price))[0];
-    if(!fd) return; const fp=Number(fd.price); if(fp<-400 || fp>400) return;
+    if(!fd) return; const fp=Number(fd.price); nlFdNow.set(`${g.fx}|${g.mk}|${g.who}|${g.line}|${side}`, fp); if(fp<-400 || fp>400) return;
     const hv=p=>(toImplied(fp)+toImplied(Number(p))-1)*100, sigs=[];
     // sharp money, same as pregame: every exchange's order on the other side at 0.0% or better vs FD
     let ex=null;
@@ -1848,6 +1850,22 @@ function nlFind(rows){
   const seen=new Set();
   return out.sort((a,b)=>a.best-b.best).filter(p=>{ const k=`${p.fid}|${p.mk}|${p.who}|${p.line}`; if(seen.has(k)) return false; seen.add(k); return true; });
 }
+// After an alert, keep watching FD's price on that bet until FD pulls it (gone two scans in a row while
+// FD still has the game up): did FD move toward the exchanges/books (our side got shorter) or away?
+function nlWatchFd(){
+  let ch=false; const now=Date.now();
+  nlTracked.forEach(t=>{ if(t.final || t.fdPulled || !nlFdFx.has(t.fixtureId)) return;
+    const p=nlFdNow.get(t.key);
+    if(p!=null){ if(t.fdLast!==p || t.fdMiss){ t.fdLast=p; t.fdMiss=0; ch=true; } t.fdSeen=now; return; }
+    t.fdMiss=(t.fdMiss||0)+1; ch=true;
+    if(t.fdMiss>=2){ t.fdPulled=now; if(t.fdLast==null) t.fdLast=t.price; } });
+  if(ch) nlSave();
+}
+// cents FD moved from the alert price to its last price: + = toward consensus (our side shortened)
+const nlFdMoveC = t => t.fdLast==null ? null : centsOf(Number(t.fdLast))-centsOf(Number(t.price));
+const nlFdMove = t => { if(!t.fdPulled) return t.final&&t.fdSeen ? 'FD never pulled it' : null; const c=nlFdMoveC(t); return c>0?'FD moved toward':c<0?'FD moved away':'FD no move'; };
+const nlFdMoveTxt = t => { const c=nlFdMoveC(t); if(c==null) return ''; const tag=c>0?`toward ${c}c`:c<0?`away ${-c}c`:'no move';
+  return t.fdPulled ? `FD pulled at ${fmtAm(t.fdLast)} (${tag})` : (c?`FD now ${fmtAm(t.fdLast)} (${tag})`:''); };
 const rawBookSM=o=>String(o?.sportsbook||'').toLowerCase();
 function nlAlert(){
   nlPlays.forEach(p=>{
@@ -1919,6 +1937,8 @@ function nlUniq(list){
     if(!u.final && t.final){ u.final=t.final; u.result=t.result; u.actual=t.actual; } });
   return [...m.values()];
 }
+const nlAgree = t => { const n=(t.kinds||[t.kind]).length; return n>=3?'3+ signals agree':n===2?'2 signals agree':'1 signal'; };
+const nlCombo = t => (t.kinds||[t.kind]).length>1 ? [...t.kinds].sort().join(' + ') : null;   // only bets 2+ signals hit
 const nlMoney = t => t.size==null ? null : t.size<250?'Exch under $250':t.size<500?'Exch $250–500':t.size<1000?'Exch $500–1k':'Exch $1k+';
 function nlRecapText(day){
   const today=nlTracked.filter(t=>etDayOf(t.trackedAt)===day), done=today.filter(t=>t.final), all=nlTracked;
@@ -1938,6 +1958,9 @@ function nlRecapText(day){
     ...recapFields('All-time by market + side', recSplit(U,t=>`${sportOf(t)} ${t.marketLabel} ${nlSide(t.side)}`)),
     ...recapFields('All-time arb vs direct', recSplit(U,t=>t.direct?'Direct (0%)':-t.hold<1?'0–1% arb':-t.hold<2?'1–2% arb':'2%+ arb')),
     ...recapFields('All-time by exchange money', recSplit(U,nlMoney)),
+    ...recapFields('All-time by signals agreeing', recSplit(U,nlAgree)),
+    ...recapFields('All-time by combo (2+ agree)', recSplit(U,nlCombo)),
+    ...recapFields('All-time FD before pulling it', recSplit(U,nlFdMove)),
     // every bet that day, once, with every source that flagged it
     ...recapFields(`${dayName} · plays`, uDone.map(playLine)) ];
   return { today, done:uDone, fields };
@@ -2041,6 +2064,7 @@ function renderNbaLive(){
   const sub=t=>`<div class="dim" style="font-size:9.5px;font-weight:800;letter-spacing:.5px;text-transform:uppercase;margin:8px 0 2px">${t}</div>`;
   const kinds=['Kalshi','Novig','PX',...NL_PAIRS.map(([a,b])=>`${NL_LBL[a]}+${NL_LBL[b]}`)];
   const NU=nlUniq(nlTracked);   // each bet once (several signals can flag the same bet)
+  const grp=(title,fn)=>{ const m={}; NU.forEach(t=>{ const k=fn(t); if(k!=null) (m[k]=m[k]||[]).push(t); }); const e=Object.entries(m); return e.length?sub(title)+e.sort((x,y)=>y[1].length-x[1].length).map(([k,l])=>row(k,l)).join(''):''; };
   const rec=nlTracked.length?`<div class="ttsum" style="margin-top:14px"><div class="ttsumh"><span>NBA Live record</span></div>${row(`All bets (each once)`,NU)}${kinds.map(k=>row(k,nlTracked.filter(t=>t.kind===k))).join('')}
     ${sub('By sport')}${['nba','nfl'].map(k=>row(SPORTS[k]?.label||k,NU.filter(t=>(t.sk||'nba')===k))).join('')}
     ${sub('Arb vs direct')}${row('Arb (above 0%)',NU.filter(t=>!t.direct))}${row('Direct (0%)',NU.filter(t=>t.direct))}
@@ -2049,10 +2073,11 @@ function renderNbaLive(){
     ${nlTracked.some(t=>['Kalshi','Novig','PX','Exchanges'].includes(t.kind))?`${sub('Exchange money')}${[['Under $250',t=>t.size<250],['$250–500',t=>t.size>=250&&t.size<500],['$500–1k',t=>t.size>=500&&t.size<1000],['$1k+',t=>t.size>=1000]].map(([l,fn])=>row(l,nlTracked.filter(t=>['Kalshi','Novig','PX','Exchanges'].includes(t.kind)&&t.size!=null&&fn(t)))).join('')}`:''}
     ${sub('By arb %')}${[['Direct (0%)',t=>t.direct],['0–1% arb',t=>!t.direct&&-t.hold<1],['1–2% arb',t=>-t.hold>=1&&-t.hold<2],['2%+ arb',t=>-t.hold>=2]].map(([l,fn])=>row(l,NU.filter(fn))).join('')}
     ${sub('By prop')}${[...new Set(NU.map(t=>t.marketLabel))].map(m=>row(m,NU.filter(t=>t.marketLabel===m))).join('')}
-    ${sub('By prop + side')}${[...new Set(NU.map(t=>t.marketLabel+'|'+t.side))].map(k=>{ const [m,sd]=k.split('|'); return row(`${m} ${nlSide(sd)}`,NU.filter(t=>t.marketLabel===m&&t.side===sd)); }).join('')}</div>`:'';
+    ${sub('By prop + side')}${[...new Set(NU.map(t=>t.marketLabel+'|'+t.side))].map(k=>{ const [m,sd]=k.split('|'); return row(`${m} ${nlSide(sd)}`,NU.filter(t=>t.marketLabel===m&&t.side===sd)); }).join('')}
+    ${grp('Signals agreeing',nlAgree)}${grp('Combos (2+ agree)',nlCombo)}${grp('FD before pulling it',nlFdMove)}</div>`:'';
   const tcard=t=>`<div class="tkc"><div class="tkt"><span class="tkpl">${esc(titleCase(t.playerName))}</span>${t.result?`<span class="tkres ${t.result}">${t.result.toUpperCase()}</span>`:t.live?'<span class="tkres live">LIVE</span>':''}</div>
     <div class="tkb">${nlSide(t.side)}${t.line!=null?' '+t.line:''} ${esc(t.marketLabel)} - <b>FD ${fmtAm(t.price)}</b> - ${esc(t.kind)} ${t.direct?'0% hold':(-t.hold).toFixed(1)+'% arb'}${t.size?' - '+usd(t.size):''}</div>
-    <div class="tkm">${esc(t.away)} @ ${esc(t.home)}${t.score?' - '+esc(t.score):''}${t.actual!=null?` - <b>${t.actual}</b>${t.line!=null?' / '+t.line:''}`:''}</div>
+    <div class="tkm">${esc(t.away)} @ ${esc(t.home)}${t.score?' - '+esc(t.score):''}${t.actual!=null?` - <b>${t.actual}</b>${t.line!=null?' / '+t.line:''}`:''}${nlFdMoveTxt(t)?' - '+esc(nlFdMoveTxt(t)):''}</div>
     <div class="tka">${t.final?`<button data-nlg="${t.id}|">Reopen</button>`:`<button data-nlg="${t.id}|win">W</button><button data-nlg="${t.id}|loss">L</button>`}<button data-nlrm="${t.id}">Remove</button></div></div>`;
   const open=nlTracked.filter(t=>!t.final), done=nlTracked.filter(t=>t.final);
   v.innerHTML=head+cards+rec+backupHtml()+(open.length?`${sub('Open')}${open.map(tcard).join('')}`:'')+(done.length?`<button class="tkhisttoggle" id="nlHistB">History (${done.length}) ${nlHist?'▴ hide':'▾ show'}</button>${nlHist?done.map(tcard).join(''):''}`:'');
