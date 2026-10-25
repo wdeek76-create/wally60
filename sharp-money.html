@@ -441,6 +441,10 @@ const smHoldOrder = k => { const m=String(k).match(/^([\d.]+)(?:–[\d.]+)?%\+? 
 const smHoldBucket = t => { const h=smFdHold(t); if(h==null) return 'Unknown';
   if(h>-0.05){ const r=Math.max(0, Math.round(h*2)/2); return `${r?r.toFixed(1):'0'}% hold`; }
   const a=-h; return a<0.5?'0–0.5% arb':a<1?'0.5–1% arb':a<2?'1–2% arb':'2%+ arb'; };
+// which exchange(s) the money came from: "Kalshi", "Novig", "PX", or a combo like "Kalshi+Novig"
+const SM_EXL = { kalshi:'Kalshi', novig:'Novig', 'prophet x':'PX' };
+const smSrc = t => t.exBy ? Object.keys(t.exBy).filter(k=>t.exBy[k]>0).map(k=>SM_EXL[k]||k).sort().join('+')||null : null;
+const smSrcHold = t => { const s=smSrc(t), h=smFdHold(t); if(!s||h==null) return null; return `${s} · ${h<=-0.05?'arb':'hold'}`; };
 function sharpSummaryHtml(){
   const all=tracked.filter(t=>t.src==='sharp' && tkInBook(t)); if(!all.length) return '';
   const g=all.filter(t=>t.result); const openN=all.length-g.length;
@@ -457,7 +461,8 @@ function sharpSummaryHtml(){
     ${sub('By time to tip')}${split(t=>outBucket(t)||'Unknown')}
     ${sub('By exchange money')}${split(liqB)}
     ${sub('By source')}${split(t=>t.via?`Borrowing ${bookShort(t.via.book)}`:'FD direct')}
-    ${sub('By hold / arb')}${splitBy(smHoldBucket, smHoldOrder)}</div>`;
+    ${sub('By hold / arb')}${splitBy(smHoldBucket, smHoldOrder)}
+    ${g.some(smSrc)?`${sub('By exchange')}${split(t=>smSrc(t)||'Unknown (before this was tracked)')}${sub('By exchange · hold vs arb')}${split(t=>smSrcHold(t)||'Unknown (before this was tracked)')}`:''}</div>`;
 }
 
 // ───────────────────────── sharp money ─────────────────────────
@@ -533,8 +538,8 @@ function arbLadder(oppRows, targetPrice){
       const opp=Number(l.price), hold=(tImp+toImplied(opp)-1)*100;
       if(hold < -SHARP_MAX_ARB) return; // a "+20% arb" is bad exchange data, not money
       if(Math.abs(cents(-opp)-tC) <= LIQ_BAND_CENTS) band+=l.size;
-      const lv=levels[opp]||(levels[opp]={opp, size:0, books:new Set(), zero:hold<=sharpMaxHold+1e-7, hold});
-      lv.size+=l.size; lv.books.add(k);
+      const lv=levels[opp]||(levels[opp]={opp, size:0, books:new Set(), by:{}, zero:hold<=sharpMaxHold+1e-7, hold});
+      lv.size+=l.size; lv.books.add(k); lv.by[k]=(lv.by[k]||0)+l.size;
     });
   });
   const all=Object.values(levels).sort((a,b)=>b.opp-a.opp);
@@ -892,6 +897,7 @@ function sharpAutoTrack(e){
     mkey:e.mk, marketLabel:marketLabel(e.sk,e.mk), marketNames:[...new Set(e.own.map(x=>x.market))], side:tSide, line:e.line??null,
     price:Number(o.price), book:bookLabel(o.sportsbook), bookKey:bk, pinned:true, trackedAt:Date.now(), mainLineAtTrack:mainLineOf(e.own, e.side),
     isTeam:false, teamSide:null, favDog:null, stakeUnits:null, isGame:false, sharpLiq:e.L.total, sharpEdge:o._edge, via:e.via||null,
+    exBy:(()=>{ const m={}; (e.L.rows||[]).forEach(l=>Object.entries(l.by||{}).forEach(([k,v])=>{ m[k]=Math.round((m[k]||0)+v); })); return Object.keys(m).length?m:null; })(),
     snapshots:[snap], live:null, actual:null, result:null, open:null, close:null });
   saveTracked();
 }
@@ -2022,6 +2028,8 @@ function smRecapFields(day){
     ...recapFields('All-time by market', recSplit(fd,lab)),
     ...recapFields('All-time by side', recSplit(fd,t=>sideTxt(t))),
     ...recapFields('All-time by time to tip', recSplit(fd,outBucket)),
+    ...recapFields('All-time by exchange', recSplit(fd,smSrc)),
+    ...recapFields('All-time by exchange · hold vs arb', recSplit(fd,smSrcHold)),
     ...recapFields('All-time by hold / arb', recSplit(fd,smHoldBucket).sort((a,b)=>smHoldOrder(a)-smHoldOrder(b))),
     ...recapFields('All-time by arb money', recSplit(fd,t=>{ const v=t.sharpLiq||0; return v>=2500?'$2.5k+':v>=1000?'$1k–2.5k':'Under $1k'; })),
     ...[...new Set(done.map(lab))].flatMap(k=>recapFields(`${dayName} · ${k}`, done.filter(t=>lab(t)===k).map(playLine))) ] };
