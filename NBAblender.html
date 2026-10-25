@@ -5283,9 +5283,35 @@ const BOOK_LOGO_ALIASES = {
 };
 // PropShop prints book codes (FD, PIN, PB, DK, NV, PX\u2026); map them and any capitalisation to the logo names above.
 const BOOK_CODE_NAMES = { FD: "FanDuel", PIN: "Pinnacle", PINN: "Pinnacle", PB: "Prop Builder", DK: "DraftKings", NV: "Novig", NVG: "Novig", PX: "ProphetX", KALSHI: "Kalshi", FLIFF: "Fliff", BOOKMAKER: "Bookmaker", BET105: "Bet105", KAMBI: "Kambi", "PROP BUILDER": "Prop Builder", PROPBUILDER: "Prop Builder", FANDUEL: "FanDuel", PINNACLE: "Pinnacle", DRAFTKINGS: "DraftKings", NOVIG: "Novig", PROPHETX: "ProphetX" };
+// Real logos from OpticOdds (its /sportsbooks list: name + logo URL), fetched once, turned into data URIs so the card picture can draw them, and kept in
+// localStorage. They win over the placeholder badges above; the books that already have a bundled logo keep it.
+const OO_LOGO_KEY = "nba_oo_logos_v1";
+let OO_LOGO_CACHE = {}; try { OO_LOGO_CACHE = JSON.parse(localStorage.getItem(OO_LOGO_KEY) || "{}") || {}; } catch (e) {}
+const OO_LOGO_BOOKS = ["Caesars", "Hard Rock", "theScore", "BetMGM", "bet365", "Fanatics", "Kambi"];   // the books whose bundled logo is a placeholder (or missing)
+async function ooEnsureLogos(force) {
+  const need = OO_LOGO_BOOKS.filter(n => !OO_LOGO_CACHE[n] || force);
+  if (!need.length || (typeof ooEnsureLogos._tried === "number" && Date.now() - ooEnsureLogos._tried < 6 * 3600e3 && !force)) return { loaded: Object.keys(OO_LOGO_CACHE).length, note: "cached" };
+  ooEnsureLogos._tried = Date.now();
+  let note = "";
+  try {
+    const r = await ooCall("/sportsbooks", {});
+    const list = Array.isArray(r) ? r : (r && (r.data || r.sportsbooks)) || [];
+    const toData = url => fetch(url, { mode: "cors" }).then(x => { if (!x.ok) throw new Error("logo " + x.status); return x.blob(); }).then(b => new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.onerror = rej; fr.readAsDataURL(b); }));
+    let got = 0, blocked = 0;
+    for (const it of list) {
+      const nm = String(it.name || it.sportsbook || it.id || "").toLowerCase().trim(), label = OO_BOOK_TO_LABEL[nm], url = it.logo || it.logo_url || it.image || it.icon;
+      if (!label || !url || !OO_LOGO_BOOKS.includes(label) || (OO_LOGO_CACHE[label] && !force)) continue;
+      try { OO_LOGO_CACHE[label] = await toData(url); got++; } catch (e) { blocked++; console.warn("[OO logos] could not load", label, url, e && e.message); }
+    }
+    try { localStorage.setItem(OO_LOGO_KEY, JSON.stringify(OO_LOGO_CACHE)); } catch (e) {}
+    note = `${got} loaded${blocked ? `, ${blocked} blocked by the browser (CORS)` : ""}${!list.length ? " \u2014 OpticOdds returned no book list" : ""}`;
+  } catch (e) { note = "OpticOdds logo list failed: " + (e && e.message || e); console.warn("[OO logos]", e); }
+  return { loaded: Object.keys(OO_LOGO_CACHE).length, note };
+}
 function logoFor(book) {
   if (book == null) return null;
   const aliased = BOOK_LOGO_ALIASES[book] || book;
+  if (OO_LOGO_CACHE[aliased]) return OO_LOGO_CACHE[aliased];
   if (BOOK_LOGOS[aliased]) return BOOK_LOGOS[aliased];
   const named = BOOK_CODE_NAMES[String(book).trim().toUpperCase()];
   return (named && BOOK_LOGOS[named]) || null;
@@ -26870,6 +26896,7 @@ async function _mSlateGames(dateIso, fallback) {
   return fallback;
 }
 async function _morningCardHtml(picks, mode) {
+  try { const lg = await ooEnsureLogos(); if (lg && lg.note && lg.note !== "cached") showToast("Book logos: " + lg.note); } catch (e) {}
   const nick = mode === "nick";
   const esc = _mEsc;
   const teams = [...new Set(picks.map(b => b.team).concat(picks.flatMap(b => String(b.game || "").split("@").map(x => x.trim()))).filter(t => t && /^[A-Z]{2,3}$/.test(t)))];
