@@ -408,6 +408,7 @@ main{flex:1;padding:12px calc(var(--sar) + 12px) max(160px, calc(var(--ftrh,76px
 .gsetbk{flex:1;padding:10px;border-radius:10px;border:1px solid rgba(34,197,94,.45);background:rgba(34,197,94,.1);color:var(--purple);font-size:12px;font-weight:800}
 .gmtm.me{color:var(--green)}
 .tmgame{margin:4px 0 10px}
+.gmop{display:block;font-size:9.5px;opacity:.6;margin-top:1px;font-weight:600}
 .gmboard{display:grid;grid-template-columns:auto 1fr 1fr .8fr 1fr;gap:5px 6px;margin-top:8px;align-items:center;font-size:12px}
 .gmh{font-size:10px;color:var(--dim);text-align:center;font-weight:700;letter-spacing:.3px}
 .gmtm{display:flex;align-items:center;gap:5px;font-weight:800;font-size:12.5px}
@@ -2777,8 +2778,10 @@ async function openPlayer(p, startAt, keepScroll){
     h+=`<div class="empty">No main lines found for ${esc(titleCase(p.name))} across your shops.</div>`;
   }
   view.innerHTML=h; if(!keepScroll) window.scrollTo({top:0});
+  const bindGameBoard=()=>view.querySelectorAll('.tmgame .gmcell[data-fk]').forEach(el=>el.addEventListener('click',()=>{ const q=players.find(x=>x.key===el.dataset.fk); if(q) openPlayer(q, startIdxFor(q, el.dataset.fmk)); }));
+  if((p.isTeam||p.isGame) && f && !gameOpen[f.id]) ensureGameOpen(f).then(()=>{ const box=view.querySelector('.tmgame'); if(current===p && box){ box.innerHTML=gameOddsLine(f, p.key); bindGameBoard(); } });
   view.querySelectorAll('.mchip[data-jump]').forEach(el=>el.addEventListener('click',()=>{ const q=players.find(x=>x.key===el.dataset.jump); if(q) openPlayer(q); }));
-  view.querySelectorAll('.tmgame .gmcell[data-fk]').forEach(el=>el.addEventListener('click',()=>{ const q=players.find(x=>x.key===el.dataset.fk); if(q) openPlayer(q, startIdxFor(q, el.dataset.fmk)); }));
+  bindGameBoard();
   $('#back')?.addEventListener('click',()=>{ $('#q').value=''; renderSlate(); });
   $('#shot')?.addEventListener('click',shareBoard);
   p._teamAb=teamAb; // for Copy summary
@@ -5159,13 +5162,31 @@ function bestML(rows){ const b=bestFirst(rows)[0]; return b?fmtAm(b.price):'—'
 // regex, so this always agrees with what you'd see if you opened that team/total yourself.
 // Every game card, before it's opened: spread / total / moneyline for both teams, like a sportsbook
 // board -- the consensus line, best price across books (tap a cell to open that market).
+// Opening numbers for a game's main lines (spread / total / ML / team total): FanDuel's open, else
+// Pinnacle's. One history pull per game, only when a team / game page opens.
+const gameOpen = {};   // fixtureId -> history rows (null while loading)
+const gameOpenPull = {};
+function ensureGameOpen(f){ return gameOpenPull[f.id] || (gameOpenPull[f.id]=ensureGameOpen0(f)); }
+async function ensureGameOpen0(f){
+  const names=[...new Set(mainRows.filter(o=>o._fx===f.id && ['spread','ml','total','tt'].includes(marketKeyFor(sportKey,o.market))).map(o=>o.market))];
+  const rows=[]; if(names.length){ try{ const r=await oo('/fixtures/odds/historical',{fixture_id:f.id,sportsbook:['FanDuel','Pinnacle'],market:names,is_main:true}); (r?.data?.[0]?.odds||[]).forEach(o=>rows.push(o)); }catch(e){} }
+  gameOpen[f.id]=rows; return rows;
+}
+function gameOpenOf(f, mk, test){
+  const rows=(gameOpen[f.id]||[]).filter(o=>o.olv?.price!=null && marketKeyFor(sportKey,o.market)===mk && test(o));
+  return rows.find(o=>canonBook(o.sportsbook)==='fanduel') || rows.find(o=>canonBook(o.sportsbook)==='pinnacle') || null;
+}
 function gameOddsLine(f, hl){   // hl: a team key to highlight (on that team's own page)
   const team = side => players.find(p=>p.isTeam && p.teamSide===side && p.fixtureId===f.id);
   const away=team('away'), home=team('home');
   const game = players.find(p=>p.isGame && p.fixtureId===f.id && p.marketKeys.has('total'));
   const ok = r => Math.abs(Number(r.price))<10000;
   const common = rows => { const c={}; rows.forEach(o=>{ if(o.points!=null) c[o.points]=(c[o.points]||0)+1; }); const k=Object.keys(c).sort((a,b)=>c[b]-c[a])[0]; return k==null?null:Number(k); };
-  const cell = (p, mk, txt) => p && txt ? `<span class="gmcell" data-fk="${esc(p.key)}" data-fmk="${mk}">${txt}</span>` : '<span class="gmcell dim">—</span>';
+  const cell = (p, mk, txt, op) => p && txt ? `<span class="gmcell" data-fk="${esc(p.key)}" data-fmk="${mk}">${txt}${op?`<small class="gmop">op ${op}</small>`:''}</span>` : '<span class="gmcell dim">—</span>';
+  // opening number for a cell (only once the page has pulled this game's history)
+  const nick=n=>normName(n).split(' ').pop(), isTeamRow=p=>o=>{ const w=normName(cleanSel(o.selection||o.name)); return w===p.key || nick(w)===nick(p.key); };
+  const opOf = (p, mk, side) => { if(!hl || !gameOpen[f.id] || !p) return ''; const o=gameOpenOf(f, mk, mk==='total' ? (x=>sideOf(x)===side) : mk==='tt' ? (x=>isTeamRow(p)(x) && sideOf(x)==='over') : isTeamRow(p));
+    if(!o) return ''; const v=o.olv, pt=v.points??o.points; return mk==='ml' ? fmtAm(v.price) : mk==='spread' ? `${pt>0?'+':''}${pt}` : `${pt}`; };
   const spreadTxt = p => { if(!p?.marketKeys.has('spread')) return ''; const rows=rowsFor(p,'spread',mainRows).filter(ok); const ln=common(rows); if(ln==null) return '';
     const b=bestFirst(rows.filter(o=>Number(o.points)===ln))[0]; return `<b>${ln>0?'+':''}${ln}</b> ${b?fmtAm(b.price):''}`; };
   const mlTxt = p => { if(!p?.marketKeys.has('ml')) return ''; const b=bestFirst(rowsFor(p,'ml',mainRows).filter(ok))[0]; return b?`<b>${fmtAm(b.price)}</b>`:''; };
@@ -5175,7 +5196,7 @@ function gameOddsLine(f, hl){   // hl: a team key to highlight (on that team's o
   const ttTxt = p => { if(!p?.marketKeys.has('tt')) return ''; const line=lineForMarket(p,'tt'); if(line==null) return '';
     const b=bestFirst(rowsFor(p,'tt',mainRows).filter(o=>ok(o) && sideOf(o)==='over' && Number(o.points)===Number(line)))[0]; return `<b>o${line}</b> ${b?fmtAm(b.price):''}`; };
   if(!away && !home && !game) return '';
-  const row = (p, c, totSide) => `<span class="gmtm${hl&&p&&p.key===hl?' me':''}">${c.logo?`<img src="${esc(c.logo)}" alt="">`:''}${esc(c.ab||c.name)}</span>${cell(p,'spread',spreadTxt(p))}${cell(game,'total',totTxt(totSide))}${cell(p,'ml',mlTxt(p))}${cell(p,'tt',ttTxt(p))}`;
+  const row = (p, c, totSide) => `<span class="gmtm${hl&&p&&p.key===hl?' me':''}">${c.logo?`<img src="${esc(c.logo)}" alt="">`:''}${esc(c.ab||c.name)}</span>${cell(p,'spread',spreadTxt(p),opOf(p,'spread'))}${cell(game,'total',totTxt(totSide),opOf(game,'total',totSide))}${cell(p,'ml',mlTxt(p),opOf(p,'ml'))}${cell(p,'tt',ttTxt(p),opOf(p,'tt'))}`;
   return `<div class="gmboard"><span></span><span class="gmh">Spread</span><span class="gmh">Total</span><span class="gmh">ML</span><span class="gmh">Team Tot</span>${row(away,f.away,'over')}${row(home,f.home,'under')}</div>`;
 }
 let gridMode = false;   // grid / "Classic screen" view removed
