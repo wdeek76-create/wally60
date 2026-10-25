@@ -1799,10 +1799,27 @@ async function nlScan(){
     })));
     await runPool(jobs,3);
     nlPlays=nlFind(rows); nlLast=Date.now(); nlErr='';
+    if(nlPlays.length) await nlRefreshState();
     nlAlert(); nlWatchFd();
   }catch(e){ nlErr=e.message; }
   finally{ nlBusy=false; nlSave(); if(viewMode==='nbalive') renderNbaLive(); }
 }
+// live score + quarter/clock per game (for the alert and the tracked bet), refreshed at most every 15s
+const nlState = {}; let nlStateAt = 0;
+async function nlRefreshState(){
+  if(Date.now()-nlStateAt<15e3) return; nlStateAt=Date.now();
+  for(const ids of chunk(nlGames.map(f=>f.id),5)){ try{ const r=await oo('/fixtures/results',{fixture_id:ids});
+    (r?.data||[]).forEach(x=>{ const id=x?.fixture?.id; if(!id) return; const sc=x.scores||{}, ip=x.in_play||{};
+      const period=Number(ip.period||ip.quarter||0)||0, clock=String(ip.clock||ip.time||'').trim();
+      nlState[id]={ ...(nlState[id]||{}), away:Number(sc.away?.total), home:Number(sc.home?.total), period, label:[period?(period>4?'OT':'Q'+period):'', clock].filter(Boolean).join(' ') }; }); }catch(e){}
+    try{ const r=await oo('/fixtures/player-results',{fixture_id:ids}); (r?.data||[]).forEach(x=>{ const id=x?.fixture?.id; if(id) (nlState[id]=nlState[id]||{}).players=x.results||[]; }); }catch(e){} }
+}
+// the player's stat right now from the live box score (null if the feed doesn't have it yet)
+const nlStatNow = (fid, who, mk, sk, market) => { const row=(nlState[fid]?.players||[]).find(x=>normName(cleanSel(x.player?.name||''))===who);
+  if(!row) return null; const v=statFor(row, mk, sk||'nba', [market]); return v==null||isNaN(v) ? null : Number(v); };
+// "Lakers 54 @ Jazz 60 · **Q3 5:21**"
+const nlScoreLine = f => { if(!f) return ''; const st=nlState[f.id]||{}, A=teamNick(f.away.name)||f.away.ab, H=teamNick(f.home.name)||f.home.ab, sc=!isNaN(st.away)&&!isNaN(st.home);
+  return `${A}${sc?' '+st.away:''} @ ${H}${sc?' '+st.home:''} · **${st.label||'LIVE'}**`; };
 let nlKal = null;   // what Kalshi sent on the last scan (shown on the tab)
 const nlFdNow = new Map(), nlFdFx = new Set();   // FD's price on every bet this scan + games FD answered for
 function nlFind(rows){
@@ -1875,7 +1892,7 @@ function nlAlert(){
     ns.forEach(x=>{ if(nlTracked.some(t=>t.key===p.key && t.kind===x.kind)) return;
       nlTracked.unshift({ id:Date.now()+Math.random().toString(36).slice(2,6), key:p.key, kind:x.kind, direct:!(x.hold<-0.05), hold:x.hold, size:x.size||null, vs:x.prices,
         fixtureId:p.fid, away:p.f?.away.ab||'', home:p.f?.home.ab||'', playerKey:p.who, playerName:p.name, mkey:p.mk, sk:p.sk||'nba', marketLabel:marketLabel(p.sk||'nba',p.mk), marketNames:[p.market], exBy:x.by||null,
-        side:p.side==='yes'?'Yes':p.side==='no'?'No':p.side, line:p.line, price:Number(p.fd.price), trackedAt:Date.now(), actual:null, result:null, final:false }); });
+        side:p.side==='yes'?'Yes':p.side==='no'?'No':p.side, line:p.line, price:Number(p.fd.price), trackedAt:Date.now(), period:nlState[p.fid]?.period||null, statAt:nlStatNow(p.fid, p.who, p.mk, p.sk, p.market), atScore:nlState[p.fid]?.label?nlScoreLine(p.f).replace(/\*/g,''):null, actual:null, result:null, final:false }); });
     if(nlHook) nlPost(p, ns);
   });
 }
@@ -1885,7 +1902,7 @@ function nlAlert(){
 function nlPost(p, sigs){
   const lg=(SPORTS[p.sk]?.label||'NBA').toUpperCase(), mk=marketLabel(p.sk||'nba',p.mk), bet=`${titleCase(p.name)} ${nlSide(p.side)}${p.line!=null?' '+p.line:''} ${mk}`;
   const title=`${fmtAm(p.fd.price)} ${bet}`, opp=nlSide(NL_OPP[p.side]);
-  const role=/^\d{15,}$/.test(nlRole)?nlRole:'', f=p.f, fdUrl=sharpLink(p.fd);
+  const role=/^\d{15,}$/.test(nlRole)?nlRole:'', f=p.f, fdUrl=sharpLink(p.fd), cur=nlStatNow(p.fid, p.who, p.mk, p.sk, p.market);
   const fields=sigs.map(x=>{
     if(x.exch){
       const tbl='```\n'+[`${'Book'.padEnd(6)} ${'Odds'.padStart(5)} ${'Liq'.padStart(6)} ${'Hold'.padStart(6)}`, ...x.levels.slice(0,6).map(l=>`${(NL_LBL[l.book]||l.book).padEnd(6)} ${fmtAm(l.price).padStart(5)} ${usd(l.size).padStart(6)} ${(l.hold<-0.05?'+'+(-l.hold).toFixed(1)+'%':'0.0%').padStart(6)}`)].join('\n')+'\n```';
@@ -1902,7 +1919,7 @@ function nlPost(p, sigs){
   fields.push({ name:'Links', value:links.join(' · ')+`\nSent <t:${Math.floor(Date.now()/1000)}:R>` });
   discordPost({ username:'FanDuel', avatar_url:httpsLogo('fanduel'), content:[title, role?`<@&${role}>`:''].filter(Boolean).join(' '), allowed_mentions: role?{roles:[role]}:{parse:[]},
     embeds:[{ title, url:discordUrl(fdUrl)||undefined, color:sigs.some(x=>x.hold<-0.05)?0x22c55e:0xeab308, thumbnail:httpsLogo('fanduel')?{url:httpsLogo('fanduel')}:undefined,
-      description:`${f?`${teamNick(f.away.name)||f.away.ab} @ ${teamNick(f.home.name)||f.home.ab} **LIVE**\n`:''}**${lg} LIVE - ${esc(mk).toUpperCase()}**`, fields, footer:{ text:`${lg} LIVE` } }] }, null, nlHook);
+      description:`${f?nlScoreLine(f)+'\n':''}**${lg} LIVE - ${esc(mk).toUpperCase()}**${cur!=null?`\nCurrently **${cur}** ${esc(mk)}${p.line!=null?` (line ${p.line})`:''}`:''}`, fields, footer:{ text:`${lg} LIVE` } }] }, null, nlHook);
 }
 // Recap: once every play tracked on a day is graded and no game is on, post that day's results and the
 // all-time record (by signal, sport) to the in-game channel -- once per day. The tab has a button too.
