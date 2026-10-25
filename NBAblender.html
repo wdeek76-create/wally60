@@ -24719,14 +24719,30 @@ function _mExtractCells(tokens) {
     rest.push(t);
   }
   let projection = preGameNums.length ? preGameNums[0] : null;
-  let minutes = null;
+  let minutes = null, sim = null;
   if (noProj) {
     // After the game line the board prints either "− −" (nothing) or the source projection and minutes ("3  32.98"),
     // then the Consensus cell starts at the first line+odds pair.
     let k = 0; while (k < rest.length && !(_mIsLine(rest[k]) && _mIsOdds(rest[k + 1]))) k++;
     const pre = rest.slice(0, k).filter(x => /^\d+(\.\d+)?$/.test(x));
     if (pre.length) { projection = parseFloat(pre[0]); if (pre.length > 1) minutes = parseFloat(pre[1]); }
+    const dashesBefore = rest.slice(0, k).filter(x => x === "\u2014").length;
     rest.splice(0, k);
+    // Newer PropShop layout: two "sim fair" slots (over, under; each a line+price or an em dash) sit between the minutes and the Consensus
+    // cell. The Consensus pair is the first adjacent over/under with the same line and mirrored prices (-114 / +114); anything before it is sim fair.
+    const pr = j => (_mIsLine(rest[j]) && _mIsOdds(rest[j + 1])) ? { line: parseFloat(rest[j]), odds: parseInt(rest[j + 1], 10) } : null;
+    let cj = -1;
+    for (let j = 0; j + 3 < rest.length && cj < 0; j++) { const a = pr(j), b = pr(j + 2); if (a && b && a.line === b.line && a.odds * b.odds < 0 && Math.abs(a.odds + b.odds) <= 3) cj = j; }
+    if (cj > 0) {
+      const reg = rest.slice(0, cj), got = [null, null]; let slot = Math.min(dashesBefore, 2), c = 0;
+      while (slot < 2 && c < reg.length) {
+        if (reg[c] === "\u2014") { slot++; c++; }
+        else if (_mIsLine(reg[c]) && _mIsOdds(reg[c + 1])) { got[slot] = { line: parseFloat(reg[c]), odds: parseInt(reg[c + 1], 10) }; slot++; c += 2; }
+        else c++;
+      }
+      if (got[0] || got[1]) sim = { over: got[0], under: got[1] };
+      rest.splice(0, cj);
+    }
   }
   const parseSide = i => {
     if (i >= rest.length) return { line: null, odds: null, consumed: 0 };
@@ -24755,7 +24771,7 @@ function _mExtractCells(tokens) {
     });
     cellIdx++;
   }
-  return { gameStr, gameTime, allCells, projection, minutes, noProj };
+  return { gameStr, gameTime, allCells, projection, minutes, noProj, sim };
 }
 // Market from the header region of the paste (before the first player block).
 function _mStatOfHeader(text) {
@@ -24811,15 +24827,26 @@ function parseMorningPropShop(raw, stat) {
   const results = [], errors = [];
   for (const block of _mSplitBlocks(raw)) {
     try {
-      const { gameStr, gameTime, allCells, projection, minutes, noProj } = _mExtractCells(block.tokens);
+      const { gameStr, gameTime, allCells, projection, minutes, noProj, sim } = _mExtractCells(block.tokens);
       if (!gameStr || allCells.length < 2) continue;
       if (!noProj && (projection === 0 || projection == null)) continue;
       if (noProj && projection === 0) continue;   // projected for nothing — not playing
       const best = allCells[1];   // 0 = Consensus, 1 = Best Line
       if (!best || best.ev === null) continue;
       const o = best.over, u = best.under;
-      let play = null;
-      if (o.odds && u.odds) play = parseInt(o.odds) >= parseInt(u.odds) ? { ou: "over", line: o.line, odds: o.odds } : { ou: "under", line: u.line, odds: u.odds };
+      let play = null, simFair = null;
+      if (sim && best.ev != null) {   // the sim fair is on the side the edge is on; its price is the best cell's price for that side
+        let sd = sim.over && !sim.under ? "over" : sim.under && !sim.over ? "under" : null;
+        const price = side => (o.odds && !u.odds) ? o : side === "over" ? o : u;   // one price shown = the edge side's
+        if (!sd && sim.over && sim.under) {   // both sides have a sim fair: the one whose own edge matches the listed one
+          const evOf = side => { const px = price(side), dB = oddsToDecimal(parseInt(px.odds, 10)), dF = oddsToDecimal(sim[side].odds); return px.odds && dB && dF ? Math.abs((1 / dF) * dB - 1 - best.ev / 100) : 9; };
+          sd = evOf("over") <= evOf("under") ? "over" : "under";
+        }
+        const px = sd ? price(sd) : null;
+        if (px && px.odds && px.line != null) { play = { ou: sd, line: px.line, odds: px.odds }; simFair = sim[sd]; }
+      }
+      if (play) { /* side fixed by the sim fair */ }
+      else if (o.odds && u.odds) play = parseInt(o.odds) >= parseInt(u.odds) ? { ou: "over", line: o.line, odds: o.odds } : { ou: "under", line: u.line, odds: u.odds };
       else if (o.odds) {
         // Best Line shows only the +EV side's price, so work out which side it is from the Consensus over/under:
         // same line → whichever side's price, against Consensus no-vig odds, gives the listed EV; different line → above consensus = under.
@@ -24854,7 +24881,7 @@ function parseMorningPropShop(raw, stat) {
         // The season crosses New Year: an "Oct-28" pasted in January is last year's slate.
         if (mo) { let y = year; if (Number(mo) >= 9 && new Date().getMonth() < 6) y = year - 1; gameDateIso = y + "-" + mo + "-" + String(dm[2]).padStart(2, "0"); }
       }
-      results.push({ player: block.player, game: gameStr, gameTime: gameTime || "", gameDateIso, ou: play.ou, line: Number(play.line), odds: parseInt(play.odds, 10), book: best.book || "", liq: best.liq != null ? best.liq : null, ev: best.ev, proj: projection != null ? projection : null, minutes: minutes != null ? minutes : null });
+      results.push({ player: block.player, game: gameStr, gameTime: gameTime || "", gameDateIso, ou: play.ou, line: Number(play.line), odds: parseInt(play.odds, 10), book: best.book || "", liq: best.liq != null ? best.liq : null, ev: best.ev, proj: projection != null ? projection : null, minutes: minutes != null ? minutes : null, simFair: simFair ? simFair.odds : null });
     } catch (e) { errors.push((block.player || "?") + ": " + e.message); }
   }
   return { results, errors };
@@ -26522,7 +26549,15 @@ async function tabsSoloImport() {
   await _tsSyncRw(say);
   { const warn = morningPasteWarnings(raw, results, stat, "tabs"); if (warn.length && !confirm("Check this paste before it's stored:\n\n\u2022 " + warn.join("\n\u2022 ") + "\n\nImport it anyway?")) { say("Not imported \u2014 " + warn[0] + "."); return; } }
   const now = Date.now(), nowIso = new Date().toISOString(), today = localYMD(new Date());
-  let added = 0, upd = 0, late = 0; const seen = { initial: 0, "30min": 0 };
+  let added = 0, upd = 0, late = 0, replaced = 0; const seen = { initial: 0, "30min": 0 }, pasteKeys = new Set(), scopes = new Set();
+  results.forEach(r => {   // pass 1: which market / day / release this paste covers, and which lines it holds
+    if (!r.gameDateIso || _mRejected(r.player)) return;
+    const tip = _tsTipTs(r.gameDateIso, r.gameTime), mins = tip != null ? Math.round((tip - now) / 60000) : null;
+    if (mins != null && mins < -5) return;
+    const rel = relPick !== "AUTO" ? relPick : (mins != null && mins <= TABS_SOLO_WINDOW_MIN ? "30min" : "initial");
+    scopes.add(stat + "|" + r.gameDateIso + "|" + rel); pasteKeys.add([resolveNorm(r.player), stat, r.gameDateIso, r.ou, Number(r.line), rel].join("|"));
+  });
+  { const before = tabsSolo.length; tabsSolo = tabsSolo.filter(x => !(x.result === "pending" && scopes.has(x.stat + "|" + x.gameDate + "|" + x.release) && !pasteKeys.has(x.key))); replaced = before - tabsSolo.length; }
   results.forEach(r => {
     if (!r.gameDateIso || _mRejected(r.player)) return;
     const tip = _tsTipTs(r.gameDateIso, r.gameTime), mins = tip != null ? Math.round((tip - now) / 60000) : null;
@@ -26535,15 +26570,15 @@ async function tabsSoloImport() {
     const cur = tabsSolo.find(x => x.key === key);
     const mn = r.minutes > 0 ? Number(r.minutes) : _mCsvMin("tabs", r.player);   // projected minutes: from the PropShop board, else the loaded Tabs file
     const cx = tabsSoloContext(r.player, _mTeamFor(r.player), r.ou);
-    if (cur) { if (cur.result === "pending") { Object.assign(cur, { odds, book: r.book, ev: Number(r.ev), proj: r.proj, min: mn, ctx: cx.cls, ctxWhy: cx.why }); upd++; } return; }
-    tabsSolo.push({ key, player: r.player, game: r.game || "", team: _mTeamFor(r.player), gameDate: r.gameDateIso, gameTime: r.gameTime || "", stat, ou: r.ou, line: Number(r.line), odds, book: r.book, ev: Number(r.ev), proj: r.proj, min: mn, ctx: cx.cls, ctxWhy: cx.why, at: nowIso, release: rel, minToTip: mins, result: "pending", actual: null });
+    if (cur) { if (cur.result === "pending") { Object.assign(cur, { odds, book: r.book, ev: Number(r.ev), proj: r.proj, min: mn, simFair: r.simFair, ctx: cx.cls, ctxWhy: cx.why }); upd++; } return; }
+    tabsSolo.push({ key, player: r.player, game: r.game || "", team: _mTeamFor(r.player), gameDate: r.gameDateIso, gameTime: r.gameTime || "", stat, ou: r.ou, line: Number(r.line), odds, book: r.book, ev: Number(r.ev), proj: r.proj, min: mn, simFair: r.simFair, ctx: cx.cls, ctxWhy: cx.why, at: nowIso, release: rel, minToTip: mins, result: "pending", actual: null });
     added++;
   });
   tabsSoloSelStat = _mNextStat(stat);
   Object.keys(seen).forEach(rel => { if (seen[rel]) tabsSoloMeta[today + "|" + rel + "|" + stat] = { n: seen[rel], at: now }; });
   tabsSoloSave();
   if (ta) ta.value = "";
-  say(`${stat}: ${added} new${upd ? `, ${upd} updated` : ""} · ${seen.initial} initial / ${seen["30min"]} at 30 min${late ? ` · ${late} already tipped, skipped` : ""}`);
+  say(`${stat}: ${added} new${upd ? `, ${upd} updated` : ""} · ${seen.initial} initial / ${seen["30min"]} at 30 min${late ? ` · ${late} already tipped, skipped` : ""}${replaced ? ` · ${replaced} old open line${replaced === 1 ? "" : "s"} from the earlier paste replaced` : ""}`);
   showToast(`Tabs Solo ${stat}: ${added} logged`);
   renderTabsSolo();  { const ss = document.getElementById("ts-stat"); if (ss) ss.value = tabsSoloSelStat; }
 }
@@ -26562,7 +26597,7 @@ function tabsSoloDelete(key) { tabsSolo = tabsSolo.filter(x => x.key !== key); t
 function tabsSoloClear() { if (!confirm(`Delete all ${tabsSolo.length} Tabs Solo bets? This can't be undone.`)) return; tabsSolo = []; tabsSoloMeta = {}; tabsSoloSave(); renderTabsSolo(); }
 function tabsSoloExport() {
   if (!tabsSolo.length) { showToast("Tabs Solo is empty"); return; }
-  const cols = ["gameDate", "gameTime", "release", "minToTip", "player", "team", "stat", "ou", "line", "odds", "book", "ev", "proj", "min", "ctx", "ctxWhy", "result", "actual"];
+  const cols = ["gameDate", "gameTime", "release", "minToTip", "player", "team", "stat", "ou", "line", "odds", "book", "ev", "proj", "min", "simFair", "ctx", "ctxWhy", "result", "actual"];
   const q = v => { const s = v == null ? "" : String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
   const blob = new Blob([cols.join(",") + "\n" + tabsSolo.map(b => cols.map(c => q(b[c])).join(",")).join("\n")], { type: "text/csv" });
   const url = URL.createObjectURL(blob), a = document.createElement("a");
@@ -26609,7 +26644,7 @@ function renderTabsSolo() {
   const dayLines = days.map(d => ({ label: d.slice(5), set: rows.filter(x => x.gameDate === d) }));
   // bet list
   const resCol = r => r === "hit" ? "#4ade80" : r === "miss" ? "#f87171" : r === "void" ? "#e6edf5" : "#fbbf24";
-  const list = rows.slice().sort((a, b) => (b.gameDate + b.at).localeCompare(a.gameDate + a.at)).slice(0, tabsSoloShow).map(x => `<tr style="border-top:1px solid #1a1d22;"><td style="padding:4px 8px;color:#e6edf5;white-space:nowrap;">${esc(x.gameDate.slice(5))} ${esc(x.gameTime.replace(/^[A-Za-z]+-\d+\s*/, ""))}</td><td style="padding:4px 8px;color:#fff;font-weight:700;white-space:nowrap;">${esc(displayPlayerName(x.player))} <span style="color:#7dd3fc;font-weight:600;">${esc(x.team || "")}</span></td><td style="padding:4px 8px;white-space:nowrap;"><b style="color:${x.ou === "over" ? C.over : C.under};">${x.ou === "over" ? "O" : "U"}${x.line}</b> <span style="color:#fff;">${esc(x.stat)}</span></td><td style="padding:4px 8px;${mono}color:#fff;">${x.odds > 0 ? "+" + x.odds : x.odds}</td><td style="padding:4px 8px;color:#e6edf5;">${esc(x.book || "")}</td><td style="padding:4px 8px;${mono}color:#4ade80;">+${x.ev.toFixed(1)}%</td><td style="padding:4px 8px;${mono}color:#fff;">${x.min != null ? Math.round(x.min) + "m" : "\u2014"}</td><td style="padding:4px 8px;white-space:nowrap;"><span title="${esc(x.ctxWhy || "")}" style="border:1px solid ${(TABS_CTX[x.ctx || "clean"] || TABS_CTX.clean)[1]}88;color:${(TABS_CTX[x.ctx || "clean"] || TABS_CTX.clean)[1]};border-radius:5px;padding:1px 6px;font-size:10px;font-weight:800;">${(TABS_CTX[x.ctx || "clean"] || TABS_CTX.clean)[0]}</span>${x.ctxWhy ? ` <span style="color:#e6edf5;font-size:10px;">${esc(String(x.ctxWhy).slice(0, 48))}</span>` : ""}</td><td style="padding:4px 8px;"><span style="border:1px solid #c4b5fd88;color:#c4b5fd;border-radius:5px;padding:1px 6px;font-size:10px;font-weight:800;">${TABS_SOLO_REL[x.release] || x.release}</span>${x.minToTip != null ? ` <span style="color:#e6edf5;font-size:10px;">${x.minToTip}m to tip</span>` : ""}</td><td style="padding:4px 8px;font-weight:800;color:${resCol(x.result)};">${x.result === "pending" ? "OPEN" : x.result.toUpperCase()}${x.actual != null ? ` <span style="color:#e6edf5;font-weight:600;">${x.actual}</span>` : ""}</td><td style="padding:4px 8px;"><a href="#" onclick="tabsSoloDelete('${esc(x.key).replace(/'/g, "")}');return false;" style="color:#6b7380;text-decoration:none;">✕</a></td></tr>`).join("");
+  const list = rows.slice().sort((a, b) => (b.gameDate + b.at).localeCompare(a.gameDate + a.at)).slice(0, tabsSoloShow).map(x => `<tr style="border-top:1px solid #1a1d22;"><td style="padding:4px 8px;color:#e6edf5;white-space:nowrap;">${esc(x.gameDate.slice(5))} ${esc(x.gameTime.replace(/^[A-Za-z]+-\d+\s*/, ""))}</td><td style="padding:4px 8px;color:#fff;font-weight:700;white-space:nowrap;">${esc(displayPlayerName(x.player))} <span style="color:#7dd3fc;font-weight:600;">${esc(x.team || "")}</span></td><td style="padding:4px 8px;white-space:nowrap;"><b style="color:${x.ou === "over" ? C.over : C.under};">${x.ou === "over" ? "O" : "U"}${x.line}</b> <span style="color:#fff;">${esc(x.stat)}</span></td><td style="padding:4px 8px;${mono}color:#fff;">${x.odds > 0 ? "+" + x.odds : x.odds}</td><td style="padding:4px 8px;color:#e6edf5;">${esc(x.book || "")}</td><td style="padding:4px 8px;${mono}color:#4ade80;white-space:nowrap;">+${x.ev.toFixed(1)}%${x.simFair != null ? ` <span style="color:#e6edf5;">fair ${x.simFair > 0 ? "+" : ""}${x.simFair} (${(100 / oddsToDecimal(x.simFair)).toFixed(0)}%)</span>` : ""}</td><td style="padding:4px 8px;${mono}color:#fff;">${x.min != null ? Math.round(x.min) + "m" : "\u2014"}</td><td style="padding:4px 8px;white-space:nowrap;"><span title="${esc(x.ctxWhy || "")}" style="border:1px solid ${(TABS_CTX[x.ctx || "clean"] || TABS_CTX.clean)[1]}88;color:${(TABS_CTX[x.ctx || "clean"] || TABS_CTX.clean)[1]};border-radius:5px;padding:1px 6px;font-size:10px;font-weight:800;">${(TABS_CTX[x.ctx || "clean"] || TABS_CTX.clean)[0]}</span>${x.ctxWhy ? ` <span style="color:#e6edf5;font-size:10px;">${esc(String(x.ctxWhy).slice(0, 48))}</span>` : ""}</td><td style="padding:4px 8px;"><span style="border:1px solid #c4b5fd88;color:#c4b5fd;border-radius:5px;padding:1px 6px;font-size:10px;font-weight:800;">${TABS_SOLO_REL[x.release] || x.release}</span>${x.minToTip != null ? ` <span style="color:#e6edf5;font-size:10px;">${x.minToTip}m to tip</span>` : ""}</td><td style="padding:4px 8px;font-weight:800;color:${resCol(x.result)};">${x.result === "pending" ? "OPEN" : x.result.toUpperCase()}${x.actual != null ? ` <span style="color:#e6edf5;font-weight:600;">${x.actual}</span>` : ""}</td><td style="padding:4px 8px;"><a href="#" onclick="tabsSoloDelete('${esc(x.key).replace(/'/g, "")}');return false;" style="color:#6b7380;text-decoration:none;">✕</a></td></tr>`).join("");
   el.innerHTML = `<div style="max-width:1100px;margin:0 auto;padding:8px;">${paste}${filters}${tiles}${h("By release")}${table("Release", relLines)}${h("By edge")}${table("Edge", edgeLines)}${h("By market")}${table("Market", mktLines)}${h("By RW context (clean vs upside / downside / flagged)")}${table("Context", ctxLines)}${h("By projected minutes")}${table("Min", minLines)}${h("By day")}${table("Day", dayLines)}${h(`Bets (showing ${Math.min(rows.length, tabsSoloShow)} of ${rows.length}, newest first)`)}<div style="overflow-x:auto;"><table style="border-collapse:collapse;font-size:12px;width:100%;min-width:760px;"><tbody>${list}</tbody></table></div>${rows.length > tabsSoloShow ? `<div style="margin-top:8px;display:flex;gap:8px;"><button onclick="tabsSoloShow+=100;renderTabsSolo()" style="background:transparent;border:1px solid #1a1d22;color:#e6edf5;border-radius:6px;padding:6px 12px;font-size:11px;font-weight:700;cursor:pointer;">SHOW 100 MORE</button><button onclick="tabsSoloShow=1e9;renderTabsSolo()" style="background:transparent;border:1px solid #1a1d22;color:#e6edf5;border-radius:6px;padding:6px 12px;font-size:11px;font-weight:700;cursor:pointer;">SHOW ALL ${rows.length}</button></div>` : ""}</div>`;
 }
 
