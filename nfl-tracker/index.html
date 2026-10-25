@@ -5233,31 +5233,52 @@ const DISCORD_DEST = {
 };
 const DISCORD_HOOK_KEY = DISCORD_DEST.partners.hookKey;
 const SENT_KEY = 'nfl_sent_card_picks';
-const _discordHook = (kind = 'partners') => localStorage.getItem(DISCORD_DEST[kind].hookKey) || '';
+// Saved in localStorage AND a cookie (some browsers refuse or drop page storage, which made the
+// Nick webhook prompt come back on every send); read from whichever has it.
+const _dsMem = {};
+function _dsGet(k) {
+  try { const v = localStorage.getItem(k); if (v !== null) return v; } catch (e) {}
+  const m = document.cookie.match(new RegExp('(?:^|; )' + k + '=([^;]*)'));
+  if (m) { try { return decodeURIComponent(m[1]); } catch (e) {} }
+  return k in _dsMem ? _dsMem[k] : null;
+}
+function _dsSet(k, v) {
+  _dsMem[k] = v;
+  try { localStorage.setItem(k, v); } catch (e) { console.warn('[discord] localStorage refused', k, e.message); }
+  try { document.cookie = k + '=' + encodeURIComponent(v) + '; max-age=315360000; path=/; SameSite=Lax' + (location.protocol === 'https:' ? '; Secure' : ''); } catch (e) {}
+}
+function _dsDel(k) {
+  delete _dsMem[k];
+  try { localStorage.removeItem(k); } catch (e) {}
+  try { document.cookie = k + '=; max-age=0; path=/'; } catch (e) {}
+}
+const _discordHook = (kind = 'partners') => _dsGet(DISCORD_DEST[kind].hookKey) || '';
 // Role pinged on every send (Discord role ID). null = never set (Nick asks on its first send).
-const _discordRole = (kind = 'partners') => { const d = DISCORD_DEST[kind], v = localStorage.getItem(d.roleKey); return v === null ? d.roleDefault : v; };
+const _discordRole = (kind = 'partners') => { const d = DISCORD_DEST[kind], v = _dsGet(d.roleKey); return v === null ? d.roleDefault : v; };
 function setDiscordRole(kind = 'partners') {
   const d = DISCORD_DEST[kind];
   const v = prompt(`${d.label} card — Discord role ID to ping on every send (Server Settings → Roles → right-click the role → Copy Role ID; needs Developer Mode).\nLeave empty for no ping.`, _discordRole(kind) || '');
   if (v === null) return false;
   const id = v.trim();
   if (id && !/^\d{15,22}$/.test(id)) { alert('A role ID is just the long number, e.g. 1555588738191589538.'); return false; }
-  localStorage.setItem(d.roleKey, id);
+  _dsSet(d.roleKey, id);
   if (currentTab === 'sent') render();
   return true;
 }
-const _isDiscordHook = u => /^https:\/\/(?:ptb\.|canary\.)?(?:discord|discordapp)\.com\/api\/webhooks\/\d+\/[\w-]+/i.test(String(u || '').trim());
+// any Discord webhook link: discord.com / discordapp.com / ptb. / canary., with or without /v10/
+const _isDiscordHook = u => /^https:\/\/(?:[\w-]+\.)?(?:discord|discordapp)\.com\/api\/(?:v\d+\/)?webhooks\/\d+\/[\w.-]+/i.test(String(u || '').trim());
 function setDiscordWebhook(kind = 'partners') {
   const d = DISCORD_DEST[kind];
   const cur = _discordHook(kind);
   const v = prompt(`${d.label} card — Discord webhook URL (channel settings → Integrations → Webhooks → Copy Webhook URL).\nLeave empty to remove.`, cur);
   if (v === null) return cur || null;
   const u = v.trim();
-  if (!u) { localStorage.removeItem(d.hookKey); if (currentTab === 'sent') render(); return null; }
-  if (!_isDiscordHook(u)) { alert("That doesn't look like a Discord webhook URL (https://discord.com/api/webhooks/…)."); return null; }
-  localStorage.setItem(d.hookKey, u);
+  if (!u) { _dsDel(d.hookKey); if (currentTab === 'sent') render(); return null; }
+  if (!_isDiscordHook(u)) { alert("That doesn't look like a Discord webhook URL (https://discord.com/api/webhooks/…).\nIn Discord: channel settings → Integrations → Webhooks → your webhook → Copy Webhook URL."); return null; }
+  _dsSet(d.hookKey, u.split(/[?#]/)[0]);
+  if (!_discordHook(kind)) alert('This browser would not save the webhook (private/incognito window or site data blocked?) — it will be asked again next time.');
   if (currentTab === 'sent') render();
-  return u;
+  return _discordHook(kind) || u;
 }
 async function _discordPost(blob, fname, content, kind = 'partners') {
   const hook = _discordHook(kind) || setDiscordWebhook(kind);
