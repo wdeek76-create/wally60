@@ -12039,6 +12039,27 @@ async function shareOpenPropsAsImageDiscord(betList) {
   try { const r = await ooRefreshBetsForPic(filtered); showToast(`Refreshed ${r.refreshed}${r.skipped ? ` · ${r.skipped} skipped (started / no feed)` : ""}`); }
   catch (e) { console.warn("[pic refresh] failed, using stored books", e); }
 
+  // The Discord picture is the same card as Morning's DISCORD card (same look, no sources / agree / edge columns), built from these bets.
+  {
+    const picks = filtered.map((b, i) => {
+      const bk = _isBlankBook(b.book) ? inferBookFromAlts(b.odds, b.line, b.altBooks) : b.book;
+      if (!bk) return null;
+      return { id: "t" + i, player: b.player, team: b.team || "", game: b.game || "", gameTime: b.gameTime || "", stat: String(b.stat || "").toUpperCase(), ou: String(b.ou || "over").toLowerCase(), line: Number(b.line), odds: Number(b.odds), book: bk,
+        fairProb: b.fair != null && Number(b.fair) > 0 ? Number(b.fair) / (Number(b.fair) > 1 ? 100 : 1) : null,
+        altBooks: (Array.isArray(b.altBooks) ? b.altBooks : []).filter(a => a && a.book && a.odds != null && (a.line == null || Number(a.line) === Number(b.line))).map(a => ({ book: a.book, odds: Number(a.odds), liq: a.liq != null ? a.liq : null })),
+        liqBooks: b.liq && b.liq.books ? b.liq.books : null, liqLevels: b.liq && b.liq.levels ? b.liq.levels : null, sourcePrices: [] };
+    }).filter(Boolean);
+    if (!picks.length) { showToast("No open props with a real book to put on the picture"); return; }
+    showToast(`Building Discord card (${picks.length})\u2026`);
+    let blob; try { blob = await _morningCardBlob(picks, "discord"); } catch (e) { console.error("[discord pic]", e); showToast("Card failed \u2014 " + (e && e.message || "see console")); return; }
+    if (!blob) { showToast("Card failed"); return; }
+    const file = new File([blob], `nba-model-discord-${localYMD(new Date())}.png`, { type: "image/png" });
+    let done = false;
+    try { if (navigator.clipboard && window.ClipboardItem) { await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]); done = true; showToast("Discord card copied \u2014 paste it into Discord"); } } catch (e) {}
+    if (!done) { const url = URL.createObjectURL(file), a = document.createElement("a"); a.href = url; a.download = file.name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000); }
+    return;
+  }
+
   const pickBest = (b) => {
     const mb = _isBlankBook(b.book) ? inferBookFromAlts(b.odds, b.line, b.altBooks) : b.book;
     const candidates = mb ? [{ book: mb, odds: b.odds, fair: b.fair, line: b.line }] : [];
@@ -26027,6 +26048,7 @@ function morningImport() {
   info.textContent = `${_mSrc(src).label} ${stat}: ${n} prop${n === 1 ? "" : "s"} (was ${prev})${results.length - n ? `, ${results.length - n} repeat(s) collapsed` : ""}${errors.length ? `, ${errors.length} parse error(s)` : ""}.` + (logged ? ` Logged ${logged} new morning pick${logged === 1 ? "" : "s"}.` : "") + (morningNewsLoadedAt() ? "" : " Auto-log held — paste today's RW news first.");
   showToast(`${_mSrc(src).label} ${stat}: ${n} props${logged ? ` · ${logged} logged` : ""}`);
   renderMorning();  { const ss = document.getElementById("morning-stat"); if (ss) ss.value = morningSelStat; }
+  if (logged) morningResolveUnbooked();
 }
 function morningParseNews() {
   const src = document.getElementById("morning-news-paste"), dst = document.getElementById("rw-injury-paste");
@@ -26035,8 +26057,9 @@ function morningParseNews() {
   dst.value = src.value;
   parseRotoWireInjuriesPaste();
   src.value = "";
-  morningAutoLog() && saveMorningBets();
+  const nLogged = morningAutoLog(); if (nLogged) saveMorningBets();
   renderMorning();
+  if (nLogged) morningResolveUnbooked();
 }
 function morningSetView(v) { morningView = v; renderMorning(); }
 function morningSetStat(s) { morningStatFilter = s; renderMorning(); }
@@ -27058,6 +27081,19 @@ const _mRealBook = _mHeadlineOk;
 // Picks with no real book ("PropShop" / "PR" / blank = a board price whose book was never matched) are removed from the Morning log AND the Tracker
 // (pending ones only; graded bets stay as history).
 const _mPlaceholderBook = bk => /^(propshop|pr|\?|-|—)?$/i.test(String(bk == null ? "" : bk).trim());
+// A pick whose PropShop board named no book gets its book from the market (OpticOdds: the price that matches at one of our books). If the market can't
+// match it, it is dropped and not kept (Morning log + its Tracker copy). Runs after every import / news parse.
+async function morningResolveUnbooked() {
+  const bad = morningBets.filter(b => b.result === "pending" && _mPlaceholderBook(b.book));
+  if (!bad.length) return 0;
+  try { await morningRefreshPicks(bad); } catch (e) { console.warn("[MORNING] book lookup failed", e); }
+  const left = morningBets.filter(b => b.result === "pending" && _mPlaceholderBook(b.book)).length;
+  const fixed = bad.length - left;
+  const dropped = left ? morningDropUnbooked(true) : 0;
+  if (fixed || dropped) showToast(`${fixed ? `Matched ${fixed} pick${fixed === 1 ? "" : "s"} to a book from the market` : ""}${fixed && dropped ? " \u00b7 " : ""}${dropped ? `dropped ${dropped} with no book PropShop or the market could match` : ""}`);
+  try { renderMorning(); } catch (e) {}
+  return dropped;
+}
 function morningDropUnbooked(quiet) {
   const badM = b => b.result === "pending" && _mPlaceholderBook(b.book);
   const nM = morningBets.filter(badM).length;
