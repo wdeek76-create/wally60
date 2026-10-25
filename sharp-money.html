@@ -1897,24 +1897,39 @@ async function postRecapFields(hook, title, fields){
 }
 const recRow = list => { const r=ttRecord(list.filter(t=>t.final&&t.result)); return `${r.w}-${r.l}${r.p?'-'+r.p:''} · ${r.u>=0?'+':''}${r.u.toFixed(2)}u${r.roi!=null?` · ${r.roi>=0?'+':''}${r.roi.toFixed(1)}%`:''}`; };
 const recSplit = (list, fn) => { const m={}; list.filter(t=>t.final&&t.result).forEach(t=>{ const k=fn(t); if(k==null) return; (m[k]=m[k]||[]).push(t); }); return Object.entries(m).sort((a,b)=>b[1].length-a[1].length).map(([k,l])=>`${k} (${l.length}): ${recRow(l)}`); };
+// one row per bet: the same FD bet hit by several signals (DK+CZR, DK+Fliff...) is one bet, not three --
+// totals count it once; its sources are listed together. Per-signal rows still use every row.
+function nlUniq(list){
+  const m=new Map();
+  list.slice().sort((a,b)=>a.trackedAt-b.trackedAt).forEach(t=>{ const u=m.get(t.key);
+    if(!u){ m.set(t.key, { ...t, kinds:[t.kind] }); return; }
+    if(!u.kinds.includes(t.kind)) u.kinds.push(t.kind);
+    u.hold=Math.min(u.hold??0, t.hold??0); u.direct=u.direct&&t.direct; u.size=Math.max(u.size||0, t.size||0)||null;
+    if(!u.final && t.final){ u.final=t.final; u.result=t.result; u.actual=t.actual; } });
+  return [...m.values()];
+}
 const nlMoney = t => t.size==null ? null : t.size<250?'Exch under $250':t.size<500?'Exch $250–500':t.size<1000?'Exch $500–1k':'Exch $1k+';
 function nlRecapText(day){
   const today=nlTracked.filter(t=>etDayOf(t.trackedAt)===day), done=today.filter(t=>t.final), all=nlTracked;
+  const U=nlUniq(all), uDone=nlUniq(today).filter(t=>t.final);   // one per bet
   const dayName=new Date(day+'T12:00:00').toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'});
   const sportOf=t=>SPORTS[t.sk||'nba']?.label||'NBA';
-  const playLine=t=>`${t.result==='win'?'✅':t.result==='loss'?'❌':'➖'} ${titleCase(t.playerName)} ${nlSide(t.side)}${t.line!=null?' '+t.line:''} ${t.marketLabel} ${fmtAm(t.price)}${t.size?` · ${usd(t.size)}`:''} · ${t.direct?'0%':(-t.hold).toFixed(1)+'% arb'}${t.actual!=null?` (${t.actual})`:''}`;
+  const playLine=t=>`${t.result==='win'?'✅':t.result==='loss'?'❌':'➖'} ${titleCase(t.playerName)} ${nlSide(t.side)}${t.line!=null?' '+t.line:''} ${t.marketLabel} ${fmtAm(t.price)}${t.size?` · ${usd(t.size)}`:''} · ${t.direct?'0%':(-t.hold).toFixed(1)+'% arb'}${t.actual!=null?` (${t.actual})`:''}${t.kinds?` · ${t.kinds.join(', ')}`:''}`;
   const fields=[
-    ...recapFields(`${dayName} · ${recRow(done)}`, [...recSplit(done,t=>t.kind), ...recSplit(done,t=>`${sportOf(t)} ${t.marketLabel}`)]),
-    ...recapFields(`All-time · ${recRow(all)}`, recSplit(all,t=>t.kind)),
-    ...recapFields('All-time by sport', recSplit(all,sportOf)),
-    ...recapFields('All-time by market', recSplit(all,t=>`${sportOf(t)} ${t.marketLabel}`)),
+    // headline records count each bet once; "by signal" rows are each source's own record (a bet two
+    // sources both hit shows up under both)
+    ...recapFields(`${dayName} · ${recRow(uDone)} (${uDone.length} bets)`, recSplit(uDone,t=>`${sportOf(t)} ${t.marketLabel}`)),
+    ...recapFields(`${dayName} · by signal`, recSplit(done,t=>t.kind)),
+    ...recapFields(`All-time · ${recRow(U)} (${U.length} bets)`, recSplit(all,t=>t.kind)),
+    ...recapFields('All-time by sport', recSplit(U,sportOf)),
+    ...recapFields('All-time by market', recSplit(U,t=>`${sportOf(t)} ${t.marketLabel}`)),
     ...recapFields('All-time by signal + side', recSplit(all,t=>`${t.kind} ${nlSide(t.side)}`)),
-    ...recapFields('All-time by market + side', recSplit(all,t=>`${sportOf(t)} ${t.marketLabel} ${nlSide(t.side)}`)),
-    ...recapFields('All-time arb vs direct', recSplit(all,t=>t.direct?'Direct (0%)':-t.hold<1?'0–1% arb':-t.hold<2?'1–2% arb':'2%+ arb')),
-    ...recapFields('All-time by exchange money', recSplit(all,nlMoney)),
-    // every play that day, under its source
-    ...[...new Set(done.map(t=>t.kind))].flatMap(k=>recapFields(`${dayName} · ${k} plays`, done.filter(t=>t.kind===k).map(playLine))) ];
-  return { today, done, fields };
+    ...recapFields('All-time by market + side', recSplit(U,t=>`${sportOf(t)} ${t.marketLabel} ${nlSide(t.side)}`)),
+    ...recapFields('All-time arb vs direct', recSplit(U,t=>t.direct?'Direct (0%)':-t.hold<1?'0–1% arb':-t.hold<2?'1–2% arb':'2%+ arb')),
+    ...recapFields('All-time by exchange money', recSplit(U,nlMoney)),
+    // every bet that day, once, with every source that flagged it
+    ...recapFields(`${dayName} · plays`, uDone.map(playLine)) ];
+  return { today, done:uDone, fields };
 }
 async function nlPostRecap(day, manual){
   if(!nlHook){ if(manual) toast('Set the in-game Discord first'); return false; }
@@ -2013,15 +2028,16 @@ function renderNbaLive(){
   const row=(l,list)=>{ const r=ttRecord(list.filter(t=>t.final)); return `<div class="ttrow"><span>${esc(l)} <span class="dim">(${r.n})</span></span><span>${r.w}-${r.l}-${r.p}</span><span class="${r.u>0?'pos':r.u<0?'neg':''}">${r.u>=0?'+':''}${r.u.toFixed(2)}u</span><span class="dim">${r.roi!=null?r.roi.toFixed(1)+'%':'—'}</span></div>`; };
   const sub=t=>`<div class="dim" style="font-size:9.5px;font-weight:800;letter-spacing:.5px;text-transform:uppercase;margin:8px 0 2px">${t}</div>`;
   const kinds=['Kalshi','Novig','PX',...NL_PAIRS.map(([a,b])=>`${NL_LBL[a]}+${NL_LBL[b]}`)];
-  const rec=nlTracked.length?`<div class="ttsum" style="margin-top:14px"><div class="ttsumh"><span>NBA Live record</span></div>${row('All signals',nlTracked)}${kinds.map(k=>row(k,nlTracked.filter(t=>t.kind===k))).join('')}
-    ${sub('By sport')}${['nba','nfl'].map(k=>row(SPORTS[k]?.label||k,nlTracked.filter(t=>(t.sk||'nba')===k))).join('')}
-    ${sub('Arb vs direct')}${row('Arb (above 0%)',nlTracked.filter(t=>!t.direct))}${row('Direct (0%)',nlTracked.filter(t=>t.direct))}
-    ${sub('By side')}${row('Overs',nlTracked.filter(t=>t.side==='over'))}${row('Unders',nlTracked.filter(t=>t.side==='under'))}
+  const NU=nlUniq(nlTracked);   // each bet once (several signals can flag the same bet)
+  const rec=nlTracked.length?`<div class="ttsum" style="margin-top:14px"><div class="ttsumh"><span>NBA Live record</span></div>${row(`All bets (each once)`,NU)}${kinds.map(k=>row(k,nlTracked.filter(t=>t.kind===k))).join('')}
+    ${sub('By sport')}${['nba','nfl'].map(k=>row(SPORTS[k]?.label||k,NU.filter(t=>(t.sk||'nba')===k))).join('')}
+    ${sub('Arb vs direct')}${row('Arb (above 0%)',NU.filter(t=>!t.direct))}${row('Direct (0%)',NU.filter(t=>t.direct))}
+    ${sub('By side')}${row('Overs',NU.filter(t=>t.side==='over'))}${row('Unders',NU.filter(t=>t.side==='under'))}
     ${sub('By signal + side')}${kinds.flatMap(k=>['over','under'].map(sd=>[k,sd])).filter(([k,sd])=>nlTracked.some(t=>t.kind===k&&t.side===sd)).map(([k,sd])=>row(`${k} ${nlSide(sd)}`,nlTracked.filter(t=>t.kind===k&&t.side===sd))).join('')}
     ${nlTracked.some(t=>['Kalshi','Novig','PX','Exchanges'].includes(t.kind))?`${sub('Exchange money')}${[['Under $250',t=>t.size<250],['$250–500',t=>t.size>=250&&t.size<500],['$500–1k',t=>t.size>=500&&t.size<1000],['$1k+',t=>t.size>=1000]].map(([l,fn])=>row(l,nlTracked.filter(t=>['Kalshi','Novig','PX','Exchanges'].includes(t.kind)&&t.size!=null&&fn(t)))).join('')}`:''}
-    ${sub('By arb %')}${[['Direct (0%)',t=>t.direct],['0–1% arb',t=>!t.direct&&-t.hold<1],['1–2% arb',t=>-t.hold>=1&&-t.hold<2],['2%+ arb',t=>-t.hold>=2]].map(([l,fn])=>row(l,nlTracked.filter(fn))).join('')}
-    ${sub('By prop')}${[...new Set(nlTracked.map(t=>t.marketLabel))].map(m=>row(m,nlTracked.filter(t=>t.marketLabel===m))).join('')}
-    ${sub('By prop + side')}${[...new Set(nlTracked.map(t=>t.marketLabel+'|'+t.side))].map(k=>{ const [m,sd]=k.split('|'); return row(`${m} ${nlSide(sd)}`,nlTracked.filter(t=>t.marketLabel===m&&t.side===sd)); }).join('')}</div>`:'';
+    ${sub('By arb %')}${[['Direct (0%)',t=>t.direct],['0–1% arb',t=>!t.direct&&-t.hold<1],['1–2% arb',t=>-t.hold>=1&&-t.hold<2],['2%+ arb',t=>-t.hold>=2]].map(([l,fn])=>row(l,NU.filter(fn))).join('')}
+    ${sub('By prop')}${[...new Set(NU.map(t=>t.marketLabel))].map(m=>row(m,NU.filter(t=>t.marketLabel===m))).join('')}
+    ${sub('By prop + side')}${[...new Set(NU.map(t=>t.marketLabel+'|'+t.side))].map(k=>{ const [m,sd]=k.split('|'); return row(`${m} ${nlSide(sd)}`,NU.filter(t=>t.marketLabel===m&&t.side===sd)); }).join('')}</div>`:'';
   const tcard=t=>`<div class="tkc"><div class="tkt"><span class="tkpl">${esc(titleCase(t.playerName))}</span>${t.result?`<span class="tkres ${t.result}">${t.result.toUpperCase()}</span>`:t.live?'<span class="tkres live">LIVE</span>':''}</div>
     <div class="tkb">${nlSide(t.side)}${t.line!=null?' '+t.line:''} ${esc(t.marketLabel)} - <b>FD ${fmtAm(t.price)}</b> - ${esc(t.kind)} ${t.direct?'0% hold':(-t.hold).toFixed(1)+'% arb'}${t.size?' - '+usd(t.size):''}</div>
     <div class="tkm">${esc(t.away)} @ ${esc(t.home)}${t.score?' - '+esc(t.score):''}${t.actual!=null?` - <b>${t.actual}</b>${t.line!=null?' / '+t.line:''}`:''}</div>
