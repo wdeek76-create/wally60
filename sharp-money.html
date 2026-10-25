@@ -431,15 +431,23 @@ let tkSport = LS.get('sm_tksport','all');   // sport tabs right above the bet li
 const tkBookOf = t => (t.bookKey||canonBook(t.book)||'fanduel');
 const tkBookLabel = k => k==='fanduel'?'FanDuel':k==='bet105'?'bet105':bookLabel(k);
 const tkInBook = t => tkBook==='all' || tkBookOf(t)===tkBook;
-// arb (FD + the exchange's other side locks in profit) vs direct (shows as 0.0% hold), and arb size
-const smArbDirect = t => t.sharpEdge==null ? 'Unknown' : t.sharpEdge>=0.05 ? 'Arb (above 0%)' : 'Direct (0% hold)';
-const smArbBucket = t => t.sharpEdge==null ? 'Unknown' : t.sharpEdge<0.05 ? 'Direct (0% hold)' : t.sharpEdge<0.5 ? '0–0.5% arb' : t.sharpEdge<1 ? '0.5–1% arb' : t.sharpEdge<2 ? '1–2% arb' : '2%+ arb';
+// FD's real hold on the bet: the exchange's other side + FD's price. A "via" play was matched on the
+// other book's price, so FD's few cents worse adds that much hold back on.
+const smFdHold = t => { if(t.sharpEdge==null) return null; let h=-t.sharpEdge;
+  if(t.via?.price!=null) h += (toImplied(Number(t.price))-toImplied(Number(t.via.price)))*100; return h; };
+// low holds each 0.5% spot (0%, 0.5%, 1%...), arbs in buckets
+// holds low -> high, then arbs small -> big (works on a bucket label or a recap line that starts with one)
+const smHoldOrder = k => { const m=String(k).match(/^([\d.]+)(?:–[\d.]+)?%\+? (hold|arb)/); if(!m) return 999; return m[2]==='hold' ? Number(m[1]) : 100+Number(m[1]); };
+const smHoldBucket = t => { const h=smFdHold(t); if(h==null) return 'Unknown';
+  if(h>-0.05){ const r=Math.max(0, Math.round(h*2)/2); return `${r?r.toFixed(1):'0'}% hold`; }
+  const a=-h; return a<0.5?'0–0.5% arb':a<1?'0.5–1% arb':a<2?'1–2% arb':'2%+ arb'; };
 function sharpSummaryHtml(){
   const all=tracked.filter(t=>t.src==='sharp' && tkInBook(t)); if(!all.length) return '';
   const g=all.filter(t=>t.result); const openN=all.length-g.length;
   const row=(label,r)=>`<div class="ttrow"><span>${esc(label)} <span class="dim">(${r.n})</span></span><span>${r.w}-${r.l}-${r.p}</span><span class="${r.u>0?'pos':r.u<0?'neg':''}">${r.u>=0?'+':''}${r.u.toFixed(2)}u</span><span class="dim">${r.roi!=null?r.roi.toFixed(1)+'% ROI':'—'}</span></div>`;
   const liqB=t=>{ const v=t.sharpLiq||0; return v>=2500?'$2.5k+ backing':v>=1000?'$1k–2.5k backing':'Under $1k backing'; };
   const split=(fn)=>{ const m={}; g.forEach(t=>{ const k=fn(t); (m[k]=m[k]||[]).push(t); }); return Object.entries(m).sort((a,b)=>b[1].length-a[1].length).map(([k,l])=>row(k, ttRecord(l))).join(''); };
+  const splitBy=(fn,ord)=>{ const m={}; g.forEach(t=>{ const k=fn(t); (m[k]=m[k]||[]).push(t); }); return Object.entries(m).sort((a,b)=>ord(a[0])-ord(b[0])).map(([k,l])=>row(k, ttRecord(l))).join(''); };
   const sub=t=>g.length?`<div class="dim" style="font-size:9.5px;font-weight:800;letter-spacing:.5px;text-transform:uppercase;margin:8px 0 2px">${t}</div>`:'';
   return `<div class="ttsum"><div class="ttsumh"><span>Sharp Money${tkBook==='all'?'':' · '+esc(tkBookLabel(tkBook))}</span></div>${row('Overall', ttRecord(g))}${openN?`<div class="ttrow dim" style="font-size:10.5px">${openN} open / ungraded not counted</div>`:''}
     ${[['under','Unders'],['Yes','Anytime Yes'],['No','Anytime No'],['over','Overs']].map(([k,l])=>{ const L=g.filter(t=>t.side===k); return L.length?row(l, ttRecord(L)):''; }).join('')}
@@ -449,8 +457,7 @@ function sharpSummaryHtml(){
     ${sub('By time to tip')}${split(t=>outBucket(t)||'Unknown')}
     ${sub('By exchange money')}${split(liqB)}
     ${sub('By source')}${split(t=>t.via?`Via ${bookShort(t.via.book)}`:'FD direct')}
-    ${sub('Arb vs direct')}${split(smArbDirect)}
-    ${sub('By arb %')}${split(smArbBucket)}</div>`;
+    ${sub('By hold / arb')}${splitBy(smHoldBucket, smHoldOrder)}</div>`;
 }
 
 // ───────────────────────── sharp money ─────────────────────────
@@ -1965,8 +1972,7 @@ function smRecapFields(day){
     ...recapFields('All-time by market', recSplit(fd,lab)),
     ...recapFields('All-time by side', recSplit(fd,t=>sideTxt(t))),
     ...recapFields('All-time by time to tip', recSplit(fd,outBucket)),
-    ...recapFields('All-time arb vs direct', recSplit(fd,smArbDirect)),
-    ...recapFields('All-time by arb %', recSplit(fd,smArbBucket)),
+    ...recapFields('All-time by hold / arb', recSplit(fd,smHoldBucket).sort((a,b)=>smHoldOrder(a)-smHoldOrder(b))),
     ...recapFields('All-time by arb money', recSplit(fd,t=>{ const v=t.sharpLiq||0; return v>=2500?'$2.5k+':v>=1000?'$1k–2.5k':'Under $1k'; })),
     ...[...new Set(done.map(lab))].flatMap(k=>recapFields(`${dayName} · ${k}`, done.filter(t=>lab(t)===k).map(playLine))) ] };
 }
