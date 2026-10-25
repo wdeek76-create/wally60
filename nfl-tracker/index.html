@@ -528,6 +528,7 @@ select.sel:focus { border-color: var(--teal); }
     <button class="btn ghost" id="copyConsensusBtn" onclick="copyEnsemble('consensus')" style="display:none;color:var(--purple)">⧉ Full Consensus</button>
     <button class="btn ghost" id="discordCardBtn" onclick="makeDiscordCard('partners')" style="display:none">🖼 Discord Card</button>
     <button class="btn ghost" id="discordSendBtn" onclick="makeDiscordCard('partners', { send: true })" style="display:none;color:#a5b4fc;border-color:rgba(129,140,248,0.4)" title="Posts the Discord Card straight to your Discord webhook and logs every pick on it to the Sent tab">📤 Send to Discord</button>
+    <button class="btn ghost" id="nickSendBtn" onclick="makeDiscordCard('nick', { send: true })" style="display:none;color:#a5b4fc;border-color:rgba(129,140,248,0.4)" title="Posts the Nick Card straight to the Nick webhook (not logged to Sent)">📤 Send Nick Card</button>
     <button class="btn ghost" id="nickCardBtn" onclick="makeDiscordCard('nick')" style="display:none" title="Same card plus the sources grid (edges + projections) and agreeing standalones — internal">🖼 Nick Card</button>
     <button class="btn ghost" onclick="openManageModal()">⋯ Manage</button>
   </div>
@@ -3938,7 +3939,7 @@ function renderSourceBar() {
   if (cp) cp.style.display = isEns ? 'none' : '';
   if (cpp) cpp.style.display = isEns ? '' : 'none';
   if (cpn) cpn.style.display = isEns ? '' : 'none';
-  if (dcb) dcb.style.display = isEns ? '' : 'none'; { const dsb = document.getElementById('discordSendBtn'); if (dsb) dsb.style.display = isEns ? '' : 'none'; } { const nkb = document.getElementById('nickCardBtn'); if (nkb) nkb.style.display = isEns ? '' : 'none'; }
+  if (dcb) dcb.style.display = isEns ? '' : 'none'; ['discordSendBtn', 'nickSendBtn'].forEach(id => { const el = document.getElementById(id); if (el) el.style.display = isEns ? '' : 'none'; }); { const nkb = document.getElementById('nickCardBtn'); if (nkb) nkb.style.display = isEns ? '' : 'none'; }
   const all = [...SOURCES, 'ensemble'];
   container.innerHTML = all.map(src => {
     const arr = src === 'ensemble' ? computeEnsembleProps() : (propsBySource[src] || []);
@@ -5224,37 +5225,45 @@ async function copyEnsemble(mode) {
 // Every pick that actually made it INTO that image (not the ones the live re-check dropped) is
 // logged to the Sent tab, at the best price shown in the picture. Grades come from the
 // Ensemble grading automatically, nothing to grade twice; a row can still be graded by hand.
-const DISCORD_HOOK_KEY = 'nfl_discord_webhook';
+// Two destinations: the Partners card (logs to the Sent tab) and the Nick card (internal, not
+// logged). Each has its own webhook URL and its own role to ping, saved in this browser only.
+const DISCORD_DEST = {
+  partners: { label: 'Partners', hookKey: 'nfl_discord_webhook', roleKey: 'nfl_discord_role', roleDefault: '1555588738191589538' },
+  nick:     { label: 'Nick',     hookKey: 'nfl_discord_webhook_nick', roleKey: 'nfl_discord_role_nick', roleDefault: null },
+};
+const DISCORD_HOOK_KEY = DISCORD_DEST.partners.hookKey;
 const SENT_KEY = 'nfl_sent_card_picks';
-// Role pinged on every send (Discord role ID). Change/clear it on the Sent tab.
-const DISCORD_ROLE_KEY = 'nfl_discord_role';
-const DISCORD_ROLE_DEFAULT = '1555588738191589538';
-const _discordRole = () => { const v = localStorage.getItem(DISCORD_ROLE_KEY); return v === null ? DISCORD_ROLE_DEFAULT : v; };
-function setDiscordRole() {
-  const v = prompt('Discord role ID to ping on every send (Server Settings → Roles → right-click the role → Copy Role ID; needs Developer Mode).\nLeave empty for no ping.', _discordRole());
-  if (v === null) return;
+const _discordHook = (kind = 'partners') => localStorage.getItem(DISCORD_DEST[kind].hookKey) || '';
+// Role pinged on every send (Discord role ID). null = never set (Nick asks on its first send).
+const _discordRole = (kind = 'partners') => { const d = DISCORD_DEST[kind], v = localStorage.getItem(d.roleKey); return v === null ? d.roleDefault : v; };
+function setDiscordRole(kind = 'partners') {
+  const d = DISCORD_DEST[kind];
+  const v = prompt(`${d.label} card — Discord role ID to ping on every send (Server Settings → Roles → right-click the role → Copy Role ID; needs Developer Mode).\nLeave empty for no ping.`, _discordRole(kind) || '');
+  if (v === null) return false;
   const id = v.trim();
-  if (id && !/^\d{15,22}$/.test(id)) { alert('A role ID is just the long number, e.g. 1555588738191589538.'); return; }
-  localStorage.setItem(DISCORD_ROLE_KEY, id);
+  if (id && !/^\d{15,22}$/.test(id)) { alert('A role ID is just the long number, e.g. 1555588738191589538.'); return false; }
+  localStorage.setItem(d.roleKey, id);
   if (currentTab === 'sent') render();
+  return true;
 }
 const _isDiscordHook = u => /^https:\/\/(?:ptb\.|canary\.)?(?:discord|discordapp)\.com\/api\/webhooks\/\d+\/[\w-]+/i.test(String(u || '').trim());
-function setDiscordWebhook() {
-  const cur = localStorage.getItem(DISCORD_HOOK_KEY) || '';
-  const v = prompt('Discord webhook URL (Server Settings → Integrations → Webhooks → Copy Webhook URL).\nLeave empty to remove.', cur);
+function setDiscordWebhook(kind = 'partners') {
+  const d = DISCORD_DEST[kind];
+  const cur = _discordHook(kind);
+  const v = prompt(`${d.label} card — Discord webhook URL (channel settings → Integrations → Webhooks → Copy Webhook URL).\nLeave empty to remove.`, cur);
   if (v === null) return cur || null;
   const u = v.trim();
-  if (!u) { localStorage.removeItem(DISCORD_HOOK_KEY); if (currentTab === 'sent') render(); return null; }
+  if (!u) { localStorage.removeItem(d.hookKey); if (currentTab === 'sent') render(); return null; }
   if (!_isDiscordHook(u)) { alert("That doesn't look like a Discord webhook URL (https://discord.com/api/webhooks/…)."); return null; }
-  localStorage.setItem(DISCORD_HOOK_KEY, u);
+  localStorage.setItem(d.hookKey, u);
   if (currentTab === 'sent') render();
   return u;
 }
-async function _discordPost(blob, fname, content) {
-  const hook = localStorage.getItem(DISCORD_HOOK_KEY) || setDiscordWebhook();
+async function _discordPost(blob, fname, content, kind = 'partners') {
+  const hook = _discordHook(kind) || setDiscordWebhook(kind);
   if (!hook) return false;
   const fd = new FormData();
-  const role = _discordRole();
+  const role = _discordRole(kind);
   fd.append('payload_json', JSON.stringify({
     content: (role ? `<@&${role}> ` : '') + (content || ''),
     allowed_mentions: { parse: [], roles: role ? [role] : [] }, // ping only this role, never @everyone
@@ -5328,13 +5337,13 @@ function removeSent(key) {
 function renderSent() {
   const wrap = document.getElementById('wrap');
   const arr = refreshSentGrades();
-  const hook = localStorage.getItem(DISCORD_HOOK_KEY);
-  const hookBar = `<div class="panel"><div class="panel-body" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:12px">
-    <span>Discord webhook: ${hook ? '<b class="pos">set ✓</b> <span class="dim">…' + escHtml(hook.slice(-6)) + '</span>' : '<b class="neg">not set</b>'}</span>
-    <button class="btn ghost" onclick="setDiscordWebhook()">${hook ? 'Change' : 'Set'} webhook</button>
-    <span>Pings: ${_discordRole() ? '<b>@role</b> <span class="dim mono">' + escHtml(_discordRole()) + '</span>' : '<span class="dim">nobody</span>'}</span>
-    <button class="btn ghost" onclick="setDiscordRole()">Change role</button>
-    <span class="dim">Only picks that were in a picture you sent with 📤 Send to Discord land here, at the price shown on the card. Grades follow the Ensemble.</span></div></div>`;
+  const hook = _discordHook('partners');
+  const destRow = kind => { const h = _discordHook(kind), r = _discordRole(kind); return `<span><b>${DISCORD_DEST[kind].label} card</b> → webhook ${h ? '<b class="pos">set ✓</b> <span class="dim">…' + escHtml(h.slice(-6)) + '</span>' : '<b class="neg">not set</b>'} · pings ${r ? '<b>@role</b> <span class="dim mono">' + escHtml(r) + '</span>' : '<span class="dim">nobody</span>'}</span>
+    <button class="btn ghost" onclick="setDiscordWebhook('${kind}')">${h ? 'Change' : 'Set'} webhook</button><button class="btn ghost" onclick="setDiscordRole('${kind}')">Change role</button>`; };
+  const hookBar = `<div class="panel"><div class="panel-body" style="display:flex;flex-direction:column;gap:8px;font-size:12px">
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">${destRow('partners')}</div>
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">${destRow('nick')}</div>
+    <span class="dim">Only picks in a Partners card sent with 📤 Send to Discord land here, at the price shown on the card. Grades follow the Ensemble. Nick card sends aren't tracked.</span></div></div>`;
   if (!arr.length) {
     wrap.innerHTML = hookBar + `<div class="empty"><h3>Nothing sent yet</h3><p>Go to the <strong>Ensemble</strong> source and hit <strong>📤 Send to Discord</strong>. Every pick on that card gets tracked here.</p></div>`;
     return;
@@ -5481,8 +5490,9 @@ async function _uriFor(url) {
 // mode: 'partners' (default) = plays + books only. 'nick' = adds the sources grid + agreeing standalones.
 async function makeDiscordCard(mode = 'partners', opts = {}) {
   const forNick = mode === 'nick';
-  const btn = document.getElementById(opts.send ? 'discordSendBtn' : forNick ? 'nickCardBtn' : 'discordCardBtn');
-  if (opts.send && !localStorage.getItem(DISCORD_HOOK_KEY) && !setDiscordWebhook()) return;
+  const btn = document.getElementById(opts.send ? (forNick ? 'nickSendBtn' : 'discordSendBtn') : forNick ? 'nickCardBtn' : 'discordCardBtn');
+  if (opts.send && !_discordHook(mode) && !setDiscordWebhook(mode)) return;
+  if (opts.send && _discordRole(mode) === null && !setDiscordRole(mode)) return; // Nick: pick its role on the first send
   const cardShown = []; // rows actually drawn on the card → Sent tracker
   const setBtn = t => { if (btn) btn.textContent = t; };
   const orig = btn ? btn.textContent : '';
@@ -5761,8 +5771,8 @@ async function makeDiscordCard(mode = 'partners', opts = {}) {
         else {
           setBtn('Sending…');
           const hdr = pg.multiDate ? fmtDateHdr(pg.date) + ' – ' + fmtDateHdr(pg.dateTo) : fmtDateHdr(pg.date);
-          if (await _discordPost(blob, fname, `**NFL Props · ${hdr}** · ${cardShown.length} play${cardShown.length === 1 ? '' : 's'}`)) {
-            const added = logSentPicks(cardShown);
+          if (await _discordPost(blob, fname, `**NFL Props${forNick ? ' · Nick' : ''} · ${hdr}** · ${cardShown.length} play${cardShown.length === 1 ? '' : 's'}`, mode)) {
+            const added = forNick ? 0 : logSentPicks(cardShown); // only the Partners card feeds the Sent tracker
             render();
             setBtn('✓ Sent'); await new Promise(r => setTimeout(r, 1500));
             console.log('[discord] sent', cardShown.length, 'picks,', added, 'new in Sent tracker');
@@ -5774,7 +5784,7 @@ async function makeDiscordCard(mode = 'partners', opts = {}) {
       } else {
         _downloadBlob(blob, fname);
       }
-    } catch(e) { console.error(opts.send ? 'discord send failed' : 'card render failed', e); alert((opts.send ? 'Send to Discord failed: ' : 'Card render failed: ') + e.message + (opts.send ? '\nNothing was logged to Sent. Check the webhook URL (Sent tab → Change webhook).' : '')); }
+    } catch(e) { console.error(opts.send ? 'discord send failed' : 'card render failed', e); alert((opts.send ? 'Send to Discord failed: ' : 'Card render failed: ') + e.message + (opts.send ? `\n${forNick ? 'Nothing was sent' : 'Nothing was logged to Sent'}. Check the ${forNick ? 'Nick' : 'Partners'} webhook URL (Sent tab → Change webhook).` : '')); }
     document.body.removeChild(panel);
   }
   setBtn(orig);
