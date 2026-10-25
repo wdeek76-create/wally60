@@ -1094,15 +1094,27 @@ function loadState() {
       console.warn('[nfl-tracker] removed', gone.length, 'anytime TD picks (backed up in nfl_anytime_td_removed_backup)');
     }
   } catch(e) { console.warn('Anytime TD cleanup failed:', e); }
+  // One-time: put back any "+ Add Pick" picks the no-name cleanup below removed (it used to treat
+  // a one-word name as junk). They're in nfl_noname_removed_backup.
+  try {
+    if (!localStorage.getItem('nfl_manual_restore_v1')) {
+      const bk = JSON.parse(localStorage.getItem('nfl_noname_removed_backup') || '[]');
+      const ens = propsBySource.ensemble || (propsBySource.ensemble = []);
+      const back = bk.filter(x => x && x.src === 'ensemble' && _isManualPick({ ...x, source: x.source || 'ensemble' }) && !ens.some(e => e.id === x.id));
+      back.forEach(x => { const { src, ...pick } = x; ens.push(pick); });
+      if (back.length) { localStorage.setItem(storageKey('ensemble'), JSON.stringify(ens)); console.warn('[nfl-tracker] restored', back.length, 'hand-added Ensemble picks:', back.map(x => x.player).join(', ')); }
+      localStorage.setItem('nfl_manual_restore_v1', String(Date.now()));
+    }
+  } catch(e) { console.warn('Manual pick restore failed:', e); }
   // Picks saved with no real player name (e.g. "Rec Yds") can't be bet or graded — clear them.
   // Removed rows are kept in nfl_noname_removed_backup in case anything needs restoring.
   try {
     const removed = [];
     [...SOURCES, 'ensemble'].forEach(src => {
       const arr = propsBySource[src] || [];
-      const keep = arr.filter(p => _validPlayerName(p && p.player));
+      const keep = arr.filter(p => _validPlayerName(p && p.player) || _isManualPick(p));
       if (keep.length !== arr.length) {
-        arr.filter(p => !_validPlayerName(p && p.player)).forEach(p => removed.push({ src, ...p }));
+        arr.filter(p => !_validPlayerName(p && p.player) && !_isManualPick(p)).forEach(p => removed.push({ src, ...p }));
         propsBySource[src] = keep;
         localStorage.setItem(storageKey(src), JSON.stringify(keep));
       }
@@ -1387,11 +1399,11 @@ function syncPropsAlias() {
     // Yardage OFF hides EVERY yardage pick on this tab -- pending AND graded -- exactly
     // like the original. (A change that kept graded yardage bets counted with the
     // toggle off is what inflated 133 props to ~299.)
-    const allYds = _noYards ? all.filter(p => !_YARDAGE_MARKETS.has(p.market)) : all;
+    const allYds = _noYards ? all.filter(p => !_YARDAGE_MARKETS.has(p.market) || _isManualPick(p)) : all;
     const sel = document.getElementById('ensTierSel');
     const mode = sel ? sel.value : 'all';
-    props = mode === 'all' ? allYds : allYds.filter(p => mode === 'strong' ? p.tier === 'strong' : p.tier !== 'strong');
-    if (_ensNewOnly) props = props.filter(_isNewPick);
+    props = mode === 'all' ? allYds : allYds.filter(p => _isManualPick(p) || (mode === 'strong' ? p.tier === 'strong' : p.tier !== 'strong'));
+    if (_ensNewOnly) props = props.filter(p => _isNewPick(p) || _isManualPick(p));
     props._unfiltered = allYds;
   } else {
     if (!propsBySource[currentSource]) propsBySource[currentSource] = [];
@@ -1706,7 +1718,7 @@ function computeEnsembleProps() {
   // Include stored ensemble bets not currently 3+/4 anymore — also backfill play-to
   // for anything that predates the freeze (same one-time-then-never-again rule).
   stored.forEach(s => {
-    if (!s.playTo) { s.playTo = _ensemblePlayTo(s); storeDirty = true; }
+    if (!s.playTo || (_isManualPick(s) && !s.playTo.odds)) { s.playTo = _isManualPick(s) ? { odds: String(s.odds), src: 'manual', ev: s.ev || null } : _ensemblePlayTo(s); storeDirty = true; }
     const alreadyIn = ensemble.some(e => e.id === s.id);
     if (!alreadyIn) ensemble.push(s);
   });
@@ -1904,6 +1916,8 @@ function submitManualAdd() {
     gameTime: g('maGameTime'), date: g('maDate') || getTodayStr(),
     result: '', notes: '', actual: null, pnl: null,
     ensembleSources: [], altLines: [], standaloneAgrees: [],
+    createdAt: Date.now(),                                        // counts as "New"
+    playTo: { odds: String(odds), src: 'manual', ev: isNaN(ev) ? null : ev }, // card's play-to = the odds you entered
   };
   if (!propsBySource.ensemble) propsBySource.ensemble = [];
   propsBySource.ensemble.push(entry);
@@ -2055,6 +2069,9 @@ function _isMarketLike(s) {
   const words = String(s || '').toLowerCase().replace(/[^a-z\s]/g, ' ').split(/\s+/).filter(Boolean);
   return words.length > 0 && words.every(w => _MKT_WORDS.has(w));
 }
+// A pick you typed in with "+ Add Pick": it stays no matter what — no cleanup, filter or live re-check
+// removes or hides it; only its own delete button does.
+function _isManualPick(p) { return !!(p && p.manual === true && (p.source === 'ensemble' || String(p.id || '').startsWith('ens_manual_'))); }
 function _validPlayerName(s) {
   const n = String(s || '').trim();
   if (n.length < 4 || !/[a-z]/i.test(n)) return false;
@@ -4922,7 +4939,7 @@ async function testParlay() {
 // For yardage markets, only send if every source's projection sits on the correct side of ITS line.
 // Under → proj < line. Over → proj > line. Sources without a stored proj are ignored.
 function _projAgreesWithSide(p) {
-  if (!_YARDAGE_MARKETS.has(p.market)) return true;
+  if (!_YARDAGE_MARKETS.has(p.market) || _isManualPick(p)) return true;
   const srcs = Array.isArray(p.ensembleSources) ? p.ensembleSources : [];
   const withProj = srcs.filter(s => s.proj !== null && s.proj !== undefined && !isNaN(s.proj));
   if (!withProj.length) return false; // no projection captured → don't send yardage
@@ -4939,7 +4956,7 @@ function _saveEnsDashSettings() {
   try { if (localStorage.getItem('nfl_ens_dash_settings') !== next) localStorage.setItem('nfl_ens_dash_settings', next); } catch (e) {}
 }
 function toggleNoYards() { _noYards = !_noYards; render(); }
-function _yardsOk(p) { return !_noYards || !_YARDAGE_MARKETS.has(p.market); }
+function _yardsOk(p) { return !_noYards || !_YARDAGE_MARKETS.has(p.market) || _isManualPick(p); }
 // Shared "has this game already kicked off" check — used to drop a pending play from
 // Copy Plays / Copy Ensemble / Nick & Discord cards once its game has started, so a
 // backlog of ungraded-but-already-played props (nothing left "in play" to bet) doesn't
@@ -4976,7 +4993,7 @@ const NEW_WINDOW_HOURS = 8;
 let _ensNewOnly = false;
 function toggleNewOnly() { _ensNewOnly = !_ensNewOnly; render(); }
 function _isNewPick(p) { return !!(p.createdAt) && (Date.now() - p.createdAt) <= NEW_WINDOW_HOURS * 3600000; }
-function _newOk(p) { return !_ensNewOnly || _isNewPick(p); }
+function _newOk(p) { return !_ensNewOnly || _isNewPick(p) || _isManualPick(p); }
 // Send-time re-check — a tracked pick's own line/odds/ev stay frozen (that's intentional,
 // it's your record of what you actually bet), but before it goes OUT in a send we verify
 // its agreeing sources still currently back it on their live present-day numbers, not just
@@ -4995,6 +5012,7 @@ function _stillGoodLive(p) {
   return confirming >= ENSEMBLE_MIN_AGREE;
 }
 function _tierOk(p) {
+  if (_isManualPick(p)) return true;
   const sel = document.getElementById('ensTierSel');
   const mode = sel ? sel.value : 'all';
   if (mode === 'all') return true;
@@ -5688,7 +5706,7 @@ async function makeDiscordCard(mode = 'partners', opts = {}) {
         const ensembleWithLive = (p.ensembleSources || []).map(x => ({ ...x, liveEv: _liveEvForSource(x, liveBest && liveBest.price) }));
         const qualEnsemble = ensembleWithLive.filter(x => x.liveEv == null || x.liveEv >= 5);
         const staleEnsemble = ensembleWithLive.filter(x => x.liveEv != null && x.liveEv < 5);
-        if (qualEnsemble.length < ENSEMBLE_MIN_AGREE) { console.log('[card] dropped (live re-check <', ENSEMBLE_MIN_AGREE, 'of 4 main sources still 5%+ at current price):', p.player, p.side + p.line, mkt, staleEnsemble.map(s => s.src + ' now ' + s.liveEv.toFixed(1) + '%')); return; }
+        if (qualEnsemble.length < ENSEMBLE_MIN_AGREE && !_isManualPick(p)) { console.log('[card] dropped (live re-check <', ENSEMBLE_MIN_AGREE, 'of 4 main sources still 5%+ at current price):', p.player, p.side + p.line, mkt, staleEnsemble.map(s => s.src + ' now ' + s.liveEv.toFixed(1) + '%')); return; }
         const standaloneWithLive = (Array.isArray(p.standaloneAgrees) ? p.standaloneAgrees : []).map(a =>
           (a.src === 'blitz' || a.ev == null || !a.odds) ? { ...a, liveEv: null } : { ...a, liveEv: _liveEvForSource(a, liveBest && liveBest.price) });
         const qualStandalone = standaloneWithLive.filter(a => a.src === 'blitz' || a.liveEv == null || a.liveEv >= 0);
