@@ -5614,6 +5614,75 @@ async function copySentWeek(wk) {
   const ok = await _copyText(_sentTextOf(list));
   if (!ok) prompt('Copy these:', _sentTextOf(list));
 }
+// ── Discord recap: same layout as Copy Week Recap. Week line + picks = what went out on Discord
+// (Sent tab, card prices); MTD / YTD = the overall model — Ensemble with the dashboard's tier +
+// Yardage settings, the same set the other recap uses.
+function _modelProps() {
+  let all = []; try { all = computeEnsembleProps(); } catch (e) { return []; }
+  if (_noYards) all = all.filter(p => !_YARDAGE_MARKETS.has(p.market) || _isManualPick(p));
+  const sel = document.getElementById('ensTierSel'), mode = sel ? sel.value : 'all';
+  return mode === 'all' ? all : all.filter(p => _isManualPick(p) || (mode === 'strong' ? p.tier === 'strong' : p.tier !== 'strong'));
+}
+function buildSentRecapText(weekKey) {
+  const isSettled = p => p.result === 'win' || p.result === 'loss' || p.result === 'push';
+  const sent = loadSent().filter(e => isoWeek(e.date) === weekKey);
+  if (!sent.length) return null;
+  const wr = weekRange(weekKey), end = wr.end || '9999-12-31';
+  const fmtPnl = n => (n >= 0 ? '+' : '') + n.toFixed(2) + 'u';
+  const u = n => { const v = Number(Number(n).toFixed(2)); return (v >= 0 ? '+' : '') + v + 'u'; };
+  const rec = arr => { const st = calcStats(arr); return st.w + '-' + st.l + (st.pu ? '-' + st.pu : '') + ' ' + fmtPnl(st.pnl); };
+  const model = _modelProps().filter(p => isSettled(p) && (p.date || '') && p.date <= end);
+  const out = ['NFL Props', wr.label.replace(/[–—]/g, '-') + ': ' + rec(sent),
+    'MTD: ' + rec(model.filter(p => p.date.slice(0, 7) === end.slice(0, 7))),
+    'YTD: ' + rec(model.filter(p => p.date.slice(0, 4) === end.slice(0, 4))), ''];
+  const settled = sent.filter(isSettled);
+  const byImpact = arr => arr.slice().sort((a, b) => Math.abs(b.pnl || 0) - Math.abs(a.pnl || 0));
+  const line = e => {
+    const act = e.actual !== null && e.actual !== undefined && e.actual !== '' ? ' (' + e.actual + ')' : '';
+    const res = e.result === 'win' ? 'WIN' + act + ' = ' + u(e.pnl || 0) : e.result === 'loss' ? 'LOSS' + act + ' = ' + u(e.pnl || 0) : 'PUSH' + act;
+    return e.player + (e.team ? ' (' + e.team + ')' : '') + ': ' + (e.side === 'U' ? 'u' : 'o') + e.line + ' ' + _sentMktLabel(e.market) + ' ' + e.odds + ' ' + res;
+  };
+  byImpact(settled.filter(e => e.result === 'win')).forEach(e => out.push(line(e)));
+  byImpact(settled.filter(e => e.result === 'loss')).forEach(e => out.push(line(e)));
+  const pushes = settled.filter(e => e.result === 'push');
+  if (pushes.length) { out.push(''); pushes.forEach(e => out.push(line(e))); }
+  const pending = sent.filter(e => !isSettled(e));
+  if (pending.length) { out.push(''); out.push('Pending: ' + pending.map(e => e.player + ' ' + (e.side === 'U' ? 'u' : 'o') + e.line + ' ' + _sentMktLabel(e.market)).join(', ')); }
+  return out.join('\n');
+}
+function _sentRecapWeek() { const el = document.getElementById('sentRecapWeek'); return el ? el.value : ''; }
+function showSentRecap() { const t = buildSentRecapText(_sentRecapWeek()); const pre = document.getElementById('sentRecapPre'); if (pre) pre.textContent = t || 'Nothing sent that week.'; }
+async function copySentRecap() {
+  const t = buildSentRecapText(_sentRecapWeek()); if (!t) return;
+  const ok = await _copyText(t); const m = document.getElementById('sentRecapMsg');
+  if (ok) { if (m) m.textContent = '✓ Copied'; } else prompt('Copy this:', t);
+}
+async function postSentRecap() {
+  const t = buildSentRecapText(_sentRecapWeek()); if (!t) return;
+  const hook = _discordHook('partners') || setDiscordWebhook('partners'); if (!hook) return;
+  if (!confirm('Post this recap to the Partners Discord channel?\n\n' + t.slice(0, 600) + (t.length > 600 ? '\n…' : ''))) return;
+  const m = document.getElementById('sentRecapMsg');
+  try {
+    const fd = new FormData();
+    fd.append('payload_json', JSON.stringify({ content: '```\n' + t.slice(0, 1990 - 8) + '\n```', allowed_mentions: { parse: [] } }));
+    await fetch(hook, { method: 'POST', body: fd, mode: 'no-cors' });
+    if (m) m.textContent = '✓ Posted';
+  } catch (e) { if (m) m.innerHTML = '<span class="neg">Post failed: ' + escHtml(e.message) + '</span>'; }
+}
+function storagePanelHtml() {
+  const r = _storageReport(), mb = n => (n / 1048576).toFixed(2) + ' MB', cap = 5 * 1048576;
+  const pct = Math.min(100, Math.round(r.total / cap * 100));
+  const col = r.full || pct >= 90 ? 'var(--red)' : pct >= 70 ? 'var(--amber)' : 'var(--teal)';
+  return `<div class="panel"><div class="panel-head"><span class="panel-title">Storage</span><span class="muted" style="font-size:11px">this browser, this site — shared with every source's saved props and the Blender (about 5 MB max)</span></div>
+    <div class="panel-body" style="font-size:12px;display:flex;flex-direction:column;gap:8px">
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><b style="color:${col}">${mb(r.total)} used${r.full ? ' · FULL — saves are failing' : ' · ~' + pct + '%'}</b>
+        <div style="flex:1;min-width:160px;max-width:360px;height:8px;border-radius:4px;background:var(--bg3,#222);overflow:hidden"><div style="width:${r.full ? 100 : pct}%;height:100%;background:${col}"></div></div>
+        <span class="dim">Sent list backup database: ${_sentIdbOk === false ? '<b class="neg">not working</b>' : _sentIdbOk ? '<b class="pos">working ✓</b>' : 'checking…'}</span>
+        <button class="btn ghost" onclick="freeStorageSpace()">Clear old backup copies</button></div>
+      <table class="tbl"><thead><tr><th>Biggest saved items</th><th class="r">Size</th></tr></thead><tbody>
+        ${r.rows.slice(0, 10).map(([k, n]) => `<tr><td class="mono">${escHtml(k)}${_SAFE_TO_CLEAR.includes(k) ? ' <span class="dim">(old backup — safe to clear)</span>' : ''}</td><td class="r mono">${mb(n)}</td></tr>`).join('')}
+      </tbody></table></div></div>`;
+}
 function renderSent() {
   const wrap = document.getElementById('wrap');
   const arr = refreshSentGrades();
@@ -5639,8 +5708,17 @@ function renderSent() {
         ${weeksSent.length ? 'Copy text: ' + weeksSent.slice(0, 4).map(w => `<button class="btn ghost" onclick="copySentWeek('${w}')">${escHtml(weekRange(w).label.split(' (')[0])}${w === thisWk ? ' (this week)' : ''}</button>`).join('') : ''}
         <span id="sentPasteMsg"></span>
       </div></div></div>`;
+  const recapBox = weeksSent.length ? `<div class="panel"><div class="panel-head"><span class="panel-title">Discord recap</span><span class="muted" style="font-size:11px">week line + picks = what went out on Discord · MTD / YTD = the overall model (Ensemble, dashboard settings)</span></div>
+    <div class="panel-body" style="display:flex;flex-direction:column;gap:8px;font-size:12px">
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <select id="sentRecapWeek" class="sel" onchange="showSentRecap()">${weeksSent.map(w => `<option value="${w}">${escHtml(weekRange(w).label)}</option>`).join('')}</select>
+        <button class="btn primary" onclick="copySentRecap()">⧉ Copy recap</button>
+        <button class="btn ghost" style="color:#a5b4fc;border-color:rgba(129,140,248,0.4)" onclick="postSentRecap()">📤 Post to Discord</button>
+        <span id="sentRecapMsg" class="pos"></span></div>
+      <pre id="sentRecapPre" class="mono" style="margin:0;white-space:pre-wrap;background:var(--bg,#111);border:1px solid var(--border,#333);border-radius:8px;padding:10px;max-height:340px;overflow:auto">${escHtml(buildSentRecapText(weeksSent[0]) || '')}</pre>
+    </div></div>` : '';
   if (!arr.length) {
-    wrap.innerHTML = hookBar + pasteBox + `<div class="empty"><h3>Nothing sent yet</h3><p>Go to the <strong>Ensemble</strong> source and hit <strong>📤 Send to Discord</strong>. Every pick on that card gets tracked here.</p></div>`;
+    wrap.innerHTML = hookBar + pasteBox + storagePanelHtml() + `<div class="empty"><h3>Nothing sent yet</h3><p>Go to the <strong>Ensemble</strong> source and hit <strong>📤 Send to Discord</strong>. Every pick on that card gets tracked here.</p></div>`;
     return;
   }
   const _pnlOf = a => calcStats(a).pnl;
@@ -5677,7 +5755,7 @@ function renderSent() {
     <div class="panel"><div class="panel-head"><span class="panel-title">Sent Picks</span><span class="muted" style="font-size:11px">P&L at the best price on the card, 1u to win (risk 1u on plus money)</span></div>
       <div class="panel-body compact" style="overflow-x:auto"><table class="tbl">
         <thead><tr><th>Player</th><th class="c">Market</th><th class="c">Side</th><th class="c">Price on card</th><th class="c">Result</th><th class="r">P&L</th><th class="r"></th></tr></thead>
-        <tbody>${picks}</tbody></table></div></div>`;
+        <tbody>${picks}</tbody></table></div></div>` + recapBox + storagePanelHtml();
 }
 
 // ===== DISCORD CARD (ensemble 10%+ plays as one image) =====

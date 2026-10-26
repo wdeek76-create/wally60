@@ -47,3 +47,11 @@ SENT TAB: TEXT VERSION + PASTE
 - "Paste sent picks" on the Sent tab adds lines in that format (your results format works too:
   "Bo Nix: o32.5 Pass Att -115 LOSS (29) = -1.15u"). WIN/LOSS/PUSH on a line grades it; a line
   without one grades itself from any source's graded actual for that player + market.
+
+DISCORD RECAP + STORAGE (Sent tab)
+- Discord recap: pick a week -> preview, "Copy recap", or "Post to Discord" (Partners webhook,
+  plain text, no role tag). Same layout as Copy Week Recap: the Week line and the pick lines are
+  what went out on Discord (card prices); MTD / YTD are the overall model (Ensemble with the
+  dashboard's tier + Yardage settings).
+- Storage: how much of this browser's ~5 MB is used, the biggest saved items, and whether the
+  Sent list's backup database works. "Clear old backup copies" removes only old cleanup backups.
