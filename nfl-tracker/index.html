@@ -1094,6 +1094,19 @@ function loadState() {
       console.warn('[nfl-tracker] removed', gone.length, 'anytime TD picks (backed up in nfl_anytime_td_removed_backup)');
     }
   } catch(e) { console.warn('Anytime TD cleanup failed:', e); }
+  // Strip images that got saved inside picks (Discord card headshots — see makeDiscordCard). They
+  // filled the browser's storage (Ensemble alone ~4 MB); the card fetches headshots fresh anyway.
+  try {
+    const isImg = v => typeof v === 'string' && v.length > 200 && v.startsWith('data:');
+    let freed = 0;
+    [...SOURCES, 'ensemble'].forEach(src => {
+      const arr = propsBySource[src]; if (!Array.isArray(arr)) return;
+      let dirty = false;
+      arr.forEach(p => { if (!p || typeof p !== 'object') return; Object.keys(p).forEach(k => { if (k === '_ooHead' || isImg(p[k])) { freed += String(p[k] || '').length * 2; delete p[k]; dirty = true; } }); });
+      if (dirty) { try { localStorage.setItem(storageKey(src), JSON.stringify(arr)); } catch (e) { console.warn('[nfl-tracker] image strip save failed for', src, e && e.name); } }
+    });
+    if (freed) console.warn('[nfl-tracker] removed saved card images from picks: ~' + (freed / 1048576).toFixed(2) + ' MB freed');
+  } catch (e) { console.warn('Image strip failed:', e); }
   // One-time: put back any "+ Add Pick" picks the no-name cleanup below removed (it used to treat
   // a one-word name as junk). They're in nfl_noname_removed_backup.
   try {
@@ -5901,8 +5914,11 @@ async function makeDiscordCard(mode = 'partners', opts = {}) {
     const ooUrl = ev ? (ev.home === a ? ev.homeLogo : ev.awayLogo) : null;
     logos[a] = (ooUrl && await _uriFor(ooUrl)) || await _teamLogo(a);
   }
-  // OpticOdds headshots via player_id on the odds rows → /players
-  const ooHeads = {};
+  // OpticOdds headshots via player_id on the odds rows → /players. Kept in a local map (by player),
+  // NOT on the pick: picks are the saved Ensemble objects, and an image stored on them got saved
+  // too — ~10-50 KB per pick, which is what filled the browser's storage.
+  const ooHeads = {}, ooHeadByPlayer = {};
+  const _ooHeadOf = p => ooHeadByPlayer[p.player] || null;
   {
     const pidByPlay = {};
     plays.forEach(p => { const r = (oddsByGame[p.game || ''] || []).find(o => o.player_id && _ooNormName(o.selection || o.name) === _ooNormName(p.player)); if (r) pidByPlay[p.player] = r.player_id; });
@@ -5911,12 +5927,12 @@ async function makeDiscordCard(mode = 'partners', opts = {}) {
       try { const r = await opticodds.fetch('/players', { id: pids.slice(i, i + 10) }); (r?.data || []).forEach(d => { if (d?.id && d.logo) ooHeads[d.id] = d.logo; }); } catch (e) {}
     }
     setBtn('Loading headshots…');
-    for (const [player, pid] of Object.entries(pidByPlay)) { if (ooHeads[pid]) { const uri = await _uriFor(ooHeads[pid]); if (uri) plays.filter(p => p.player === player).forEach(p => { p._ooHead = uri; }); } }
+    for (const [player, pid] of Object.entries(pidByPlay)) { if (ooHeads[pid]) { const uri = await _uriFor(ooHeads[pid]); if (uri) ooHeadByPlayer[player] = uri; } }
   }
 
   // Headshots: need ESPN athlete IDs. If any play lacks one, (re)load rosters —
   // force a fresh pull if the cache predates ID support (values are strings, not {team,id}).
-  const needIds = plays.some(p => !p.espnId && !p._ooHead);
+  const needIds = plays.some(p => !p.espnId && !_ooHeadOf(p));
   if (needIds) {
     setBtn('Loading rosters…');
     const cache = _loadRosterCache();
@@ -5927,7 +5943,7 @@ async function makeDiscordCard(mode = 'partners', opts = {}) {
   }
   setBtn('Loading headshots…');
   const heads = {};
-  for (const p of plays) { if (!p._ooHead && p.espnId && heads[p.espnId] === undefined) heads[p.espnId] = await _headshot(p.espnId); }
+  for (const p of plays) { if (!_ooHeadOf(p) && p.espnId && heads[p.espnId] === undefined) heads[p.espnId] = await _headshot(p.espnId); }
   console.log('[card] headshots:', Object.values(heads).filter(Boolean).length, '/', plays.length, 'plays');
 
   // Group by date, then build cards
@@ -5992,7 +6008,7 @@ async function makeDiscordCard(mode = 'partners', opts = {}) {
       });
       const teamLogo = p.team && logos[p.team] ? `<img src="${logos[p.team]}" style="width:16px;height:16px;object-fit:contain;vertical-align:-3px;margin-right:4px">` : '';
       const hs = Math.round(62 * F);
-      const headUri = p._ooHead || (p.espnId && heads[p.espnId]) || null;
+      const headUri = _ooHeadOf(p) || (p.espnId && heads[p.espnId]) || null;
       const head = headUri ? `<div style="display:flex;justify-content:center"><div style="width:${hs}px;height:${hs}px;border-radius:50%;overflow:hidden;background:#111827;border:2px solid #1e293b"><img src="${headUri}" style="width:100%;height:100%;object-fit:cover"></div></div>` : '';
       return `
         <div style="background:#0b0f19;border:1px solid #1e293b;border-radius:${Math.round(16*F)}px;padding:${Math.round(14*F)}px;display:flex;flex-direction:column;gap:${Math.round(10*F)}px;box-shadow:0 0 0 1px rgba(59,130,246,.06) inset;font-size:${F}em">
@@ -6054,7 +6070,7 @@ async function makeDiscordCard(mode = 'partners', opts = {}) {
         const pt = _ooPlayTo(p) || _playToForPool(qualEnsemble);
         const srcs = qualEnsemble.slice().sort((a,b) => _evOf(a) - _evOf(b)); // lowest LIVE edge first — the one the play-to anchors to
         const n = qualEnsemble.length + qualStandalone.length; const gradeColor = n >= 4 ? '#4ade80' : '#fbbf24';
-        const headUri = p._ooHead || (p.espnId && heads[p.espnId]) || null;
+        const headUri = _ooHeadOf(p) || (p.espnId && heads[p.espnId]) || null;
         const headImg = headUri ? `<img src="${headUri}" style="width:56px;height:56px;border-radius:50%;object-fit:cover;background:#111827;border:2px solid #1e293b">` : `<div style="width:56px;height:56px;border-radius:50%;background:#111827;border:2px solid #1e293b"></div>`;
         const t = _matchupTeams(p.game) || ['',''];
         const clears = o => _ooPlayable(o.price, pt?.odds);
