@@ -1215,7 +1215,7 @@ let bets = [];
 let modalPlayer = "";
 let modalPos = "";
 
-const BOOKS = ["FanDuel","DraftKings","Onyx","Prop Builder","Fliff","Novig","ProphetX","Bookmaker","Pinnacle","Bet105","Kambi","Caesars","Hard Rock","BetMGM","Other"];
+const BOOKS = ["FanDuel","DraftKings","Onyx","Props Builder","Fliff","Novig","ProphetX","Bookmaker","Pinnacle","Bet105","Kambi","Caesars","Hard Rock","BetMGM","Other"];
 
 // Use IndexedDB for unlimited bet storage
 let db = null;
@@ -1245,12 +1245,15 @@ function initDB() {
 // reload even after IndexedDB had moved on — "random old bets" coming
 // back. Both stores are now kept in sync on every save, and cleared
 // together (clearNhlAllCache) so "start fresh" actually means fresh.
+// The book is "Props Builder" (was labelled "Prop Builder"): rename it in anything already saved — bet books,
+// CLV keys, alt-book lists — so old and new bets count together.
+function _nhlPbRename(x) { try { const t = JSON.stringify(x); return t.indexOf('"Prop Builder"') < 0 ? x : JSON.parse(t.split('"Prop Builder"').join('"Props Builder"')); } catch (e) { return x; } }
 function loadBetsFromLocalStorage() {
   try {
     const raw = localStorage.getItem("nhl_blender_bets");
     if (raw) {
       const parsed = JSON.parse(raw);
-      if (parsed && parsed.length > 0) bets = parsed.sort((a,b) => b.id - a.id);
+      if (parsed && parsed.length > 0) bets = _nhlPbRename(parsed).sort((a,b) => b.id - a.id);
     }
   } catch(e) {}
 }
@@ -1263,7 +1266,7 @@ function loadBets() {
         const req = store.getAll();
         req.onsuccess = () => {
           const fromDb = req.result || [];
-          if (fromDb.length > 0) { bets = fromDb.sort((a,b) => b.id - a.id); resolve(); return; }
+          if (fromDb.length > 0) { const before = JSON.stringify(fromDb); bets = _nhlPbRename(fromDb).sort((a,b) => b.id - a.id); if (JSON.stringify(bets).length !== before.length) saveBets(); resolve(); return; }
           loadBetsFromLocalStorage(); // IndexedDB empty (e.g. cleared without also clearing localStorage) — fall back
           resolve();
         };
@@ -1598,10 +1601,11 @@ function _nhlBetDayMs(b) {
   if (m) return new Date(+m[1], +m[2] - 1, +m[3]).getTime();
   const d = new Date(t); return isNaN(d.getTime()) ? NaN : new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
 }
-function buildNhlRecapText() {
+function buildNhlRecapText(opts) {
+  opts = opts || {};
   const settled = bets.filter(b => b.result && b.result !== "pending" && !isNaN(_nhlBetDayMs(b)));
   if (!settled.length) return null;
-  const targetMs = Math.max(...settled.map(_nhlBetDayMs));
+  const targetMs = opts.dayMs != null ? opts.dayMs : Math.max(...settled.map(_nhlBetDayMs));
   const dayBets = settled.filter(b => _nhlBetDayMs(b) === targetMs);
   const hits = dayBets.filter(b => b.result === "hit"), misses = dayBets.filter(b => b.result === "miss"), voids = dayBets.filter(b => b.result === "void");
   const now = new Date();
@@ -1618,13 +1622,19 @@ function buildNhlRecapText() {
   const fmt = (label, r) => `${label} ${r.w}-${r.l} ${r.pl >= 0 ? "+" : ""}${r.pl.toFixed(2)}u`;
   const td = new Date(targetMs);
   const dayRec = { w: hits.length, l: misses.length, pl: hits.reduce((a, b) => a + b.toWin, 0) - misses.reduce((a, b) => a + b.stake, 0) };
-  const lines = ["NHL Props", fmt(`${td.getMonth() + 1}/${td.getDate()}:`, dayRec), fmt("WTD:", acc.wtd), fmt("MTD:", acc.mtd), fmt("YTD:", acc.ytd), ""];
+  // CLV (opts.clv): average cents vs the Pinnacle / FanDuel / Props Builder closes, for the day and each pick.
+  const clvOf = b => (typeof _nhlBetClvCents === "function" ? _nhlBetClvCents(b) : null);
+  const cents = c => `${c >= 0 ? "+" : ""}${c.toFixed(1)}¢`;
+  const dayClv = dayBets.map(clvOf).filter(c => c != null);
+  const dayLine = fmt(`${td.getMonth() + 1}/${td.getDate()}:`, dayRec) + (opts.clv && dayClv.length ? ` · CLV ${cents(dayClv.reduce((a, c) => a + c, 0) / dayClv.length)} (beat ${dayClv.filter(c => c > 0).length}/${dayClv.length})` : "");
+  const lines = ["NHL Props", dayLine, fmt("WTD:", acc.wtd), fmt("MTD:", acc.mtd), fmt("YTD:", acc.ytd), ""];
   const u = n => String(Number(Number(n).toFixed(2)));
   const line = b => {
     const actual = (b.actual != null && b.result !== "void") ? ` (${Number.isInteger(Number(b.actual)) ? Number(b.actual) : Number(b.actual).toFixed(1)})` : "";
     const when = (b.hitAtTime && _nhlHasCrossMoment(b)) ? ` @ ${b.hitAtTime}` : ""; // when the over cashed / the under lost
     const res = b.result === "hit" ? `WIN${actual}${when} = +${u(b.toWin)}u` : b.result === "miss" ? `LOSS${actual}${when} = -${u(b.stake)}u` : "VOID";
-    return `${b.player}${b.team ? ` (${b.team})` : ""}: ${String(b.ou || "").toLowerCase().startsWith("u") ? "u" : "o"}${b.line} ${String(b.stat || "").toUpperCase()} ${b.odds > 0 ? "+" + b.odds : b.odds} ${res}`;
+    const c = opts.clv ? clvOf(b) : null;
+    return `${b.player}${b.team ? ` (${b.team})` : ""}: ${String(b.ou || "").toLowerCase().startsWith("u") ? "u" : "o"}${b.line} ${String(b.stat || "").toUpperCase()} ${b.odds > 0 ? "+" + b.odds : b.odds} ${res}${c != null ? ` · CLV ${cents(c)}` : ""}`;
   };
   hits.slice().sort((a, b) => b.toWin - a.toWin).forEach(b => lines.push(line(b)));
   misses.slice().sort((a, b) => b.stake - a.stake).forEach(b => lines.push(line(b)));
@@ -2594,7 +2604,7 @@ function _nhlBetMatchesFixture(b, x) {
 const NHL_SOLO_MIN_EV = 1;
 const NHL_SOLO_BUCKETS = [["1-3%", 1, 3], ["3-5%", 3, 5], ["5-10%", 5, 10], ["10%+", 10, Infinity]];
 let nhlSoloLog = [];
-try { nhlSoloLog = JSON.parse(localStorage.getItem("nhl_solo_src_log") || "[]") || []; } catch (e) { nhlSoloLog = []; }
+try { nhlSoloLog = _nhlPbRename(JSON.parse(localStorage.getItem("nhl_solo_src_log") || "[]") || []); } catch (e) { nhlSoloLog = []; }
 let _nhlSoloGrading = false;
 function _nhlSoloClearOpen() {
   const n = nhlSoloLog.filter(x => x.result === "pending").length;
@@ -2714,18 +2724,18 @@ function renderNhlSoloTab() {
       <button onclick="gradeNhlSoloLog(true)" style="background:#0066cc;border:none;color:#fff;border-radius:5px;padding:4px 10px;font-size:12px;font-weight:700;cursor:pointer;">Grade now</button>
       <button onclick="_nhlSoloClearOpen()" style="background:transparent;border:1px solid #f8717155;color:#f87171;border-radius:5px;padding:4px 10px;font-size:12px;font-weight:700;cursor:pointer;">Clear open</button>
     </div>
-    <div style="font-size:12px;color:#9fb8d6;margin-bottom:14px;">Logged on every model run: each source's projection on every line and side, at the best Pinnacle / Prop Builder / FanDuel / Bet105 price then (earlier rows came from PropShop pastes). Bet or not, separate from the tracker; pushes and DNPs don't count.</div>
+    <div style="font-size:12px;color:#9fb8d6;margin-bottom:14px;">Logged on every model run: each source's projection on every line and side, at the best Pinnacle / Props Builder / FanDuel / Bet105 price then (earlier rows came from PropShop pastes). Bet or not, separate from the tracker; pushes and DNPs don't count.</div>
     ${nhlSoloLog.length ? tables : `<div style="color:#9fb8d6;font-size:13px;">Nothing logged yet — paste a source on the Results tab and its ${NHL_SOLO_MIN_EV}%+ lines start showing up here.</div>`}`;
 }
 // ── MODEL ─────────────────────────────────────────────────────────────────
 // Our own version of the ensemble, no PropShop: each uploaded CSV projection → Poisson hit chance
 // (the exact math PropShop's % comes from) → EV at the best live trusted-book price
-// (Pinnacle / Prop Builder / FanDuel / Bet105). Same gate as the ensemble: 3 sources at 3%+ and none
+// (Pinnacle / Props Builder / FanDuel / Bet105). Same gate as the ensemble: 3 sources at 3%+ and none
 // negative; a player one source doesn't project at all needs all 3 others at 3%+.
 // Each run's picks are saved to their own log (flat 1u at the run's price) and graded — kept apart
 // from the tracker, so it can be compared against the PropShop ensemble before trusting it.
 let nhlModelLog = [];
-try { nhlModelLog = JSON.parse(localStorage.getItem("nhl_model_log") || "[]") || []; } catch (e) { nhlModelLog = []; }
+try { nhlModelLog = _nhlPbRename(JSON.parse(localStorage.getItem("nhl_model_log") || "[]") || []); } catch (e) { nhlModelLog = []; }
 let _nhlModelRows = null, _nhlModelRunAt = null, _nhlModelBusy = false, _nhlModelGrading = false, _nhlModelPreview = false;
 function _nhlModelSave() { try { localStorage.setItem("nhl_model_log", JSON.stringify(nhlModelLog)); } catch (e) { console.warn("[NHL model] save failed", e); } }
 // One source's CSV projection for a player in this game (name, then team if the name is shared).
@@ -2813,7 +2823,7 @@ async function runNhlModel(opts) {
       });
       const have = Object.keys(projs);
       if (!have.length) continue;
-      // Solo sources: each source on its own, every line and side, at the best Pinnacle / Prop Builder /
+      // Solo sources: each source on its own, every line and side, at the best Pinnacle / Props Builder /
       // FanDuel / Bet105 price now — logged when it's 1%+ (flat 1u, graded on the SOLO SOURCES tab).
       for (const ou of ["over", "under"]) {
         const four = await _nhlLiveBookFor(player, line, ou, iso, [home, away]);
@@ -3119,7 +3129,7 @@ async function shareNhlModelCard() {
 // The ensemble now feeds from the model: every model pick goes to the tracker as an ensemble bet at the live
 // price it qualified at (one per player per day, like before). Only once all 4 sources have projections
 // loaded (CSV or paste) — a source that's simply not loaded yet would otherwise turn 3-of-4 into 3-of-3.
-// Model picks going into the ensemble tracker are priced like the ensemble: best of Pinnacle / Prop Builder /
+// Model picks going into the ensemble tracker are priced like the ensemble: best of Pinnacle / Props Builder /
 // FanDuel / Bet105 right now (exchanges and the rest stay alt books), with every source's EV redone at it.
 async function _nhlToTrackerPrice(r) {
   const gm = String(r.game || "").split("@").map(t => t.trim());
@@ -3334,7 +3344,7 @@ function renderNhlModelTab() {
       <button onclick="_nhlModelClearOpen()" style="background:transparent;border:1px solid #f8717155;color:#f87171;${btn}">Clear open picks</button>
       <button onclick="if(event.shiftKey){setNhlNickWebhook();return;}sendNhlCard('nick')" title="Same card as Send to Nick on the Tracker tab (model picks are in the tracker)" style="background:#0a1628;border:1px solid #0d2035;color:#00aaff;${btn}">🖼 Send to Nick</button>
     </div>
-    <div style="font-size:12px;color:#9fb8d6;margin-bottom:14px;">CSVs loaded: ${loaded.length ? loaded.join(", ") : "none — upload them on the Upload tab"}. Poisson on each projection → EV at the best Pinnacle / Prop Builder / FanDuel / Bet105 price — or Novig / ProphetX / Kalshi when $${NHL_MODEL_EXCH_MIN}+ is available there. Rule: all 4 sources must project the player, 3 at ${NHL_PS_QUAL_EV}%+, none negative. Open picks go straight into the tracker at this price and book. The record below is the same picks, betting to win 1u on favorites and risking 1u on underdogs.</div>
+    <div style="font-size:12px;color:#9fb8d6;margin-bottom:14px;">CSVs loaded: ${loaded.length ? loaded.join(", ") : "none — upload them on the Upload tab"}. Poisson on each projection → EV at the best Pinnacle / Props Builder / FanDuel / Bet105 price — or Novig / ProphetX / Kalshi when $${NHL_MODEL_EXCH_MIN}+ is available there. Rule: all 4 sources must project the player, 3 at ${NHL_PS_QUAL_EV}%+, none negative. Open picks go straight into the tracker at this price and book. The record below is the same picks, betting to win 1u on favorites and risking 1u on underdogs.</div>
     ${_nhlLinkedNamesHtml()}${matchHtml}${records}${_nhlModelOpenHtml()}${today}${_nhlModelHistoryHtml()}`;
 }
 // opts.silent — used by the auto-trigger poll below so it doesn't fight with
@@ -3450,20 +3460,20 @@ async function runAutoGrade(opts) {
 // closing price/points) and .olv (the opening price) once a book has
 // actually closed the market — no need to poll odds ourselves and guess
 // which snapshot was "the close". Tracked against all three books you
-// actually bet at once — Pinnacle, FanDuel, Prop Builder — not a single
+// actually bet at once — Pinnacle, FanDuel, Props Builder — not a single
 // picked reference, since a close against one book alone doesn't say much
 // when your bets are split across all three. A book "closes" a game's
 // market at kickoff/puck-drop, so a given book is only fetched once the
 // fixture's start time has passed.
 // Display labels, mapped to the actual string OpticOdds wants in the
-// `sportsbook` request param — Prop Builder is the one case where those
+// `sportsbook` request param — Props Builder is the one case where those
 // differ (OpticOdds' own name is "Props Builder", with an s; same mismatch
 // that bit the card's book-logo lookup earlier).
-const NHL_CLV_BOOKS = ["Pinnacle", "FanDuel", "Prop Builder"];
-const NHL_CLV_BOOK_REQUEST_NAME = { "Pinnacle": "Pinnacle", "FanDuel": "FanDuel", "Prop Builder": "Props Builder", "Bookmaker": "BookMaker", "BetOnline": "BetOnline" };
-const NHL_CLV_BOOK_SHORT = { "Pinnacle": "PIN", "FanDuel": "FD", "Prop Builder": "PB", "Bookmaker": "BM", "BetOnline": "BOL" };
+const NHL_CLV_BOOKS = ["Pinnacle", "FanDuel", "Props Builder"];
+const NHL_CLV_BOOK_REQUEST_NAME = { "Pinnacle": "Pinnacle", "FanDuel": "FanDuel", "Props Builder": "Props Builder", "Bookmaker": "BookMaker", "BetOnline": "BetOnline" };
+const NHL_CLV_BOOK_SHORT = { "Pinnacle": "PIN", "FanDuel": "FD", "Props Builder": "PB", "Bookmaker": "BM", "BetOnline": "BOL" };
 // Totals closes: sharp books first, then the books we bet at.
-const NHLT_CLOSE_BOOKS = ["Pinnacle", "Bookmaker", "BetOnline", "FanDuel", "Prop Builder"];
+const NHLT_CLOSE_BOOKS = ["Pinnacle", "Bookmaker", "BetOnline", "FanDuel", "Props Builder"];
 // cents: -110 -> -10, +105 -> +5 ; delta = bet - close (positive = you beat the close)
 function _nhlClvCents(betOdds, closeOdds) {
   const c = a => { a = parseInt(a); return isNaN(a) ? null : (a > 0 ? a - 100 : a + 100); };
@@ -3549,7 +3559,7 @@ function _nhlClvLineForBet(bet) {
   }).filter(Boolean);
   return parts.length ? `CLV ${parts.join(" · ")}` : "";
 }
-// Tracker CLV column: one line per book that has a close (Pinnacle / FanDuel / Prop Builder) —
+// Tracker CLV column: one line per book that has a close (Pinnacle / FanDuel / Props Builder) —
 // that book's closing price and your CLV % against it (your price's payout vs the closing price's
 // payout: -130 against a -155 close = +7.5%). "*" = that book had stopped quoting your exact line by
 // the close, so its main-line close is shown with no % (not a like-for-like comparison).
@@ -3617,7 +3627,7 @@ async function manualNhlClvCapture() {
   if (btn) { btn.disabled = true; btn.textContent = "Fetching…"; }
   const n = await runNhlClvCapture({ silent: true });
   if (btn) { btn.disabled = false; btn.textContent = orig; }
-  alert(n ? `CLV set on ${n} bet${n === 1 ? "" : "s"} (Pinnacle/FanDuel/Prop Builder).` : "Nothing to fetch — either every bet already has all 3 closes, or none of your pending games have started yet.");
+  alert(n ? `CLV set on ${n} bet${n === 1 ? "" : "s"} (Pinnacle/FanDuel/Props Builder).` : "Nothing to fetch — either every bet already has all 3 closes, or none of your pending games have started yet.");
 }
 // Auto-trigger: poll every few minutes and grade anything whose game has
 // gone final, with no need to open the Auto Grade tab or click the button.
@@ -3871,7 +3881,7 @@ async function ooCall(endpoint, params) {
 // Same book list, same label mapping, and same anchor-priority tiers as the
 // WNBA/NFL tools — deliberately identical ("same books we use"), not just
 // similar, so a pick that clears here would clear there too:
-//   1. Pinnacle / Prop Builder / FanDuel / Bet105 — if any of these four
+//   1. Pinnacle / Props Builder / FanDuel / Bet105 — if any of these four
 //      clear the gate, the anchor MUST come from this group (lowest price).
 //   2. Exchanges (Novig / ProphetX / Kalshi) — only used when none of the
 //      four above clear.
@@ -3883,7 +3893,7 @@ const OO_BOOKS_REQUEST = ["FanDuel","Prop Builder","Props Builder","Novig","Prop
 // OpticOdds doesn't know can't knock out a chunk of real books; a name that errors is skipped for the session.
 const OO_BOOKS_EXTRA = ["Caesars", "Hard Rock", "Hard Rock Bet", "Kambi"];
 const _ooExtraBad = new Set();
-const OO_BOOK_TO_LABEL = { "caesars":"Caesars", "caesars sportsbook":"Caesars", "hard rock":"Hard Rock", "hard rock bet":"Hard Rock", "hardrockbet":"Hard Rock", "fanduel":"FanDuel", "prop builder":"Prop Builder", "propbuilder":"Prop Builder", "props builder":"Prop Builder", "propsbuilder":"Prop Builder", "novig":"Novig", "prophet x":"ProphetX", "fliff":"Fliff",
+const OO_BOOK_TO_LABEL = { "caesars":"Caesars", "caesars sportsbook":"Caesars", "hard rock":"Hard Rock", "hard rock bet":"Hard Rock", "hardrockbet":"Hard Rock", "fanduel":"FanDuel", "prop builder":"Props Builder", "propbuilder":"Props Builder", "props builder":"Props Builder", "propsbuilder":"Props Builder", "novig":"Novig", "prophet x":"ProphetX", "fliff":"Fliff",
   "draftkings":"DraftKings", "onyx odds":"Onyx", "bookmaker":"Bookmaker", "pinnacle":"Pinnacle",
   "bet105":"Bet105", "courtside":"Courtside", "betrivers":"Kambi", "kambi":"Kambi", "kalshi":"Kalshi", "betmgm":"BetMGM", "betonline":"BetOnline", "betonlineag":"BetOnline" }; // BetMGM: other-books list only — not in NHL_BOOK_PRIORITY, so it never anchors
 const OO_EXCHANGES = ["novig", "prophet x", "kalshi"];
@@ -3908,7 +3918,7 @@ function _nhlBookLabel(raw) {
   return null;
 }
 const _ooChunk = (a, n) => { const o = []; for (let i = 0; i < a.length; i += n) o.push(a.slice(i, i + n)); return o; };
-const NHL_BOOK_PRIORITY = ["Pinnacle", "Prop Builder", "FanDuel", "Bet105"];
+const NHL_BOOK_PRIORITY = ["Pinnacle", "Props Builder", "FanDuel", "Bet105"];
 
 function nhlIsExch(book) {
   // Compare on the normalized key (letters/digits only), not a raw
@@ -4219,7 +4229,7 @@ async function _nhlLiveBookFor(player, line, side, dateIso, teamHints, opts) {
     const lv = side === "over" ? r.overLevels : r.underLevels;
     if (entry.isExch && lv && lv.length) entry.levels = lv;
     allBooks.push(entry);
-    if (nhlBookRank(r.book) < 500) anchorCandidates.push(entry); // best price = Pinnacle / Prop Builder / FanDuel / Bet105; everything else is an alt book
+    if (nhlBookRank(r.book) < 500) anchorCandidates.push(entry); // best price = Pinnacle / Props Builder / FanDuel / Bet105; everything else is an alt book
     else if (opts.exch500 && NHL_MODEL_EXCH.includes(r.book) && _nhlExchDeepEnough(entry, opts.minPrice)) anchorCandidates.push(entry); // deep exchange price ($500+, at or better than play-to when given)
   });
   if (!allBooks.length) return null;
@@ -4382,7 +4392,7 @@ async function scanNhlOpticOdds() {
 // whatever clears the min edge straight off PropShop's own EV% (not
 // recomputed against our STOK/RG/RW/Saber blend — this is a separate track,
 // same as NFL). Player name detection explicitly rejects known sportsbook
-// names (case-insensitively) — "Prop Builder" is two capitalized words and
+// names (case-insensitively) — "Props Builder" is two capitalized words and
 // would otherwise slip past the old lowercase-only heuristic and get logged
 // as a fake player, which is the glitch Brian flagged from the NFL side.
 // ===========================================================================
@@ -4405,7 +4415,7 @@ function _splitPropShopBlocksNhl(raw) {
     if (/^\d/.test(s)) return false;
     if (s.includes('@')) return false;
     if (/^[+-]?\d/.test(s)) return false;
-    if (_PROPSHOP_BOOKS_NHL.has(s.toLowerCase())) return false; // book name, not a player — the "Prop Builder" fix
+    if (_PROPSHOP_BOOKS_NHL.has(s.toLowerCase())) return false; // book name, not a player — the "Props Builder" fix
     const words = s.split(/\s+/);
     if (words.length < 2) return false;
     if (s === s.toLowerCase()) return false; // purely lowercase — likely a book/label
@@ -4484,7 +4494,7 @@ function _extractCellsNhl(tokens) {
 // and every book's line/price (EV% where positive). It no longer says over or under, so the side is worked
 // out from the EV itself: Poisson on the projection reproduces PropShop's % on exactly one side.
 const _PS2_GAME_RE = /^([A-Z]{2,3})\s*@\s*([A-Z]{2,3})\s+\d{1,2}:\d{2}\s*[AP]M$/i;
-const _PS2_BOOKS = { FD: "FanDuel", PIN: "Pinnacle", PB: "Prop Builder", DK: "DraftKings", NV: "Novig", NOV: "Novig", PX: "ProphetX", MGM: "BetMGM", CZR: "Caesars", FL: "Fliff", FLF: "Fliff", BOL: "BetOnline", BM: "Bookmaker", B105: "Bet105", KAL: "Kalshi", ONYX: "Onyx" };
+const _PS2_BOOKS = { FD: "FanDuel", PIN: "Pinnacle", PB: "Props Builder", DK: "DraftKings", NV: "Novig", NOV: "Novig", PX: "ProphetX", MGM: "BetMGM", CZR: "Caesars", FL: "Fliff", FLF: "Fliff", BOL: "BetOnline", BM: "Bookmaker", B105: "Bet105", KAL: "Kalshi", ONYX: "Onyx" };
 function _nhlIsPs2Format(raw) { return String(raw || "").split("\n").some(l => _PS2_GAME_RE.test(l.trim())); }
 function _parsePropShopNhlV2(raw, minEdge) {
   const lines = String(raw).split("\n").map(l => l.trim()).filter(Boolean);
@@ -4988,7 +4998,7 @@ async function _nhlPsLogRow(r) {
   // cards re-price everything live at send time anyway (and leave off anything out of range).
   const teamHints = r.team ? [r.team] : (r.game || '').split('@').map(s => s.trim());
   const live = await _nhlLiveBookFor(r.player, r.line, r.ou, r.gameDateIso, teamHints);
-  // Never track a pick that fails the ensemble rule at the best price right now (Pinnacle / Prop Builder /
+  // Never track a pick that fails the ensemble rule at the best price right now (Pinnacle / Props Builder /
   // FanDuel / Bet105): every source re-priced with Poisson, 3 at 3%+, none negative.
   const gate = r._asIs ? null : _nhlLiveGate({ stat: "SOG", ou: r.ou, line: r.line, odds: live ? live.price : r.odds, sourceProjs: r.sourceProjs || {}, psMissingSrc: r.missingSrc, psMissingProj: r.missingProj });
   if (gate && !gate.ok) { console.log(`[NHL ensemble] not tracking ${r.player} ${r.ou} ${r.line} at ${live ? live.price + " " + live.book : r.odds}: ${gate.why}`); return false; }
@@ -5358,7 +5368,7 @@ async function _nhlLoadBookLogos(names) {
       // Key the logo by OUR canonical label's normalized key, not the raw
       // OpticOdds name's — OpticOdds calls it "Props Builder" (normalizes to
       // "propsbuilder"), but every badge lookup elsewhere in this card keys
-      // off the label we already map book names to ("Prop Builder", no "s",
+      // off the label we already map book names to ("Props Builder", no "s",
       // normalizes to "propbuilder"). Those never collided, so the logo sat
       // in the map under a key nothing ever looked up — same class of bug as
       // the earlier nhlIsExch ProphetX space mismatch. Also keep the raw-name
@@ -5832,6 +5842,7 @@ function renderNhlDiscordTab() {
       <button onclick="navigator.clipboard.writeText(_nhlDiscordRecapText());showNhlToast('Copied')" title="Each day's recap posts to Discord on its own once all that day's Discord picks are graded" style="background:transparent;border:1px solid #0d2035;color:#cc66ff;${btn}">Copy recap</button>
       <button onclick="setNhlDiscordWebhook()" style="background:transparent;border:1px solid #0d2035;color:${_nhlDiscordHook() ? "#00cc66" : "#9fb8d6"};${btn}">${_nhlDiscordHook() ? "Webhook ✓ …" + _nhlDiscordHook().slice(-4) + " · change" : "Set Discord webhook"}</button>
       <button onclick="setNhlNickWebhook()" style="background:transparent;border:1px solid #0d2035;color:${_nhlNickHook() ? "#00cc66" : "#9fb8d6"};${btn}">${_nhlNickHook() ? "Nick webhook ✓" + (_nhlNickRole() ? " + role" : "") + " · change" : "Set Nick webhook"}</button>
+      <button onclick="setNhlRecapWebhook()" style="background:transparent;border:1px solid #0d2035;color:${_nhlRecapHook() ? "#00cc66" : "#9fb8d6"};${btn}">${_nhlRecapHook() ? "Recap webhook ✓ · change" : "Set recap webhook"}</button>
     </div>
     ${sent.length ? `<div style="overflow-x:auto;border:1px solid #0d2035;border-radius:8px;display:inline-block;max-width:100%;"><table style="border-collapse:collapse;color:#fff;">
       <thead><tr style="background:#0a1628;">${["Date", "Player", "Prop", "Sent at", "Result", "Units", ""].map(h => `<th style="padding:6px 10px;font-size:11px;text-align:left;letter-spacing:.5px;text-transform:uppercase;">${h}</th>`).join("")}</tr></thead>
@@ -6037,43 +6048,43 @@ async function _nhlPaintSentCards() {
       <div style="font-size:11px;color:#9fb8d6;margin-top:6px;line-height:1.5;">${c.picks.map(escapeHtmlBasic).join("<br>")}</div></div>`; }).join("");
 }
 const NHL_DISCORD_ROLE = "1555588242764595230";   // NHL role — tagged on every card posted
-// Daily recap → Discord webhook, on its own: once every pick sent to Discord for a game day is graded, that
-// day's results (W/L, units, ROI, CLV) plus the running record post as plain text (no role ping). Once per day.
-const NHL_RECAP_POSTED_KEY = "nhl_discord_recap_days";
+// Daily props recap → its own webhook, on its own: once every tracker bet for a day is graded, that day's recap
+// (same layout as the tracker's Recap button: day, WTD, MTD, YTD, every pick) posts with CLV. Once per day.
+const NHL_RECAP_HOOK_KEY = "nhl_recap_webhook", NHL_RECAP_POSTED_KEY = "nhl_recap_posted_days";
+function _nhlRecapHook() { try { return localStorage.getItem(NHL_RECAP_HOOK_KEY) || ""; } catch (e) { return ""; } }
+function setNhlRecapWebhook() {
+  const cur = _nhlRecapHook();
+  const u = prompt("Webhook URL for the daily recap (posts by itself once a day's bets are all graded).\nSaved only in this browser. Leave blank to turn it off." + (cur ? "\n\nCurrently set: …" + cur.slice(-6) : ""), "");
+  if (u == null) return;
+  const v = u.trim();
+  if (v && !/^https:\/\/(?:ptb\.|canary\.)?discord(?:app)?\.com\/api\/webhooks\/\d+\/[\w-]+/.test(v)) { alert("That doesn't look like a Discord webhook URL (https://discord.com/api/webhooks/…)."); return; }
+  try { if (v) localStorage.setItem(NHL_RECAP_HOOK_KEY, v); else localStorage.removeItem(NHL_RECAP_HOOK_KEY); } catch (e) {}
+  // Days already finished before the webhook existed aren't posted retroactively.
+  if (v) { try { const done = JSON.parse(localStorage.getItem(NHL_RECAP_POSTED_KEY) || "[]"); bets.forEach(b => { if (b.result !== "pending") { const d = _ymdLocal(new Date(_nhlBetDayMs(b))); if (!done.includes(d) && !bets.some(x => x.result === "pending" && _nhlBetDayMs(x) === _nhlBetDayMs(b))) done.push(d); } }); localStorage.setItem(NHL_RECAP_POSTED_KEY, JSON.stringify([...new Set(done)].slice(-90))); } catch (e) {} }
+  showNhlToast(v ? "Recap webhook saved — each day's recap posts once its bets are graded" : "Recap webhook off");
+  if (currentTab === "tracker") renderTracker();
+  if (currentTab === "discord") renderNhlDiscordTab();
+}
 function _nhlBetClvCents(b) {
   const v = NHL_CLV_BOOKS.map(k => b.clvCents && b.clvCents[k]).filter(x => x != null && isFinite(x));
   return v.length ? v.reduce((a, c) => a + c, 0) / v.length : null;
 }
-function _nhlDailyRecapText(dayIso) {
-  const fmt = n => (Number(n) > 0 ? "+" : "") + n, u = n => (n >= 0 ? "+" : "") + n.toFixed(2) + "u";
-  const day = bets.filter(b => b.discordSent && _ymdLocal(new Date(b.date)) === dayIso);
-  let w = 0, l = 0, pl = 0, risk = 0; const clvs = [];
-  const lines = day.map(b => {
-    const o = Number(b.discordOdds != null ? b.discordOdds : b.odds), st = Number(b.stake) || 1, c = _nhlBetClvCents(b);
-    if (c != null) clvs.push(c);
-    let mark = "➖", res = "push";
-    if (b.result === "hit") { w++; pl += _nhlDiscordWin(b); risk += st; mark = "✅"; res = u(_nhlDiscordWin(b)); }
-    else if (b.result === "miss") { l++; pl -= st; risk += st; mark = "❌"; res = u(-st); }
-    return `${mark} ${b.player} ${b.ou === "over" ? "O" : "U"}${b.line} ${fmt(o)}${b.actual != null ? ` · ${b.actual} SOG` : ""} · ${res}${c != null ? ` · CLV ${c >= 0 ? "+" : ""}${c.toFixed(1)}¢` : ""}`;
-  });
-  const clvAvg = clvs.length ? clvs.reduce((a, c) => a + c, 0) / clvs.length : null;
-  const d = new Date(dayIso + "T12:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
-  const head = `**NHL Model · ${d}** — ${w}-${l} · ${u(pl)} · ROI ${risk ? (pl / risk * 100).toFixed(1) : "0.0"}%${clvAvg != null ? ` · CLV ${clvAvg >= 0 ? "+" : ""}${clvAvg.toFixed(1)}¢ (beat ${clvs.filter(c => c > 0).length}/${clvs.length})` : ""}`;
-  return [head, ...lines, "", _nhlDiscordRecapText().replace(/^NHL SOG Discord:/, "Season:")].join("\n").slice(0, 1990);
-}
 async function _nhlMaybePostDailyRecap() {
-  if (!_nhlDiscordHook()) return;
+  if (!_nhlRecapHook()) return;
   let done = []; try { done = JSON.parse(localStorage.getItem(NHL_RECAP_POSTED_KEY) || "[]"); } catch (e) {}
-  const days = [...new Set(bets.filter(b => b.discordSent).map(b => _ymdLocal(new Date(b.date))))].filter(d => !done.includes(d) && d >= _ymdLocal(new Date(Date.now() - 3 * 86400000)));
-  for (const day of days) {
-    const list = bets.filter(b => b.discordSent && _ymdLocal(new Date(b.date)) === day);
-    if (!list.length || list.some(b => b.result === "pending")) continue;   // wait until every pick that day is graded
+  const dayMsList = [...new Set(bets.map(_nhlBetDayMs).filter(ms => !isNaN(ms)))].sort((a, b) => a - b);
+  for (const ms of dayMsList) {
+    const day = _ymdLocal(new Date(ms));
+    if (done.includes(day) || day >= _ymdLocal(new Date(Date.now() + 86400000))) continue;
+    const list = bets.filter(b => _nhlBetDayMs(b) === ms);
+    if (!list.length || list.some(b => b.result === "pending")) continue;   // wait until every bet that day is graded
+    const r = buildNhlRecapText({ dayMs: ms, clv: true }); if (!r) continue;
     try {
-      const r = await fetch(_nhlDiscordHook(), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content: _nhlDailyRecapText(day), allowed_mentions: { parse: [] } }) });
-      if (!r.ok) throw new Error(r.status + "");
-      done.push(day); try { localStorage.setItem(NHL_RECAP_POSTED_KEY, JSON.stringify(done.slice(-60))); } catch (e) {}
-      showNhlToast("Daily recap posted to Discord ✓");
-    } catch (e) { console.warn("[NHL] daily recap post failed", day, e && e.message); }
+      const res = await fetch(_nhlRecapHook(), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content: r.text.slice(0, 1990), allowed_mentions: { parse: [] } }) });
+      if (!res.ok) throw new Error(res.status + "");
+      done.push(day); try { localStorage.setItem(NHL_RECAP_POSTED_KEY, JSON.stringify(done.slice(-90))); } catch (e) {}
+      showNhlToast(`Recap for ${r.label} posted to Discord ✓`);
+    } catch (e) { console.warn("[NHL] recap post failed", day, e && e.message); }
   }
 }
 async function _nhlPostToDiscord(blob, text, to) {
@@ -6983,7 +6994,7 @@ function scheduleNextTickerRefresh() {
           <option>FanDuel</option>
           <option>DraftKings</option>
           <option>Onyx</option>
-          <option>Prop Builder</option>
+          <option>Props Builder</option>
           <option>Fliff</option>
           <option>Novig</option>
           <option>ProphetX</option>
@@ -7044,11 +7055,11 @@ const NHLT_SABER_KEY = "nhl_totals_saber_v1";   // { dateIso: { at, teams: { CAN
 const NHLT_BETS_KEY = "nhl_totals_bets_v1";     // logged plays
 const NHLT_GAMES_KEY = "nhl_totals_games_v1";   // every game: Saber vs Pinnacle vs actual (calibration)
 const NHLT_MINEV_KEY = "nhl_totals_min_ev";
-const NHLT_ANCHOR_BOOKS = ["Pinnacle", "Prop Builder", "FanDuel", "Bet105", "Bookmaker", "BetOnline"]; // books a totals play can be logged at
+const NHLT_ANCHOR_BOOKS = ["Pinnacle", "Props Builder", "FanDuel", "Bet105", "Bookmaker", "BetOnline"]; // books a totals play can be logged at
 let nhltSaber = {}, nhltBets = [], nhltGames = {}, nhltSlate = [], nhltLastScan = null, nhltBusy = false;
 function nhltLoad() {
   try { nhltSaber = JSON.parse(localStorage.getItem(NHLT_SABER_KEY) || "{}"); } catch (e) { nhltSaber = {}; }
-  try { nhltBets = JSON.parse(localStorage.getItem(NHLT_BETS_KEY) || "[]"); } catch (e) { nhltBets = []; }
+  try { nhltBets = _nhlPbRename(JSON.parse(localStorage.getItem(NHLT_BETS_KEY) || "[]")); } catch (e) { nhltBets = []; }
   try { nhltGames = JSON.parse(localStorage.getItem(NHLT_GAMES_KEY) || "{}"); } catch (e) { nhltGames = {}; }
 }
 function nhltSave() {
@@ -7363,7 +7374,7 @@ async function gradeNhlTotals(opts) {
   try { snaps = await _nhltSnapshotPrices(); } catch (e) { console.warn("[NHL totals] snapshot", e && e.message); }
   for (const b of nhltBets) {
     if (b.close || !b.start || new Date(b.start).getTime() > now) continue;
-    // 1) OpticOdds' tagged close, same line: Pinnacle, Bookmaker, BetOnline, then FanDuel, Prop Builder.
+    // 1) OpticOdds' tagged close, same line: Pinnacle, Bookmaker, BetOnline, then FanDuel, Props Builder.
     let got = false;
     for (const bk of NHLT_CLOSE_BOOKS) {
       try { if (await _nhltPinClose(b, bk)) { got = true; break; } } catch (e) {}
@@ -7519,7 +7530,7 @@ function renderNhlTotals() {
         <button onclick="gradeNhlTotals()" style="background:#0a1628;border:1px solid #0d2035;color:#00aaff;border-radius:6px;padding:7px 14px;font-size:13px;font-weight:600;cursor:pointer;">Grade + closes</button>
         <span style="font-size:12px;color:#fff;">${nhltLastScan ? "last scan " + new Date(nhltLastScan).toLocaleTimeString() : ""}</span>
       </div>
-      <div style="font-size:12px;color:#fff;margin-bottom:12px;max-width:1100px;">Each team's goals ~ Poisson on Saber's team number; a regulation tie adds one goal (OT or shootout), won in proportion to Saber goals. Best price comes from Pinnacle, Prop Builder, FanDuel, Bet105, Bookmaker or BetOnline. One play per market per game (the better side), logged at the price it was found; it is never changed afterwards.</div>
+      <div style="font-size:12px;color:#fff;margin-bottom:12px;max-width:1100px;">Each team's goals ~ Poisson on Saber's team number; a regulation tie adds one goal (OT or shootout), won in proportion to Saber goals. Best price comes from Pinnacle, Props Builder, FanDuel, Bet105, Bookmaker or BetOnline. One play per market per game (the better side), logged at the price it was found; it is never changed afterwards.</div>
       ${nhltSlate.some(x => x.f.date === dateIso) ? `<div class="tracker-section wide"><h4>Slate</h4><div style="overflow-x:auto;border:1px solid #0d2035;border-radius:8px;width:fit-content;max-width:100%;"><table style="border-collapse:collapse;"><thead style="background:#0a1628;"><tr>${["Game", "Market", "Saber", "Line", "Over", "Under", "Logged"].map(th).join("")}</tr></thead><tbody>${slateRows}</tbody></table></div></div>` : (day ? `<div style="color:#fff;font-size:13px;margin-bottom:14px;">Hit Scan totals to price today's games.</div>` : "")}
       <div class="tracker-section wide"><h4>Record</h4><div class="overview-strip" style="flex-wrap:wrap;">
         ${_nhltStatTile("All totals", bets)}
