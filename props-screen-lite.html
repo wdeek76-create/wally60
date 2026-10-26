@@ -1210,6 +1210,35 @@ function matrixAsk(head, defKey, by){
     setTimeout(()=>el.querySelector(matrixHook?'#mxEdge':'#mxHook').focus(),50);
   });
 }
+// Telegram post: "J Smith Chicago under 20.5 points rebounds assists -118 fd -113 novig ... score
+// 19.5 -108 builder" -- every book at the line (FD / PB first), then books sitting on another line.
+const TG_NAME = { fanduel:'fd', 'props builder':'pbuilder', novig:'novig', 'prophet x':'prophet x', kalshi:'kalshi', caesars:'cz', draftkings:'dk', 'onyx odds':'onyx', courtside:'courtside',
+  thescore:'score', 'thescore bet':'score', 'espn bet':'score', 'hard rock bet':'hard rock', fanatics:'fanatics', bookmaker:'bookmaker', pinnacle:'pinnacle', bet105:'b105', betonline:'bol', betmgm:'mgm', fliff:'fliff', betrivers:'betrivers', circa:'circa' };
+const TG_MKT = { pts:'points', reb:'rebounds', ast:'assists', pra:'points rebounds assists', pr:'points rebounds', pa:'points assists', ra:'rebounds assists', '3pm':'threes' };
+const TG_FIRST = ['props builder','fanduel'];
+const TWO_WORD_NICK = /\s(trail blazers|red sox|white sox|blue jays|maple leafs|golden knights|red wings|blue jackets)$/i;
+function tgText(p, mkey, sd, single, line, all){
+  // first initial + last name; initials-style first names stay whole ("PJ Washington", "OG Anunoby")
+  const raw=String(p.name).trim().split(/\s+/), nm=String(titleCase(p.name)).split(' ');
+  const first = /^([A-Z]\.?){2,3}$/.test(raw[0]) ? raw[0].replace(/\./g,'') : nm[0][0];
+  const short = nm.length>1 ? `${first} ${nm.slice(1).join(' ')}` : nm[0];
+  const f=fixtures.find(x=>x.id===p.fixtureId), tm=f && p._teamAb ? [f.home,f.away].find(c=>c.ab===p._teamAb) : null;
+  const city = tm?.name ? (TWO_WORD_NICK.test(tm.name) ? tm.name.replace(TWO_WORD_NICK,'') : tm.name.split(' ').slice(0,-1).join(' ')) : '';
+  const side = single ? (singleSideLabel(mkey)||'yes').toLowerCase() : sd;
+  const mkt = TG_MKT[mkey] || String(marketLabel(sportKey,mkey)).toLowerCase();
+  const bn = k => TG_NAME[k] || String(k).toLowerCase();
+  const amt = v => { const n=Math.round(Number(v)); return n>0?'+'+n:String(n); };
+  const order = (a,b) => { const ia=TG_FIRST.indexOf(a), ib=TG_FIRST.indexOf(b); return (ia<0?99:ia)-(ib<0?99:ib); };
+  // best price per book at the line on this side
+  const at={}; all.forEach(o=>{ if(sideOf(o)!==sd) return; if(!single && line!=null && Number(o.points)!==Number(line)) return; const k=matrixBookOf(o); if(!at[k] || toDec(o.price)>toDec(at[k].price)) at[k]=o; });
+  // books whose main line on this side is a different number
+  const off={}; if(!single) rowsFor(p,mkey,mainRows).forEach(o=>{ const k=matrixBookOf(o); if(at[k] || sideOf(o)!==sd || o.points==null || Number(o.points)===Number(line)) return; if(!off[k] || toDec(o.price)>toDec(off[k].price)) off[k]=o; });
+  const main=Object.keys(at).sort(order).map(k=>`${amt(at[k].price)} ${bn(k)}`).join(' ');
+  // grouped by line: "19.5 -108 pbuilder -105 fanatics"
+  const byLn={}; Object.keys(off).sort(order).forEach(k=>{ (byLn[off[k].points]=byLn[off[k].points]||[]).push(`${amt(off[k].price)} ${bn(k)}`); });
+  const alt=Object.entries(byLn).map(([ln,l])=>`${ln} ${l.join(' ')}`).join('\n');
+  return `${short}${city?' '+city:''} ${side}${!single&&line!=null?' '+line:''} ${mkt}${main?' '+main:''}${alt?'\n'+alt:''}`;
+}
 async function runMatrix(p, mkey){
   if(!p || !mkey){ toast('Nothing to run'); return; }
   const ctx=`${p.key}|${mkey}`;
@@ -1253,7 +1282,7 @@ async function runMatrix(p, mkey){
   // down to the play-to price goes at the end: "... +108 novig 48.1¢ play to -158 (novig $905)"
   const books=[...ok.map(([k,o])=>`${amt(o.price)} ${nm(k)}`), ...exOk.map(x=>`${amt(x.price)} ${nm(x.k)} ${(toImplied(x.price)*100).toFixed(1)}¢`)].join(' ');
   const depth=exOk.length?` (${exOk.map(x=>`${nm(x.k)} ${usd(x.$)}`).join(', ')})`:'';
-  const text=`${head} ${books||'(no book at +5% EV)'} play to ${amt(playTo)}${depth}`; // like Copy summary, + exchange $ at the play-to price or better
+  const text=tgText(p, mkey, sd, single, line, all); // the Telegram channel's format
   await copyText(text);
   const inRange = ok.length>0 || exOk.length>0;
   // In range -> also posted to the Matrix Discord channel (when one is set). Tracked either way.
