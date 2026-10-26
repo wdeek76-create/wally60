@@ -5401,41 +5401,68 @@ const SENT_SEED_OCT25 = [
   ['Tee Higgins','rec','U',4.5,'+121','DraftKings','loss',6], ['Amon-Ra St. Brown','rec','U',7.5,'-112','DraftKings','loss',9],
   ['Bo Nix','pass_att','O',32.5,'-107','DraftKings','loss',29], ['Kendrick Bourne','rec','U',3.5,'-127','DraftKings','win',3],
 ];
-function _seedSentOct25() {
-  try {
-    if (localStorage.getItem('nfl_sent_seed_oct25_v1')) return;
-    let arr = []; try { arr = JSON.parse(localStorage.getItem(SENT_KEY) || '[]') || []; } catch (e) {}
-    const have = new Set(arr.map(e => e.key));
-    const at = Date.parse('2026-10-25T16:00:00Z');
-    SENT_SEED_OCT25.forEach(([player, market, side, line, odds, book, result, actual], i) => {
-      const e = { player, market, side, line, date: '2026-10-25' };
-      const key = _sentKey(e); if (have.has(key)) return;
-      arr.push({ key, ensId: null, player, team: '', market, side, line, date: '2026-10-25', game: '', gameTime: '',
-        odds, book, playTo: null, ev: null, tier: null, sentAt: at + i, result, actual, pnl: result ? _sentPnl(result, odds) : null,
-        gradedAt: result ? Date.parse('2026-10-26T04:00:00Z') : null, manual: !!result });
-    });
-    localStorage.setItem(SENT_KEY, JSON.stringify(arr));
-    localStorage.setItem('nfl_sent_seed_oct25_v1', String(Date.now()));
-  } catch (e) { console.warn('Sent seed failed', e); }
+// Sent picks are kept in memory, in localStorage AND in the browser's IndexedDB. localStorage is
+// shared with every source's saved props and the Blender (~5 MB cap); once it's full every write
+// fails silently — the Sent tab stayed at 0 however many times a card was added. IndexedDB has far
+// more room, so the Sent list survives either way; whichever copy has picks is merged on load.
+let _sentCache = null, _sentLSFailed = false, _sentIdbOk = null;
+function _sentIdb() {
+  return new Promise((res, rej) => {
+    try { const r = indexedDB.open('nfl_tracker_db', 1); r.onupgradeneeded = () => r.result.createObjectStore('kv'); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); }
+    catch (e) { rej(e); }
+  });
+}
+async function _sentIdbPut(arr) {
+  try { const db = await _sentIdb(); await new Promise((res, rej) => { const tx = db.transaction('kv', 'readwrite'); tx.objectStore('kv').put(JSON.stringify(arr), SENT_KEY); tx.oncomplete = res; tx.onerror = () => rej(tx.error); }); _sentIdbOk = true; }
+  catch (e) { _sentIdbOk = false; console.warn('[sent] IndexedDB save failed', e); }
+}
+async function _sentIdbGet() {
+  try { const db = await _sentIdb(); return await new Promise((res, rej) => { const q = db.transaction('kv', 'readonly').objectStore('kv').get(SENT_KEY); q.onsuccess = () => { try { const a = JSON.parse(q.result || '[]'); res(Array.isArray(a) ? a : []); } catch (e) { res([]); } }; q.onerror = () => rej(q.error); }); }
+  catch (e) { return []; }
+}
+function _sentReadLS() { try { const a = JSON.parse(localStorage.getItem(SENT_KEY) || '[]'); return Array.isArray(a) ? a : []; } catch (e) { return []; } }
+// The Sun Oct 25 card: added once (skips picks already there)
+function _seedSentOct25(arr) {
+  let flag = null; try { flag = localStorage.getItem('nfl_sent_seed_oct25_v1'); } catch (e) {}
+  if (flag) return arr;
+  const out = arr.slice();
+  const at = Date.parse('2026-10-25T16:00:00Z');
+  SENT_SEED_OCT25.forEach(([player, market, side, line, odds, book, result, actual], i) => {
+    const e = { player, market, side, line, date: '2026-10-25' };
+    if (out.some(o => _sentSame(o, e))) return;
+    out.push({ key: _sentKey(e), ensId: null, player, team: '', market, side, line, date: '2026-10-25', game: '', gameTime: '',
+      odds, book, playTo: null, ev: null, tier: null, sentAt: at + i, result, actual, pnl: result ? _sentPnl(result, odds) : null,
+      gradedAt: result ? Date.parse('2026-10-26T04:00:00Z') : null, manual: !!result });
+  });
+  try { localStorage.setItem('nfl_sent_seed_oct25_v1', String(Date.now())); } catch (e) {}
+  return out;
 }
 // Same pick (player + market + side + line) logged twice within a day = one pick. Happens when a
 // card is pasted with the wrong "Sent on" date; the first one logged is kept.
 const _sentSame = (a, b) => normName(a.player) === normName(b.player) && a.market === b.market && a.side === b.side && Number(a.line) === Number(b.line)
   && Math.abs((new Date((a.date || '') + 'T12:00:00') - new Date((b.date || '') + 'T12:00:00')) / 86400000) <= 1;
-function loadSent() {
-  _seedSentOct25();
-  let a = [];
-  try { a = JSON.parse(localStorage.getItem(SENT_KEY) || '[]'); if (!Array.isArray(a)) a = []; } catch (e) { a = []; }
+function _sentDedupe(a) {
   const kept = [];
   a.slice().sort((x, y) => (x.sentAt || 0) - (y.sentAt || 0)).forEach(e => {
     const twin = kept.find(k => _sentSame(k, e));
     if (!twin) { kept.push(e); return; }
     if (!twin.result && e.result) Object.assign(twin, { result: e.result, actual: e.actual, pnl: _sentPnl(e.result, twin.odds), gradedAt: e.gradedAt, manual: e.manual });
   });
-  if (kept.length !== a.length) { try { localStorage.setItem(SENT_KEY, JSON.stringify(kept)); } catch (e) {} console.warn('[sent] merged', a.length - kept.length, 'duplicate sent pick(s)'); }
   return kept;
 }
-function saveSent(a) { try { localStorage.setItem(SENT_KEY, JSON.stringify(a)); } catch (e) { console.warn('sent save failed', e); } }
+function loadSent() {
+  const base = _sentCache || _sentReadLS();
+  const seeded = _seedSentOct25(base);
+  const kept = _sentDedupe(seeded);
+  if (!_sentCache || kept.length !== base.length) { if (kept.length !== seeded.length) console.warn('[sent] merged', seeded.length - kept.length, 'duplicate sent pick(s)'); saveSent(kept); }
+  return _sentCache;
+}
+function saveSent(a) {
+  _sentCache = a;
+  try { localStorage.setItem(SENT_KEY, JSON.stringify(a)); _sentLSFailed = false; }
+  catch (e) { _sentLSFailed = true; console.warn('[sent] localStorage full/refused — keeping Sent in IndexedDB', e && e.name); }
+  _sentIdbPut(a);
+}
 const _sentKey = p => normName(p.player) + '|' + p.market + '|' + p.side + '|' + String(Number(p.line)) + '|' + (p.date || '');
 function _sentPnl(result, odds) {
   const o = parseFloat(odds);
@@ -5443,6 +5470,31 @@ function _sentPnl(result, odds) {
   if (result === 'loss') return isNaN(o) ? -1 : o > 0 ? -1.0 : -(Math.abs(o) / 100);
   if (result === 'push') return 0;
   return null;
+}
+// On load: pull in whatever IndexedDB has (picks saved while localStorage was full)
+_sentIdbGet().then(idb => {
+  if (!idb.length) { loadSent(); return; }
+  const merged = _sentDedupe(loadSent().concat(idb));
+  saveSent(merged);
+  const sc = document.getElementById('tab-sent-count'); if (sc) sc.textContent = merged.length;
+  if (typeof currentTab !== 'undefined' && currentTab === 'sent') render();
+});
+// How full this site's localStorage is, and the biggest items in it
+function _storageReport() {
+  const rows = []; let total = 0;
+  try { for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); const n = (k.length + (localStorage.getItem(k) || '').length) * 2; total += n; rows.push([k, n]); } } catch (e) {}
+  rows.sort((a, b) => b[1] - a[1]);
+  let full = false; try { localStorage.setItem('__nfl_space_test', 'x'.repeat(50000)); localStorage.removeItem('__nfl_space_test'); } catch (e) { full = true; }
+  return { total, rows, full };
+}
+const _SAFE_TO_CLEAR = ['nfl_props_ensemble_backup_pre_restore', 'nfl_noname_removed_backup', 'nfl_anytime_td_removed_backup', 'nfl_blender_td_removed_backup'];
+function freeStorageSpace() {
+  const r = _storageReport(), del = r.rows.filter(([k]) => _SAFE_TO_CLEAR.includes(k));
+  if (!del.length) { alert('No old backup copies to clear. The biggest items are listed on the Sent tab.'); return; }
+  const mb = n => (n / 1048576).toFixed(2) + ' MB';
+  if (!confirm('Delete these old backup copies? (Copies of picks that were cleaned out earlier — not your current picks.)\n\n' + del.map(([k, n]) => k + ' — ' + mb(n)).join('\n'))) return;
+  del.forEach(([k]) => { try { localStorage.removeItem(k); } catch (e) {} });
+  saveSent(loadSent()); render();
 }
 // shown = [{p, best, pt}] — exactly the rows drawn on the card
 function logSentPicks(shown) {
@@ -5526,6 +5578,10 @@ function _parseSentLine(line) {
     odds: m[6].replace('−', '-'), result: res ? (/void/i.test(res) ? 'push' : res.toLowerCase()) : '', actual: act != null ? parseFloat(act) : null };
 }
 function importSentPaste() {
+  try { _importSentPaste(); }
+  catch (e) { console.error('[sent] paste failed', e); const m = document.getElementById('sentPasteMsg'); if (m) m.innerHTML = `<span class="neg">Couldn't add them: ${escHtml(e.message || String(e))}</span>`; else alert("Couldn't add them: " + e.message); }
+}
+function _importSentPaste() {
   const raw = (document.getElementById('sentPasteArea') || {}).value || '';
   const day = (document.getElementById('sentPasteDate') || {}).value || _localDateStr();
   const wk = isoWeek(day);
@@ -5550,7 +5606,7 @@ function importSentPaste() {
   saveSent(arr);
   if (added) render(); // redraws the tab (clears the box)
   const msg = document.getElementById('sentPasteMsg');
-  if (msg) msg.innerHTML = `Added ${added}${dup ? ` · ${dup} already there` : ''}${bad.length ? ` · <span class="neg">couldn't read ${bad.length}:</span> <span class="dim">${bad.map(escHtml).join(' | ')}</span>` : ''}`;
+  if (msg) msg.innerHTML = `Added ${added}${dup ? ` · ${dup} already there` : ''}${bad.length ? ` · <span class="neg">couldn't read ${bad.length}:</span> <span class="dim">${bad.map(escHtml).join(' | ')}</span>` : ''}${!added && !dup && !bad.length ? '<span class="neg">Nothing in the box I could read — one pick per line, like "Cam Ward: u0.5 Pass TD +174"</span>' : ''}`;
   if (bad.length && !added) { const ta = document.getElementById('sentPasteArea'); if (ta) ta.value = raw; }
 }
 async function copySentWeek(wk) {
@@ -5567,6 +5623,10 @@ function renderSent() {
   const hookBar = `<div class="panel"><div class="panel-body" style="display:flex;flex-direction:column;gap:8px;font-size:12px">
     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">${destRow('partners')}</div>
     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">${destRow('nick')}</div>
+    ${(() => { const r = _storageReport(); if (!r.full && !_sentLSFailed && _sentIdbOk !== false) return ''; const mb = n => (n / 1048576).toFixed(2) + ' MB';
+      return `<div style="padding:8px 10px;border:1px solid rgba(251,191,36,.4);border-radius:8px;background:rgba(251,191,36,.08)"><b style="color:var(--amber)">This browser's storage for the tracker is full</b> (${mb(r.total)} used) — new saves were failing silently. ${_sentIdbOk !== false ? 'The Sent list is now kept in the browser database instead, so it saves.' : '<b class="neg">The browser database refused too.</b>'}
+        <div class="dim" style="margin-top:4px">Biggest: ${r.rows.slice(0, 6).map(([k, n]) => escHtml(k) + ' ' + mb(n)).join(' · ')}</div>
+        <button class="btn ghost" style="margin-top:6px" onclick="freeStorageSpace()">Clear old backup copies</button></div>`; })()}
     <span class="dim">Only picks in a Partners card sent with 📤 Send to Discord land here, at the price shown on the card. Grades follow the Ensemble. Nick card sends aren't tracked.</span></div></div>`;
   const thisWk = isoWeek(_localDateStr());
   const weeksSent = [...new Set(arr.map(e => isoWeek(e.date)))].sort().reverse();
