@@ -10575,6 +10575,20 @@ function copyDailyRecap() { _copyDailyRecapFiltered("all"); }
 function copyDailyRecapProps() { _copyDailyRecapFiltered("props"); }
 function copyDailyRecapTotals() { _copyDailyRecapFiltered("totals"); }
 
+// Posts a recap's text to the Discord webhook, split on line breaks so no message goes past Discord's 2000-character limit.
+async function _postRecapToWebhook(text, day) {
+  const hook = getMorningWebhook(); if (!hook || !text) return false;
+  const chunks = []; let cur = "";
+  String(text).split("\n").forEach(l => { if ((cur + "\n" + l).length > 1900) { chunks.push(cur); cur = l; } else cur = cur ? cur + "\n" + l : l; });
+  if (cur) chunks.push(cur);
+  try {
+    for (const c of chunks) {
+      const r = await fetch(hook + (hook.includes("?") ? "&" : "?") + "wait=true", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content: c, allowed_mentions: { parse: [] } }) });
+      if (!r.ok) throw new Error("Discord said " + r.status);
+    }
+    showToast(`Props recap posted to Discord${day ? " (" + day + ")" : ""} \u2713`); return true;
+  } catch (e) { showToast("Recap post failed \u2014 " + (e && e.message || e)); return false; }
+}
 function _copyDailyRecapFiltered(kind) {
   // Group settled bets by their game date
   const isTotal = b => (b.stat || "").toUpperCase() === "GAME_TOTAL";
@@ -10766,6 +10780,7 @@ function _copyDailyRecapFiltered(kind) {
     } catch(e) { return false; }
   };
   const label = kind === "props" ? "props" : kind === "totals" ? "totals" : "bets";
+  if (kind === "props" && getMorningWebhook()) _postRecapToWebhook(text, targetDate);   // the props recap also goes to your Discord webhook
   if (tryExec(text)) {
     showToast(`Copied ${dayBets.length} ${label} recap for ${targetDate}`);
   } else if (navigator.clipboard?.writeText) {
@@ -26741,12 +26756,19 @@ async function tabsSoloGrade(auto) {
   if (graded) tabsSoloSave();
   if (!auto || graded) showToast(graded ? `Tabs Solo: graded ${graded}` : "Tabs Solo: nothing final yet");
   renderTabsSolo();
+  // push the report: right away when you grade by hand; on auto-grade only once the day's bets are all settled (games finish one by one, so no repeat posts)
+  if (graded && getTabsWebhook()) {
+    const days = [...new Set(tabsSolo.filter(x => x.result !== "pending").map(x => x.gameDate))];
+    const dayDone = !tabsSolo.some(x => x.result === "pending" && x.gameDate <= today);
+    if (!auto || dayDone) await tabsSoloPostReport(true);
+  }
 }
 function tabsSoloSet(kind, v) { if (kind === "stat") tabsSoloStat = v; else if (kind === "ctx") tabsSoloCtx = v; else tabsSoloRel = v; renderTabsSolo(); }
 function tabsSoloDelete(key) { tabsSolo = tabsSolo.filter(x => x.key !== key); tabsSoloSave(); renderTabsSolo(); }
 function tabsSoloClear() { if (!confirm(`Delete all ${tabsSolo.length} Tabs Solo bets? This can't be undone.`)) return; tabsSolo = []; tabsSoloMeta = {}; tabsSoloSave(); renderTabsSolo(); }
 // One clean text report of the whole Tabs Solo dashboard (all bets, filters ignored): overall, over vs under, then per market / release / edge / RW context / day, each with its own over-under split.
-function tabsSoloReportText() {
+function tabsSoloReportText(opts) {
+  opts = opts || {};
   const rows = tabsSolo.filter(x => x.result === "hit" || x.result === "miss");
   if (!rows.length) return "";
   const win = x => x.odds > 0 ? x.odds / 100 : 100 / Math.abs(x.odds);
@@ -26757,20 +26779,47 @@ function tabsSoloReportText() {
   const line = (label, set, w) => { const a = agg(set); if (!a.n) return null; const o = agg(set.filter(x => x.ou === "over")), un = agg(set.filter(x => x.ou === "under")); return `${label.padEnd(w || 9)} ${rec(a)} ${u(a.pl)}${roi(a)} | O ${o.n ? rec(o) + " " + u(o.pl) : "\u2014"} | U ${un.n ? rec(un) + " " + u(un.pl) : "\u2014"}`; };
   const sect = (title, items, w) => { const ls = items.map(([l, set]) => line(l, set, w)).filter(Boolean); return ls.length ? ["", title].concat(ls) : []; };
   const all = agg(rows), days = [...new Set(rows.map(x => x.gameDate))].sort();
-  const out = [`TABS SOLO \u00b7 ${days[0].slice(5)}${days.length > 1 ? " to " + days[days.length - 1].slice(5) : ""} \u00b7 ${all.n} graded${tabsSolo.length - rows.length ? ` \u00b7 ${tabsSolo.filter(x => x.result === "pending").length} open` : ""}`];
-  out.push(line("ALL", rows, 9));
-  out.push(...sect("By market", MORNING_STATS.map(st => [st, rows.filter(x => x.stat === st)]), 9));
-  out.push(...sect("By release", Object.keys(TABS_SOLO_REL).map(r => [TABS_SOLO_REL[r], rows.filter(x => x.release === r)]), 9));
-  out.push(...sect("By edge", MORNING_SOLO_BUCKETS.map(([l, lo, hi]) => [l, rows.filter(x => x.ev >= lo && x.ev < hi)]), 9));
-  out.push(...sect("By RW context", Object.keys(TABS_CTX).map(c => [TABS_CTX[c][0], rows.filter(x => (x.ctx || "clean") === c)]), 9));
-  out.push(...sect("By day", days.slice(-7).reverse().map(d => [d.slice(5), rows.filter(x => x.gameDate === d)]), 9));
-  // projected vs actual
+  const head = [`TABS SOLO \u00b7 ${days[0].slice(5)}${days.length > 1 ? " to " + days[days.length - 1].slice(5) : ""} \u00b7 ${all.n} graded${tabsSolo.some(x => x.result === "pending") ? ` \u00b7 ${tabsSolo.filter(x => x.result === "pending").length} open` : ""}`, line("ALL", rows, 9)];
+  const S = {
+    market: sect("By market", MORNING_STATS.map(st => [st, rows.filter(x => x.stat === st)]), 9),
+    release: sect("By release", Object.keys(TABS_SOLO_REL).map(r => [TABS_SOLO_REL[r], rows.filter(x => x.release === r)]), 9),
+    edge: sect("By edge", MORNING_SOLO_BUCKETS.map(([l, lo, hi]) => [l, rows.filter(x => x.ev >= lo && x.ev < hi)]), 9),
+    context: sect("By RW context", Object.keys(TABS_CTX).map(c => [TABS_CTX[c][0], rows.filter(x => (x.ctx || "clean") === c)]), 9),
+    day: sect("By day", days.slice(-7).reverse().map(d => [d.slice(5), rows.filter(x => x.gameDate === d)]), 9),
+  };
   const pv = [], pvRow = (lbl, pairs) => { if (!pairs.length) return; const n = pairs.length, ap = pairs.reduce((t, q) => t + q[0], 0) / n, aa = pairs.reduce((t, q) => t + q[1], 0) / n, mae = pairs.reduce((t, q) => t + Math.abs(q[0] - q[1]), 0) / n; pv.push(`${lbl.padEnd(9)} proj ${ap.toFixed(2)} \u00b7 actual ${aa.toFixed(2)} \u00b7 miss ${mae.toFixed(2)} \u00b7 n ${n}`); };
   MORNING_STATS.forEach(st => pvRow(st, rows.filter(x => x.stat === st && x.proj > 0 && x.actual != null).map(x => [Number(x.proj), Number(x.actual)])));
   { const seen = new Set(), mp = []; rows.forEach(x => { if (!(x.min > 0) || x.actualMin == null) return; const k = resolveNorm(x.player) + "|" + x.gameDate; if (seen.has(k)) return; seen.add(k); mp.push([Number(x.min), Number(x.actualMin)]); }); pvRow("Minutes", mp); }
-  if (pv.length) out.push("", "Projected vs actual", ...pv);
-  out.push("", "1u flat at the price pasted. Pushes / DNPs not counted.");
-  return out.join("\n");
+  S.pva = pv.length ? ["", "Projected vs actual", ...pv] : [];
+  const foot = ["", "1u flat at the price pasted. Pushes / DNPs not counted."];
+  const order = opts.order || ["market", "release", "edge", "context", "day", "pva"];
+  let out = head.slice();
+  const maxLen = opts.max || Infinity;
+  order.forEach(k => { const next = out.concat(S[k] || []); if (next.concat(foot).join("\n").length <= maxLen || out.length === head.length) out = next; });   // sections that don't fit are dropped, never cut in half
+  return out.concat(foot).join("\n");
+}
+// Tabs Solo's own webhook (saved only in this browser): grading Tabs Solo posts the performance report there.
+const TABS_WEBHOOK_KEY = "nba_tabs_solo_webhook";
+function getTabsWebhook() { try { return localStorage.getItem(TABS_WEBHOOK_KEY) || ""; } catch (e) { return ""; } }
+function tabsSoloSetWebhook() {
+  const v = prompt("Paste the Discord webhook URL for the Tabs Solo report (Channel settings \u2192 Integrations \u2192 Webhooks \u2192 Copy Webhook URL).\n\nSaved only in this browser. Leave empty to remove it.", getTabsWebhook());
+  if (v === null) return;
+  const t = v.trim();
+  if (t && !/^https:\/\/(?:[a-z]+\.)?discord(?:app)?\.com\/api\/webhooks\/\d+\/[\w-]+/i.test(t)) { showToast("That doesn't look like a Discord webhook URL"); return; }
+  try { if (t) localStorage.setItem(TABS_WEBHOOK_KEY, t); else localStorage.removeItem(TABS_WEBHOOK_KEY); } catch (e) {}
+  showToast(t ? "Tabs Solo webhook saved" : "Tabs Solo webhook removed");
+  renderTabsSolo();
+}
+async function tabsSoloPostReport(quiet) {
+  const hook = getTabsWebhook();
+  if (!hook) { if (!quiet) tabsSoloSetWebhook(); return false; }
+  const t = tabsSoloReportText({ max: 1900, order: ["market", "day", "context", "release", "edge", "pva"] });
+  if (!t) { if (!quiet) showToast("Nothing graded in Tabs Solo yet"); return false; }
+  try {
+    const r = await fetch(hook + (hook.includes("?") ? "&" : "?") + "wait=true", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content: "```\n" + t + "\n```", allowed_mentions: { parse: [] } }) });
+    if (!r.ok) throw new Error("Discord said " + r.status);
+    if (!quiet) showToast("Tabs Solo report posted \u2713"); return true;
+  } catch (e) { showToast("Tabs Solo post failed \u2014 " + (e && e.message || e)); return false; }
 }
 function tabsSoloCopyReport() {
   const t = tabsSoloReportText(); if (!t) { showToast("Nothing graded in Tabs Solo yet"); return; }
@@ -26807,7 +26856,7 @@ function renderTabsSolo() {
   const sel = "background:#050507;border:1px solid #1a1d22;color:#e2e8f0;border-radius:5px;padding:4px 6px;";
   const paste = `<div style="${card}"><div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:10px;align-items:flex-start;"><div><div style="font-size:14px;font-weight:800;color:#fff;letter-spacing:1px;">TABS SOLO</div><div style="font-size:11px;color:#e6edf5;margin-top:3px;max-width:620px;line-height:1.5;">Paste the Tabs board from PropShop, one market per paste. Every ${TABS_SOLO_MIN_EV}%+ line is logged 1u flat. Each line is tagged <b>30 MIN</b> if its game tips within ${TABS_SOLO_WINDOW_MIN} min of the paste, otherwise <b>INITIAL</b> (Auto) — per game, so one paste can hold both.</div></div>${grid}</div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px;"><label style="font-size:11px;color:#e6edf5;">Market <select id="ts-stat" onchange="tabsSoloSelStat=this.value" style="${sel}">${opts}</select></label><label style="font-size:11px;color:#e6edf5;">Release <select id="ts-rel" style="${sel}"><option value="AUTO">Auto (from tip time)</option><option value="initial">Initial</option><option value="30min">30 min</option></select></label>
-    <button onclick="tabsSoloImport()" style="background:#7c3aed;border:none;color:#fff;border-radius:6px;padding:7px 16px;font-size:12px;font-weight:800;cursor:pointer;">IMPORT</button><button id="ts-grade-btn" onclick="tabsSoloGrade()" style="background:#1e40af;border:none;color:#fff;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:800;cursor:pointer;">GRADE PENDING</button><button onclick="tabsSoloCopyReport()" title="Copy the whole dashboard as one clean text report" style="background:#7c3aed;border:none;color:#fff;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:800;cursor:pointer;">COPY REPORT</button><button onclick="tabsSoloExport()" style="background:transparent;border:1px solid #1a1d22;color:#e6edf5;border-radius:6px;padding:7px 12px;font-size:11px;font-weight:700;cursor:pointer;">EXPORT CSV</button><button onclick="tabsSoloClear()" style="background:transparent;border:1px solid #7f1d1d;color:#f87171;border-radius:6px;padding:7px 12px;font-size:11px;font-weight:700;cursor:pointer;">CLEAR ALL</button><span id="ts-info" style="font-size:11px;color:#e6edf5;">${esc(tabsSoloInfo)}</span></div>
+    <button onclick="tabsSoloImport()" style="background:#7c3aed;border:none;color:#fff;border-radius:6px;padding:7px 16px;font-size:12px;font-weight:800;cursor:pointer;">IMPORT</button><button id="ts-grade-btn" onclick="tabsSoloGrade()" style="background:#1e40af;border:none;color:#fff;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:800;cursor:pointer;">GRADE PENDING</button><button onclick="${getTabsWebhook() ? "tabsSoloPostReport()" : "tabsSoloSetWebhook()"}" title="Grading Tabs Solo posts the report to this webhook" style="background:#5865f2;border:none;color:#fff;border-radius:6px;padding:7px 12px;font-size:11px;font-weight:800;cursor:pointer;">${getTabsWebhook() ? "➤ POST REPORT" : "🔗 WEBHOOK"}</button>${getTabsWebhook() ? `<button onclick="tabsSoloSetWebhook()" style="background:transparent;border:1px solid #1a1d22;color:#e6edf5;border-radius:6px;padding:7px 10px;font-size:11px;font-weight:700;cursor:pointer;">⚙</button>` : ""}<button onclick="tabsSoloCopyReport()" title="Copy the whole dashboard as one clean text report" style="background:#7c3aed;border:none;color:#fff;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:800;cursor:pointer;">COPY REPORT</button><button onclick="tabsSoloExport()" style="background:transparent;border:1px solid #1a1d22;color:#e6edf5;border-radius:6px;padding:7px 12px;font-size:11px;font-weight:700;cursor:pointer;">EXPORT CSV</button><button onclick="tabsSoloClear()" style="background:transparent;border:1px solid #7f1d1d;color:#f87171;border-radius:6px;padding:7px 12px;font-size:11px;font-weight:700;cursor:pointer;">CLEAR ALL</button><span id="ts-info" style="font-size:11px;color:#e6edf5;">${esc(tabsSoloInfo)}</span></div>
     <textarea id="ts-paste" placeholder="Paste the Tabs PropShop board here…" spellcheck="false" style="width:100%;min-height:60px;margin-top:8px;background:#050507;border:1px solid #1a1d22;border-radius:6px;padding:8px 10px;color:#e2e8f0;${mono}font-size:11px;outline:none;resize:vertical;box-sizing:border-box;"></textarea></div>`;
   const filters = `<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:12px;">${["ALL"].concat(MORNING_STATS).map(s => btn(s, `tabsSoloSet('stat','${s}')`, tabsSoloStat === s)).join("")}<span style="width:14px;"></span>${btn("ALL", "tabsSoloSet('rel','ALL')", tabsSoloRel === "ALL", "#c4b5fd")}${Object.keys(TABS_SOLO_REL).map(r => btn(TABS_SOLO_REL[r], `tabsSoloSet('rel','${r}')`, tabsSoloRel === r, "#c4b5fd")).join("")}<span style="width:14px;"></span>${btn("ALL", "tabsSoloSet('ctx','ALL')", tabsSoloCtx === "ALL", "#94a3b8")}${Object.keys(TABS_CTX).map(c => btn(TABS_CTX[c][0], `tabsSoloSet('ctx','${c}')`, tabsSoloCtx === c, TABS_CTX[c][1])).join("")}<button onclick="tabsSoloRetag()" title="Re-read RW injuries / lineups / blurbs for the open bets" style="background:transparent;border:1px solid #1a1d22;color:#e6edf5;border-radius:6px;padding:5px 11px;font-size:11px;font-weight:700;cursor:pointer;">RE-TAG OPEN</button></div>`;
   if (!tabsSolo.length) { el.innerHTML = `<div style="max-width:1100px;margin:0 auto;padding:8px;">${paste}<div style="font-size:12px;color:#e6edf5;">Nothing logged yet.</div></div>`; return; }
