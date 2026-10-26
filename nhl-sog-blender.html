@@ -5696,8 +5696,10 @@ function _nhlLiveGate(b) {
   const why = ok ? "" : missing.length ? `no ${missing.map(k => _NHL_SRC_TAG[k]).join("/")} projection` : neg.length ? neg.map(k => `${_NHL_SRC_TAG[k]} ${evs[k]}%`).join(", ") : `only ${qual} source${qual === 1 ? "" : "s"} at ${NHL_PS_QUAL_EV}%+`;
   return { ok, evs, why };
 }
-function _nhlStillInRange(b) {
-  const g = _nhlLiveGate(b);
+// opts.playToOnly (Discord card): only the price vs the pick's original play-to counts — a source that has
+// slipped slightly negative at a price still inside play-to doesn't pull the pick off the public card.
+function _nhlStillInRange(b, opts) {
+  const g = opts && opts.playToOnly ? null : _nhlLiveGate(b);
   if (g && !g.ok) return false; // a source negative (or <3 at 3%+) at the best price now — not a play any more
   const e = _nhlDisplayEv(b);
   if (b._psEnsemble && b.fairProb != null) return e == null || e >= NHL_PS_QUAL_EV - 0.05; // 0.05 = rounding slack so a pick sitting exactly on play-to isn't dropped
@@ -6054,14 +6056,15 @@ async function sendNhlCard(mode) {
   try {
     const refreshed = await _nhlRefreshPicksForCard(picks);
     // Only send picks still inside our threshold at the current live price. They stay in the tracker either way.
-    const freshPicks = mode === "me" ? _nhlMeCardPicks(refreshed) : refreshed.filter(_nhlStillInRange);
+    const rangeOpts = mode === "discord" ? { playToOnly: true } : undefined;
+    const freshPicks = mode === "me" ? _nhlMeCardPicks(refreshed) : refreshed.filter(b => _nhlStillInRange(b, rangeOpts));
     const droppedNeg = refreshed.length - freshPicks.length;
     _nhlLastCardReport = _nhlBuildCardReport(refreshed, freshPicks, mode);
     if (newOnly && alreadySent.length) {
       // Already-sent picks aren't sent again, but we still check them: still a play at today's price = noted on the bet.
       let again = []; try { again = await _nhlRefreshPicksForCard(alreadySent); } catch (e) {}
       const fmtO = n => (Number(n) > 0 ? "+" : "") + n, at = new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-      const still = again.filter(b => b._liveNow && _nhlStillInRange(b)), gone = again.filter(b => !still.includes(b));
+      const still = again.filter(b => b._liveNow && _nhlStillInRange(b, rangeOpts)), gone = again.filter(b => !still.includes(b));
       still.forEach(fp => { const real = bets.find(x => x.id === fp.id); if (real) real.stillPlay = { at, odds: fp.odds, book: fp.book, day: today }; });
       gone.forEach(fp => { const real = bets.find(x => x.id === fp.id); if (real) delete real.stillPlay; });
       saveBets();
