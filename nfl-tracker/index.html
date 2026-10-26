@@ -1277,7 +1277,7 @@ function loadState() {
       const before = (propsBySource.ensemble || []).length;
       const kept = (propsBySource.ensemble || []).filter(p => {
         const k = [normName(p.player), p.market, Number(p.line), p.side, parseInt(p.odds)].join('|');
-        return canonicalKeys.has(k);
+        return canonicalKeys.has(k) || _isManualPick(p);
       });
       // Keep a full copy of what was there before, so nothing is ever unrecoverable.
       try { localStorage.setItem('nfl_props_ensemble_backup_pre_restore', JSON.stringify(propsBySource.ensemble || [])); } catch(e) {}
@@ -2072,6 +2072,50 @@ function _isMarketLike(s) {
 // A pick you typed in with "+ Add Pick": it stays no matter what — no cleanup, filter or live re-check
 // removes or hides it; only its own delete button does.
 function _isManualPick(p) { return !!(p && p.manual === true && (p.source === 'ensemble' || String(p.id || '').startsWith('ens_manual_'))); }
+// Hand-added picks also live in their OWN store (nfl_manual_picks), copied over on every change.
+// Anything that rewrites the Ensemble list (old one-time restores, Clear Pending, a reset…) can no
+// longer lose one: _keepManualPicks() puts back any that went missing, grade included. Only the
+// pick's delete button removes it for good (its id goes in nfl_manual_deleted).
+const MANUAL_KEY = 'nfl_manual_picks', MANUAL_DELETED_KEY = 'nfl_manual_deleted';
+// Picks that must always be on the record, whatever happens to this browser's saved data.
+const BUILTIN_MANUAL_PICKS = [
+  { id: 'ens_manual_builtin_henderson_w7', source: 'ensemble', manual: true, tier: 'value',
+    player: 'TreVeyon Henderson', team: 'NE', game: 'NE @ CHI', pos: 'RB',
+    market: 'rush_att', line: 6.5, side: 'U', odds: '-120', book: 'Manual add', ev: 0,
+    gameTime: '8:15 PM', date: '2026-10-22', result: 'win', notes: '', actual: null, pnl: 1,
+    ensembleSources: [], altLines: [], standaloneAgrees: [], createdAt: 1792627200000,
+    playTo: { odds: '-120', src: 'manual', ev: null } },
+];
+function _manualLoad(key) { try { const a = JSON.parse(localStorage.getItem(key) || '[]'); return Array.isArray(a) ? a : []; } catch (e) { return []; } }
+function _keepManualPicks() {
+  const ens = propsBySource.ensemble || (propsBySource.ensemble = []);
+  const deleted = new Set(_manualLoad(MANUAL_DELETED_KEY).map(String));
+  const keep = {};
+  BUILTIN_MANUAL_PICKS.forEach(p => { keep[p.id] = p; });
+  _manualLoad(MANUAL_KEY).forEach(p => { if (p && p.id) keep[p.id] = p; });
+  ens.forEach(p => { if (_isManualPick(p)) keep[p.id] = p; });          // latest version (grades, notes) wins
+  let added = 0;
+  const builtinIds = new Set(BUILTIN_MANUAL_PICKS.map(p => p.id));
+  const samePick = (a, b) => normName(a.player) === normName(b.player) && a.market === b.market && a.side === b.side && Number(a.line) === Number(b.line) && isoWeek(a.date || '') === isoWeek(b.date || '');
+  Object.values(keep).forEach(p => {
+    if (deleted.has(String(p.id))) return;
+    if (ens.some(e => String(e.id) === String(p.id))) return;
+    if (builtinIds.has(p.id) && ens.some(e => samePick(e, p))) { delete keep[p.id]; return; } // already on the record under another id
+    ens.push(JSON.parse(JSON.stringify(p))); added++;
+  });
+  const store = Object.values(keep).filter(p => !deleted.has(String(p.id)));
+  try {
+    const was = localStorage.getItem(MANUAL_KEY), now = JSON.stringify(store);
+    if (was !== now) localStorage.setItem(MANUAL_KEY, now);
+    if (added) { localStorage.setItem(storageKey('ensemble'), JSON.stringify(ens)); console.warn('[nfl-tracker] put back', added, 'hand-added Ensemble pick(s)'); }
+  } catch (e) {}
+  return added;
+}
+function _forgetManualPick(id) {
+  const del = _manualLoad(MANUAL_DELETED_KEY).map(String);
+  if (!del.includes(String(id))) del.push(String(id));
+  try { localStorage.setItem(MANUAL_DELETED_KEY, JSON.stringify(del)); localStorage.setItem(MANUAL_KEY, JSON.stringify(_manualLoad(MANUAL_KEY).filter(p => String(p.id) !== String(id)))); } catch (e) {}
+}
 function _validPlayerName(s) {
   const n = String(s || '').trim();
   if (n.length < 4 || !/[a-z]/i.test(n)) return false;
@@ -3193,6 +3237,8 @@ function _freezePendingEnsemble() {
 function deletePick(id) {
   if (!confirm('Delete this pick? You can re-paste it after.')) return;
   if (currentSource === 'ensemble') {
+    const gone = (propsBySource.ensemble || []).find(p => String(p.id) === String(id));
+    if (_isManualPick(gone)) _forgetManualPick(id);
     propsBySource.ensemble = (propsBySource.ensemble || []).filter(p => String(p.id) !== String(id));
     try { localStorage.setItem(storageKey('ensemble'), JSON.stringify(propsBySource.ensemble)); } catch(e) {}
   } else {
@@ -3206,7 +3252,7 @@ function deletePick(id) {
 function clearPending() {
   if (!confirm('Clear ALL pending props?')) return;
   if (currentSource === 'ensemble') {
-    propsBySource.ensemble = (propsBySource.ensemble || []).filter(p => p.result && p.result !== '');
+    propsBySource.ensemble = (propsBySource.ensemble || []).filter(p => (p.result && p.result !== '') || _isManualPick(p));
     try { localStorage.setItem(storageKey('ensemble'), JSON.stringify(propsBySource.ensemble)); } catch(e) {}
   } else {
     if (ENSEMBLE_SOURCES.includes(currentSource)) _freezePendingEnsemble();
@@ -3986,6 +4032,7 @@ function renderSourceBar() {
 
 // ===== RENDER DISPATCH =====
 function render() {
+  _keepManualPicks(); // hand-added Ensemble picks can't go missing
   syncPropsAlias(); // recompute ensemble props on every render
   renderSourceBar();
   if (_sched.events.length) renderTicker();
