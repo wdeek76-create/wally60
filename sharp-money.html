@@ -631,14 +631,8 @@ function sharpScan(sk, rows){
       if(!L.total) return;
       if(via) soft.forEach(o=>{ o._arb$=L.total; o._edge=L.bestHold!=null?-L.bestHold:null; });
       else soft.forEach(o=>{ const a=arbLadder(opp, o.price); o._arb$=a.total; o._edge=a.bestHold!=null?-a.bestHold:null; });
-      // main lines: the sharp books' (Pin/BOL/Circa/BKM) price on the same side + their limits, for context
-      // each sharp book's own main line on this side (its number may differ: +7.5 at Circa vs +8.5 here)
-      const refOf = bk => { if(!SHARP_MAINS.has(mk)) return null; const mine=own.filter(o=>o._sd===side && canonBook(o.sportsbook)===bk);
-        const r = mine.find(o=>o.is_main) || mine.filter(at).sort((a,b)=>toDec(b.price)-toDec(a.price))[0] || mine[0];
-        return r ? { price:Number(r.price), line:sharpLine(r), limit: r.limits?.max!=null ? Number(r.limits.max) : null } : null; };
-      const pin = refOf('pinnacle'), bol = refOf('betonline'), circa = refOf('circa'), bkm = refOf('bookmaker');
       const teamName = team ? cleanSel(soft[0].selection||soft[0].name||'').replace(/\s+[+-]?\d+(\.\d+)?$/,'') : null;
-      out.push({ via, pin, bol, circa, bkm, k:`${sk}|${g}|${side}|${line}${tb==='fanduel'?'':'|'+tb}`, tgt:tb, sk, fx, mk, key, pid:own.find(o=>o.player_id)?.player_id||null,
+      out.push({ via, sd:side, k:`${sk}|${g}|${side}|${line}${tb==='fanduel'?'':'|'+tb}`, tgt:tb, sk, fx, mk, key, pid:own.find(o=>o.player_id)?.player_id||null,
         player: team ? `${teamName} ${mk==='ml'?'ML':(line>0?'+':'')+line}` : sharpPlayerOf(soft[0]), side: team?'team':side, line: team?null:line, ref:soft[0], soft, L, own });
       });
     }));
@@ -786,7 +780,7 @@ async function sharpDcPump(){
       const e=sharpDcQ.shift(), name=`${titleCase(e.player)} ${sharpSideLabel(e.side)}${e.line!=null?' '+e.line:''}`;
       let ok=false, why='';
       const tag = e.tgt==='bet105' ? 'b105 · ' : '';
-      try{ e.info = SHARP_MAINS.has(e.mk) ? null : await smInfo(e); const pl=sharpDiscordPayload(e), rt=roleTag(roleFor(e));
+      try{ if(SHARP_MAINS.has(e.mk)) await smSharpRefs(e); e.info = SHARP_MAINS.has(e.mk) ? null : await smInfo(e); const pl=sharpDiscordPayload(e), rt=roleTag(roleFor(e));
         // same order as the title, then the role tag: "-108 Giannis Antetokounmpo Under 4.5 Rebounds @SM"
         const head=String(pl.embeds?.[0]?.title||'');
         ok=await discordPost({ ...pl, ...rt, content:[head, rt.content].filter(Boolean).join(' ') }, m=>{ why=m; }, hookFor(e)); }catch(err){ why=err.message; }
@@ -933,15 +927,21 @@ async function sharpScanSport(sk){
   const rows=[];
   // FanDuel: its main lines. Exchanges: every line they post -- their "main" flag doesn't always
   // land on FanDuel's number, and a line that isn't flagged would otherwise never come back.
+  // Only the markets Sharp Money uses: a full pull (every market) learns their names, then scans ask
+  // for just those -- far less data back from the backend. Full pull again every 30 min for new ones.
+  const mn=smMktNames[sk], full=!mn || Date.now()-mn.at>SM_MKT_FULL_MS;
   const pull=(books, list=fx)=>{ const jobs=[]; for(const fc of chunk(list,5)) for(const bk of books) jobs.push(async()=>{
     const params={fixture_id:fc.map(f=>f.id),sportsbook:bk}; if(!EXCH.has(canonBook(bk[0]))) params.is_main=true;
+    if(!full) params.market=[...mn.names];
     try{ const r=await oo('/fixtures/odds',params); (r?.data||[]).forEach(d=>(d.odds||[]).forEach(o=>{ o._fx=d.id; rows.push(o); })); }catch(e){ console.warn('[sharp] scan chunk failed', sk, e.message); }
   }); return runPool(jobs, 4); };
   // 1) FanDuel + the exchanges first, and its alerts go out right away
   // bet105 and the via-books each asked on their own: one book name OpticOdds doesn't take for a sport
   // fails the whole request, and bundled with them that silently took bet105 down too
-  if(fx.length) await pull([['FanDuel'],['Novig','Prophet X','Kalshi'],['bet105'],['Props Builder'],['DraftKings'],['Onyx Odds'],['Pinnacle'],['BetOnline'],['Circa'],['BookMaker']]);
-  if(fx.length && !rows.length){ sharpDiag[sk]={at:Date.now(), games:fx.length, rows:0, byBook:{}, props:0, withExch:0, sides:0}; return; } // failed pull: keep the last good read instead of zeroing everything
+  if(fx.length) await pull([['FanDuel'],['Novig','Prophet X','Kalshi'],['bet105'],['Props Builder'],['DraftKings'],['Onyx Odds']]);
+  if(fx.length && !rows.length){ if(!full) delete smMktNames[sk]; sharpDiag[sk]={at:Date.now(), games:fx.length, rows:0, byBook:{}, props:0, withExch:0, sides:0}; return; } // failed pull: keep the last good read instead of zeroing everything (and go back to a full pull next time)
+  if(full){ const ok=new Set(SHARP_MARKETS[sk]||[]), names=new Set(); rows.forEach(o=>{ if(o.market && ok.has(marketKeyFor(sk,o.market))) names.add(o.market); });
+    if(names.size) smMktNames[sk]={ names, at:Date.now() }; }
   { const found=sharpScan(sk, rows).filter(x=>x.tgt==='fanduel'); sharpDiag[sk].games=fx.length;
     sharpRecord(sk, found, Date.now(), fx, 'fanduel'); sharpCheckPings(sk); if(viewMode==='sharp') renderSharp(); }
   // 2) then bet105 (asked on its own, so it can never slow down or cost the FanDuel read)
@@ -952,6 +952,21 @@ async function sharpScanSport(sk){
     sharpRecord(sk, found.filter(x=>x.tgt==='bet105'), Date.now(), all, 'bet105'); sharpCheckPings(sk); }
 }
 // Every sport scans side by side; each one starts its next scan as soon as its last one is done.
+const smMktNames = {};   // sk -> { names:Set of market names Sharp Money uses, at }
+const SM_MKT_FULL_MS = 30*60e3;
+// Pin / BOL / Circa / BookMaker: reference numbers on b105 main-line alerts only, so they're pulled
+// right before such an alert posts (this game + market only), never on every scan.
+const SM_REF_BOOKS = [['Pinnacle','pin'],['BetOnline','bol'],['Circa','circa'],['BookMaker','bkm']];
+async function smSharpRefs(e){
+  if(!SHARP_MAINS.has(e.mk) || !e.ref?.market) return;
+  const team = e.mk==='ml'||e.mk==='spread', betLine = e.line ?? sharpLine(e.ref);
+  await Promise.all(SM_REF_BOOKS.map(async([bk,key])=>{
+    let rows=[]; try{ const r=await oo('/fixtures/odds',{fixture_id:[e.fx],sportsbook:[bk],market:[e.ref.market],is_main:true}); rows=r?.data?.[0]?.odds||[]; }catch(err){}
+    const mine=rows.filter(o=>{ const s = team ? 't:'+normName(cleanSel(o.selection||o.name||'').replace(/\s+[+-]?\d+(\.\d+)?$/,'')) : sharpSideOf(o, e.mk); return s===e.sd; });
+    const r = mine.find(o=>o.is_main) || mine.filter(o=>sharpLine(o)===betLine).sort((a,b)=>toDec(b.price)-toDec(a.price))[0] || mine[0];
+    e[key] = r ? { price:Number(r.price), line:sharpLine(r), limit: r.limits?.max!=null ? Number(r.limits.max) : null } : null;
+  }));
+}
 async function sharpScanOne(sk){
   if(sharpBusy[sk]) return; sharpBusy[sk]=true;
   try{ await sharpScanSport(sk); if(viewMode==='sharp') renderSharp(); }
