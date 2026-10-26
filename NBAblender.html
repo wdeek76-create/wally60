@@ -26745,6 +26745,38 @@ async function tabsSoloGrade(auto) {
 function tabsSoloSet(kind, v) { if (kind === "stat") tabsSoloStat = v; else if (kind === "ctx") tabsSoloCtx = v; else tabsSoloRel = v; renderTabsSolo(); }
 function tabsSoloDelete(key) { tabsSolo = tabsSolo.filter(x => x.key !== key); tabsSoloSave(); renderTabsSolo(); }
 function tabsSoloClear() { if (!confirm(`Delete all ${tabsSolo.length} Tabs Solo bets? This can't be undone.`)) return; tabsSolo = []; tabsSoloMeta = {}; tabsSoloSave(); renderTabsSolo(); }
+// One clean text report of the whole Tabs Solo dashboard (all bets, filters ignored): overall, over vs under, then per market / release / edge / RW context / day, each with its own over-under split.
+function tabsSoloReportText() {
+  const rows = tabsSolo.filter(x => x.result === "hit" || x.result === "miss");
+  if (!rows.length) return "";
+  const win = x => x.odds > 0 ? x.odds / 100 : 100 / Math.abs(x.odds);
+  const agg = set => { const v = { w: 0, l: 0, pl: 0 }; set.forEach(x => { if (x.result === "hit") { v.w++; v.pl += win(x); } else { v.l++; v.pl -= 1; } }); v.n = v.w + v.l; return v; };
+  const u = n => (n >= 0 ? "+" : "") + n.toFixed(2) + "u";
+  const rec = v => `${v.w}-${v.l}${v.n ? ` ${Math.round(v.w / v.n * 100)}%` : ""}`;
+  const roi = v => v.n ? ` ${(v.pl / v.n * 100 >= 0 ? "+" : "") + (v.pl / v.n * 100).toFixed(0)}%` : "";
+  const line = (label, set, w) => { const a = agg(set); if (!a.n) return null; const o = agg(set.filter(x => x.ou === "over")), un = agg(set.filter(x => x.ou === "under")); return `${label.padEnd(w || 9)} ${rec(a)} ${u(a.pl)}${roi(a)} | O ${o.n ? rec(o) + " " + u(o.pl) : "\u2014"} | U ${un.n ? rec(un) + " " + u(un.pl) : "\u2014"}`; };
+  const sect = (title, items, w) => { const ls = items.map(([l, set]) => line(l, set, w)).filter(Boolean); return ls.length ? ["", title].concat(ls) : []; };
+  const all = agg(rows), days = [...new Set(rows.map(x => x.gameDate))].sort();
+  const out = [`TABS SOLO \u00b7 ${days[0].slice(5)}${days.length > 1 ? " to " + days[days.length - 1].slice(5) : ""} \u00b7 ${all.n} graded${tabsSolo.length - rows.length ? ` \u00b7 ${tabsSolo.filter(x => x.result === "pending").length} open` : ""}`];
+  out.push(line("ALL", rows, 9));
+  out.push(...sect("By market", MORNING_STATS.map(st => [st, rows.filter(x => x.stat === st)]), 9));
+  out.push(...sect("By release", Object.keys(TABS_SOLO_REL).map(r => [TABS_SOLO_REL[r], rows.filter(x => x.release === r)]), 9));
+  out.push(...sect("By edge", MORNING_SOLO_BUCKETS.map(([l, lo, hi]) => [l, rows.filter(x => x.ev >= lo && x.ev < hi)]), 9));
+  out.push(...sect("By RW context", Object.keys(TABS_CTX).map(c => [TABS_CTX[c][0], rows.filter(x => (x.ctx || "clean") === c)]), 9));
+  out.push(...sect("By day", days.slice(-7).reverse().map(d => [d.slice(5), rows.filter(x => x.gameDate === d)]), 9));
+  // projected vs actual
+  const pv = [], pvRow = (lbl, pairs) => { if (!pairs.length) return; const n = pairs.length, ap = pairs.reduce((t, q) => t + q[0], 0) / n, aa = pairs.reduce((t, q) => t + q[1], 0) / n, mae = pairs.reduce((t, q) => t + Math.abs(q[0] - q[1]), 0) / n; pv.push(`${lbl.padEnd(9)} proj ${ap.toFixed(2)} \u00b7 actual ${aa.toFixed(2)} \u00b7 miss ${mae.toFixed(2)} \u00b7 n ${n}`); };
+  MORNING_STATS.forEach(st => pvRow(st, rows.filter(x => x.stat === st && x.proj > 0 && x.actual != null).map(x => [Number(x.proj), Number(x.actual)])));
+  { const seen = new Set(), mp = []; rows.forEach(x => { if (!(x.min > 0) || x.actualMin == null) return; const k = resolveNorm(x.player) + "|" + x.gameDate; if (seen.has(k)) return; seen.add(k); mp.push([Number(x.min), Number(x.actualMin)]); }); pvRow("Minutes", mp); }
+  if (pv.length) out.push("", "Projected vs actual", ...pv);
+  out.push("", "1u flat at the price pasted. Pushes / DNPs not counted.");
+  return out.join("\n");
+}
+function tabsSoloCopyReport() {
+  const t = tabsSoloReportText(); if (!t) { showToast("Nothing graded in Tabs Solo yet"); return; }
+  const text = "```\n" + t + "\n```";   // code block so Discord keeps the columns lined up
+  try { navigator.clipboard.writeText(text).then(() => showToast("Tabs Solo report copied"), () => prompt("Copy:", text)); } catch (e) { prompt("Copy:", text); }
+}
 function tabsSoloExport() {
   if (!tabsSolo.length) { showToast("Tabs Solo is empty"); return; }
   const cols = ["gameDate", "gameTime", "release", "minToTip", "player", "team", "stat", "ou", "line", "odds", "book", "ev", "proj", "min", "simFair", "ctx", "ctxWhy", "result", "actual"];
@@ -26775,7 +26807,7 @@ function renderTabsSolo() {
   const sel = "background:#050507;border:1px solid #1a1d22;color:#e2e8f0;border-radius:5px;padding:4px 6px;";
   const paste = `<div style="${card}"><div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:10px;align-items:flex-start;"><div><div style="font-size:14px;font-weight:800;color:#fff;letter-spacing:1px;">TABS SOLO</div><div style="font-size:11px;color:#e6edf5;margin-top:3px;max-width:620px;line-height:1.5;">Paste the Tabs board from PropShop, one market per paste. Every ${TABS_SOLO_MIN_EV}%+ line is logged 1u flat. Each line is tagged <b>30 MIN</b> if its game tips within ${TABS_SOLO_WINDOW_MIN} min of the paste, otherwise <b>INITIAL</b> (Auto) — per game, so one paste can hold both.</div></div>${grid}</div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px;"><label style="font-size:11px;color:#e6edf5;">Market <select id="ts-stat" onchange="tabsSoloSelStat=this.value" style="${sel}">${opts}</select></label><label style="font-size:11px;color:#e6edf5;">Release <select id="ts-rel" style="${sel}"><option value="AUTO">Auto (from tip time)</option><option value="initial">Initial</option><option value="30min">30 min</option></select></label>
-    <button onclick="tabsSoloImport()" style="background:#7c3aed;border:none;color:#fff;border-radius:6px;padding:7px 16px;font-size:12px;font-weight:800;cursor:pointer;">IMPORT</button><button id="ts-grade-btn" onclick="tabsSoloGrade()" style="background:#1e40af;border:none;color:#fff;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:800;cursor:pointer;">GRADE PENDING</button><button onclick="tabsSoloExport()" style="background:transparent;border:1px solid #1a1d22;color:#e6edf5;border-radius:6px;padding:7px 12px;font-size:11px;font-weight:700;cursor:pointer;">EXPORT CSV</button><button onclick="tabsSoloClear()" style="background:transparent;border:1px solid #7f1d1d;color:#f87171;border-radius:6px;padding:7px 12px;font-size:11px;font-weight:700;cursor:pointer;">CLEAR ALL</button><span id="ts-info" style="font-size:11px;color:#e6edf5;">${esc(tabsSoloInfo)}</span></div>
+    <button onclick="tabsSoloImport()" style="background:#7c3aed;border:none;color:#fff;border-radius:6px;padding:7px 16px;font-size:12px;font-weight:800;cursor:pointer;">IMPORT</button><button id="ts-grade-btn" onclick="tabsSoloGrade()" style="background:#1e40af;border:none;color:#fff;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:800;cursor:pointer;">GRADE PENDING</button><button onclick="tabsSoloCopyReport()" title="Copy the whole dashboard as one clean text report" style="background:#7c3aed;border:none;color:#fff;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:800;cursor:pointer;">COPY REPORT</button><button onclick="tabsSoloExport()" style="background:transparent;border:1px solid #1a1d22;color:#e6edf5;border-radius:6px;padding:7px 12px;font-size:11px;font-weight:700;cursor:pointer;">EXPORT CSV</button><button onclick="tabsSoloClear()" style="background:transparent;border:1px solid #7f1d1d;color:#f87171;border-radius:6px;padding:7px 12px;font-size:11px;font-weight:700;cursor:pointer;">CLEAR ALL</button><span id="ts-info" style="font-size:11px;color:#e6edf5;">${esc(tabsSoloInfo)}</span></div>
     <textarea id="ts-paste" placeholder="Paste the Tabs PropShop board here…" spellcheck="false" style="width:100%;min-height:60px;margin-top:8px;background:#050507;border:1px solid #1a1d22;border-radius:6px;padding:8px 10px;color:#e2e8f0;${mono}font-size:11px;outline:none;resize:vertical;box-sizing:border-box;"></textarea></div>`;
   const filters = `<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:12px;">${["ALL"].concat(MORNING_STATS).map(s => btn(s, `tabsSoloSet('stat','${s}')`, tabsSoloStat === s)).join("")}<span style="width:14px;"></span>${btn("ALL", "tabsSoloSet('rel','ALL')", tabsSoloRel === "ALL", "#c4b5fd")}${Object.keys(TABS_SOLO_REL).map(r => btn(TABS_SOLO_REL[r], `tabsSoloSet('rel','${r}')`, tabsSoloRel === r, "#c4b5fd")).join("")}<span style="width:14px;"></span>${btn("ALL", "tabsSoloSet('ctx','ALL')", tabsSoloCtx === "ALL", "#94a3b8")}${Object.keys(TABS_CTX).map(c => btn(TABS_CTX[c][0], `tabsSoloSet('ctx','${c}')`, tabsSoloCtx === c, TABS_CTX[c][1])).join("")}<button onclick="tabsSoloRetag()" title="Re-read RW injuries / lineups / blurbs for the open bets" style="background:transparent;border:1px solid #1a1d22;color:#e6edf5;border-radius:6px;padding:5px 11px;font-size:11px;font-weight:700;cursor:pointer;">RE-TAG OPEN</button></div>`;
   if (!tabsSolo.length) { el.innerHTML = `<div style="max-width:1100px;margin:0 auto;padding:8px;">${paste}<div style="font-size:12px;color:#e6edf5;">Nothing logged yet.</div></div>`; return; }
