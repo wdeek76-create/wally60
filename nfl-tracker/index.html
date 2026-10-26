@@ -5458,7 +5458,14 @@ function refreshSentGrades() {
   let changed = false;
   arr.forEach(e => {
     if (e.manual) return;
-    const src = (e.ensId && byId[e.ensId]) || byKey[e.key];
+    let src = (e.ensId && byId[e.ensId]) || byKey[e.key];
+    if (!src || !['win', 'loss', 'push'].includes(src.result)) {
+      // not on (or not graded in) the Ensemble — grade off any source's actual stat for this player+market
+      const dd = (a, b) => (!a || !b) ? 99 : Math.abs((new Date(a + 'T12:00:00') - new Date(b + 'T12:00:00')) / 86400000);
+      let g = null;
+      SOURCES.forEach(s => (propsBySource[s] || []).forEach(p => { if (!g && p.actual != null && p.actual !== '' && !isNaN(parseFloat(p.actual)) && normName(p.player) === normName(e.player) && p.market === e.market && dd(p.date, e.date) <= 1) g = p; }));
+      if (g) { const a = parseFloat(g.actual), ln = parseFloat(e.line); src = { result: a === ln ? 'push' : ((e.side === 'O') === (a > ln) ? 'win' : 'loss'), actual: a }; }
+    }
     if (!src) return;
     const res = ['win', 'loss', 'push'].includes(src.result) ? src.result : '';
     if (res === e.result && (src.actual ?? null) === (e.actual ?? null)) return;
@@ -5480,6 +5487,62 @@ function removeSent(key) {
   if (!confirm(`Remove ${e.player} ${e.side === 'O' ? 'over' : 'under'} ${e.line} from the Sent tracker?`)) return;
   saveSent(arr.filter(x => x.key !== key)); render();
 }
+// ── Text version of sent picks: "Cam Ward: u0.5 Pass TD +174" — one line per pick, the same format
+// as your results. Copied automatically when a card goes to Discord; paste it back on the Sent tab.
+const _sentMktLabel = m => (MARKET_MAP[m] || { label: m }).label;
+const _sentTextLine = e => `${e.player}: ${e.side === 'O' ? 'o' : 'u'}${e.line} ${_sentMktLabel(e.market)} ${e.odds}`;
+function _sentTextOf(list) { return list.map(_sentTextLine).join('\n'); }
+function _localDateStr(d) { d = d || new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
+async function _copyText(t) { try { await navigator.clipboard.writeText(t); return true; } catch (e) { return false; } }
+function _sentMarketKey(label) {
+  const l = String(label || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  const byLabel = Object.keys(MARKET_MAP).find(k => MARKET_MAP[k].label.toLowerCase() === l);
+  return byLabel || MARKET_ALIASES[l] || MARKET_ALIASES[l.replace(/s$/, '')] || null;
+}
+// "Cam Ward: u0.5 Pass TD +174"  /  "TreVeyon Henderson (NE): u6.5 Rush Att -120 WIN = +1u"  /  "Kirk Cousins o33.5 Pass Att -117"
+function _parseSentLine(line) {
+  const m = String(line || '').trim().match(/^(.+?)(?:\s*\(([A-Z]{2,4})\))?\s*[:\-–]?\s+([ouOU])\s*(\d+(?:\.\d+)?)\s+(.+?)\s+([+\-−]\d{3,4})\b(.*)$/);
+  if (!m) return null;
+  const market = _sentMarketKey(m[5]);
+  if (!market) return { error: `unknown market "${m[5]}"` };
+  const tail = m[7] || '', res = (tail.match(/\b(WIN|LOSS|PUSH|VOID)\b/i) || [])[1];
+  const act = (tail.match(/\(([\d.]+)\)/) || [])[1];
+  return { player: m[1].trim(), team: m[2] || '', side: m[3].toLowerCase() === 'o' ? 'O' : 'U', line: parseFloat(m[4]), market,
+    odds: m[6].replace('−', '-'), result: res ? (/void/i.test(res) ? 'push' : res.toLowerCase()) : '', actual: act != null ? parseFloat(act) : null };
+}
+function importSentPaste() {
+  const raw = (document.getElementById('sentPasteArea') || {}).value || '';
+  const day = (document.getElementById('sentPasteDate') || {}).value || _localDateStr();
+  const wk = isoWeek(day);
+  // look the pick up in the tracker (Ensemble first, then any source) that week, for its real game date
+  let pool = []; try { pool = computeEnsembleProps(); } catch (e) {}
+  SOURCES.forEach(src => (propsBySource[src] || []).forEach(p => pool.push(p)));
+  const arr = loadSent(), have = new Set(arr.map(e => e.key));
+  let added = 0, dup = 0; const bad = [];
+  raw.split(/\n/).map(l => l.trim()).filter(Boolean).forEach((l, i) => {
+    const x = _parseSentLine(l);
+    if (!x || x.error) { if (!/^(sun|mon|tue|wed|thu|fri|sat)|props?$|^player/i.test(l)) bad.push(l + (x && x.error ? ' — ' + x.error : '')); return; }
+    const hit = pool.find(p => normName(p.player) === normName(x.player) && p.market === x.market && p.side === x.side && isoWeek(p.date || '') === wk && Number(p.line) === x.line)
+             || pool.find(p => normName(p.player) === normName(x.player) && p.market === x.market && p.side === x.side && isoWeek(p.date || '') === wk);
+    const e = { player: hit ? hit.player : x.player, team: x.team || (hit && hit.team) || '', market: x.market, side: x.side, line: x.line,
+      date: (hit && hit.date) || day, game: (hit && hit.game) || '', gameTime: (hit && hit.gameTime) || '' };
+    e.key = _sentKey(e);
+    if (have.has(e.key)) { dup++; return; }
+    have.add(e.key); added++;
+    arr.push({ ...e, ensId: hit && String(hit.id || '').startsWith('ens_') ? hit.id : null, odds: x.odds, book: '', playTo: null, ev: null, tier: (hit && hit.tier) || null,
+      sentAt: Date.now() + i, result: x.result, actual: x.actual, pnl: x.result ? _sentPnl(x.result, x.odds) : null, gradedAt: x.result ? Date.now() : null, manual: !!x.result, pasted: true });
+  });
+  saveSent(arr);
+  if (added) render(); // redraws the tab (clears the box)
+  const msg = document.getElementById('sentPasteMsg');
+  if (msg) msg.innerHTML = `Added ${added}${dup ? ` · ${dup} already there` : ''}${bad.length ? ` · <span class="neg">couldn't read ${bad.length}:</span> <span class="dim">${bad.map(escHtml).join(' | ')}</span>` : ''}`;
+  if (bad.length && !added) { const ta = document.getElementById('sentPasteArea'); if (ta) ta.value = raw; }
+}
+async function copySentWeek(wk) {
+  const list = loadSent().filter(e => isoWeek(e.date) === wk).sort((a, b) => String(a.date).localeCompare(String(b.date)) || a.sentAt - b.sentAt);
+  const ok = await _copyText(_sentTextOf(list));
+  if (!ok) prompt('Copy these:', _sentTextOf(list));
+}
 function renderSent() {
   const wrap = document.getElementById('wrap');
   const arr = refreshSentGrades();
@@ -5490,8 +5553,19 @@ function renderSent() {
     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">${destRow('partners')}</div>
     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">${destRow('nick')}</div>
     <span class="dim">Only picks in a Partners card sent with 📤 Send to Discord land here, at the price shown on the card. Grades follow the Ensemble. Nick card sends aren't tracked.</span></div></div>`;
+  const thisWk = isoWeek(_localDateStr());
+  const weeksSent = [...new Set(arr.map(e => isoWeek(e.date)))].sort().reverse();
+  const pasteBox = `<div class="panel"><div class="panel-head"><span class="panel-title">Paste sent picks</span><span class="muted" style="font-size:11px">one per line — "Cam Ward: u0.5 Pass TD +174" · WIN/LOSS on a line grades it, otherwise it grades itself from your sources' results</span></div>
+    <div class="panel-body" style="display:flex;flex-direction:column;gap:8px">
+      <textarea id="sentPasteArea" class="paste-area" style="min-height:110px" placeholder="Kirk Cousins: o33.5 Pass Att -117&#10;Tyrone Tracy Jr.: u1.5 Receptions -118"></textarea>
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:12px">
+        <label>Sent on <input type="date" id="sentPasteDate" class="sel" value="${_localDateStr()}"></label>
+        <button class="btn primary" onclick="importSentPaste()">Add to Sent</button>
+        ${weeksSent.length ? 'Copy text: ' + weeksSent.slice(0, 4).map(w => `<button class="btn ghost" onclick="copySentWeek('${w}')">${escHtml(weekRange(w).label.split(' (')[0])}${w === thisWk ? ' (this week)' : ''}</button>`).join('') : ''}
+        <span id="sentPasteMsg"></span>
+      </div></div></div>`;
   if (!arr.length) {
-    wrap.innerHTML = hookBar + `<div class="empty"><h3>Nothing sent yet</h3><p>Go to the <strong>Ensemble</strong> source and hit <strong>📤 Send to Discord</strong>. Every pick on that card gets tracked here.</p></div>`;
+    wrap.innerHTML = hookBar + pasteBox + `<div class="empty"><h3>Nothing sent yet</h3><p>Go to the <strong>Ensemble</strong> source and hit <strong>📤 Send to Discord</strong>. Every pick on that card gets tracked here.</p></div>`;
     return;
   }
   const _pnlOf = a => calcStats(a).pnl;
@@ -5521,7 +5595,7 @@ function renderSent() {
     <td class="r mono ${e.pnl > 0 ? 'pos' : e.pnl < 0 ? 'neg' : 'muted'}">${e.pnl != null ? fmtU(e.pnl) : '—'}</td>
     <td class="r" style="white-space:nowrap">${gbtn(e, 'win', 'W')}${gbtn(e, 'loss', 'L')}${gbtn(e, 'push', 'P')}${e.manual ? gbtn(e, 'auto', 'auto') : ''}<button class="btn ghost" style="padding:2px 7px;font-size:11px;color:var(--red)" onclick="removeSent('${escHtml(e.key).replace(/'/g, "\\'")}')">✕</button></td>
   </tr>`).join('');
-  wrap.innerHTML = hookBar + kpiStrip(arr, 'sent to Discord') + `
+  wrap.innerHTML = hookBar + kpiStrip(arr, 'sent to Discord') + pasteBox + `
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:12px">
       ${table('By Week', weeks)}${table('By Market', mkts)}${table('By Side', sides)}${table('By Tier', tiers)}
     </div>
@@ -5922,6 +5996,8 @@ async function makeDiscordCard(mode = 'partners', opts = {}) {
           // just the picture (plus the role tag) — no caption text
           if (await _discordPost(blob, fname, '', mode)) {
             const added = forNick ? 0 : logSentPicks(cardShown); // only the Partners card feeds the Sent tracker
+            // text version of what went out, on the clipboard (paste it back on the Sent tab if ever needed)
+            _copyText(cardShown.map(({ p, best }) => _sentTextLine({ player: p.player, side: p.side, line: p.line, market: p.market, odds: best ? _ooFmtPrice(best.price) : String(p.odds || '') })).join('\n'));
             render();
             setBtn('✓ Sent'); await new Promise(r => setTimeout(r, 1500));
             console.log('[discord] sent', cardShown.length, 'picks,', added, 'new in Sent tracker');

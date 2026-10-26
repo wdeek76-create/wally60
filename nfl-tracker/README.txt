@@ -39,3 +39,11 @@ SEND TO DISCORD + SENT TRACKER
 - "📤 Send Nick Card" posts the Nick Card to its OWN webhook and pings its own role (both asked
   on the first send; change either on the Sent tab). The Nick card MUST tag a role: with no role
   set it asks, and sends nothing until one is entered. Nick sends are not logged to Sent.
+
+SENT TAB: TEXT VERSION + PASTE
+- Each Send to Discord also copies the card's picks as text, one per line:
+    Cam Ward: u0.5 Pass TD +174
+  The Sent tab has "Copy text" buttons per week for the same thing.
+- "Paste sent picks" on the Sent tab adds lines in that format (your results format works too:
+  "Bo Nix: o32.5 Pass Att -115 LOSS (29) = -1.15u"). WIN/LOSS/PUSH on a line grades it; a line
+  without one grades itself from any source's graded actual for that player + market.
