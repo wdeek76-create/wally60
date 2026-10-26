@@ -8,6 +8,11 @@
 <title>NHL SOG BLENDER</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0;}
+/* Light theme (default): the dark design flipped to white background / black text in one step; photos, logos and
+   card images are flipped back so they keep their real colors. Cards sent out are rendered separately and stay as-is. */
+html.light{filter:invert(1) hue-rotate(180deg);background:#000;}
+html.light body,html.light #header{background:#000 !important;} /* flips to pure white */
+html.light img,html.light video,html.light canvas,html.light svg image{filter:invert(1) hue-rotate(180deg);}
 body{background:#060b14;color:#e2e8f0;font-family:'Inter',sans-serif;min-height:100vh;font-size:15px;}
 button{font-family:'Inter',sans-serif;cursor:pointer;}
 input{font-family:'Inter',sans-serif;}
@@ -180,7 +185,14 @@ tr:hover td{background:#0a1628;}
 <div id="header">
   <div class="logo">N</div>
   <span class="t1">NHL</span><span class="t2">SOG BLENDER</span>
+  <button id="theme-btn" onclick="_nhlToggleTheme()" title="Light / dark" style="margin-left:10px;background:transparent;border:1px solid #0d2035;color:#9fb8d6;border-radius:6px;padding:4px 9px;font-size:13px;cursor:pointer;"></button>
 </div>
+<script>
+function _nhlApplyTheme() { let t = "light"; try { t = localStorage.getItem("nhl_theme") || "light"; } catch (e) {}
+  document.documentElement.classList.toggle("light", t === "light"); const b = document.getElementById("theme-btn"); if (b) b.textContent = t === "light" ? "🌙 Dark" : "☀ Light"; }
+function _nhlToggleTheme() { let t = "light"; try { t = localStorage.getItem("nhl_theme") || "light"; } catch (e) {} try { localStorage.setItem("nhl_theme", t === "light" ? "dark" : "light"); } catch (e) {} _nhlApplyTheme(); }
+_nhlApplyTheme();
+</script>
 
 <!-- NHL scoreboard ticker — sportsbook-style horizontal strip, same pattern as
      the WNBA tool's ticker. Auto-scrolls, pauses on hover/touch, refreshes
@@ -3422,6 +3434,7 @@ async function runAutoGrade(opts) {
     }
 
     if (graded) { saveBets(); if (currentTab === "tracker") renderTracker(); }
+    _nhlMaybePostDailyRecap().catch(() => {});
     if (!opts.silent) agLog.push(graded ? ("✓ " + graded + " bet" + (graded === 1 ? "" : "s") + " graded and saved to tracker!") : "No completed games among pending bets yet.");
     else if (graded) showNhlToast(graded + " bet" + (graded === 1 ? "" : "s") + " auto-graded");
   } catch (e) {
@@ -3620,6 +3633,7 @@ function _nhlStartAutoGradePolling() {
     gradeNhlModelLog().catch(e => console.warn("[NHL model] grade", e && e.message));
     runNhlClvCapture({ silent: true }).catch(() => {});
     nhlBackfillCrossTimes().catch(() => {});
+    if (!agRunning) _nhlMaybePostDailyRecap().catch(() => {});   // also covers picks graded by hand
   };
   tick();
   _nhlAutoGradeTimer = setInterval(tick, 180000);
@@ -5815,7 +5829,7 @@ function renderNhlDiscordTab() {
   el.innerHTML = `<div style="padding:4px 0;">
     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;">
       <span style="font-size:15px;font-weight:800;color:#cc66ff;">${escapeHtmlBasic(_nhlDiscordRecapText())}</span>
-      <button onclick="_nhlSendDiscordRecap()" title="Copies the recap and posts it to your Discord webhook" style="background:transparent;border:1px solid #0d2035;color:#cc66ff;${btn}">${_nhlDiscordHook() ? "Copy + post recap" : "Copy recap"}</button>
+      <button onclick="navigator.clipboard.writeText(_nhlDiscordRecapText());showNhlToast('Copied')" title="Each day's recap posts to Discord on its own once all that day's Discord picks are graded" style="background:transparent;border:1px solid #0d2035;color:#cc66ff;${btn}">Copy recap</button>
       <button onclick="setNhlDiscordWebhook()" style="background:transparent;border:1px solid #0d2035;color:${_nhlDiscordHook() ? "#00cc66" : "#9fb8d6"};${btn}">${_nhlDiscordHook() ? "Webhook ✓ …" + _nhlDiscordHook().slice(-4) + " · change" : "Set Discord webhook"}</button>
       <button onclick="setNhlNickWebhook()" style="background:transparent;border:1px solid #0d2035;color:${_nhlNickHook() ? "#00cc66" : "#9fb8d6"};${btn}">${_nhlNickHook() ? "Nick webhook ✓" + (_nhlNickRole() ? " + role" : "") + " · change" : "Set Nick webhook"}</button>
     </div>
@@ -6023,16 +6037,44 @@ async function _nhlPaintSentCards() {
       <div style="font-size:11px;color:#9fb8d6;margin-top:6px;line-height:1.5;">${c.picks.map(escapeHtmlBasic).join("<br>")}</div></div>`; }).join("");
 }
 const NHL_DISCORD_ROLE = "1555588242764595230";   // NHL role — tagged on every card posted
-// Recap: copied, and posted as plain text to the Discord webhook when one is set (no role ping).
-async function _nhlSendDiscordRecap() {
-  const text = _nhlDiscordRecapText();
-  try { await navigator.clipboard.writeText(text); } catch (e) {}
-  if (!_nhlDiscordHook()) { showNhlToast("Copied"); return; }
-  try {
-    const r = await fetch(_nhlDiscordHook(), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content: text.slice(0, 2000), allowed_mentions: { parse: [] } }) });
-    if (!r.ok) throw new Error(r.status + " " + (await r.text()).slice(0, 120));
-    showNhlToast("Recap posted to Discord ✓ (and copied)");
-  } catch (e) { console.warn("[NHL] recap post failed", e); showNhlToast("Copied — couldn't post to Discord (" + e.message + ")"); }
+// Daily recap → Discord webhook, on its own: once every pick sent to Discord for a game day is graded, that
+// day's results (W/L, units, ROI, CLV) plus the running record post as plain text (no role ping). Once per day.
+const NHL_RECAP_POSTED_KEY = "nhl_discord_recap_days";
+function _nhlBetClvCents(b) {
+  const v = NHL_CLV_BOOKS.map(k => b.clvCents && b.clvCents[k]).filter(x => x != null && isFinite(x));
+  return v.length ? v.reduce((a, c) => a + c, 0) / v.length : null;
+}
+function _nhlDailyRecapText(dayIso) {
+  const fmt = n => (Number(n) > 0 ? "+" : "") + n, u = n => (n >= 0 ? "+" : "") + n.toFixed(2) + "u";
+  const day = bets.filter(b => b.discordSent && _ymdLocal(new Date(b.date)) === dayIso);
+  let w = 0, l = 0, pl = 0, risk = 0; const clvs = [];
+  const lines = day.map(b => {
+    const o = Number(b.discordOdds != null ? b.discordOdds : b.odds), st = Number(b.stake) || 1, c = _nhlBetClvCents(b);
+    if (c != null) clvs.push(c);
+    let mark = "➖", res = "push";
+    if (b.result === "hit") { w++; pl += _nhlDiscordWin(b); risk += st; mark = "✅"; res = u(_nhlDiscordWin(b)); }
+    else if (b.result === "miss") { l++; pl -= st; risk += st; mark = "❌"; res = u(-st); }
+    return `${mark} ${b.player} ${b.ou === "over" ? "O" : "U"}${b.line} ${fmt(o)}${b.actual != null ? ` · ${b.actual} SOG` : ""} · ${res}${c != null ? ` · CLV ${c >= 0 ? "+" : ""}${c.toFixed(1)}¢` : ""}`;
+  });
+  const clvAvg = clvs.length ? clvs.reduce((a, c) => a + c, 0) / clvs.length : null;
+  const d = new Date(dayIso + "T12:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+  const head = `**NHL Model · ${d}** — ${w}-${l} · ${u(pl)} · ROI ${risk ? (pl / risk * 100).toFixed(1) : "0.0"}%${clvAvg != null ? ` · CLV ${clvAvg >= 0 ? "+" : ""}${clvAvg.toFixed(1)}¢ (beat ${clvs.filter(c => c > 0).length}/${clvs.length})` : ""}`;
+  return [head, ...lines, "", _nhlDiscordRecapText().replace(/^NHL SOG Discord:/, "Season:")].join("\n").slice(0, 1990);
+}
+async function _nhlMaybePostDailyRecap() {
+  if (!_nhlDiscordHook()) return;
+  let done = []; try { done = JSON.parse(localStorage.getItem(NHL_RECAP_POSTED_KEY) || "[]"); } catch (e) {}
+  const days = [...new Set(bets.filter(b => b.discordSent).map(b => _ymdLocal(new Date(b.date))))].filter(d => !done.includes(d) && d >= _ymdLocal(new Date(Date.now() - 3 * 86400000)));
+  for (const day of days) {
+    const list = bets.filter(b => b.discordSent && _ymdLocal(new Date(b.date)) === day);
+    if (!list.length || list.some(b => b.result === "pending")) continue;   // wait until every pick that day is graded
+    try {
+      const r = await fetch(_nhlDiscordHook(), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content: _nhlDailyRecapText(day), allowed_mentions: { parse: [] } }) });
+      if (!r.ok) throw new Error(r.status + "");
+      done.push(day); try { localStorage.setItem(NHL_RECAP_POSTED_KEY, JSON.stringify(done.slice(-60))); } catch (e) {}
+      showNhlToast("Daily recap posted to Discord ✓");
+    } catch (e) { console.warn("[NHL] daily recap post failed", day, e && e.message); }
+  }
 }
 async function _nhlPostToDiscord(blob, text, to) {
   to = to || { url: _nhlDiscordHook(), role: NHL_DISCORD_ROLE };
