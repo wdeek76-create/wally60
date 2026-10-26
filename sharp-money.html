@@ -516,7 +516,9 @@ let sharpMin = Number(LS.get('props_sharpmin2','350')) || 350;
 const sharpMaxHold = 0;
 const holdOkTxt = () => '0.0% arb or better';
 let sharpPingsOn = LS.get('props_sharppings','1')==='1';
-let sharpSportF = 'all';
+// sports shown in the sharp list: none picked = All; tap sports to show several at once
+const sharpSportF = new Set((()=>{ try{ return JSON.parse(LS.get('sm_sportf','[]'))||[]; }catch(e){ return []; } })());
+const sharpSportOn = sk => !sharpSportF.size || sharpSportF.has(sk);
 let sharpTimer = null; const sharpBusy = {};
 const sharpStarted = Date.now();
 const sharpTape = {};          // "sk|fx|mk|player|side|line" -> { ...scan, hist:[{t,total}], at }
@@ -663,7 +665,7 @@ const TIP_LAG = { nba:10*60e3, wnba:10*60e3 };
 const tipAt = (sk, start) => new Date(start).getTime() + (TIP_LAG[sk]||0);
 const sharpLive = e => e.f ? (e.f.live || tipAt(e.sk, e.f.start) <= Date.now()) : false;
 function sharpList(){
-  return Object.values(sharpTape).filter(e=>sharpQual(e) && !sharpLive(e) && (sharpSportF==='all'||e.sk===sharpSportF));
+  return Object.values(sharpTape).filter(e=>sharpQual(e) && !sharpLive(e) && sharpSportOn(e.sk));
 }
 const edgeTxt = e => e==null ? '' : e>1e-7 ? `ARB +${e.toFixed(1)}%` : e>=-1e-7 ? 'DIRECT MATCH' : `LOW HOLD ${(-e).toFixed(1)}%`;
 const c10Txt = e => `${e.c10.cents}c vs ${bookShort(e.c10.book)} ${fmtAm(e.c10.price)}`;
@@ -981,7 +983,7 @@ function renderSharp(){
   const list = sharpList().sort((a,b)=>{ const fa=sharpFlow(a).d, fb=sharpFlow(b).d; return (fb>0)-(fa>0) || b.L.total-a.L.total; });
   const sports = SHARP_SPORTS();
   const counts = {}; Object.values(sharpTape).filter(e=>sharpQual(e) && !sharpLive(e)).forEach(e=>{ counts[e.sk]=(counts[e.sk]||0)+1; });
-  const chips = `<div class="mnav" style="position:static"><button class="mchip${sharpSportF==='all'?' on':''}" data-shs="all">All</button>${sports.map(k=>`<button class="mchip${sharpSportF===k?' on':''}" data-shs="${k}">${esc(SPORTS[k].label)}${counts[k]?` <span class="tcount">${counts[k]}</span>`:''}</button>`).join('')}</div>
+  const chips = `<div class="mnav" style="position:static"><button class="mchip${!sharpSportF.size?' on':''}" data-shs="all">All</button>${sports.map(k=>`<button class="mchip${sharpSportF.has(k)?' on':''}" data-shs="${k}">${esc(SPORTS[k].label)}${counts[k]?` <span class="tcount">${counts[k]}</span>`:''}</button>`).join('')}</div>
     <div class="mnav" style="position:static">${[250,350,500,1000,2500].map(v=>`<button class="mchip${sharpMin===v?' on':''}" data-shmin="${v}">${usd(v)}+</button>`).join('')}</div>
     <div class="mnav" style="position:static"><button class="mchip${sharpPingsOn?' on':''}" data-shping>${sharpPingsOn?'🔔 Pings on':'🔕 Pings off'}</button><button class="mchip${discordHook?' on':''}" data-shdc>${discordHook?'FD Discord ✓':'FD Discord'}</button><button class="mchip${b105Hook?' on':''}" data-shdck>${b105Hook?'b105 Discord ✓':'b105 Discord'}</button></div>`;
   const scanned = sports.filter(k=>sharpLastScan[k]).length;
@@ -996,7 +998,10 @@ function renderSharp(){
       <div class="smdiag">b105 right now: ${(()=>{ const all=Object.values(sharpTape).filter(e=>e.tgt==='bet105' && !sharpLive(e)); const q=all.filter(e=>e.L.total>=sharpMin); const top=all.sort((a,b)=>b.L.total-a.L.total)[0];
         return `${all.length} sides with exchange money · ${q.length} at ${usd(sharpMin)}+${top?` · biggest ${esc(titleCase(top.player))} ${usd(top.L.total)}`:''}`; })()}</div>${sharpDcLog.map(x=>`<div class="smdiag" style="color:${x.ok?'#86efac':'#fca5a5'}">${new Date(x.at).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})} ${esc(x.txt)}</div>`).join('')||'<div class="smdiag dim">nothing sent yet</div>'}</div>`:''}`;
   view.querySelectorAll('[data-shmin]').forEach(b=>b.addEventListener('click',()=>{ sharpMin=Number(b.dataset.shmin); LS.set('props_sharpmin2',String(sharpMin)); renderSharp(); }));
-  view.querySelectorAll('[data-shs]').forEach(b=>b.addEventListener('click',()=>{ sharpSportF=b.dataset.shs; renderSharp(); if(sharpSportF!=='all' && !sharpLastScan[sharpSportF]) sharpScanSport(sharpSportF).then(()=>{ if(viewMode==='sharp') renderSharp(); }); }));
+  view.querySelectorAll('[data-shs]').forEach(b=>b.addEventListener('click',()=>{ const k=b.dataset.shs;
+    if(k==='all') sharpSportF.clear(); else { sharpSportF.has(k) ? sharpSportF.delete(k) : sharpSportF.add(k); if(sharpSportF.size===sports.length) sharpSportF.clear(); }
+    LS.set('sm_sportf', JSON.stringify([...sharpSportF])); renderSharp();
+    if(k!=='all' && sharpSportF.has(k) && !sharpLastScan[k]) sharpScanSport(k).then(()=>{ if(viewMode==='sharp') renderSharp(); }); }));
   view.querySelector('[data-shping]')?.addEventListener('click',()=>{
     sharpPingsOn=!sharpPingsOn; LS.set('props_sharppings',sharpPingsOn?'1':'0');
     if(sharpPingsOn && window.Notification && Notification.permission==='default'){ try{ Notification.requestPermission(); }catch(e){} }
