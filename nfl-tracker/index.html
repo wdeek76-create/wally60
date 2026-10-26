@@ -5418,8 +5418,23 @@ function _seedSentOct25() {
     localStorage.setItem('nfl_sent_seed_oct25_v1', String(Date.now()));
   } catch (e) { console.warn('Sent seed failed', e); }
 }
+// Same pick (player + market + side + line) logged twice within a day = one pick. Happens when a
+// card is pasted with the wrong "Sent on" date; the first one logged is kept.
+const _sentSame = (a, b) => normName(a.player) === normName(b.player) && a.market === b.market && a.side === b.side && Number(a.line) === Number(b.line)
+  && Math.abs((new Date((a.date || '') + 'T12:00:00') - new Date((b.date || '') + 'T12:00:00')) / 86400000) <= 1;
 function loadSent() {
-  _seedSentOct25(); try { const a = JSON.parse(localStorage.getItem(SENT_KEY) || '[]'); return Array.isArray(a) ? a : []; } catch (e) { return []; } }
+  _seedSentOct25();
+  let a = [];
+  try { a = JSON.parse(localStorage.getItem(SENT_KEY) || '[]'); if (!Array.isArray(a)) a = []; } catch (e) { a = []; }
+  const kept = [];
+  a.slice().sort((x, y) => (x.sentAt || 0) - (y.sentAt || 0)).forEach(e => {
+    const twin = kept.find(k => _sentSame(k, e));
+    if (!twin) { kept.push(e); return; }
+    if (!twin.result && e.result) Object.assign(twin, { result: e.result, actual: e.actual, pnl: _sentPnl(e.result, twin.odds), gradedAt: e.gradedAt, manual: e.manual });
+  });
+  if (kept.length !== a.length) { try { localStorage.setItem(SENT_KEY, JSON.stringify(kept)); } catch (e) {} console.warn('[sent] merged', a.length - kept.length, 'duplicate sent pick(s)'); }
+  return kept;
+}
 function saveSent(a) { try { localStorage.setItem(SENT_KEY, JSON.stringify(a)); } catch (e) { console.warn('sent save failed', e); } }
 const _sentKey = p => normName(p.player) + '|' + p.market + '|' + p.side + '|' + String(Number(p.line)) + '|' + (p.date || '');
 function _sentPnl(result, odds) {
@@ -5527,7 +5542,7 @@ function importSentPaste() {
     const e = { player: hit ? hit.player : x.player, team: x.team || (hit && hit.team) || '', market: x.market, side: x.side, line: x.line,
       date: (hit && hit.date) || day, game: (hit && hit.game) || '', gameTime: (hit && hit.gameTime) || '' };
     e.key = _sentKey(e);
-    if (have.has(e.key)) { dup++; return; }
+    if (have.has(e.key) || arr.some(o => _sentSame(o, e))) { dup++; return; }
     have.add(e.key); added++;
     arr.push({ ...e, ensId: hit && String(hit.id || '').startsWith('ens_') ? hit.id : null, odds: x.odds, book: '', playTo: null, ev: null, tier: (hit && hit.tier) || null,
       sentAt: Date.now() + i, result: x.result, actual: x.actual, pnl: x.result ? _sentPnl(x.result, x.odds) : null, gradedAt: x.result ? Date.now() : null, manual: !!x.result, pasted: true });
