@@ -26512,6 +26512,7 @@ function renderMorning() {
   const viewBar = `<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:8px;">
     ${btn(`ENSEMBLE (${cleared.filter(r => statOk(r.stat)).length})`, "morningSetView('ensemble')", morningView === "ensemble", "#c4b5fd")}
     ${btn(`NEAR MISSES (${misses.filter(r => statOk(r.stat)).length})`, "morningSetView('misses')", morningView === "misses", "#fbbf24")}
+    ${btn(`ALT LINES (${morningAltGroups(statOk).length})`, "morningSetView('lines')", morningView === "lines", "#f472b6")}
     ${btn(`SOLO (${morningSolo.filter(x => statOk(x.stat)).length})`, "morningSetView('solo')", morningView === "solo", "#38bdf8")}
     ${MORNING_SRC_KEYS.map(k => btn(`${_mSrc(k).label} (${counts[k]})`, `morningSetView('${k}')`, morningView === k, _mSrc(k).color)).join("")}
     <span style="flex:1;"></span>
@@ -26544,6 +26545,8 @@ function renderMorning() {
         ${td(GATE_SHORT[r.gate] || r.gate, "color:#fbbf24;font-weight:800;font-size:11px;")}${td(_mEsc(r.why), "color:#a8b0bb;white-space:normal;max-width:280px;")}
         ${td(`<span style="display:inline-flex;gap:5px;flex-wrap:wrap;">${_mSrcPills(pr, ev, null, null)}</span>`)}
       </tr>`; }).join("")}</tbody></table></div>` : `<div style="font-size:12px;color:#525a64;padding:8px 0;">No near misses.</div>`;
+  } else if (morningView === "lines") {
+    viewBody = morningAltLinesHtml(statOk);
   } else if (morningView === "solo") {
     viewBody = morningSoloHtml(statOk);
   } else {
@@ -27077,6 +27080,33 @@ async function autoGradeTick() {
 setInterval(() => { try { autoGradeTick(); } catch (e) {} }, 10 * 60000);
 setTimeout(() => { try { autoGradeTick(); } catch (e) {} }, 45000);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) setTimeout(() => { try { autoGradeTick(); } catch (e) {} }, 3000); });
+
+// ── ALT LINES: where each source sits on a player's line ───────────────────
+// PropShop's Best can be an alt line (3.5 instead of 2.5), so two sources can be on the same side at different lines and never meet in the ensemble.
+// This lists every player / market / side that has more than one line across the sources: who is on which line, at what edge, and who has no row at all.
+function morningAltGroups(statOk) {
+  const groups = {};
+  MORNING_SRC_KEYS.forEach(src => (morningPs[src] || []).forEach(p => {
+    if (!statOk(p.stat) || !_mNameHit(p.player)) return;
+    const k = [resolveNorm(p.player), p.stat, p.gameDateIso || "", p.ou].join("|");
+    const g = groups[k] = groups[k] || { player: p.player, team: p.team, stat: p.stat, ou: p.ou, lines: {}, srcs: new Set() };
+    (g.lines[Number(p.line)] = g.lines[Number(p.line)] || []).push({ src, ev: Number(p.ev), odds: p.odds, book: p.book });
+    g.srcs.add(src);
+  }));
+  return Object.values(groups).filter(g => Object.keys(g.lines).length >= 2).map(g => {
+    const lines = Object.keys(g.lines).map(Number).sort((a, b) => a - b).map(ln => ({ line: ln, rows: g.lines[ln], qual: g.lines[ln].filter(r => r.ev >= MORNING_QUAL_EV).length }));
+    return { ...g, lineList: lines, bestQual: Math.max(...lines.map(l => l.qual)), missing: MORNING_SRC_KEYS.filter(k => !g.srcs.has(k)) };
+  }).sort((a, b) => b.bestQual - a.bestQual || b.srcs.size - a.srcs.size);
+}
+function morningAltLinesHtml(statOk) {
+  const rows = morningAltGroups(statOk), esc = _mEsc;
+  if (!rows.length) return `<div style="font-size:12px;color:#e6edf5;padding:8px 0;">No player has sources on different lines right now.</div>`;
+  const th = t => `<th style="text-align:left;padding:4px 10px;font-size:10px;letter-spacing:.5px;color:#e6edf5;text-transform:uppercase;">${t}</th>`;
+  const evCol = e => e >= MORNING_QUAL_EV ? "#4ade80" : e >= 0 ? "#fbbf24" : "#f87171";
+  const chip = l => `<div style="display:inline-block;vertical-align:top;margin:2px 8px 2px 0;padding:4px 8px;border:1px solid ${l.qual >= 3 ? "#4ade80" : "#1a1d22"};border-radius:6px;background:${l.qual >= 3 ? "#4ade8014" : "transparent"};"><div style="font-weight:800;color:#fff;font-size:12px;">${l.line} <span style="font-size:10px;color:${l.qual >= 3 ? "#4ade80" : "#e6edf5"};font-weight:700;">${l.rows.length} source${l.rows.length === 1 ? "" : "s"} \u00b7 ${l.qual} at ${MORNING_QUAL_EV}%+${l.qual >= 3 ? " \u00b7 would clear" : ""}</span></div>${l.rows.map(r => `<div style="font-size:11px;white-space:nowrap;"><b style="color:${_mSrc(r.src).color};">${_mSrc(r.src).label}</b> <span style="color:#fff;">${_mFmtOdds(r.odds)}</span> <span style="color:${evCol(r.ev)};font-weight:700;">${r.ev >= 0 ? "+" : ""}${r.ev.toFixed(1)}%</span> <span style="color:#e6edf5;">${esc(r.book || "")}</span></div>`).join("")}</div>`;
+  return `<div style="font-size:11px;color:#e6edf5;margin-bottom:6px;">Same player, market and side, different lines across the sources (PropShop's best can be an alt line). Green = 3+ sources at ${MORNING_QUAL_EV}%+ on that one line, which would clear if the ensemble took alt lines. Sorted by the most sources agreeing on a line.</div>
+    <div style="overflow-x:auto;"><table style="border-collapse:collapse;width:100%;"><thead><tr>${["PLAYER", "MARKET", "SIDE", "LINES \u2192 WHO IS ON EACH", "NO ROW"].map(th).join("")}</tr></thead><tbody>${rows.slice(0, 120).map(g => `<tr style="border-top:1px solid #1a1d22;"><td style="padding:6px 10px;white-space:nowrap;">${_mPlayerCell(g.player, g.team)}</td><td style="padding:6px 10px;font-weight:800;color:#fff;">${esc(g.stat)}</td><td style="padding:6px 10px;font-weight:800;color:${g.ou === "over" ? "#f87171" : "#4ade80"};">${g.ou.toUpperCase()}</td><td style="padding:6px 10px;">${g.lineList.map(chip).join("")}</td><td style="padding:6px 10px;font-size:11px;color:#e6edf5;">${g.missing.length ? g.missing.map(k => _mSrc(k).label).join(", ") : "\u2014"}</td></tr>`).join("")}</tbody></table></div>`;
+}
 
 // ── SEND TO NICK / SEND TO DISCORD ─────────────────────────────────────────
 // Rendered image cards of today's pending morning picks. NICK = internal "why this pick":
