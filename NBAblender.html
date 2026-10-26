@@ -4337,6 +4337,14 @@ function computeCLV(bet) {
   return { lineDelta, pricePct, adjusted, favorable, book: bet.closing.book,
            closeLine: clLine, closePrice: clPrice };
 }
+// One short CLV string for text recaps: "CLV +2.3%" (price vs the close at your line) or "CLV line +0.5" (the line moved your way); "" when no close is stored yet.
+function _clvText(bet) {
+  const c = computeCLV(bet); if (!c) return "";
+  if (c.pricePct != null && Math.abs(c.lineDelta) < 0.5) return `CLV ${c.pricePct >= 0 ? "+" : ""}${c.pricePct.toFixed(1)}%`;
+  if (Math.abs(c.lineDelta) >= 0.5) return `CLV line ${c.lineDelta > 0 ? "+" : ""}${c.lineDelta}${c.pricePct != null ? ` (${c.pricePct >= 0 ? "+" : ""}${c.pricePct.toFixed(1)}%)` : ""}`;
+  return "CLV flat";
+}
+function _clvSummaryLine(list) { const a = _clvAgg(list); return a.n ? `CLV: ${a.beat}/${a.n} beat the close${a.avg != null ? ` · avg ${a.avg >= 0 ? "+" : ""}${a.avg.toFixed(1)}%` : ""}` : ""; }
 // Win chance on YOUR line implied by the closing price at the CLOSING line. Returns null if
 // it can't be worked out (unknown stat, price out of range) — then no % is shown at all,
 // only the line move, which is still coloured by direction.
@@ -4377,7 +4385,7 @@ async function grabClosingLines(isoDate) {
       const days = [...new Set(needsClose.map(betDayLocal).filter(Boolean))].sort();
       day = days.length ? days[days.length - 1] : localYMD(new Date(Date.now() - 86400000));
     }
-    const todays = bets.filter(b => b && betDayLocal(b) === day && !b.closing &&
+    const todays = bets.filter(b => b && betDayLocal(b) === day && (!b.closing || !b.closingBooks) &&
       !["GAME_TOTAL", "GAME_SPREAD"].includes((b.stat || "").toUpperCase()));
     if (!todays.length) { showToast(`No bets needing closing lines on ${day}`); return; }
     showToast(`Fetching closing odds for ${day}…`);
@@ -4429,6 +4437,14 @@ async function grabClosingLines(isoDate) {
       if (price == null || isNaN(price)) return;
       b.closing = { book: best.bookmaker, line: Number(best.line),
                     price: Number(price), at: Date.now() };
+      // What FanDuel / Pinnacle / Prop Builder each closed at for this player + market (null = no closing price there: pulled off the board).
+      b.closingBooks = {};
+      ["FanDuel", "Pinnacle", "Prop Builder"].forEach(lbl => {
+        const rs = mine.filter(r => (OO_BOOK_TO_LABEL[String(r.bookmaker || "").toLowerCase()] || r.label) === lbl);
+        let pick = null, gap = Infinity;
+        rs.forEach(r => { const px = isUnder ? r.under_price : r.over_price; if (px == null || isNaN(px)) return; const g = Math.abs(Number(r.line) - Number(b.line)); if (g < gap) { gap = g; pick = r; } });
+        b.closingBooks[lbl] = pick ? { line: Number(pick.line), price: Number(isUnder ? pick.under_price : pick.over_price) } : null;
+      });
       matched++;
     });
     if (matched) { saveBets(); renderTracker(); }
@@ -10019,7 +10035,7 @@ function logGrade(msg, kind) {
   if (currentTab === "tracker") renderAutoGrade();
 }
 
-async function gradeAllPending(mode) {
+async function gradeAllPending(mode, auto) {
   // mode: undefined/"pending" → grade pending only (default)
   //       "regrade"          → re-run grader on already-settled bets (fixes DNP/postponed errors)
   if (gradingInProgress) return;
@@ -10030,7 +10046,7 @@ async function gradeAllPending(mode) {
   if (!targetBets.length) {
     const msg = isRegrade ? "No settled bets to re-grade" : "No pending bets to grade";
     logGrade(msg, "info");
-    showToast(msg);
+    if (!auto) showToast(msg);
     return;
   }
   if (isRegrade && !confirm(`Re-grade ${targetBets.length} already-settled bet(s)? This re-runs the grader and will correct DNP/postponed mistakes (results may change).`)) {
@@ -10088,12 +10104,16 @@ async function gradeAllPending(mode) {
   if (skipped) summaryParts.push(`${skipped} not final`);
   if (failed) summaryParts.push(`${failed} failed`);
   logGrade(`Done. ${summaryParts.join(", ")}.`, "info");
+  if (!isRegrade && graded > 0) {   // grade all also pulls the closing lines for the days just graded, so CLV fills in without another click
+    try { const days = [...new Set(targetBets.filter(b => b.result && b.result !== "pending").map(betDayLocal).filter(Boolean))].sort(); for (const day of days) await grabClosingLines(day); logGrade(`Closing lines pulled for ${days.join(", ")}.`, "info"); }
+    catch (e) { console.warn("[grade] closing lines skipped", e); }
+  }
   if (currentTab === "tracker") renderTracker();
   const toastBits = [`${isRegrade ? "Re-graded" : "Graded"} ${graded} of ${targetBets.length}`];
   if (isRegrade && changed) toastBits.push(`${changed} changed`);
   if (skipped) toastBits.push(`${skipped} not final`);
   if (failed) toastBits.push(`${failed} failed`);
-  showToast(toastBits.join(" • "));
+  if (!auto || graded > 0) showToast(toastBits.join(" • "));
 
   // Auto-sync Splits (season logs) after grading, so L5/L10/Season hit rates
   // reflect the games that were JUST graded instead of going stale until the
@@ -10673,6 +10693,7 @@ function _copyDailyRecapFiltered(kind) {
   lines.push(fmtAligned("WTD:", acc.wtd));
   lines.push(fmtAligned("MTD:", acc.mtd));
   lines.push(fmtAligned("YTD:", acc.ytd));
+  { const cl = _clvSummaryLine(dayBets); if (cl) lines.push(cl); }
   lines.push("");
 
   // Picks list — hits first, then misses, voids at bottom.
@@ -10717,7 +10738,8 @@ function _copyDailyRecapFiltered(kind) {
     if (b.result === "hit") resultStr = `WIN${actualStr} = +${u(b.toWin)}u`;
     else if (b.result === "miss") resultStr = `LOSS${actualStr} = -${u(b.stake)}u`;
     else resultStr = `VOID`;
-    return `${b.player}${teamStr}: ${lineStr} ${oddsStr} ${resultStr}`;
+    const clvStr = _clvText(b);
+    return `${b.player}${teamStr}: ${lineStr} ${oddsStr} ${resultStr}${clvStr ? " · " + clvStr : ""}`;
   };
   // Render hits, then misses, then voids — all flow continuously with no
   // separator between hits and misses groups. Only voids get a blank line
@@ -10832,6 +10854,11 @@ function copyClosingRecap(isoDate) {
   const day = isoDate || localYMD(new Date(Date.now() - 86400000));
   const rows = bets.filter(b => b && betDayLocal(b) === day && b.closing);
   if (!rows.length) { showToast(`No closing lines stored for ${day}`); return; }
+  window._closingBackfilled = window._closingBackfilled || {};
+  if (rows.some(b => !b.closingBooks) && !window._closingBackfilled[day]) {   // closes saved before per-book info existed: re-pull once so FD / PIN / PB moves and pulled props show
+    window._closingBackfilled[day] = true; showToast("Re-pulling closing lines for the per-book moves\u2026");
+    grabClosingLines(day).then(() => copyClosingRecap(day)); return;
+  }
   let beat = 0, lost = 0, pushSum = 0;
   const lines = rows.map(b => {
     const clv = computeCLV(b);
@@ -10843,7 +10870,19 @@ function copyClosingRecap(isoDate) {
     const arrow = clv.favorable === true ? "\u2713" : clv.favorable === false ? "\u2717" : "\u2022";
     const lineMove = clv.lineDelta === 0 ? "" : ` \u00b7 line ${b.line}\u2192${clv.closeLine}`;
     const pct = clv.pricePct != null ? ` (${clv.adjusted ? "\u2248" : ""}${clv.pricePct >= 0 ? "+" : ""}${clv.pricePct.toFixed(1)}%)` : "";
-    return `${arrow} ${b.player}${b.team ? ` (${b.team})` : ""}: ${dir}${b.line} ${statLbl} ${b.odds > 0 ? "+" : ""}${b.odds} \u2192 ${clv.closePrice > 0 ? "+" : ""}${clv.closePrice}${pct}${lineMove}`;
+    // key books: a FULL number of line movement (1.0 or more) at FanDuel / Pinnacle / Prop Builder, or the book pulled the prop off the board
+    const SHORT = { FanDuel: "FD", Pinnacle: "PIN", "Prop Builder": "PB" };
+    let bookNotes = "";
+    if (b.closingBooks) {
+      const notes = [];
+      Object.keys(SHORT).forEach(k => {
+        const cb = b.closingBooks[k];
+        if (cb === null) notes.push(`${SHORT[k]} pulled off the market`);
+        else if (cb && Math.abs(cb.line - Number(b.line)) >= 1) notes.push(`${SHORT[k]} moved ${Number(b.line)}\u2192${cb.line} (${Math.abs(cb.line - Number(b.line))} full)`);
+      });
+      if (notes.length) bookNotes = `\n   \u21b3 ${notes.join(" \u00b7 ")}`;
+    }
+    return `${arrow} ${b.player}${b.team ? ` (${b.team})` : ""}: ${dir}${b.line} ${statLbl} ${b.odds > 0 ? "+" : ""}${b.odds} \u2192 ${clv.closePrice > 0 ? "+" : ""}${clv.closePrice}${pct}${lineMove}${bookNotes}`;
   }).filter(Boolean);
   const n = beat + lost;
   const avg = lines.length ? (pushSum / lines.length) : 0;
@@ -15185,7 +15224,7 @@ function renderTracker() {
     // this pick?" without opening the modal.
     let srcProjsRow = "";
     if (!isTotal && b.srcProjs && b.line != null) {
-      const SRC_LABELS = { roto: "RG", rotowire: "RW", dimers: "DMR" };
+      const SRC_LABELS = { stok: "STOK", roto: "RG", saber: "SABER", rotowire: "RW", tabs: "TABS", dimers: "DMR" };   // every source that has a projection on the bet
       const pills = [];
       const vals = [];
       // EV-based agreement: a source agrees if its individual projection produces
@@ -26041,6 +26080,19 @@ function _mPushTracker(m, quiet) {
     return true;
   } catch (e) { console.warn("[MORNING] tracker push failed", e); return false; }
 }
+// Pending Tracker copies of Morning picks that never went out on a card (nor to Discord): removed on request. Graded bets are never touched.
+function morningCleanUnsentFromTracker() {
+  const sent = new Set(morningBets.filter(m => m.cardAt || m.discordSent).map(m => String(m.id)));
+  const bad = bets.filter(b => b && b.source === "morning" && b.result === "pending" && !b.discordSent && !sent.has(String(b.morningId)));
+  if (!bad.length) { showToast("No unsent Morning picks in the Tracker"); return; }
+  if (!confirm(`Remove ${bad.length} open Tracker bet${bad.length === 1 ? "" : "s"} that came from Morning picks never put on a card?\n\n${bad.slice(0, 8).map(b => displayPlayerName(b.player) + " " + (b.ou === "over" ? "o" : "u") + b.line + " " + b.stat).join("\n")}${bad.length > 8 ? "\n\u2026" : ""}\n\nGraded bets are never touched.`)) return;
+  const ids = new Set(bad.map(b => b.id));
+  bets = bets.filter(b => !ids.has(b.id));
+  morningBets.forEach(m => { if (m.trackerId && ids.has(m.trackerId)) delete m.trackerId; });
+  try { saveBets(); saveMorningBets(); } catch (e) {}
+  showToast(`Removed ${bad.length} unsent bet${bad.length === 1 ? "" : "s"} from the Tracker`);
+  try { renderTracker(); } catch (e) {} renderMorning();
+}
 function morningPushAllToTracker() {
   let n = 0; morningBets.forEach(m => { if (_mPushTracker(m, true)) n++; });
   if (n) { saveBets(); saveMorningBets(); try { renderTracker(); } catch (e) {} }
@@ -26060,7 +26112,7 @@ function _mLogRow(r) {
     requiredQual: r.requiredQual, missingSrc: r.missingSrc, missingProj: r.missingProj,
     stake: s.stake, toWin: s.toWin, result: "pending", actual: null,
   });
-  if (morningToTrackerOn()) { try { _mPushTracker(morningBets[0]); } catch (e) {} }
+  // The Tracker copy is made when the pick goes out on a card (see _mDropUnpriced), not when it first clears: picks pop in and out as boards are re-pasted, and the ones that never reach a card shouldn't land in the Tracker.
   return true;
 }
 function morningAutoLog() {
@@ -26215,9 +26267,9 @@ function morningCleanOrphans() {
   } catch (e) { return 0; }
 }
 function morningSetResult(id, res) { const b = morningBets.find(x => String(x.id) === String(id)); if (!b) return; b.result = res; if (res === "pending") b.actual = null; saveMorningBets(); renderMorning(); }
-async function morningGradePending() {
+async function morningGradePending(auto) {
   const pending = morningBets.filter(b => b.result === "pending");
-  if (!pending.length && !morningSolo.some(x => x.result === "pending")) { showToast("Nothing pending to grade"); return; }
+  if (!pending.length && !morningSolo.some(x => x.result === "pending")) { if (!auto) showToast("Nothing pending to grade"); return; }
   const btn = document.getElementById("morning-grade-btn");
   if (btn) { btn.disabled = true; btn.textContent = "GRADING…"; }
   let graded = 0, waiting = 0;
@@ -26232,7 +26284,7 @@ async function morningGradePending() {
   let soloGraded = 0;
   try { soloGraded = await morningGradeSolo(); } catch (e) { console.warn("[MORNING solo] grade failed", e); }
   if (btn) { btn.disabled = false; btn.textContent = "GRADE PENDING"; }
-  showToast(`Graded ${graded}${soloGraded ? ` + ${soloGraded} solo` : ""}${waiting ? ` · ${waiting} not final yet` : ""}${cleared ? " · all graded \u2014 lineups + RG ratings cleared" : ""}`);
+  if (!auto || graded || soloGraded) showToast(`Graded ${graded}${soloGraded ? ` + ${soloGraded} solo` : ""}${waiting ? ` · ${waiting} not final yet` : ""}${cleared ? " · all graded \u2014 lineups + RG ratings cleared" : ""}`);
   renderMorning();
 }
 function morningCopyCard() {
@@ -26478,8 +26530,9 @@ function renderMorning() {
     <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:10px;">
       <div style="font-size:13px;font-weight:800;color:#d4dae3;letter-spacing:1px;text-transform:uppercase;">Morning log <span style="color:#a8b0bb;font-weight:600;font-size:11px;text-transform:none;letter-spacing:0;">· separate from the Tracker</span></div>
       <div style="display:flex;gap:6px;flex-wrap:wrap;">
+        <button onclick="morningToggleAutoGrade()" title="Grade everything automatically, every 10 min, once the games should be over" style="background:${autoGradeOn() ? "#22c55e22" : "transparent"};border:1px solid ${autoGradeOn() ? "#22c55e" : "#1a1d22"};color:${autoGradeOn() ? "#22c55e" : "#e6edf5"};border-radius:6px;padding:6px 12px;font-size:11px;font-weight:800;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;">AUTO-GRADE: ${autoGradeOn() ? "ON" : "OFF"}</button>
         <button id="morning-grade-btn" onclick="morningGradePending()" style="background:#7dd3fc1a;border:1px solid #7dd3fc;color:#7dd3fc;border-radius:6px;padding:6px 12px;font-size:11px;font-weight:800;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;">GRADE PENDING</button>
-        ${btn("⧉ NICK", "morningSendCard('nick')", false, "#00aaff")}${btn(getNickWebhook() ? "➤ NICK" : "🔗 NICK WEBHOOK", "morningPostNick()", !!getNickWebhook(), "#00aaff")}${getNickWebhook() ? btn("⚙", "morningSetNickWebhook()", false) : ""}${btn("📝 RECAP", "morningCopyDiscordRecap()", false, "#fbbf24")}${getMorningWebhook() ? btn("➤ POST RECAP", "morningPostDiscordRecap()", false, "#fbbf24") : ""}${btn("🖼 DISCORD", "morningSendCard('discord')", false, "#cc66ff")}${btn(getMorningWebhook() ? "➤ POST" : "🔗 WEBHOOK", "morningPostDiscord()", !!getMorningWebhook(), "#5865f2")}${getMorningWebhook() ? btn("⚙", "morningSetWebhook()", false) : ""}${btn(morningToTrackerOn() ? "TRACKER: ON" : "TRACKER: OFF", "morningToggleTracker()", morningToTrackerOn(), "#22c55e")}${btn("→ SEND ALL TO TRACKER", "morningPushAllToTracker()", false)}${btn("COPY TODAY", "morningCopyCard()", false)}${btn("EXPORT CSV", "morningExportCsv()", false)}
+        ${btn("⧉ NICK", "morningSendCard('nick')", false, "#00aaff")}${btn(getNickWebhook() ? "➤ NICK" : "🔗 NICK WEBHOOK", "morningPostNick()", !!getNickWebhook(), "#00aaff")}${getNickWebhook() ? btn("⚙", "morningSetNickWebhook()", false) : ""}${btn("📝 RECAP", "morningCopyDiscordRecap()", false, "#fbbf24")}${getMorningWebhook() ? btn("➤ POST RECAP", "morningPostDiscordRecap()", false, "#fbbf24") : ""}${btn("🖼 DISCORD", "morningSendCard('discord')", false, "#cc66ff")}${btn(getMorningWebhook() ? "➤ POST" : "🔗 WEBHOOK", "morningPostDiscord()", !!getMorningWebhook(), "#5865f2")}${getMorningWebhook() ? btn("⚙", "morningSetWebhook()", false) : ""}${btn(morningToTrackerOn() ? "TRACKER: ON" : "TRACKER: OFF", "morningToggleTracker()", morningToTrackerOn(), "#22c55e")}${btn("🧹 UNSENT FROM TRACKER", "morningCleanUnsentFromTracker()", false, "#f87171")}${btn("→ SEND ALL TO TRACKER", "morningPushAllToTracker()", false)}${btn("COPY TODAY", "morningCopyCard()", false)}${btn("EXPORT CSV", "morningExportCsv()", false)}
       </div>
     </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;">
@@ -26679,14 +26732,14 @@ async function tabsSoloImport() {
   showToast(`Tabs Solo ${stat}: ${added} logged`);
   renderTabsSolo();  { const ss = document.getElementById("ts-stat"); if (ss) ss.value = tabsSoloSelStat; }
 }
-async function tabsSoloGrade() {
+async function tabsSoloGrade(auto) {
   const btn = document.getElementById("ts-grade-btn"); if (btn) { btn.disabled = true; btn.textContent = "GRADING…"; }
   const today = localYMD(new Date()); let graded = 0;
   for (const x of tabsSolo.filter(y => y.result === "pending" && y.gameDate <= today)) {
     try { const r = await gradeBet(x); if (r.ok) { x.result = r.result; x.actual = r.total != null ? r.total : null; if (r.actualMin != null) x.actualMin = r.actualMin; graded++; } } catch (e) {}
   }
   if (graded) tabsSoloSave();
-  showToast(graded ? `Tabs Solo: graded ${graded}` : "Tabs Solo: nothing final yet");
+  if (!auto || graded) showToast(graded ? `Tabs Solo: graded ${graded}` : "Tabs Solo: nothing final yet");
   renderTabsSolo();
 }
 function tabsSoloSet(kind, v) { if (kind === "stat") tabsSoloStat = v; else if (kind === "ctx") tabsSoloCtx = v; else tabsSoloRel = v; renderTabsSolo(); }
@@ -26854,8 +26907,10 @@ function morningDiscordRecapText(date) {
   r.rows.forEach(b => {
     const o = b.discordOdds != null ? b.discordOdds : b.odds, book = b.discordBook || b.book || "";
     const icon = b.result === "hit" ? "✅" : b.result === "miss" ? "❌" : b.result === "void" ? "➖" : "⏳";
-    L.push(`${icon} **${displayPlayerName(b.player)}** ${mk[b.ou] || b.ou}${b.line} ${b.stat} ${o > 0 ? "+" : ""}${o}${book ? " (" + book + ")" : ""}${b.actual != null && b.result !== "pending" ? ` — ${b.actual}` : ""}`);
+    const clv = _clvText(_mTwin(b));
+    L.push(`${icon} **${displayPlayerName(b.player)}** ${mk[b.ou] || b.ou}${b.line} ${b.stat} ${o > 0 ? "+" : ""}${o}${book ? " (" + book + ")" : ""}${b.actual != null && b.result !== "pending" ? ` — ${b.actual}` : ""}${clv ? " · " + clv : ""}`);
   });
+  { const cl = _clvSummaryLine(r.rows.map(_mTwin).filter(Boolean)); if (cl) L.push("", cl); }
   L.push("", `Last 7 days: ${rec(r.week)} (${u(r.week.units)}) · All-time: ${rec(r.all)} (${u(r.all.units)}${r.all.roi != null ? `, ROI ${r.all.roi >= 0 ? "+" : ""}${r.all.roi.toFixed(1)}%` : ""})`, "_1u flat at the price posted. Pushes/DNPs not counted._");
   return L.join("\n");
 }
@@ -26874,6 +26929,41 @@ async function morningPostDiscordRecap() {
     showToast("Recap posted to Discord ✓");
   } catch (e) { showToast("Recap post failed — " + (e && e.message || e)); }
 }
+
+// ── AUTO-GRADE ──────────────────────────────────────────────────────────────
+// Every 10 minutes (and when the tab comes back into view) anything still pending whose game should be over is graded: the Tracker (grade all + closing lines),
+// the Morning log (+ its solo lines, lineups cleared when everything is graded) and Tabs Solo. A game counts as over 170 min after tip, or any earlier day, or
+// (no tip time on the bet) late at night. The graders only settle a bet once the box score is final, so an early try just leaves it pending. On/off in Morning.
+const AUTO_GRADE_KEY = "nba_auto_grade_v1";
+function autoGradeOn() { try { return localStorage.getItem(AUTO_GRADE_KEY) !== "0"; } catch (e) { return true; } }
+function morningToggleAutoGrade() { try { localStorage.setItem(AUTO_GRADE_KEY, autoGradeOn() ? "0" : "1"); } catch (e) {} showToast(autoGradeOn() ? "Auto-grade ON (every 10 min, games that should be over)" : "Auto-grade OFF"); renderMorning(); }
+function _mGameOver(b) {
+  const d = (typeof betDayLocal === "function" ? betDayLocal(b) : "") || b.gameDate || "";
+  if (!d) return false;
+  const today = localYMD(new Date());
+  if (d < today) return true; if (d > today) return false;
+  const tip = _tsTipTs(d, b.gameTime);
+  if (tip != null) return Date.now() > tip + 170 * 60000;
+  const h = new Date().getHours(); return h >= 23 || h < 6;
+}
+let _autoGrading = false;
+async function autoGradeTick() {
+  if (!autoGradeOn() || _autoGrading || gradingInProgress || document.hidden) return;
+  const trk = bets.filter(b => b && b.result === "pending" && _mGameOver(b)).length;
+  const mor = morningBets.filter(b => b.result === "pending" && _mGameOver(b)).length + morningSolo.filter(x => x.result === "pending" && _mGameOver({ gameDate: x.gameDate })).length;
+  const solo = tabsSolo.filter(x => x.result === "pending" && _mGameOver(x)).length;
+  if (!trk && !mor && !solo) return;
+  _autoGrading = true;
+  try {
+    if (trk) await gradeAllPending(undefined, true);
+    if (mor) await morningGradePending(true);
+    if (solo) await tabsSoloGrade(true);
+  } catch (e) { console.warn("[auto-grade]", e); }
+  _autoGrading = false;
+}
+setInterval(() => { try { autoGradeTick(); } catch (e) {} }, 10 * 60000);
+setTimeout(() => { try { autoGradeTick(); } catch (e) {} }, 45000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) setTimeout(() => { try { autoGradeTick(); } catch (e) {} }, 3000); });
 
 // ── SEND TO NICK / SEND TO DISCORD ─────────────────────────────────────────
 // Rendered image cards of today's pending morning picks. NICK = internal "why this pick":
@@ -27243,6 +27333,7 @@ function _mDropUnpriced(picks) {
   const inRange = b => _mInRange(b, b.odds);   // the price we can actually get is still at the play-to or better
   const kept = picks.filter(b => _mRealBook(b) && inRange(b) && !b.liveMissing), dropped = picks.filter(x => !kept.includes(x));
   kept.forEach(b => { delete b.cardSkip; b.cardAt = Date.now(); });
+  if (morningToTrackerOn()) { let n = 0; kept.forEach(b => { try { if (_mPushTracker(b, true)) n++; } catch (e) {} }); if (n) { try { saveBets(); } catch (e) {} } }
   dropped.forEach(b => { b.cardSkip = b.liveMissing ? "its book no longer posts this line" : !_mHeadlineOk(b) ? "no FD / PB / PIN / Bet105 price (or exchange under $" + MORNING_EXCH_MIN_LIQ + ") on this run" : "price is past the play-to"; });
   try { saveMorningBets(); } catch (e) {}
   if (dropped.length) showToast(`Left off the card (no FanDuel / Prop Builder / Pinnacle / Bet105 price, or an exchange with the size, at the play-to on this run): ${dropped.slice(0, 4).map(x => displayPlayerName(x.player)).join(", ")}${dropped.length > 4 ? " +" + (dropped.length - 4) + " more" : ""}`);
