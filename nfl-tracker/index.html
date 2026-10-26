@@ -1574,6 +1574,8 @@ function computeEnsembleProps() {
       }
     });
 
+    // You deleted this pick from Ensemble -> stays deleted, even though its sources still agree
+    if (_ensDismissed(p0)) return;
     // Existing manual/logged version?
     const _dd = (a, b) => { if (!a || !b) return 99; return Math.abs((new Date(a+'T12:00:00') - new Date(b+'T12:00:00')) / 86400000); };
     const existing = stored.find(s =>
@@ -2110,6 +2112,21 @@ function _keepManualPicks() {
     if (added) { localStorage.setItem(storageKey('ensemble'), JSON.stringify(ens)); console.warn('[nfl-tracker] put back', added, 'hand-added Ensemble pick(s)'); }
   } catch (e) {}
   return added;
+}
+// Ensemble picks you deleted. A computed pick is rebuilt from the sources on every render, so
+// deleting only its saved copy brought it straight back while 3 sources still agreed. Keyed by
+// player + market + side + date (±1 day, same as the pick match), so a new line doesn't revive it.
+const ENS_DISMISSED_KEY = 'nfl_ens_dismissed';
+let _ensDismissedCache = null;
+function _ensDismissedList() { if (!_ensDismissedCache) _ensDismissedCache = _manualLoad(ENS_DISMISSED_KEY); return _ensDismissedCache; }
+function _ensDismissed(p) {
+  const k = normName(p.player) + '|' + p.market + '|' + p.side;
+  return _ensDismissedList().some(d => d.k === k && (!d.date || !p.date || Math.abs((new Date(d.date + 'T12:00:00') - new Date(p.date + 'T12:00:00')) / 86400000) <= 1));
+}
+function _dismissEnsemblePick(p) {
+  const list = _ensDismissedList();
+  list.push({ k: normName(p.player) + '|' + p.market + '|' + p.side, date: p.date || '', player: p.player, at: Date.now() });
+  try { localStorage.setItem(ENS_DISMISSED_KEY, JSON.stringify(list.slice(-1000))); } catch (e) {}
 }
 function _forgetManualPick(id) {
   const del = _manualLoad(MANUAL_DELETED_KEY).map(String);
@@ -3239,6 +3256,7 @@ function deletePick(id) {
   if (currentSource === 'ensemble') {
     const gone = (propsBySource.ensemble || []).find(p => String(p.id) === String(id));
     if (_isManualPick(gone)) _forgetManualPick(id);
+    else if (gone) _dismissEnsemblePick(gone); // computed pick: don't rebuild it from the sources
     propsBySource.ensemble = (propsBySource.ensemble || []).filter(p => String(p.id) !== String(id));
     try { localStorage.setItem(storageKey('ensemble'), JSON.stringify(propsBySource.ensemble)); } catch(e) {}
   } else {
