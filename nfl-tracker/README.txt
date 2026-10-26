@@ -55,3 +55,11 @@ DISCORD RECAP + STORAGE (Sent tab)
   dashboard's tier + Yardage settings).
 - Storage: how much of this browser's ~5 MB is used, the biggest saved items, and whether the
   Sent list's backup database works. "Clear old backup copies" removes only old cleanup backups.
+
+BACKUP / RESTORE (Sent tab -> Storage)
+- "Download backup" saves everything this site keeps in the browser to one .json file: every
+  source's picks, Ensemble, Sent list, Blender bets, settings, webhooks.
+- "Restore backup..." loads a backup file back (asks first; each item in the file replaces the
+  current one). Use it on a new browser/computer too.
+- Before the one-time headshot-image cleanup runs, the exact pick lists are copied into the
+  browser database; "Undo image cleanup" puts them back if anything were ever missing.

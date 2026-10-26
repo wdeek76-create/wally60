@@ -1099,6 +1099,16 @@ function loadState() {
   try {
     const isImg = v => typeof v === 'string' && v.length > 200 && v.startsWith('data:');
     let freed = 0;
+    // Before touching anything: the exact saved text of every pick list that has images goes into the
+    // browser database (plenty of room there), once — "Undo image cleanup" on the Storage panel.
+    try {
+      const raw = {};
+      [...SOURCES, 'ensemble'].forEach(src => { const v = localStorage.getItem(storageKey(src)); if (v && v.indexOf('data:') >= 0) raw[storageKey(src)] = v; });
+      if (Object.keys(raw).length && !localStorage.getItem('nfl_image_strip_backup_v1')) {
+        _idbPutRaw('pre_image_strip_backup', JSON.stringify({ at: new Date().toISOString(), items: raw }));
+        try { localStorage.setItem('nfl_image_strip_backup_v1', String(Date.now())); } catch (e) {}
+      }
+    } catch (e) { console.warn('pre-strip backup failed', e); }
     [...SOURCES, 'ensemble'].forEach(src => {
       const arr = propsBySource[src]; if (!Array.isArray(arr)) return;
       let dirty = false;
@@ -5501,6 +5511,53 @@ function _storageReport() {
   return { total, rows, full };
 }
 const _SAFE_TO_CLEAR = ['nfl_props_ensemble_backup_pre_restore', 'nfl_noname_removed_backup', 'nfl_anytime_td_removed_backup', 'nfl_blender_td_removed_backup'];
+// ── Full backup to a file, and restore from one. Everything this site keeps in the browser:
+// every source's picks, Ensemble, Sent list (also its database copy), Blender bets, settings.
+function _idbOpenKV() { return new Promise((res, rej) => { try { const r = indexedDB.open('nfl_tracker_db', 1); r.onupgradeneeded = () => r.result.createObjectStore('kv'); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); } catch (e) { rej(e); } }); }
+function _idbPutRaw(key, str) { return _idbOpenKV().then(db => new Promise((res, rej) => { const tx = db.transaction('kv', 'readwrite'); tx.objectStore('kv').put(str, key); tx.oncomplete = () => res(true); tx.onerror = () => rej(tx.error); })).catch(e => { console.warn('[idb] put failed', key, e); return false; }); }
+function _idbGetRaw(key) { return _idbOpenKV().then(db => new Promise((res, rej) => { const q = db.transaction('kv', 'readonly').objectStore('kv').get(key); q.onsuccess = () => res(q.result ?? null); q.onerror = () => rej(q.error); })).catch(() => null); }
+async function downloadBackup() {
+  const data = { app: 'nfl-props-tracker', version: 1, at: new Date().toISOString(), localStorage: {}, idb: {} };
+  try { for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (k && !k.startsWith('__')) data.localStorage[k] = localStorage.getItem(k); } } catch (e) {}
+  const sentIdb = await _idbGetRaw(SENT_KEY); if (sentIdb) data.idb[SENT_KEY] = sentIdb;
+  // make sure the Sent list in memory is in the file even if neither store had it yet
+  if (_sentCache && _sentCache.length) data.idb[SENT_KEY] = JSON.stringify(_sentCache);
+  const n = k => { try { return JSON.parse(data.localStorage[k] || '[]').length; } catch (e) { return 0; } };
+  const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
+  _downloadBlob(blob, 'nfl-tracker-backup-' + _localDateStr() + '.json');
+  try { localStorage.setItem('nfl_last_backup_at', String(Date.now())); } catch (e) {}
+  const m = document.getElementById('backupMsg');
+  if (m) m.textContent = `✓ Saved — Ensemble ${n(storageKey('ensemble'))} picks · ` + SOURCES.map(s => SOURCE_LABELS[s] + ' ' + n(storageKey(s))).join(' · ') + ` · Sent ${(_sentCache || []).length}`;
+}
+function pickBackupFile() { const i = document.getElementById('backupFile'); if (i) { i.value = ''; i.click(); } }
+async function restoreBackupFile(file) {
+  if (!file) return;
+  let data; try { data = JSON.parse(await file.text()); } catch (e) { alert("That file isn't a tracker backup (couldn't read it)."); return; }
+  if (!data || data.app !== 'nfl-props-tracker' || !data.localStorage) { alert("That file isn't a tracker backup."); return; }
+  const keys = Object.keys(data.localStorage);
+  const n = k => { try { return JSON.parse(data.localStorage[k] || '[]').length; } catch (e) { return 0; } };
+  const summary = ['Ensemble ' + n(storageKey('ensemble')) + ' picks'].concat(SOURCES.map(s => SOURCE_LABELS[s] + ' ' + n(storageKey(s)))).join(' · ');
+  if (!confirm(`Restore the backup from ${new Date(data.at).toLocaleString()}?\n\n${summary}\n\nEach item in the backup replaces what's in the tracker now (${keys.length} items). Download a backup of the current state first if you might want it.`)) return;
+  const failed = [];
+  // big pick lists last, so settings/small items land even if space runs out
+  keys.sort((a, b) => (data.localStorage[a] || '').length - (data.localStorage[b] || '').length).forEach(k => {
+    try { localStorage.setItem(k, data.localStorage[k]); } catch (e) { failed.push(k); }
+  });
+  if (data.idb && data.idb[SENT_KEY]) await _idbPutRaw(SENT_KEY, data.idb[SENT_KEY]);
+  alert(failed.length ? `Restored ${keys.length - failed.length} of ${keys.length}. Not enough browser storage for: ${failed.join(', ')}. Clear space (Storage panel) and restore again.` : `Restored ${keys.length} items. Reloading…`);
+  location.reload();
+}
+async function undoImageCleanup() {
+  const raw = await _idbGetRaw('pre_image_strip_backup');
+  if (!raw) { alert('No copy from before the image cleanup on this browser.'); return; }
+  let b; try { b = JSON.parse(raw); } catch (e) { alert('That copy is unreadable.'); return; }
+  if (!confirm(`Put the pick lists back exactly as they were before the image cleanup (${new Date(b.at).toLocaleString()})?\n\nOnly needed if a pick is missing. Picks added or graded since then are replaced by that copy (the headshot images are removed again on reload, so storage won't fill back up).`)) return;
+  const failed = [];
+  Object.entries(b.items || {}).forEach(([k, v]) => { try { localStorage.setItem(k, v); } catch (e) { failed.push(k); } });
+  try { localStorage.setItem('nfl_image_strip_backup_v1', String(Date.now())); } catch (e) {}
+  alert(failed.length ? 'Not enough storage to put back: ' + failed.join(', ') : 'Put back. Reloading…');
+  location.reload();
+}
 function freeStorageSpace() {
   const r = _storageReport(), del = r.rows.filter(([k]) => _SAFE_TO_CLEAR.includes(k));
   if (!del.length) { alert('No old backup copies to clear. The biggest items are listed on the Sent tab.'); return; }
@@ -5692,6 +5749,14 @@ function storagePanelHtml() {
         <div style="flex:1;min-width:160px;max-width:360px;height:8px;border-radius:4px;background:var(--bg3,#222);overflow:hidden"><div style="width:${r.full ? 100 : pct}%;height:100%;background:${col}"></div></div>
         <span class="dim">Sent list backup database: ${_sentIdbOk === false ? '<b class="neg">not working</b>' : _sentIdbOk ? '<b class="pos">working ✓</b>' : 'checking…'}</span>
         <button class="btn ghost" onclick="freeStorageSpace()">Clear old backup copies</button></div>
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <button class="btn primary" onclick="downloadBackup()">💾 Download backup</button>
+        <button class="btn ghost" onclick="pickBackupFile()">Restore backup…</button>
+        <input type="file" id="backupFile" accept=".json,application/json" style="display:none" onchange="restoreBackupFile(this.files[0])">
+        <span class="dim">${(() => { let t = null; try { t = Number(localStorage.getItem('nfl_last_backup_at')); } catch (e) {} return t ? 'last backup ' + new Date(t).toLocaleString() : 'no backup downloaded yet'; })()}${pct >= 80 || r.full ? ' — <b style="color:var(--amber)">back up now</b>' : ''}</span>
+        <span id="backupMsg" class="pos"></span>
+        ${(() => { let f = null; try { f = localStorage.getItem('nfl_image_strip_backup_v1'); } catch (e) {} return f ? '<button class="btn ghost" title="Puts the pick lists back exactly as they were before the headshot images were removed" onclick="undoImageCleanup()">Undo image cleanup</button>' : ''; })()}
+      </div>
       <table class="tbl"><thead><tr><th>Biggest saved items</th><th class="r">Size</th></tr></thead><tbody>
         ${r.rows.slice(0, 10).map(([k, n]) => `<tr><td class="mono">${escHtml(k)}${_SAFE_TO_CLEAR.includes(k) ? ' <span class="dim">(old backup — safe to clear)</span>' : ''}</td><td class="r mono">${mb(n)}</td></tr>`).join('')}
       </tbody></table></div></div>`;
