@@ -26727,6 +26727,32 @@ async function _tsSyncRw(say) {
     await rwApiSyncAll(true);
   } catch (e) { console.warn("[TABS SOLO] RW sync skipped", e && e.message); }
 }
+// Tabs bets are only kept when the market has a matching price at FanDuel / Pinnacle / Prop Builder, or ProphetX / Kalshi with $200+ behind it (live OpticOdds read).
+// The bet takes the best of those prices; with no match it is dropped.
+const TABS_SOLO_BOOKS = new Set(["FanDuel", "Pinnacle", "Prop Builder", "ProphetX", "Kalshi"]), TABS_SOLO_EXCH_LIQ = 200;
+async function _tsMatchMarket(rows) {
+  const nameOf = bk => BOOK_CODE_NAMES[String(bk || "").trim().toUpperCase()] || String(bk || "").trim();
+  const shadows = rows.map(x => ({ _t: x, player: x.player, stat: x.stat, ou: x.ou, line: x.line, odds: x.odds, book: nameOf(x.book), fair: x.fairOdds, altBooks: [], team: x.team, refreshOwn: true }));
+  let ok = true;
+  try { await ooRefreshBetsForPic(shadows); } catch (e) { ok = false; console.warn("[TABS SOLO] market match failed", e); }
+  if (!ok) return { kept: rows, dropped: [], failed: true };
+  const kept = [], dropped = [];
+  shadows.forEach(sh => {
+    const x = sh._t, cands = [];
+    const add = (bk, odds, liq) => { const n = nameOf(bk); if (odds == null || isNaN(odds) || !TABS_SOLO_BOOKS.has(n)) return; if (_mIsExchange(n) && !(liq != null && liq >= TABS_SOLO_EXCH_LIQ)) return; cands.push({ book: n, odds: Number(odds) }); };
+    const depth = bk => (sh.liq && sh.liq.books && sh.liq.books[bk]) ? sh.liq.books[bk].liq : null;
+    if (!sh.ownGone) add(sh.ownLive != null ? x.book : sh.book, sh.ownLive != null ? sh.ownLive : x.odds, depth(nameOf(x.book)));
+    (sh.altBooks || []).forEach(a => { if (a && (a.line == null || Number(a.line) === Number(x.line))) add(a.book, a.odds, depth(nameOf(a.book))); });
+    (sh.keyOff || []).forEach(k => add(k.book, k.odds, null));
+    if (sh.liq && sh.liq.books) Object.keys(sh.liq.books).forEach(bk => { const L = sh.liq.books[bk]; if (L && L.price != null) add(bk, L.price, L.liq); });
+    let best = null; cands.forEach(c => { if (!best || c.odds > best.odds) best = c; });
+    const ev = best && x.fairOdds != null ? calcEdge(best.odds, x.fairOdds) : null;
+    if (!best || (ev != null && ev < TABS_SOLO_MIN_EV)) { dropped.push(x); return; }
+    x.odds = best.odds; x.book = best.book; if (ev != null) x.ev = Math.round(ev * 10) / 10;
+    kept.push(x);
+  });
+  return { kept, dropped, failed: false };
+}
 async function tabsSoloImport() {
   const ta = document.getElementById("ts-paste"), info = document.getElementById("ts-info");
   const raw = ta ? ta.value : "", say = t => { tabsSoloInfo = t; if (info) info.textContent = t; };
@@ -26743,7 +26769,7 @@ async function tabsSoloImport() {
   await _tsSyncRw(say);
   { const warn = morningPasteWarnings(raw, results, stat, "tabs"); if (warn.length && !confirm("Check this paste before it's stored:\n\n\u2022 " + warn.join("\n\u2022 ") + "\n\nImport it anyway?")) { say("Not imported \u2014 " + warn[0] + "."); return; } }
   const now = Date.now(), nowIso = new Date().toISOString(), today = localYMD(new Date());
-  let added = 0, upd = 0, late = 0, replaced = 0; const seen = { initial: 0, "30min": 0 }, pasteKeys = new Set(), scopes = new Set();
+  let added = 0, upd = 0, late = 0, replaced = 0, noMatch = 0; const touched = []; const seen = { initial: 0, "30min": 0 }, pasteKeys = new Set(), scopes = new Set();
   results.forEach(r => {   // pass 1: which market / day / release this paste covers, and which lines it holds
     if (!r.gameDateIso || _mRejected(r.player)) return;
     const tip = _tsTipTs(r.gameDateIso, r.gameTime), mins = tip != null ? Math.round((tip - now) / 60000) : null;
@@ -26764,15 +26790,21 @@ async function tabsSoloImport() {
     const cur = tabsSolo.find(x => x.key === key);
     const mn = r.minutes > 0 ? Number(r.minutes) : _mCsvMin("tabs", r.player);   // projected minutes: from the PropShop board, else the loaded Tabs file
     const cx = tabsSoloContext(r.player, _mTeamFor(r.player), r.ou);
-    if (cur) { if (cur.result === "pending") { Object.assign(cur, { odds, book: r.book, ev: Number(r.ev), proj: r.proj, min: mn, fairOdds: _mFairOdds(odds, r.ev), ctx: cx.cls, ctxWhy: cx.why }); upd++; } return; }
-    tabsSolo.push({ key, player: r.player, game: r.game || "", team: _mTeamFor(r.player), gameDate: r.gameDateIso, gameTime: r.gameTime || "", stat, ou: r.ou, line: Number(r.line), odds, book: r.book, ev: Number(r.ev), proj: r.proj, min: mn, fairOdds: _mFairOdds(odds, r.ev), ctx: cx.cls, ctxWhy: cx.why, at: nowIso, release: rel, minToTip: mins, result: "pending", actual: null });
+    if (cur) { if (cur.result === "pending") { Object.assign(cur, { odds, book: r.book, ev: Number(r.ev), proj: r.proj, min: mn, fairOdds: _mFairOdds(odds, r.ev), ctx: cx.cls, ctxWhy: cx.why }); upd++; touched.push(cur); } return; }
+    tabsSolo.push({ key, player: r.player, game: r.game || "", team: _mTeamFor(r.player), gameDate: r.gameDateIso, gameTime: r.gameTime || "", stat, ou: r.ou, line: Number(r.line), odds, book: r.book, ev: Number(r.ev), proj: r.proj, min: mn, fairOdds: _mFairOdds(odds, r.ev), ctx: cx.cls, ctxWhy: cx.why, at: nowIso, release: rel, minToTip: mins, result: "pending", actual: null }); touched.push(tabsSolo[tabsSolo.length - 1]);
     added++;
   });
+  if (touched.length) {
+    say(`Matching ${touched.length} to FanDuel / Pinnacle / Prop Builder / ProphetX / Kalshi ($${TABS_SOLO_EXCH_LIQ}+)\u2026`);
+    const m = await _tsMatchMarket(touched);
+    if (m.failed) showToast("Market lookup failed \u2014 kept the board prices");
+    else if (m.dropped.length) { const gone = new Set(m.dropped); noMatch = m.dropped.length; tabsSolo = tabsSolo.filter(x => !gone.has(x)); added = Math.max(0, added - m.dropped.filter(x => x.at === nowIso).length); upd = Math.max(0, upd - m.dropped.filter(x => x.at !== nowIso).length); }
+  }
   tabsSoloSelStat = _mNextStat(stat);
   Object.keys(seen).forEach(rel => { if (seen[rel]) tabsSoloMeta[today + "|" + rel + "|" + stat] = { n: seen[rel], at: now }; });
   tabsSoloSave();
   if (ta) ta.value = "";
-  say(`${stat}: ${added} new${upd ? `, ${upd} updated` : ""} · ${seen.initial} initial / ${seen["30min"]} at 30 min${late ? ` · ${late} already tipped, skipped` : ""}${replaced ? ` · ${replaced} old open line${replaced === 1 ? "" : "s"} from the earlier paste replaced` : ""}`);
+  say(`${stat}: ${added} new${upd ? `, ${upd} updated` : ""} · ${seen.initial} initial / ${seen["30min"]} at 30 min${late ? ` · ${late} already tipped, skipped` : ""}${noMatch ? ` · ${noMatch} dropped (no match at FD / PIN / PB / PX / Kalshi $200+)` : ""}${replaced ? ` · ${replaced} old open line${replaced === 1 ? "" : "s"} from the earlier paste replaced` : ""}`);
   showToast(`Tabs Solo ${stat}: ${added} logged`);
   renderTabsSolo();  { const ss = document.getElementById("ts-stat"); if (ss) ss.value = tabsSoloSelStat; }
 }
