@@ -765,12 +765,33 @@ const roleTag = (role=discordRole) => role ? { content:`<@&${role}>`, allowed_me
 const discordUrl = u => (u && /^https:\/\/[^\s]+$/i.test(String(u))) ? String(u).replace(/\[/g,'%5B').replace(/\]/g,'%5D') : undefined;
 function discordClean(p){
   const q={...p, avatar_url:discordUrl(p.avatar_url)};
-  if(q.embeds) q.embeds=q.embeds.map(em=>({...em, url:discordUrl(em.url), thumbnail:em.thumbnail&&discordUrl(em.thumbnail.url)?{url:discordUrl(em.thumbnail.url)}:undefined}));
+  const thumb=u=>/^attachment:\/\//.test(String(u||'')) ? u : discordUrl(u);   // an uploaded image (attachment://vs.png) is fine too
+  if(q.embeds) q.embeds=q.embeds.map(em=>({...em, url:discordUrl(em.url), thumbnail:em.thumbnail&&thumb(em.thumbnail.url)?{url:thumb(em.thumbnail.url)}:undefined}));
   return q;
+}
+// "FD logo / VIA / PB logo" stacked, for borrowing alerts. Logos have to allow cross-origin drawing;
+// if one doesn't (or fails to load) this returns null and the alert keeps its normal thumbnail.
+const vsCache={};
+const bk2 = e => canonBook(e.soft?.[0]?.sportsbook || e.tgt);
+function smVsImage(a, b){
+  const key=a+'|'+b; if(vsCache[key]) return vsCache[key];
+  const load = u => new Promise((res,rej)=>{ if(!u) return rej(new Error('no logo')); const im=new Image(); im.crossOrigin='anonymous'; im.onload=()=>res(im); im.onerror=()=>rej(new Error('logo')); im.src=u; });
+  return vsCache[key]=(async()=>{
+    const [A,B]=await Promise.all([load(bookLogo(a)||httpsLogo(a)), load(bookLogo(b)||httpsLogo(b))]);   // bookLogo first: FD / PX are built in (no cross-site load)
+    const W=160, S=128, cv=document.createElement('canvas'); cv.width=W; cv.height=S*2+56; const c=cv.getContext('2d');
+    const tile=(im,y)=>{ c.save(); c.beginPath(); c.roundRect((W-S)/2,y,S,S,22); c.clip(); c.fillStyle='#0b1220'; c.fillRect((W-S)/2,y,S,S); c.drawImage(im,(W-S)/2,y,S,S); c.restore(); };
+    tile(A,0); c.fillStyle='#e5e7eb'; c.font='800 30px system-ui,sans-serif'; c.textAlign='center'; c.textBaseline='middle'; c.fillText('VIA', W/2, S+28); tile(B,S+56);
+    return await new Promise(res=>cv.toBlob(bl=>res(bl||null),'image/png'));
+  })().catch(()=>{ delete vsCache[key]; return null; });
 }
 async function discordPost(payload, onErr, hook=discordHook){
   if(!hook){ onErr?.('no webhook'); return false; }
-  const send = async body => { const r=await fetch(hook,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); return r.ok ? '' : `${r.status} ${(await r.text().catch(()=>'')).slice(0,160)}`; };
+  // payload.files ([{name, blob}]): sent as multipart so an embed can use attachment://name
+  const files=payload.files||null; payload={...payload}; delete payload.files;
+  const send = async body => { let init;
+    if(files && body.embeds?.some(em=>/^attachment:/.test(em.thumbnail?.url||''))){ const fd=new FormData(); fd.append('payload_json', JSON.stringify(body)); files.forEach((f,i)=>fd.append(`files[${i}]`, f.blob, f.name)); init={method:'POST',body:fd}; }
+    else init={method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)};
+    const r=await fetch(hook,init); return r.ok ? '' : `${r.status} ${(await r.text().catch(()=>'')).slice(0,160)}`; };
   try{
     const clean=discordClean(payload);
     let err=await send(clean); if(!err) return true;
@@ -817,6 +838,8 @@ async function sharpDcPump(){
       try{ if(SHARP_MAINS.has(e.mk)) await smSharpRefs(e); e.info = SHARP_MAINS.has(e.mk) ? null : await smInfo(e); const pl=sharpDiscordPayload(e), rt=roleTag(roleFor(e));
         // same order as the title, then the role tag: "-108 Giannis Antetokounmpo Under 4.5 Rebounds @SM"
         const head=String(pl.embeds?.[0]?.title||'');
+        // borrowing play: thumbnail is "target VIA borrowed book" (drawn here, uploaded with the post)
+        if(e.via){ const vs=await smVsImage(bk2(e), e.via.book).catch(()=>null); if(vs && pl.embeds?.[0]){ pl.embeds[0].thumbnail={ url:'attachment://vs.png' }; pl.files=[{ name:'vs.png', blob:vs }]; } }
         ok=await discordPost({ ...pl, ...rt, content:[head, rt.content].filter(Boolean).join(' ') }, m=>{ why=m; }, hookFor(e)); }catch(err){ why=err.message; }
       if(ok){ dcMarkSent(e); if(e.tgt!=='bet105') fdSentBump(); }
       sharpDcNote(ok, ok ? `sent ${tag}${name}` : `FAILED ${tag}${name}: ${why||'?'}`);
