@@ -2051,9 +2051,10 @@ function nlRecapText(day){
   return { today, done:uDone, fields };
 }
 async function nlPostRecap(day, manual){
-  if(!nlHook){ if(manual) toast('Set the in-game Discord first'); return false; }
+  const hook=LS.get('nbal_recap_hook','')||nlHook;   // its own recap channel once set, else the in-game channel
+  if(!hook){ if(manual) toast('Set the in-game Discord first'); return false; }
   const R=nlRecapText(day); if(!R.done.length){ if(manual) toast('Nothing graded for that day yet'); return false; }
-  const ok=await postRecapFields(nlHook, 'In-game recap · NBA live', R.fields);
+  const ok=await postRecapFields(hook, 'In-game recap · NBA live', R.fields);
   if(ok) LS.set('nbal_recap_'+day, '1');
   if(manual) toast(ok?'Recap posted':'Recap failed');
   return ok;
@@ -2071,7 +2072,7 @@ async function nlAutoRecap0(){
 // FD Sharp Money recap: when every FanDuel bet on a game date is graded, post that date's results +
 // all-time (by sport and prop) to the FD Sharp Money channel, once.
 function smRecapFields(day, book='fanduel'){
-  const fd=tracked.filter(t=>t.src==='sharp' && (t.bookKey||'fanduel')===book);
+  const B=RECAP_BOOK[book]; const fd=tracked.filter(B.has); book=B.book;
   const dayList=fd.filter(t=>t.start && etDayOf(new Date(t.start).getTime())===day), done=dayList.filter(t=>t.final);
   const dayName=new Date(day+'T12:00:00').toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'});
   const lab=t=>`${SPORTS[t.sportKey]?.label||t.sportKey} ${t.marketLabel||t.mkey}`;
@@ -2090,9 +2091,14 @@ function smRecapFields(day, book='fanduel'){
     ] };   // breakdowns only -- no play-by-play list
 }
 // FD and b105 recaps: each to its own recap channel (falls back to that book's alert channel until set)
-let fdRecapHook = LS.get('sm_fdrecap_hook',''), b105RecapHook = LS.get('sm_b105recap_hook','');
-const RECAP_BOOK = { fanduel:{ name:'FanDuel', title:'FanDuel Sharp Money recap', flag:'sm_recap_', hook:()=>fdRecapHook||discordHook },
-                     bet105:{ name:'bet105', title:'bet105 Sharp Money recap', flag:'sm_b105recap_', hook:()=>b105RecapHook||b105Hook } };
+// three recaps, three recap channels: FD props, b105 props, b105 main lines (each falls back to its
+// alert channel until its recap webhook is set)
+const smIsBook = (t, bk) => t.src==='sharp' && (t.bookKey||'fanduel')===bk;
+const RECAP_BOOK = {
+  fanduel:{ book:'fanduel', name:'FanDuel', title:'FanDuel Sharp Money recap', flag:'sm_recap_', key:'sm_fdrecap_hook', has:t=>smIsBook(t,'fanduel'), alert:()=>discordHook },
+  bet105:{ book:'bet105', name:'bet105', title:'bet105 Sharp Money recap', flag:'sm_b105recap_', key:'sm_b105recap_hook', has:t=>smIsBook(t,'bet105') && !SHARP_MAINS.has(t.mkey), alert:()=>b105Hook },
+  b105main:{ book:'bet105', name:'bet105 main lines', title:'bet105 Main lines recap', flag:'sm_b105mainrecap_', key:'sm_b105mainrecap_hook', has:t=>smIsBook(t,'bet105') && SHARP_MAINS.has(t.mkey), alert:()=>b105MainHook||b105Hook } };
+Object.values(RECAP_BOOK).forEach(B=>{ B.hook=()=>LS.get(B.key,'')||B.alert(); });
 async function smPostRecap(day, manual, book='fanduel'){
   const B=RECAP_BOOK[book], hook=B.hook();
   if(!hook){ if(manual) toast(`Set the ${B.name} recap channel first`); return false; }
@@ -2107,7 +2113,7 @@ async function smAutoRecap(){
   if(recapBusy) return; recapBusy=true; try{ await smAutoRecap0(); } finally{ recapBusy=false; } }
 async function smAutoRecap0(){
   for(const book of Object.keys(RECAP_BOOK)){
-    const fd=tracked.filter(t=>t.src==='sharp' && (t.bookKey||'fanduel')===book && t.start);
+    const fd=tracked.filter(t=>RECAP_BOOK[book].has(t) && t.start);
     const today=etToday();
     const days=[...new Set(fd.map(t=>etDayOf(new Date(t.start).getTime())))].filter(d=>d<=today && d>=RECAP_SINCE).sort().slice(-3);
     for(const day of days){ if(LS.get(RECAP_BOOK[book].flag+day,'')) continue; const list=fd.filter(t=>etDayOf(new Date(t.start).getTime())===day);
@@ -2174,22 +2180,23 @@ function smRestore(){
     }catch(e){ toast('Import failed: '+e.message); } };
   inp.click();
 }
-const backupHtml = () => `<div class="nlctl" style="margin:0 0 12px"><button data-bk="recap">Post FD recap</button><button data-bk="recap105">Post b105 recap</button><button data-bk="rchfd" class="${fdRecapHook?'on':''}">${fdRecapHook?'FD recap channel ✓':'FD recap channel'}</button><button data-bk="rch105" class="${b105RecapHook?'on':''}">${b105RecapHook?'b105 recap channel ✓':'b105 recap channel'}</button><span class="dim">Backup</span><button data-bk="save">⬇ Download backup</button><button data-bk="load">⬆ Import backup</button><button data-bk="copy">⧉ Copy FD tracker</button><button data-bk="paste">⎘ Paste FD tracker</button></div>`;
-const lastRecapDay = book => { const days=[...new Set(tracked.filter(t=>t.src==='sharp'&&(t.bookKey||'fanduel')===book&&t.start&&t.final).map(t=>etDayOf(new Date(t.start).getTime())))].sort(); return days[days.length-1]||etToday(); };
+const backupHtml = () => `<div class="nlctl" style="margin:0 0 12px"><button data-bk="recap">Post FD recap</button><button data-bk="recap105">Post b105 recap</button><button data-bk="recapmain">Post b105 main lines recap</button>${Object.entries(RECAP_BOOK).map(([k,B])=>`<button data-rch="${k}" class="${LS.get(B.key,'')?'on':''}">${({fanduel:'FD',bet105:'b105',b105main:'b105 main lines'})[k]} recap channel${LS.get(B.key,'')?' ✓':''}</button>`).join('')}<span class="dim">Backup</span><button data-bk="save">⬇ Download backup</button><button data-bk="load">⬆ Import backup</button><button data-bk="copy">⧉ Copy FD tracker</button><button data-bk="paste">⎘ Paste FD tracker</button></div>`;
+const lastRecapDay = book => { const days=[...new Set(tracked.filter(t=>RECAP_BOOK[book].has(t)&&t.start&&t.final).map(t=>etDayOf(new Date(t.start).getTime())))].sort(); return days[days.length-1]||etToday(); };
 async function setRecapHook(book){
-  const B=RECAP_BOOK[book], cur=book==='fanduel'?fdRecapHook:b105RecapHook;
-  const v=prompt(`${B.name} recaps go to their own channel. Paste that channel's Discord webhook URL. Leave empty to post them in the ${B.name} alerts channel.`, cur); if(v==null) return;
-  if(book==='fanduel'){ fdRecapHook=v.trim(); LS.set('sm_fdrecap_hook', fdRecapHook); } else { b105RecapHook=v.trim(); LS.set('sm_b105recap_hook', b105RecapHook); }
+  const B=RECAP_BOOK[book];
+  const v=prompt(`${B.name} recaps go to their own channel. Paste that channel's Discord webhook URL. Leave empty to post them in the ${B.name} alerts channel.`, LS.get(B.key,'')); if(v==null) return;
+  LS.set(B.key, v.trim());
   if(v.trim()){ const ok=await discordPost({ username:'PocketMarket', content:`✅ ${B.name} Sharp Money recaps connected.`, allowed_mentions:{parse:[]} }, null, v.trim()); toast(ok?'Recap channel connected':'Discord test failed — check the URL'); }
   if(viewMode==='tracker') renderTracker();
 }
-const bindBackup = v => { v.querySelectorAll('[data-bk]').forEach(b=>b.onclick=()=>b.dataset.bk==='recap105'?smPostRecap(lastRecapDay('bet105'), true, 'bet105'):b.dataset.bk==='rchfd'?setRecapHook('fanduel'):b.dataset.bk==='rch105'?setRecapHook('bet105'):b.dataset.bk==='copy'?smCopyTracker():b.dataset.bk==='paste'?smPasteTracker():b.dataset.bk==='save'?smBackup():b.dataset.bk==='recap'?(()=>{ const days=[...new Set(tracked.filter(t=>t.src==='sharp'&&t.start&&t.final).map(t=>etDayOf(new Date(t.start).getTime())))].sort(); smPostRecap(days[days.length-1]||etToday(), true); })():smRestore()); };
+const bindBackup = v => { v.querySelectorAll('[data-rch]').forEach(b=>b.onclick=()=>setRecapHook(b.dataset.rch));
+  v.querySelectorAll('[data-bk]').forEach(b=>b.onclick=()=>b.dataset.bk==='recap105'?smPostRecap(lastRecapDay('bet105'), true, 'bet105'):b.dataset.bk==='recapmain'?smPostRecap(lastRecapDay('b105main'), true, 'b105main'):b.dataset.bk==='copy'?smCopyTracker():b.dataset.bk==='paste'?smPasteTracker():b.dataset.bk==='save'?smBackup():b.dataset.bk==='recap'?(()=>{ const days=[...new Set(tracked.filter(t=>t.src==='sharp'&&t.start&&t.final).map(t=>etDayOf(new Date(t.start).getTime())))].sort(); smPostRecap(days[days.length-1]||etToday(), true); })():smRestore()); };
 let nlHist=false;
 function renderNbaLive(){
   const v=$('#view'), now=Date.now();
   const nextTip=['nba'].flatMap(k=>(sharpFxCache[k]?.list||[]).map(f=>tipAt(k,f.start))).filter(t=>t>now).sort((a,b)=>a-b)[0];
   const head=`<div class="sh"><span class="t">In-game · NBA</span><span class="dim" style="font-size:10.5px">${nlGames.length?`${nlGames.length} game${nlGames.length===1?'':'s'} on · ${nlPlays.length} plays · ${nlLast?Math.round((now-nlLast)/1000)+'s ago':'…'}`:nextTip?`idle · wakes at tip ${etTime(new Date(nextTip).toISOString())}`:'idle · no NBA games soon'}</span></div>
-    <div class="nlctl"><span class="dim">Exch min (each)</span>${[0,100,250,500,1000].map(x=>`<button class="${nlKalMin===x?'on':''}" data-nlk="${x}">${x?usd(x):'Any'}</button>`).join('')}<button id="nlRecap">Post recap</button><button class="${nlHook?'on':''}" id="nlDc" style="margin-left:auto">${nlHook?'Discord ✓':'Set Discord'}</button></div>${nlErr?`<div class="dim" style="font-size:11px;color:var(--red)">${esc(nlErr.slice(0,90))}</div>`:''}
+    <div class="nlctl"><span class="dim">Exch min (each)</span>${[0,100,250,500,1000].map(x=>`<button class="${nlKalMin===x?'on':''}" data-nlk="${x}">${x?usd(x):'Any'}</button>`).join('')}<button id="nlRecap">Post recap</button><button id="nlRecapCh" class="${LS.get('nbal_recap_hook','')?'on':''}">Recap channel${LS.get('nbal_recap_hook','')?' ✓':''}</button><button class="${nlHook?'on':''}" id="nlDc" style="margin-left:auto">${nlHook?'Discord ✓':'Set Discord'}</button></div>${nlErr?`<div class="dim" style="font-size:11px;color:var(--red)">${esc(nlErr.slice(0,90))}</div>`:''}
     ${nlGames.length&&nlKal?`<div class="smdiagw"><div class="smdiag">${esc(Object.entries(nlKal.books).map(([b,n])=>`${b} ${n}`).join(' · ')||'no odds')}<div class="smdiagtop">Kalshi: ${nlKal.rows} rows · ${nlKal.mk} in our markets · ${nlKal.side} with a side · ${nlKal.fd} on FD's line${nlKal.sample.length?`<br><span style="opacity:.7">${nlKal.sample.map(esc).join('<br>')}</span>`:''}</div></div></div>`:''}`;
   const cards = !nlGames.length ? '<div class="empty">Runs only while NBA games are live (from tip to the final buzzer). Nothing on right now.</div>'
     : !nlPlays.length ? '<div class="empty">Watching… nothing at 0.0% or better right now.</div>'
@@ -2224,6 +2231,10 @@ function renderNbaLive(){
     const r=prompt('Role ID to tag (optional)', nlRole); if(r!=null){ nlRole=(r.match(/\d{15,}/)||[''])[0]; LS.set('nbal_role',nlRole); }
     if(nlHook) discordPost({ username:'FanDuel', content:['✅ In-game alerts connected', /^\d{15,}$/.test(nlRole)?`<@&${nlRole}>`:''].filter(Boolean).join(' '), allowed_mentions:/^\d{15,}$/.test(nlRole)?{roles:[nlRole]}:{parse:[]} }, null, nlHook).then(ok=>toast(ok?'NBA Live Discord connected':'Discord test failed'));
     renderNbaLive(); });
+  $('#nlRecapCh')?.addEventListener('click', async ()=>{
+    const v=prompt('In-game recaps go to their own channel. Paste that channel\'s Discord webhook URL. Leave empty to post them in the in-game channel.', LS.get('nbal_recap_hook','')); if(v==null) return;
+    LS.set('nbal_recap_hook', v.trim()); renderNbaLive();
+    if(v.trim()){ const ok=await discordPost({ username:'FanDuel', content:'✅ In-game recaps connected.', allowed_mentions:{parse:[]} }, null, v.trim()); toast(ok?'Recap channel connected':'Discord test failed — check the URL'); } });
   $('#nlRecap')?.addEventListener('click',()=>{ const days=[...new Set(nlTracked.map(t=>etDayOf(t.trackedAt)))].sort(); nlPostRecap(days[days.length-1]||etToday(), true); });
   $('#nlHistB')?.addEventListener('click',()=>{ nlHist=!nlHist; renderNbaLive(); });
   v.querySelectorAll('[data-nlg]').forEach(b=>b.onclick=()=>{ const [id,r]=b.dataset.nlg.split('|'); const t=nlTracked.find(x=>x.id===id); if(!t) return; if(r){ t.result=r; t.final=true; } else { t.result=null; t.final=false; } nlSave(); renderNbaLive(); });
