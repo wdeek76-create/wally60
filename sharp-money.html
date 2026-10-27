@@ -328,6 +328,12 @@ const has = (m, ...w) => w.every(x=>m.includes(x));
 const PERIOD = /quarter|half|1st|2nd|3rd|4th|first|last|overtime|period|double|triple|basket|alternate|odd|even|milestone|race|to score|to record|to get|band|exact|margin|method|combo|spread|handicap|head.to.head|h2h| vs /;
 const THREE = /three|3-point|3 point|3pt|3pm/;
 const NBA_MKTS = [
+  // 1st half + team totals (before 'pts', which would grab "Team Total Points"); marketKeyFor lets these past PERIOD
+  ['h1_total','1H Total', m=>/^(1st half|first half) (total points|points total|total)$/.test(m.trim())],
+  ['h1_ml','1H Moneyline', m=>/^(1st half|first half) (moneyline|money line)$/.test(m.trim())],
+  ['h1_spread','1H Spread', m=>/^(1st half|first half) (point spread|spread)$/.test(m.trim())],
+  ['h1_tt','1H Team Total', m=>/^(1st half|first half) team total( points)?$/.test(m.trim())],
+  ['tt','Team Total', m=>/^team total( points)?$/.test(m.trim())],
   ['total','Game Total', m=>/^(total points|points total|total|game total|totals)$/.test(m.trim())],
   ['ml','Moneyline', m=>/^(moneyline|money line)$/.test(m.trim())],
   ['spread','Spread', m=>/^(point spread|spread)$/.test(m.trim())],
@@ -483,9 +489,9 @@ function sharpSummaryHtml(){
 // +200 (anytime TD / goal: -250 to +500). A side newly at/above the minimum
 // ($350 default, summed across exchanges) pings at the top of the screen wherever you are and is
 // tracked as Sharp Money.
-const SOFT_BOOKS = ['fanduel','bet105']; // targets; bet105 alerts go to their own Discord channel
+const SOFT_BOOKS = ['fanduel','bet105','betonline'];   // betonline: main lines only // targets; bet105 alerts go to their own Discord channel
 const SHARP_REQ_BOOKS = ['Novig','Prophet X','Kalshi','FanDuel'];
-const SHARP_MARKETS = { nfl:['atd','rec_yds','rush_yds','rush_att','rec','pass_cmp','pass_att'], nba:['pts','pra','3pm','reb','ast','total','ml','spread'], wnba:['pts','pra','3pm','reb','ast'], nhl:['sog','ag','sv'] };
+const SHARP_MARKETS = { nfl:['atd','rec_yds','rush_yds','rush_att','rec','pass_cmp','pass_att'], nba:['pts','pra','3pm','reb','ast','total','ml','spread','h1_total','h1_ml','h1_spread','tt','h1_tt'], wnba:['pts','pra','3pm','reb','ast'], nhl:['sog','ag','sv'] };
 const SHARP_YESNO = new Set(['atd','ag']);
 // FanDuel price window: normal props -250 to +200; anytime TD / goal -250 to +500.
 const sharpPriceOk = (mk, price) => { const p=Number(price); return p>=-250 && p<=(SHARP_YESNO.has(mk)?500:200); };
@@ -501,8 +507,14 @@ const centsOf = a => a<0 ? -a-100 : 100-a;
 // a play that counts: exchange money at/over the minimum, or a live 10c play
 // bet105's main lines (game total / ML / spread) need $5k+ of EXCHANGE money (Novig / PX / Kalshi)
 // on the other side -- not a bet105 limit
-const SHARP_MAINS = new Set(['total','ml','spread']);
-const sharpMinFor = e => e.tgt==='bet105' && SHARP_MAINS.has(e.mk) ? Math.max(5000, sharpMin) : sharpMin;
+const SHARP_MAINS = new Set(['total','ml','spread','h1_total','h1_ml','h1_spread','tt','h1_tt']);
+const GAME_PERIOD_MKS = new Set(['h1_total','h1_ml','h1_spread','h1_tt','tt']);
+const TEAM_MKS = new Set(['ml','spread','h1_ml','h1_spread']);          // the selection is a team (no over/under)
+const ML_MKS = new Set(['ml','h1_ml']);
+const TOT_MKS = new Set(['total','h1_total','tt','h1_tt']);             // over/under, both sides scanned
+const GAME_TOT_MKS = new Set(['total','h1_total']);                     // the whole game, not one team
+const MAIN_LBL = { total:'GAME TOTAL', ml:'MONEYLINE', spread:'SPREAD', h1_total:'1H TOTAL', h1_ml:'1H MONEYLINE', h1_spread:'1H SPREAD', tt:'TEAM TOTAL', h1_tt:'1H TEAM TOTAL' };
+const sharpMinFor = e => e.tgt!=='fanduel' && SHARP_MAINS.has(e.mk) ? Math.max(5000, sharpMin) : sharpMin;
 const sharpQual = e => e.kind==='10c' ? !e.gone : e.L.total>=sharpMinFor(e);
 // Bet link that works on a phone and in Discord: FanDuel gets its https addToBetslip link (opens
 // the FD app with the bet in the slip when it's installed, the site otherwise), built from the row's
@@ -603,10 +615,10 @@ function sharpScan(sk, rows){
       if(K.sample.length<2) K.sample.push(`${o.market} | ${o.selection} | ${o.selection_line} | ${o.points} | ${o.price} | ob ${JSON.stringify((o.order_book||[]).slice(0,2))}`); }
     const mk=marketKeyFor(sk,o.market); if(!mk || !allowed.has(mk)) return;
     if(isK) K.mk++;
-    const team = mk==='ml'||mk==='spread';
+    const team = TEAM_MKS.has(mk);
     const s = team ? 't:'+normName(cleanSel(o.selection||o.name||'').replace(/\s+[+-]?\d+(\.\d+)?$/,'')) : sharpSideOf(o, mk); if(!s || s==='t:') return; o._sd=s;
     if(isK) K.side++;
-    const who = mk==='total'||team ? 'game' : normName(sharpPlayerOf(o)); if(!who) return;
+    const who = GAME_TOT_MKS.has(mk)||team ? 'game' : normName(sharpPlayerOf(o)); if(!who) return;
     const g=`${o._fx}|${mk}|${who}`;
     (groups[g]=groups[g]||[]).push(o);
   });
@@ -618,18 +630,19 @@ function sharpScan(sk, rows){
     if(!own.some(o=>EXCH.has(canonBook(o.sportsbook)))) return;
     d.withExch++;
     const [fx, mk, key] = g.split('|');
-    const team = mk==='ml'||mk==='spread';
-    const sides = team ? [...new Set(own.map(o=>o._sd))] : SHARP_YESNO.has(mk) ? (mk==='atd' ? ['yes'] : ['yes','no']) : mk==='total' ? ['under','over'] : ['under'];
+    const team = TEAM_MKS.has(mk);
+    const sides = team ? [...new Set(own.map(o=>o._sd))] : SHARP_YESNO.has(mk) ? (mk==='atd' ? ['yes'] : ['yes','no']) : TOT_MKS.has(mk) ? ['under','over'] : ['under'];
     const lines = [...new Set(own.map(sharpLine))];
     sides.forEach(side=>lines.forEach(line=>{
       const at = o => sharpLine(o)===line;
       // team markets: the other team (spread at the opposite number); everything else: the other side
-      const opp = team ? own.filter(o=>o._sd!==side && (mk==='ml' || sharpLine(o)===-line) && EXCH.has(canonBook(o.sportsbook)))
+      const opp = team ? own.filter(o=>o._sd!==side && (ML_MKS.has(mk) || sharpLine(o)===-line) && EXCH.has(canonBook(o.sportsbook)))
         : own.filter(o=>o._sd===SHARP_OPP[side] && at(o) && EXCH.has(canonBook(o.sportsbook)));
       // each target book is its own play (FanDuel and bet105 alert separately)
       SOFT_BOOKS.forEach(tb=>{
       if((mk==='atd'||mk==='sv') && tb!=='fanduel') return;   // anytime TD Yes / goalie saves Under: FanDuel only
-      if(SHARP_MAINS.has(mk) && tb!=='bet105') return;         // game total / ML / spread: bet105 only -- FanDuel is player props only
+      if(SHARP_MAINS.has(mk) && tb==='fanduel') return;        // main lines: bet105 / BetOnline only -- FanDuel is player props only
+      if(tb==='betonline' && !SHARP_MAINS.has(mk)) return;      // BetOnline: main lines only
       const soft = own.filter(o=>o._sd===side && at(o) && canonBook(o.sportsbook)===tb).sort((a,b)=>toDec(b.price)-toDec(a.price));
       if(!soft.length || !sharpPriceOk(mk, soft[0].price)) return;
       let L = arbLadder(opp, soft[0].price), via=null;
@@ -646,7 +659,7 @@ function sharpScan(sk, rows){
       else soft.forEach(o=>{ const a=arbLadder(opp, o.price); o._arb$=a.total; o._edge=a.bestHold!=null?-a.bestHold:null; });
       const teamName = team ? cleanSel(soft[0].selection||soft[0].name||'').replace(/\s+[+-]?\d+(\.\d+)?$/,'') : null;
       out.push({ via, sd:side, k:`${sk}|${g}|${side}|${line}${tb==='fanduel'?'':'|'+tb}`, tgt:tb, sk, fx, mk, key, pid:own.find(o=>o.player_id)?.player_id||null,
-        player: team ? `${teamName} ${mk==='ml'?'ML':(line>0?'+':'')+line}` : sharpPlayerOf(soft[0]), side: team?'team':side, line: team?null:line, ref:soft[0], soft, L, own });
+        player: team ? `${teamName} ${ML_MKS.has(mk)?'ML':(line>0?'+':'')+line}` : sharpPlayerOf(soft[0]), side: team?'team':side, line: team?null:line, ref:soft[0], soft, L, own });
       });
     }));
   });
@@ -660,7 +673,7 @@ function sharpRecord(sk, scan, at, fxList, tgt){
   scan.forEach(x=>{
     const e = sharpTape[x.k] = sharpTape[x.k] || { hist:[] };
     Object.assign(e, x, { at, f:fxById[x.fx]||e.f||null, gone:false }); seen.add(x.k);
-    if(x.mk==='total' && e.f) e.player=`${e.f.away?.ab||e.f.away?.name||''} @ ${e.f.home?.ab||e.f.home?.name||''}`;
+    if(GAME_TOT_MKS.has(x.mk) && e.f) e.player=`${e.f.away?.ab||e.f.away?.name||''} @ ${e.f.home?.ab||e.f.home?.name||''}`;
     const last = e.hist[e.hist.length-1];
     if(!last || last.total!==x.L.total) e.hist.push({ t:at, total:x.L.total });
     while(e.hist.length>2 && e.hist[1].t < at - SHARP_HIST_MS) e.hist.shift();
@@ -739,9 +752,10 @@ if(!b105Role || b105Role===discordRole){ b105Role=B105_ROLE; LS.set('sm_b105_rol
 // b105 main lines (game totals / ML / spread, every sport) go to their own channel once that webhook is
 // set (until then, the b105 channel). An earlier "NBA totals" webhook carries over as this channel.
 let b105MainHook = LS.get('sm_b105main_hook','') || LS.get('sm_b105tot_hook',''), b105MainRole = LS.get('sm_b105main_role','') || LS.get('sm_b105tot_role','');
-const isB105Main = e => e?.tgt==='bet105' && SHARP_MAINS.has(e.mk) && !!b105MainHook;
-const hookFor = e => (isB105Main(e) ? b105MainHook : e?.tgt==='bet105' ? b105Hook : discordHook);
-const roleFor = e => (isB105Main(e) ? b105MainRole : e?.tgt==='bet105' ? b105Role : discordRole);
+// BetOnline main lines go with bet105's: the main lines channel (else the b105 channel)
+const isMainCh = e => (e?.tgt==='bet105' || e?.tgt==='betonline') && SHARP_MAINS.has(e.mk) && !!b105MainHook;
+const hookFor = e => (isMainCh(e) ? b105MainHook : (e?.tgt==='bet105'||e?.tgt==='betonline') ? b105Hook : discordHook);
+const roleFor = e => (isMainCh(e) ? b105MainRole : (e?.tgt==='bet105'||e?.tgt==='betonline') ? b105Role : discordRole);
 const roleTag = (role=discordRole) => role ? { content:`<@&${role}>`, allowed_mentions:{ roles:[role] } } : { allowed_mentions:{ parse:[] } };
 // Discord rejects a whole post over one badly formed link, so links are cleaned first; if it still
 // says no, the post goes again without links/logos, and a toast says why if even that fails.
@@ -832,13 +846,13 @@ const TEAM_NICK2 = /(Trail Blazers|Maple Leafs|Blue Jackets|Golden Knights|Red W
 const teamNick = n => { n=String(n||'').trim(); if(!n) return ''; const m=n.match(TEAM_NICK2); if(m) return m[1]; const w=n.split(/\s+/); return w.length>1 ? w[w.length-1] : n; };
 // a sharp book's number for the side: "+7.5 " on a spread, "o228.5 " on a total, nothing on ML;
 // underlined when it isn't the line being bet
-function smRefLine(e, r){ if(r.line==null || e.mk==='ml') return ''; const t = e.mk==='total' ? `${e.side==='over'?'o':'u'}${r.line}` : `${r.line>0?'+':''}${r.line}`;
+function smRefLine(e, r){ if(r.line==null || ML_MKS.has(e.mk)) return ''; const t = TOT_MKS.has(e.mk) ? `${e.side==='over'?'o':'u'}${r.line}` : `${r.line>0?'+':''}${r.line}`;
   const bl = e.line ?? (e.ref ? sharpLine(e.ref) : null);   // team markets keep the bet's number on the row
   return bl!=null && r.line!==bl ? `__${t}__ ` : `${t} `; }
 function sharpDiscordPayload(e, example){
   const o=e.soft[0], bk=canonBook(o.sportsbook), url=sharpLink(o), f=e.f, sk=e.sk;
   const edge=o._edge??0, isArb=edge>1e-7, isDirect=!isArb&&edge>=-1e-7, book=bookLabel(o.sportsbook);
-  const mktName= e.mk==='pra' ? 'PRA' : (e.mk==='ml'||e.mk==='spread') ? '' : ((e.own.find(x=>x._sd===e.side)||e.own[0])?.market || marketLabel(sk,e.mk));
+  const mktName= e.mk==='pra' ? 'PRA' : TEAM_MKS.has(e.mk) ? (e.mk.startsWith('h1_')?'1H':'') : TOT_MKS.has(e.mk) ? marketLabel(sk,e.mk) : ((e.own.find(x=>x._sd===e.side)||e.own[0])?.market || marketLabel(sk,e.mk));
   const bet=`${titleCase(e.player)} ${sharpSideLabel(e.side)}${e.line!=null?' '+e.line:''}`.replace(/\s+/g,' ').trim();
   // under the name: his position and team (e.g. "RB - CHI") when known, else the market
   // full team name ("Miami Heat"): from the game when his team id or abbreviation matches a side
@@ -881,7 +895,7 @@ function sharpDiscordPayload(e, example){
     title:`${example?'[EXAMPLE] ':''}${fmtAm(o.price)} ${bet}${mktName?' '+mktName:''}`.slice(0,256),
     url:url||undefined, color:e.via?0x3b82f6:isArb?0x22c55e:isDirect?0xeab308:0xf97316,
     thumbnail: httpsLogo(bk) ? { url:httpsLogo(bk) } : undefined,
-    description:`${f?`${teamNick(f.away.name)||f.away.ab} @ ${teamNick(f.home.name)||f.home.ab} ${when}\n`:''}**${SHARP_MAINS.has(e.mk) ? `${SPORTS[sk]?.label||sk} ${e.mk==='total'?'GAME TOTAL':e.mk==='ml'?'MONEYLINE':'SPREAD'}`.toUpperCase() : (posTeam||mktName)}**`,
+    description:`${f?`${teamNick(f.away.name)||f.away.ab} @ ${teamNick(f.home.name)||f.home.ab} ${when}\n`:''}**${SHARP_MAINS.has(e.mk) ? `${SPORTS[sk]?.label||sk} ${MAIN_LBL[e.mk]||'MAIN LINE'}`.toUpperCase() : (posTeam||mktName)}**`,
     fields:[
       ...[['Pinnacle',e.pin],['BetOnline',e.bol],['Circa',e.circa],['BookMaker',e.bkm]].filter(([,r])=>r).map(([n,r])=>({ name:n, value:`${smRefLine(e, r)}**${fmtAm(r.price)}**${r.limit!=null?` · limit **${usd(r.limit)}**`:''}`, inline:true })),
       ...(e.via ? [{ name:`${bookShort(bk)} vs ${best?bookLabel(best[0]):'exchange'} - Borrowing ${bookShort(e.via.book)} ${fmtAm(e.via.price)} (${e.via.cents??0}c)`, value:`**${fmtAm(o.price)}** VS. **${best?fmtAm(-best[1].opp):'—'}**` }]
@@ -908,13 +922,16 @@ function sharpExampleEntry(){
 function sharpAutoTrack(e){
   const o=e.soft[0], bk=canonBook(o.sportsbook), f=e.f;
   const tSide = e.side==='yes'?'Yes':e.side==='no'?'No':e.side;
-  if(tracked.some(t=>t.src==='sharp' && t.playerKey===e.key && t.fixtureId===e.fx && t.mkey===e.mk && t.side===tSide && (t.line??null)===(e.line??null) && (t.bookKey||'fanduel')===bk)) return;
+  // main lines keep the team + bet number, so they can be graded (and two teams' spreads aren't one bet)
+  const teamSel = TEAM_MKS.has(e.mk) ? String(e.sd||'').replace(/^t:/,'') : (e.mk==='tt'||e.mk==='h1_tt') ? e.key : null;
+  const betLine = TEAM_MKS.has(e.mk) && !ML_MKS.has(e.mk) ? sharpLine(o) : null;
+  if(tracked.some(t=>t.src==='sharp' && t.playerKey===e.key && t.fixtureId===e.fx && t.mkey===e.mk && t.side===tSide && (t.line??null)===(e.line??null) && (t.bookKey||'fanduel')===bk && (t.teamSel??null)===teamSel && (t.betLine??null)===betLine)) return;
   const snap=snapshotFrom(e.own.filter(x=>x._sd===e.side), tSide, e.line);
   tracked.unshift({ id:Date.now()+Math.random().toString(36).slice(2,6), src:'sharp', sportKey:e.sk, fixtureId:e.fx, start:f?.start||null, away:f?.away.ab||f?.away.name||'', home:f?.home.ab||f?.home.name||'', card:null,
     playerKey:e.key, playerName:e.player, pid:e.pid, headshot:'', teamAb:'', teamLogo:'',
     mkey:e.mk, marketLabel:marketLabel(e.sk,e.mk), marketNames:[...new Set(e.own.map(x=>x.market))], side:tSide, line:e.line??null,
     price:Number(o.price), book:bookLabel(o.sportsbook), bookKey:bk, pinned:true, trackedAt:Date.now(), mainLineAtTrack:mainLineOf(e.own, e.side),
-    isTeam:false, teamSide:null, favDog:null, stakeUnits:null, isGame:false, sharpLiq:e.L.total, sharpEdge:o._edge, via:e.via||null,
+    isTeam:false, teamSide:null, favDog:null, stakeUnits:null, isGame:false, teamSel, betLine, sharpLiq:e.L.total, sharpEdge:o._edge, via:e.via||null,
     exBy:(()=>{ const m={}; (e.L.rows||[]).forEach(l=>Object.entries(l.by||{}).forEach(([k,v])=>{ m[k]=Math.round((m[k]||0)+v); })); return Object.keys(m).length?m:null; })(),
     snapshots:[snap], live:null, actual:null, result:null, open:null, close:null });
   saveTracked();
@@ -957,7 +974,7 @@ async function sharpScanSport(sk){
   // 1) FanDuel + the exchanges first, and its alerts go out right away
   // bet105 and the via-books each asked on their own: one book name OpticOdds doesn't take for a sport
   // fails the whole request, and bundled with them that silently took bet105 down too
-  if(fx.length) await pull([['FanDuel'],['Novig','Prophet X','Kalshi'],['bet105'],['Props Builder'],['DraftKings'],['Onyx Odds'],['Bovada']]);
+  if(fx.length) await pull([['FanDuel'],['Novig','Prophet X','Kalshi'],['bet105'],['Props Builder'],['DraftKings'],['Onyx Odds'],['Bovada'],['BetOnline']]);
   if(fx.length && !rows.length){ if(!full) delete smMktNames[sk]; sharpDiag[sk]={at:Date.now(), games:fx.length, rows:0, byBook:{}, props:0, withExch:0, sides:0}; return; } // failed pull: keep the last good read instead of zeroing everything (and go back to a full pull next time)
   if(full){ const ok=new Set(SHARP_MARKETS[sk]||[]), names=new Set(); rows.forEach(o=>{ if(o.market && ok.has(marketKeyFor(sk,o.market))) names.add(o.market); });
     if(names.size) smMktNames[sk]={ names, at:Date.now() }; }
@@ -968,7 +985,8 @@ async function sharpScanSport(sk){
   // (plus the exchanges for the extra day only bet105 covers, and DK / Onyx / Props Builder for FD's 10c plays)
   const before=rows.length; if(extra.length) await pull([['bet105'],['Novig','Prophet X','Kalshi']], extra);
   { const found=sharpScan(sk, rows); if(sharpDiag[sk]) sharpDiag[sk].games=all.length;
-    sharpRecord(sk, found.filter(x=>x.tgt==='bet105'), Date.now(), all, 'bet105'); sharpCheckPings(sk); }
+    sharpRecord(sk, found.filter(x=>x.tgt==='bet105'), Date.now(), all, 'bet105');
+    sharpRecord(sk, found.filter(x=>x.tgt==='betonline'), Date.now(), fx, 'betonline'); sharpCheckPings(sk); }
 }
 // Every sport scans side by side; each one starts its next scan as soon as its last one is done.
 const smMktNames = {};   // sk -> { names:Set of market names Sharp Money uses, at }
@@ -978,7 +996,7 @@ const SM_MKT_FULL_MS = 30*60e3;
 const SM_REF_BOOKS = [['Pinnacle','pin'],['BetOnline','bol'],['Circa','circa'],['BookMaker','bkm']];
 async function smSharpRefs(e){
   if(!SHARP_MAINS.has(e.mk) || !e.ref?.market) return;
-  const team = e.mk==='ml'||e.mk==='spread', betLine = e.line ?? sharpLine(e.ref);
+  const team = TEAM_MKS.has(e.mk), betLine = e.line ?? sharpLine(e.ref);
   await Promise.all(SM_REF_BOOKS.map(async([bk,key])=>{
     let rows=[]; try{ const r=await oo('/fixtures/odds',{fixture_id:[e.fx],sportsbook:[bk],market:[e.ref.market],is_main:true}); rows=r?.data?.[0]?.odds||[]; }catch(err){}
     const mine=rows.filter(o=>{ const s = team ? 't:'+normName(cleanSel(o.selection||o.name||'').replace(/\s+[+-]?\d+(\.\d+)?$/,'')) : sharpSideOf(o, e.mk); return s===e.sd; });
@@ -1124,7 +1142,7 @@ const SPORTS = {
   wnba: { label:'WNBA', sport:'basketball', league:'wnba', days:2, markets:NBA_MKTS },
   nhl:  { label:'NHL',  sport:'hockey',     league:'nhl',  days:2, markets:NHL_MKTS },
 };
-const marketKeyFor = (sk, name) => { const m=String(name||'').toLowerCase(); if(PERIOD.test(m) && !/^(point spread|spread)$/.test(m.trim())) return null; const hit=SPORTS[sk]?.markets.find(([,,t])=>t(m)); return hit?hit[0]:null; };
+const marketKeyFor = (sk, name) => { const m=String(name||'').toLowerCase(); { const h=SPORTS[sk]?.markets.find(([k,,t])=>GAME_PERIOD_MKS.has(k)&&t(m)); if(h) return h[0]; } if(PERIOD.test(m) && !/^(point spread|spread)$/.test(m.trim())) return null; const hit=SPORTS[sk]?.markets.find(([,,t])=>t(m)); return hit?hit[0]:null; };
 const marketLabel = (sk, key) => (SPORTS[sk]?.markets.find(m=>m[0]===key)||[])[1] || key;
 
 // Page state the scanner code reads. This page has no "current sport" -- it always scans them all.
@@ -1138,6 +1156,24 @@ const saveTracked = () => { LS.set('sm_tracked', JSON.stringify(tracked)); const
 // one-time: bring over Sharp Money bets that were tracked inside PocketMarket
 (()=>{ if(LS.get('sm_migrated','')) return; try{ const old=JSON.parse(LS.get('props_tracked','[]'))||[]; const mine=old.filter(t=>t.src==='sharp' && !tracked.some(x=>x.id===t.id)); if(mine.length){ tracked=mine.concat(tracked); saveTracked(); } }catch(e){} LS.set('sm_migrated','1'); })();
 const parseAm = v => { const x=String(v).trim().replace(/\s+/g,''); if(!/^[+-]?\d+$/.test(x)) return null; const n=Number(x); return Math.abs(n)>=100 ? n : null; };
+// Main lines graded off the score. 1H = the first two quarters (period scores); full game = totals.
+function gradeMain(t, R){
+  const sc=R?.scores||{}, h1=t.mkey.startsWith('h1_');
+  const pts = side => { const s=sc[side]; if(!s) return null; if(!h1) return s.total!=null?Number(s.total):null;
+    const per=Array.isArray(s.periods)?s.periods:null; if(!per || per.length<2) return null; return per.slice(0,2).reduce((a,p)=>a+(Number(p?.total??p?.score??p)||0),0); };
+  const hm=pts('home'), aw=pts('away'); if(hm==null || aw==null || isNaN(hm) || isNaN(aw)) return null;
+  if(t.mkey==='total' || t.mkey==='h1_total'){ const a=hm+aw; return { actual:a, result:gradeOne({ ...t, actual:a }) }; }
+  const nick=n=>normName(n).split(' ').pop();
+  const homeName=R.fixture?.home_competitors?.[0]?.name||'', awayName=R.fixture?.away_competitors?.[0]?.name||'';
+  const sel = t.teamSel || normName(String(t.playerName||'').replace(/\s+(ML|[+-]?\d+(\.\d+)?)$/i,''));
+  const side = sel && (normName(homeName)===sel || nick(homeName)===nick(sel)) ? 'home' : sel && (normName(awayName)===sel || nick(awayName)===nick(sel)) ? 'away' : null;
+  if(!side) return null;
+  const mine = side==='home'?hm:aw, theirs = side==='home'?aw:hm;
+  if(t.mkey==='tt' || t.mkey==='h1_tt') return { actual:mine, result:gradeOne({ ...t, actual:mine }) };
+  if(ML_MKS.has(t.mkey)) return { actual:mine-theirs, result: mine>theirs?'win':mine<theirs?'loss':'push' };
+  const bl = t.betLine ?? Number((String(t.playerName||'').match(/([+-]?\d+(\.\d+)?)$/)||[])[1]);
+  if(isNaN(bl)) return null; const m=mine-theirs+bl; return { actual:mine-theirs, result: m>0?'win':m<0?'loss':'push' };
+}
 function gradeOne(t){
   if(t.actual==null) return null; const a=Number(t.actual); if(isNaN(a)) return null;
   if(t.side==='Yes') return a>0?'win':'loss';
@@ -1162,6 +1198,7 @@ async function refreshTracked(){
       const st=String(R.fixture?.status||''); t.status=st; t.live=/live|half|progress/i.test(st);
       t.score=R.scores?`${R.scores.away?.total??''}-${R.scores.home?.total??''}`:'';
       const row=(pr[t.fixtureId]?.results||[]).find(x=>normName(cleanSel(x.player?.name||''))===t.playerKey);
+      if(SHARP_MAINS.has(t.mkey)){ const g=gradeMain(t, R); if(g){ if(g.actual!=null && t.actual!==g.actual){ t.actual=g.actual; changed=true; } if(g.result && /completed|final|closed/i.test(st)){ t.result=g.result; t.final=true; changed=true; } } return; }
       if(row){ const v=statFor(row, t.mkey, t.sportKey, t.marketNames); if(v!=null && !isNaN(v)){ if(t.actual!==v) changed=true; t.actual=v; } }
       else if(/completed|final|closed/i.test(st) && (t.side==='Yes'||t.side==='No') && pr[t.fixtureId]) { t.actual=0; }
       if(/completed|final|closed/i.test(st)){ const g=gradeOne(t); if(g){ t.result=g; t.final=true; changed=true; } }
@@ -2116,7 +2153,7 @@ const smIsBook = (t, bk) => t.src==='sharp' && (t.bookKey||'fanduel')===bk;
 const RECAP_BOOK = {
   fanduel:{ book:'fanduel', name:'FanDuel', title:'FanDuel Sharp Money recap', flag:'sm_recap_', key:'sm_fdrecap_hook', has:t=>smIsBook(t,'fanduel'), alert:()=>discordHook },
   bet105:{ book:'bet105', name:'bet105', title:'bet105 Sharp Money recap', flag:'sm_b105recap_', key:'sm_b105recap_hook', has:t=>smIsBook(t,'bet105') && !SHARP_MAINS.has(t.mkey), alert:()=>b105Hook },
-  b105main:{ book:'bet105', name:'bet105 main lines', title:'bet105 Main lines recap', flag:'sm_b105mainrecap_', key:'sm_b105mainrecap_hook', has:t=>smIsBook(t,'bet105') && SHARP_MAINS.has(t.mkey), alert:()=>b105MainHook||b105Hook } };
+  b105main:{ book:'bet105', name:'main lines', title:'Main lines recap (bet105 + BetOnline)', flag:'sm_b105mainrecap_', key:'sm_b105mainrecap_hook', has:t=>(smIsBook(t,'bet105')||smIsBook(t,'betonline')) && SHARP_MAINS.has(t.mkey), alert:()=>b105MainHook||b105Hook } };
 Object.values(RECAP_BOOK).forEach(B=>{ B.hook=()=>LS.get(B.key,'')||B.alert(); });
 async function smPostRecap(day, manual, book='fanduel'){
   const B=RECAP_BOOK[book], hook=B.hook();
