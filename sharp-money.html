@@ -2069,8 +2069,8 @@ async function nlAutoRecap0(){
 }
 // FD Sharp Money recap: when every FanDuel bet on a game date is graded, post that date's results +
 // all-time (by sport and prop) to the FD Sharp Money channel, once.
-function smRecapFields(day){
-  const fd=tracked.filter(t=>t.src==='sharp' && (t.bookKey||'fanduel')==='fanduel');
+function smRecapFields(day, book='fanduel'){
+  const fd=tracked.filter(t=>t.src==='sharp' && (t.bookKey||'fanduel')===book);
   const dayList=fd.filter(t=>t.start && etDayOf(new Date(t.start).getTime())===day), done=dayList.filter(t=>t.final);
   const dayName=new Date(day+'T12:00:00').toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'});
   const lab=t=>`${SPORTS[t.sportKey]?.label||t.sportKey} ${t.marketLabel||t.mkey}`;
@@ -2081,18 +2081,23 @@ function smRecapFields(day){
     ...recapFields('All-time by market', recSplit(fd,lab)),
     ...recapFields('All-time by side', recSplit(fd,t=>sideTxt(t))),
     ...recapFields('All-time by time to tip', recSplit(fd,outBucket)),
-    ...recapFields('All-time by source (direct vs borrowing)', recSplit(fd,t=>t.via?`Borrowing ${bookShort(t.via.book)}`:'FD direct')),
+    ...recapFields('All-time by source (direct vs borrowing)', recSplit(fd,t=>t.via?`Borrowing ${bookShort(t.via.book)}`:`${bookShort(book)} direct`)),
     ...recapFields('All-time by exchange', recSplit(fd,smSrc)),
     ...recapFields('All-time by exchange · hold vs arb', recSplit(fd,smSrcHold)),
     ...recapFields('All-time by hold / arb', recSplit(fd,smHoldBucket).sort((a,b)=>smHoldOrder(a)-smHoldOrder(b))),
     ...recapFields('All-time by arb money', recSplit(fd,t=>{ const v=t.sharpLiq||0; return v>=2500?'$2.5k+':v>=1000?'$1k–2.5k':'Under $1k'; })),
     ] };   // breakdowns only -- no play-by-play list
 }
-async function smPostRecap(day, manual){
-  if(!discordHook){ if(manual) toast('Set the FD Discord first'); return false; }
-  const R=smRecapFields(day); if(!R.dayList.some(t=>t.final)){ if(manual) toast('Nothing graded for that day yet'); return false; }
-  const ok=await postRecapFields(discordHook, 'FanDuel Sharp Money recap', R.fields);
-  if(ok) LS.set('sm_recap_'+day,'1'); if(manual) toast(ok?'Recap posted':'Recap failed'); return ok;
+// FD and b105 recaps: each to its own recap channel (falls back to that book's alert channel until set)
+let fdRecapHook = LS.get('sm_fdrecap_hook',''), b105RecapHook = LS.get('sm_b105recap_hook','');
+const RECAP_BOOK = { fanduel:{ name:'FanDuel', title:'FanDuel Sharp Money recap', flag:'sm_recap_', hook:()=>fdRecapHook||discordHook },
+                     bet105:{ name:'bet105', title:'bet105 Sharp Money recap', flag:'sm_b105recap_', hook:()=>b105RecapHook||b105Hook } };
+async function smPostRecap(day, manual, book='fanduel'){
+  const B=RECAP_BOOK[book], hook=B.hook();
+  if(!hook){ if(manual) toast(`Set the ${B.name} recap channel first`); return false; }
+  const R=smRecapFields(day, book); if(!R.dayList.some(t=>t.final)){ if(manual) toast('Nothing graded for that day yet'); return false; }
+  const ok=await postRecapFields(hook, B.title, R.fields);
+  if(ok) LS.set(B.flag+day,'1'); if(manual) toast(ok?'Recap posted':'Recap failed'); return ok;
 }
 // one recap post at a time: the auto check fires from several places (tracker refresh, the minute
 // tick), and a multi-card post takes a few seconds -- without this two could post the same day
@@ -2100,11 +2105,13 @@ let recapBusy=false;
 async function smAutoRecap(){
   if(recapBusy) return; recapBusy=true; try{ await smAutoRecap0(); } finally{ recapBusy=false; } }
 async function smAutoRecap0(){
-  const fd=tracked.filter(t=>t.src==='sharp' && (t.bookKey||'fanduel')==='fanduel' && t.start);
-  const today=etToday();
-  const days=[...new Set(fd.map(t=>etDayOf(new Date(t.start).getTime())))].filter(d=>d<=today && d>=RECAP_SINCE).sort().slice(-3);
-  for(const day of days){ if(LS.get('sm_recap_'+day,'')) continue; const list=fd.filter(t=>etDayOf(new Date(t.start).getTime())===day);
-    if(list.length && list.every(t=>t.final)) await smPostRecap(day); }
+  for(const book of Object.keys(RECAP_BOOK)){
+    const fd=tracked.filter(t=>t.src==='sharp' && (t.bookKey||'fanduel')===book && t.start);
+    const today=etToday();
+    const days=[...new Set(fd.map(t=>etDayOf(new Date(t.start).getTime())))].filter(d=>d<=today && d>=RECAP_SINCE).sort().slice(-3);
+    for(const day of days){ if(LS.get(RECAP_BOOK[book].flag+day,'')) continue; const list=fd.filter(t=>etDayOf(new Date(t.start).getTime())===day);
+      if(list.length && list.every(t=>t.final)) await smPostRecap(day, false, book); }
+  }
 }
 let nlTkBusy=false;
 async function nlRefreshTracked(){
@@ -2166,8 +2173,16 @@ function smRestore(){
     }catch(e){ toast('Import failed: '+e.message); } };
   inp.click();
 }
-const backupHtml = () => `<div class="nlctl" style="margin:0 0 12px"><button data-bk="recap">Post FD recap</button><span class="dim">Backup</span><button data-bk="save">⬇ Download backup</button><button data-bk="load">⬆ Import backup</button><button data-bk="copy">⧉ Copy FD tracker</button><button data-bk="paste">⎘ Paste FD tracker</button></div>`;
-const bindBackup = v => { v.querySelectorAll('[data-bk]').forEach(b=>b.onclick=()=>b.dataset.bk==='copy'?smCopyTracker():b.dataset.bk==='paste'?smPasteTracker():b.dataset.bk==='save'?smBackup():b.dataset.bk==='recap'?(()=>{ const days=[...new Set(tracked.filter(t=>t.src==='sharp'&&t.start&&t.final).map(t=>etDayOf(new Date(t.start).getTime())))].sort(); smPostRecap(days[days.length-1]||etToday(), true); })():smRestore()); };
+const backupHtml = () => `<div class="nlctl" style="margin:0 0 12px"><button data-bk="recap">Post FD recap</button><button data-bk="recap105">Post b105 recap</button><button data-bk="rchfd" class="${fdRecapHook?'on':''}">${fdRecapHook?'FD recap channel ✓':'FD recap channel'}</button><button data-bk="rch105" class="${b105RecapHook?'on':''}">${b105RecapHook?'b105 recap channel ✓':'b105 recap channel'}</button><span class="dim">Backup</span><button data-bk="save">⬇ Download backup</button><button data-bk="load">⬆ Import backup</button><button data-bk="copy">⧉ Copy FD tracker</button><button data-bk="paste">⎘ Paste FD tracker</button></div>`;
+const lastRecapDay = book => { const days=[...new Set(tracked.filter(t=>t.src==='sharp'&&(t.bookKey||'fanduel')===book&&t.start&&t.final).map(t=>etDayOf(new Date(t.start).getTime())))].sort(); return days[days.length-1]||etToday(); };
+async function setRecapHook(book){
+  const B=RECAP_BOOK[book], cur=book==='fanduel'?fdRecapHook:b105RecapHook;
+  const v=prompt(`${B.name} recaps go to their own channel. Paste that channel's Discord webhook URL. Leave empty to post them in the ${B.name} alerts channel.`, cur); if(v==null) return;
+  if(book==='fanduel'){ fdRecapHook=v.trim(); LS.set('sm_fdrecap_hook', fdRecapHook); } else { b105RecapHook=v.trim(); LS.set('sm_b105recap_hook', b105RecapHook); }
+  if(v.trim()){ const ok=await discordPost({ username:'PocketMarket', content:`✅ ${B.name} Sharp Money recaps connected.`, allowed_mentions:{parse:[]} }, null, v.trim()); toast(ok?'Recap channel connected':'Discord test failed — check the URL'); }
+  if(viewMode==='tracker') renderTracker();
+}
+const bindBackup = v => { v.querySelectorAll('[data-bk]').forEach(b=>b.onclick=()=>b.dataset.bk==='recap105'?smPostRecap(lastRecapDay('bet105'), true, 'bet105'):b.dataset.bk==='rchfd'?setRecapHook('fanduel'):b.dataset.bk==='rch105'?setRecapHook('bet105'):b.dataset.bk==='copy'?smCopyTracker():b.dataset.bk==='paste'?smPasteTracker():b.dataset.bk==='save'?smBackup():b.dataset.bk==='recap'?(()=>{ const days=[...new Set(tracked.filter(t=>t.src==='sharp'&&t.start&&t.final).map(t=>etDayOf(new Date(t.start).getTime())))].sort(); smPostRecap(days[days.length-1]||etToday(), true); })():smRestore()); };
 let nlHist=false;
 function renderNbaLive(){
   const v=$('#view'), now=Date.now();
