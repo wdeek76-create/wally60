@@ -630,6 +630,7 @@ a.pfgo{text-decoration:none;display:inline-block}
 .pfprice{display:inline-flex;align-items:center;font-weight:800;font-size:13px;padding:3px 8px 3px 4px;border-radius:8px;background:var(--bg3);border:1px solid var(--line2)}
 .pfprice .pfbk{margin-right:5px}
 .pftag{font-size:11px;font-weight:700;padding:3px 7px;border-radius:8px;background:var(--bg3);color:var(--dim)}
+.pftag.via{background:rgba(59,130,246,.16);color:#60a5fa}
 .pftag.money{color:var(--text)}
 .pftag.good{background:rgba(34,197,94,.14);color:var(--green)}
 .pfchev{font-size:10px;color:var(--dim);margin-left:auto}
@@ -967,7 +968,7 @@ const BACKEND_DEFAULT = 'https://nfl-props-tracker-1.vercel.app/api/odds';
 const getBackend = () => LS.get('oo_backend_url', BACKEND_DEFAULT);
 
 // Your books, in display order. Courtside / Onyx fold into DraftKings. Kalshi is an exchange.
-const BOOKS = ['Props Builder','FanDuel','Novig','Prophet X','Kalshi','Pinnacle','bet105','DraftKings','Fliff','BetOnline'];
+const BOOKS = ['Props Builder','FanDuel','Novig','Prophet X','Kalshi','Pinnacle','bet105','DraftKings','Fliff','BetOnline','Fanatics'];
 const BOOK_REQ = [...BOOKS,'Courtside','Onyx Odds'];
 // NOT part of the main bulk load (BOOK_REQ) -- these are fetched separately, narrowly, only for
 // quick arb's own reference list (see ensureQarbExtras), so they never show up anywhere else:
@@ -980,7 +981,7 @@ const bookReqFor = sk => [...BOOK_REQ,'BookMaker'];
 const mainBookRow = (sk,o) => canonBook(o.sportsbook)!=='bookmaker' || (()=>{ const mk=marketKeyFor(sk,o.market); return !!mk && (TEAM_MKS.has(mk)||GAME_MKS.has(mk)); })();
 const EXCH = new Set(['novig','prophet x','kalshi']);
 const SHOW_MAX = new Set(['pinnacle','bet105']); // flat-limit books whose max we show under the odds too
-const SHORT = { 'onyx odds':'Onyx','props builder':'PB','fanduel':'FD','novig':'Novig','prophet x':'PX','kalshi':'Kalshi','pinnacle':'Pin','bet105':'b105','draftkings':'DK','fliff':'Fliff','betonline':'BOL','caesars':'Caes','hard rock bet':'HR','betmgm':'MGM','kambi':'Kambi','betrivers':'BR','bookmaker':'BKM','circa':'Circa' };
+const SHORT = { 'fanatics':'FAN','bovada':'Bovada','onyx odds':'Onyx','props builder':'PB','fanduel':'FD','novig':'Novig','prophet x':'PX','kalshi':'Kalshi','pinnacle':'Pin','bet105':'b105','draftkings':'DK','fliff':'Fliff','betonline':'BOL','caesars':'Caes','hard rock bet':'HR','betmgm':'MGM','kambi':'Kambi','betrivers':'BR','bookmaker':'BKM','circa':'Circa' };
 const canonBook = n => { const k=String(n||'').toLowerCase(); if(k==='courtside'||k==='onyx odds') return 'draftkings'; if(k==='hard rock'||k==='hardrock') return 'hard rock bet'; return k; };
 const bookLabel = n => { const k=canonBook(n); return BOOKS.find(b=>b.toLowerCase()===k) || n; };
 // the book's own name, not merged (Courtside / Onyx stay themselves, not DraftKings)
@@ -3793,6 +3794,9 @@ function exchDepth(o){
 // Why Auto Build came back empty: how many picks each filter knocked out on the last run.
 let autoWhy = null, autoLastMsg = '';
 const why = k => { if(autoWhy) autoWhy[k]=(autoWhy[k]||0)+1; };
+// books a parlay leg may borrow exchange money from (DK skins count as DK), and how close the target has to be
+const PF_BORROW = new Set(['fanduel','props builder','draftkings','bet105','bovada','fanatics']);
+const PF_BORROW_C = 10;
 function buildAutoCandidates(){
   const S=SPORTS[sportKey];
   const out=[];
@@ -3866,9 +3870,16 @@ function buildAutoCandidates(){
           if(srcExch()) exchBack=legLadder(myRows, refRow.price, S.threeWay).total;
           if(autoSharpMin>0 && sharpN({sharp, exchBack})<autoSharpMin){ why('sharp'); return; }
         }
-        const LL = legLadder(myRows, refRow.price, S.threeWay);
+        let LL = legLadder(myRows, refRow.price, S.threeWay), via=null;
+        // 10c rule: not enough exchange money at the target's own price, but another book within 10c
+        // (better than the target by at most 10c) has it -- "borrow" that book's money, bet the target
+        if(autoTargetBook && LL.total < pfMin){
+          const tk=canonBook(refRow.sportsbook), tc=cents(refRow.price);
+          myRows.filter(o=>PF_BORROW.has(canonBook(o.sportsbook)) && canonBook(o.sportsbook)!==tk && toDec(o.price)>toDec(refRow.price) && cents(o.price)-tc<=PF_BORROW_C)
+            .forEach(o=>{ const LB=legLadder(myRows, o.price, S.threeWay); if(LB.total>LL.total){ LL=LB; via={ book:canonBook(o.sportsbook), price:Number(o.price), cents:cents(o.price)-tc }; } });
+        }
         const hold = autoHoldPref ? LL.bestHold : null;
-        out.push({ p, mkey, side, line, refRow, fairP, edgePct, isMain, sharp, exchBack, hold, liq:LL.total, avgOpp:LL.avgOpp, ladder:LL });
+        out.push({ p, mkey, side, line, refRow, fairP, edgePct, isMain, sharp, exchBack, hold, liq:LL.total, avgOpp:LL.avgOpp, ladder:LL, via });
       });
     });
   });
@@ -4126,7 +4137,7 @@ function pfScan(){
   const sk=pfLeagueKey(), d=pfData(sk);
   if(!d){ if(!pfLoading.has(sk)){ pfLoading.add(sk); ensureSportData(sk).finally(()=>{ pfLoading.delete(sk); if(viewMode==='parlay') renderParlay(); }); } return null; }
   if(!autoTargetBook){ autoTargetBook='fanduel'; LS.set('props_autotarget','fanduel'); }
-  const key=[sk, autoScope, autoTargetBook, parlayMaxHold, pfGame].join('|');
+  const key=[sk, autoScope, autoTargetBook, parlayMaxHold, pfGame, pfMin].join('|');   // pfMin too: borrowing kicks in under it
   if(pfCache.key===key && pfCache.rows===d.mainRows) return pfCache.list.filter(c=>c.src!=='exch' || c.liq>=pfMin);
   const byFx={}; d.mainRows.forEach(o=>{ if(PF_SKIP_BOOKS.has(rawBook(o))) return; (byFx[o._fx]=byFx[o._fx]||[]).push(o); });
   const plByFx={}; d.players.forEach(p=>{ (plByFx[p.fixtureId]=plByFx[p.fixtureId]||[]).push(p); });
@@ -4317,7 +4328,7 @@ function pfHtml(){
         const id=`${c.p.fixtureId}|${c.p.key}|${c.mkey}|${c.side}|${c.line}`, open=pfOpen.has(id);
         const tags = c.src==='sharp'
           ? `<span class="pftag">${esc(c.sharpBooks.map(bookShort).join('/'))} fair ${fmtAm(c.sharpFair)}${c.pinLimit?` · Pin lim ${usd(c.pinLimit)}`:''}</span><span class="pftag good">+${c.ev.toFixed(1)}% EV</span>`
-          : `<span class="pftag money">${usd(c.liq)}</span><span class="pftag${(c.hold??1)<=1e-7?' good':''}">${holdTxt(c.hold??0)}</span>`;
+          : `<span class="pftag money">${usd(c.liq)}</span><span class="pftag${(c.hold??1)<=1e-7?' good':''}">${holdTxt(c.hold??0)}</span>${c.via?`<span class="pftag via">via ${esc(bookShort(c.via.book))} ${fmtAm(c.via.price)} (${c.via.cents}c)</span>`:''}`;
         return pfRowHtml({ id, on, open, logo:pfLogoHtml(c), name:c.p.isGame&&c.fx?fxLabel(c.fx):titleCase(c.p.name), bet:pfBetTxt(c), book:rawBook(c.refRow), price:c.refRow.price, fx:c.fx, tags,
           det: open?pfDetHtml(c.refRow, autoTargetBook, c.ladder, c.cmp, c.src==='sharp'?{book:c.sharpBook, fair:c.sharpFair}:null):'', btn:`<button class="pfadd${on?' on':''}" data-pfadd="${i}">${on?'✓':'+'}</button>` }); }).join('')
       + (list.length>pfShow?`<button class="tkhisttoggle" id="pfmore">Show more (${list.length-pfShow})</button>`:'');
