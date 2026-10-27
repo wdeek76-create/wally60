@@ -451,18 +451,19 @@ const smSrc = t => t.exBy ? Object.keys(t.exBy).filter(k=>t.exBy[k]>0).map(k=>SM
 const smSrcHold = t => { const s=smSrc(t), h=smFdHold(t); if(!s||h==null) return null; return `${s} · ${h<=-0.05?'arb':'hold'}`; };
 function sharpSummaryHtml(){
   const all=tracked.filter(t=>t.src==='sharp' && tkInBook(t)); if(!all.length) return '';
-  const g=all.filter(t=>t.result); const openN=all.length-g.length;
+  // sent windows only up top + in every breakdown; muted windows (still tracked) get their own rows
+  const gAll=all.filter(t=>t.result), gMut=gAll.filter(smMuted), g=gAll.filter(t=>!smMuted(t)); const openN=all.length-gAll.length;
   const row=(label,r)=>`<div class="ttrow"><span>${esc(label)} <span class="dim">(${r.n})</span></span><span>${r.w}-${r.l}-${r.p}</span><span class="${r.u>0?'pos':r.u<0?'neg':''}">${r.u>=0?'+':''}${r.u.toFixed(2)}u</span><span class="dim">${r.roi!=null?r.roi.toFixed(1)+'% ROI':'—'}</span></div>`;
   const liqB=t=>{ const v=t.sharpLiq||0; return v>=2500?'$2.5k+ backing':v>=1000?'$1k–2.5k backing':'Under $1k backing'; };
   const split=(fn)=>{ const m={}; g.forEach(t=>{ const k=fn(t); (m[k]=m[k]||[]).push(t); }); return Object.entries(m).sort((a,b)=>b[1].length-a[1].length).map(([k,l])=>row(k, ttRecord(l))).join(''); };
   const splitBy=(fn,ord)=>{ const m={}; g.forEach(t=>{ const k=fn(t); (m[k]=m[k]||[]).push(t); }); return Object.entries(m).sort((a,b)=>ord(a[0])-ord(b[0])).map(([k,l])=>row(k, ttRecord(l))).join(''); };
   const sub=t=>g.length?`<div class="dim" style="font-size:9.5px;font-weight:800;letter-spacing:.5px;text-transform:uppercase;margin:8px 0 2px">${t}</div>`:'';
-  return `<div class="ttsum"><div class="ttsumh"><span>Sharp Money${tkBook==='all'?'':' · '+esc(tkBookLabel(tkBook))}</span></div>${row('Overall', ttRecord(g))}${openN?`<div class="ttrow dim" style="font-size:10.5px">${openN} open / ungraded not counted</div>`:''}
+  return `<div class="ttsum"><div class="ttsumh"><span>Sharp Money${tkBook==='all'?'':' · '+esc(tkBookLabel(tkBook))}</span></div>${row(gMut.length?'Overall (sent windows)':'Overall', ttRecord(g))}${gMut.length?row('Muted windows (not sent)', ttRecord(gMut))+row('With muted', ttRecord(gAll)):''}${openN?`<div class="ttrow dim" style="font-size:10.5px">${openN} open / ungraded not counted</div>`:''}
     ${[['under','Unders'],['Yes','Anytime Yes'],['No','Anytime No'],['over','Overs']].map(([k,l])=>{ const L=g.filter(t=>t.side===k); return L.length?row(l, ttRecord(L)):''; }).join('')}
     ${tkBook==='all'?`${sub('By book')}${split(t=>tkBookLabel(tkBookOf(t)))}`:''}
     ${sub('By sport')}${split(t=>(SPORTS[t.sportKey]?.label)||t.sportKey)}
     ${sub('By prop type')}${split(t=>`${(SPORTS[t.sportKey]?.label)||t.sportKey} · ${t.marketLabel||t.mkey}`)}
-    ${sub('By time to tip')}${split(t=>outBucket(t)||'Unknown')}
+    ${sub('By time to tip (all windows)')}${(()=>{ const m={}; gAll.forEach(t=>{ const b=outBucket(t)||'Unknown'; const k=b+(smMuteOut.has(b)?' (muted)':''); (m[k]=m[k]||[]).push(t); }); return Object.entries(m).sort((a,b)=>OUT_BUCKETS.findIndex(x=>a[0].startsWith(x))-OUT_BUCKETS.findIndex(x=>b[0].startsWith(x))).map(([k,l])=>row(k, ttRecord(l))).join(''); })()}
     ${sub('By exchange money')}${split(liqB)}
     ${sub('By source (FD direct vs borrowing PB / DK / b105)')}${split(t=>t.via?`Borrowing ${bookShort(t.via.book)}`:`${bookShort(tkBookOf(t))} direct`)}
     ${sub('By hold / arb')}${splitBy(smHoldBucket, smHoldOrder)}
@@ -512,6 +513,9 @@ const sharpLink = o => { const k=canonBook(o?.sportsbook); if(k==='fanduel'){ co
 // how far out from tip-off a bet was alerted / tracked (from the scheduled start)
 const OUT_BUCKETS = ['Under 1h to tip','1–3h out','3–6h out','6–10h out','10–24h out','1 day+ out'];
 const smMuteOut = new Set((()=>{ try{ return JSON.parse(LS.get('sm_mute_out','[]'))||[]; }catch(e){ return []; } })());
+if(!LS.get('sm_mute_out_v2','')){ smMuteOut.add('Under 1h to tip'); smMuteOut.add('1–3h out'); LS.set('sm_mute_out', JSON.stringify([...smMuteOut])); LS.set('sm_mute_out_v2','1'); }
+// a bet in a muted window: still tracked, but kept out of the headline record ("sent" = what Discord would get)
+const smMuted = t => { const b=outBucket(t); return !!b && smMuteOut.has(b); };
 const hrsOut = t => t.start && t.trackedAt ? (new Date(t.start).getTime()-t.trackedAt)/3600e3 : null;
 const outBucket = t => { const h=hrsOut(t); if(h==null) return null; return h<1?'Under 1h to tip':h<3?'1–3h out':h<6?'3–6h out':h<10?'6–10h out':h<24?'10–24h out':'1 day+ out'; };
 const sharpSideLabel = side => side==='yes'?'Yes':side==='no'?'No':side==='over'?'Over':side==='team'?'':'Under';
@@ -2078,18 +2082,26 @@ async function nlAutoRecap0(){
 // FD Sharp Money recap: when every FanDuel bet on a game date is graded, post that date's results +
 // all-time (by sport and prop) to the FD Sharp Money channel, once.
 function smRecapFields(day, book='fanduel'){
-  const B=RECAP_BOOK[book]; const fd=tracked.filter(B.has); book=B.book;
-  const dayList=fd.filter(t=>t.start && etDayOf(new Date(t.start).getTime())===day), done=dayList.filter(t=>t.final);
+  const B=RECAP_BOOK[book]; let fd=tracked.filter(B.has); book=B.book;
+  const dayList=fd.filter(t=>t.start && etDayOf(new Date(t.start).getTime())===day); let done=dayList.filter(t=>t.final);
   const dayName=new Date(day+'T12:00:00').toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'});
   const lab=t=>`${SPORTS[t.sportKey]?.label||t.sportKey} ${t.marketLabel||t.mkey}`;
   const playLine=t=>`${t.result==='win'?'✅':t.result==='loss'?'❌':'➖'} ${titleCase(t.playerName)} ${sideTxt(t)}${t.line!=null?' '+t.line:''} ${t.marketLabel||''} ${fmtAm(t.price)}${t.sharpLiq?` · ${usd(t.sharpLiq)}`:''}${t.actual!=null?` (${t.actual})`:''}`;
+  // headline records and breakdowns are the SENT windows only; muted windows (still tracked) show
+  // separately, and the time-to-tip sections list every window with the muted ones marked
+  const all=fd, allDone=done; const tOrd=(a,b)=>OUT_BUCKETS.findIndex(x=>a.startsWith(x))-OUT_BUCKETS.findIndex(x=>b.startsWith(x));
+  const tLab=t=>{ const b=outBucket(t); return b ? b+(smMuteOut.has(b)?' (muted)':'') : null; };
+  const mut=t=>smMuted(t); fd=all.filter(t=>!mut(t)); done=allDone.filter(t=>!mut(t));
+  const mutedDay=allDone.filter(mut), mutedAll=all.filter(mut);
   return { dayList, fields:[
     ...recapFields(`${dayName} · ${recRow(done)}`, recSplit(done,lab)),
-    ...recapFields(`${dayName} · by time to tip`, recSplit(done,outBucket).sort((a,b)=>OUT_BUCKETS.findIndex(x=>a.startsWith(x))-OUT_BUCKETS.findIndex(x=>b.startsWith(x)))),
+    ...(mutedDay.length ? recapFields(`${dayName} · muted windows (not sent)`, [`${recRow(mutedDay)} (${mutedDay.length})`, `With them: ${recRow(allDone)}`]) : []),
+    ...recapFields(`${dayName} · by time to tip`, recSplit(allDone,tLab).sort(tOrd)),
     ...recapFields(`All-time · ${recRow(fd)}`, recSplit(fd,t=>SPORTS[t.sportKey]?.label||t.sportKey)),
+    ...(mutedAll.length ? recapFields('All-time · muted windows (not sent)', [`${recRow(mutedAll)} (${mutedAll.length})`, `With them: ${recRow(all)}`]) : []),
     ...recapFields('All-time by market', recSplit(fd,lab)),
     ...recapFields('All-time by side', recSplit(fd,t=>sideTxt(t))),
-    ...recapFields('All-time by time to tip', recSplit(fd,outBucket).sort((a,b)=>OUT_BUCKETS.findIndex(x=>a.startsWith(x))-OUT_BUCKETS.findIndex(x=>b.startsWith(x)))),
+    ...recapFields('All-time by time to tip', recSplit(all,tLab).sort(tOrd)),
     ...recapFields('All-time by source (direct vs borrowing)', recSplit(fd,t=>t.via?`Borrowing ${bookShort(t.via.book)}`:`${bookShort(book)} direct`)),
     ...recapFields('All-time by exchange', recSplit(fd,smSrc)),
     ...recapFields('All-time by exchange · hold vs arb', recSplit(fd,smSrcHold)),
