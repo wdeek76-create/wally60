@@ -240,7 +240,7 @@ async function oo(endpoint, params, opts){
 }
 const BOOKS = ['Props Builder','FanDuel','Novig','Prophet X','Kalshi','Pinnacle','bet105','DraftKings','Fliff','BetOnline'];
 const EXCH = new Set(['novig','prophet x','kalshi']);
-const SHORT = { 'props builder':'PB','fanduel':'FD','novig':'Novig','prophet x':'PX','kalshi':'Kalshi','pinnacle':'Pin','bet105':'b105','draftkings':'DK','fliff':'Fliff','betonline':'BOL','caesars':'Caes','hard rock bet':'HR','betmgm':'MGM','kambi':'Kambi','betrivers':'BR','bookmaker':'BKM','circa':'Circa' };
+const SHORT = { 'props builder':'PB','fanduel':'FD','novig':'Novig','prophet x':'PX','kalshi':'Kalshi','pinnacle':'Pin','bet105':'b105','draftkings':'DK','fliff':'Fliff','betonline':'BOL','bovada':'Bovada','caesars':'Caes','hard rock bet':'HR','betmgm':'MGM','kambi':'Kambi','betrivers':'BR','bookmaker':'BKM','circa':'Circa' };
 const canonBook = n => { const k=String(n||'').toLowerCase(); if(k==='courtside'||k==='onyx odds') return 'draftkings'; if(k==='hard rock'||k==='hardrock') return 'hard rock bet'; if(k==='circa sports'||k==='circa vegas') return 'circa'; if(k==='prophetx'||k==='prophet exchange') return 'prophet x'; return k; };
 const bookLabel = n => { const k=canonBook(n); return BOOKS.find(b=>b.toLowerCase()===k) || n; };
 const bookShort = n => SHORT[canonBook(n)] || n;
@@ -493,7 +493,8 @@ const sharpSideOf = (o, mk) => { if(SHARP_YESNO.has(mk)) return String(o.selecti
 const SHARP_OPP = { over:'under', under:'over', yes:'no', no:'yes' };
 // FanDuel sharp plays also list the other books whose price on the SAME bet is within 10 cents of
 // FanDuel's (FD -110: Props Builder -115 = 5c off, in range) -- bet there too.
-const BOOK10 = new Set(['props builder','draftkings','bet105']);   // FD borrows PB / DK / bet105 (Onyx/Courtside count as DK)
+// books a target may "borrow" (their exchange money, bet the target if it's within 10c); Onyx/Courtside count as DK
+const BORROW = { fanduel:new Set(['props builder','draftkings','bet105','bovada']), bet105:new Set(['props builder','draftkings','bovada']) };
 const BOOK10_C = 10;
 const centsOf = a => a<0 ? -a-100 : 100-a;
 // a play that counts: exchange money at/over the minimum, or a live 10c play
@@ -627,11 +628,11 @@ function sharpScan(sk, rows){
       if(!soft.length || !sharpPriceOk(mk, soft[0].price)) return;
       let L = arbLadder(opp, soft[0].price), via=null;
       if(L.all.length){ const h=Math.min(...L.all.map(l=>l.hold)); if(d.best==null || h<d.best) d.best=h; }
-      if(!L.total && tb==='fanduel'){
-        // FD itself has no sharp money: check it against Props Builder / DK (Onyx) / bet105 instead --
-        // if one of them has exchange money at 0% or better and FD's price is within 10c of that
-        // book's, it's still a FanDuel play (bet FD instead of that book)
-        own.filter(o=>o._sd===side && at(o) && BOOK10.has(canonBook(o.sportsbook)) && centsOf(soft[0].price)-centsOf(o.price)<=BOOK10_C).forEach(o=>{
+      if(!L.total && !SHARP_MAINS.has(mk) && BORROW[tb]){
+        // no sharp money at the target's own price: check it against the books it borrows (FD: PB / DK /
+        // b105 / Bovada; b105 props: PB / DK / Bovada) -- if one of them has exchange money at 0% or
+        // better and the target's price is within 10c of that book's, it's still a play at the target
+        own.filter(o=>o._sd===side && at(o) && BORROW[tb].has(canonBook(o.sportsbook)) && centsOf(soft[0].price)-centsOf(o.price)<=BOOK10_C).forEach(o=>{
           const LB=arbLadder(opp, o.price); if(LB.total>(via?L.total:0)){ L=LB; via={ book:canonBook(o.sportsbook), price:Number(o.price), cents:Math.max(0,centsOf(soft[0].price)-centsOf(o.price)) }; } });
       }
       if(!L.total) return;
@@ -729,8 +730,11 @@ const B105_ROLE = '1562088640534814781';
 let b105Hook = LS.get('sm_b105_hook',''), b105Role = LS.get('sm_b105_role', B105_ROLE) // b105 role;
 // An old save that was just the SM role (the earlier default) or blank becomes the b105 role.
 if(!b105Role || b105Role===discordRole){ b105Role=B105_ROLE; LS.set('sm_b105_role', b105Role); }
-const hookFor = e => (e?.tgt==='bet105' ? b105Hook : discordHook);
-const roleFor = e => (e?.tgt==='bet105' ? b105Role : discordRole);
+// b105 NBA game totals go to their own channel once that webhook is set (until then, the b105 channel)
+let b105TotHook = LS.get('sm_b105tot_hook',''), b105TotRole = LS.get('sm_b105tot_role','');
+const isB105Tot = e => e?.tgt==='bet105' && e.sk==='nba' && e.mk==='total' && !!b105TotHook;
+const hookFor = e => (isB105Tot(e) ? b105TotHook : e?.tgt==='bet105' ? b105Hook : discordHook);
+const roleFor = e => (isB105Tot(e) ? b105TotRole : e?.tgt==='bet105' ? b105Role : discordRole);
 const roleTag = (role=discordRole) => role ? { content:`<@&${role}>`, allowed_mentions:{ roles:[role] } } : { allowed_mentions:{ parse:[] } };
 // Discord rejects a whole post over one badly formed link, so links are cleaned first; if it still
 // says no, the post goes again without links/logos, and a toast says why if even that fails.
@@ -944,7 +948,7 @@ async function sharpScanSport(sk){
   // 1) FanDuel + the exchanges first, and its alerts go out right away
   // bet105 and the via-books each asked on their own: one book name OpticOdds doesn't take for a sport
   // fails the whole request, and bundled with them that silently took bet105 down too
-  if(fx.length) await pull([['FanDuel'],['Novig','Prophet X','Kalshi'],['bet105'],['Props Builder'],['DraftKings'],['Onyx Odds']]);
+  if(fx.length) await pull([['FanDuel'],['Novig','Prophet X','Kalshi'],['bet105'],['Props Builder'],['DraftKings'],['Onyx Odds'],['Bovada']]);
   if(fx.length && !rows.length){ if(!full) delete smMktNames[sk]; sharpDiag[sk]={at:Date.now(), games:fx.length, rows:0, byBook:{}, props:0, withExch:0, sides:0}; return; } // failed pull: keep the last good read instead of zeroing everything (and go back to a full pull next time)
   if(full){ const ok=new Set(SHARP_MARKETS[sk]||[]), names=new Set(); rows.forEach(o=>{ if(o.market && ok.has(marketKeyFor(sk,o.market))) names.add(o.market); });
     if(names.size) smMktNames[sk]={ names, at:Date.now() }; }
@@ -989,7 +993,7 @@ function renderSharp(){
   const counts = {}; Object.values(sharpTape).filter(e=>sharpQual(e) && !sharpLive(e)).forEach(e=>{ counts[e.sk]=(counts[e.sk]||0)+1; });
   const chips = `<div class="mnav" style="position:static"><button class="mchip${!sharpSportF.size?' on':''}" data-shs="all">All</button>${sports.map(k=>`<button class="mchip${sharpSportF.has(k)?' on':''}" data-shs="${k}">${esc(SPORTS[k].label)}${counts[k]?` <span class="tcount">${counts[k]}</span>`:''}</button>`).join('')}</div>
     <div class="mnav" style="position:static">${[250,350,500,1000,2500].map(v=>`<button class="mchip${sharpMin===v?' on':''}" data-shmin="${v}">${usd(v)}+</button>`).join('')}</div>
-    <div class="mnav" style="position:static"><button class="mchip${sharpPingsOn?' on':''}" data-shping>${sharpPingsOn?'🔔 Pings on':'🔕 Pings off'}</button><button class="mchip${discordHook?' on':''}" data-shdc>${discordHook?'FD Discord ✓':'FD Discord'}</button><button class="mchip${b105Hook?' on':''}" data-shdck>${b105Hook?'b105 Discord ✓':'b105 Discord'}</button></div>`;
+    <div class="mnav" style="position:static"><button class="mchip${sharpPingsOn?' on':''}" data-shping>${sharpPingsOn?'🔔 Pings on':'🔕 Pings off'}</button><button class="mchip${discordHook?' on':''}" data-shdc>${discordHook?'FD Discord ✓':'FD Discord'}</button><button class="mchip${b105Hook?' on':''}" data-shdck>${b105Hook?'b105 Discord ✓':'b105 Discord'}</button><button class="mchip${b105TotHook?' on':''}" data-shdckt>${b105TotHook?'b105 NBA Totals ✓':'b105 NBA Totals'}</button></div>`;
   const scanned = sports.filter(k=>sharpLastScan[k]).length;
   // What each sport's last scan actually got back -- if a sport shows 0 for the exchanges, the
   // feed isn't returning their odds; if it shows props but 0 sides, nothing arbs FanDuel right now.
@@ -1021,6 +1025,15 @@ function renderSharp(){
       const ok=await discordPost({ username:'PocketMarket', content:'✅ PocketMarket sharp money pings connected.' }); toast(ok?'Discord connected':'Discord test failed — check the URL');
       if(ok){ await new Promise(r=>setTimeout(r,600)); const ex=sharpDiscordPayload(sharpExampleEntry(), true); const tag=roleTag(); discordPost({ ...ex, ...tag, content:[tag.content, ex.content].filter(Boolean).join(' ') }); }
     }
+  });
+  view.querySelector('[data-shdckt]')?.addEventListener('click', async ()=>{
+    const v=prompt('bet105 NBA game totals go to their own channel. Paste that channel\'s Discord webhook URL. Leave empty to send them to the regular bet105 channel.', b105TotHook);
+    if(v==null) return;
+    b105TotHook=v.trim(); LS.set('sm_b105tot_hook', b105TotHook); renderSharp();
+    if(!b105TotHook) return;
+    const r=prompt('Role to tag on bet105 NBA totals: paste its Role ID. Leave empty for no tag.', b105TotRole||'');
+    if(r!=null){ b105TotRole=(String(r).match(/\d{15,}/)||[''])[0]; LS.set('sm_b105tot_role', b105TotRole); }
+    const ok=await discordPost({ username:'bet105', content:'✅ bet105 NBA totals connected.' }, null, b105TotHook); toast(ok?'b105 NBA Totals connected':'Discord test failed — check the URL');
   });
   view.querySelector('[data-shdck]')?.addEventListener('click', async ()=>{
     const v=prompt('bet105 alerts go to their own channel. Paste that channel\'s Discord webhook URL (Server Settings → Integrations → Webhooks → New Webhook → Copy Webhook URL). Leave empty to turn bet105 alerts off.', b105Hook);
