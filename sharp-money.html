@@ -510,6 +510,8 @@ const sharpLink = o => { const k=canonBook(o?.sportsbook); if(k==='fanduel'){ co
   const d=o?.deep_link||{}; const https=[IS_IOS?d.ios:null, IS_ANDROID?d.android:null, d.desktop, d.ios, d.android].find(u=>u && /^https:\/\//i.test(String(u)));
   return https || deepLinkFor(o) || BOOK_HOME[k] || ''; };
 // how far out from tip-off a bet was alerted / tracked (from the scheduled start)
+const OUT_BUCKETS = ['Under 1h to tip','1–3h out','3–6h out','6–10h out','10–24h out','1 day+ out'];
+const smMuteOut = new Set((()=>{ try{ return JSON.parse(LS.get('sm_mute_out','[]'))||[]; }catch(e){ return []; } })());
 const hrsOut = t => t.start && t.trackedAt ? (new Date(t.start).getTime()-t.trackedAt)/3600e3 : null;
 const outBucket = t => { const h=hrsOut(t); if(h==null) return null; return h<1?'Under 1h to tip':h<3?'1–3h out':h<6?'3–6h out':h<10?'6–10h out':h<24?'10–24h out':'1 day+ out'; };
 const sharpSideLabel = side => side==='yes'?'Yes':side==='no'?'No':side==='over'?'Over':side==='team'?'':'Under';
@@ -922,7 +924,9 @@ function sharpCheckPings(sk){
     if(prev && e.L.total - prev.$ < SHARP_PING_STEP) return;
     sharpPinged[e.k]={ $:e.L.total, at:Date.now() }; changed=true;
     // Discord + tracker always; the on-screen banner/notification only with Pings on
-    if(hookFor(e)) sharpDiscord(e);
+    // muted time-to-tip windows: tracked as usual, just not sent
+    const ob=e.f?.start ? outBucket({ start:e.f.start, trackedAt:Date.now() }) : null;
+    if(hookFor(e) && !(ob && smMuteOut.has(ob))) sharpDiscord(e);
     sharpAutoTrack(e);
     if(sharpPingsOn) sharpPing(e);
   });
@@ -994,6 +998,7 @@ function renderSharp(){
   const counts = {}; Object.values(sharpTape).filter(e=>sharpQual(e) && !sharpLive(e)).forEach(e=>{ counts[e.sk]=(counts[e.sk]||0)+1; });
   const chips = `<div class="mnav" style="position:static"><button class="mchip${!sharpSportF.size?' on':''}" data-shs="all">All</button>${sports.map(k=>`<button class="mchip${sharpSportF.has(k)?' on':''}" data-shs="${k}">${esc(SPORTS[k].label)}${counts[k]?` <span class="tcount">${counts[k]}</span>`:''}</button>`).join('')}</div>
     <div class="mnav" style="position:static">${[250,350,500,1000,2500].map(v=>`<button class="mchip${sharpMin===v?' on':''}" data-shmin="${v}">${usd(v)}+</button>`).join('')}</div>
+    <div class="mnav" style="position:static"><span class="dim" style="font-size:10.5px;align-self:center">Send</span>${OUT_BUCKETS.map(b=>`<button class="mchip${smMuteOut.has(b)?'':' on'}" data-shout="${esc(b)}">${esc(b.replace(' to tip','').replace(' out',''))}</button>`).join('')}</div>
     <div class="mnav" style="position:static"><button class="mchip${sharpPingsOn?' on':''}" data-shping>${sharpPingsOn?'🔔 Pings on':'🔕 Pings off'}</button><button class="mchip${discordHook?' on':''}" data-shdc>${discordHook?'FD Discord ✓':'FD Discord'}</button><button class="mchip${b105Hook?' on':''}" data-shdck>${b105Hook?'b105 Discord ✓':'b105 Discord'}</button><button class="mchip${b105MainHook?' on':''}" data-shdckm>${b105MainHook?'b105 Main lines ✓':'b105 Main lines'}</button></div>`;
   const scanned = sports.filter(k=>sharpLastScan[k]).length;
   // What each sport's last scan actually got back -- if a sport shows 0 for the exchanges, the
@@ -1027,6 +1032,7 @@ function renderSharp(){
       if(ok){ await new Promise(r=>setTimeout(r,600)); const ex=sharpDiscordPayload(sharpExampleEntry(), true); const tag=roleTag(); discordPost({ ...ex, ...tag, content:[tag.content, ex.content].filter(Boolean).join(' ') }); }
     }
   });
+  view.querySelectorAll('[data-shout]').forEach(b=>b.addEventListener('click',()=>{ const k=b.dataset.shout; smMuteOut.has(k)?smMuteOut.delete(k):smMuteOut.add(k); LS.set('sm_mute_out', JSON.stringify([...smMuteOut])); renderSharp(); }));
   view.querySelector('[data-shdckm]')?.addEventListener('click', async ()=>{
     const v=prompt('bet105 main lines (totals / moneylines / spreads) go to their own channel. Paste that channel\'s Discord webhook URL. Leave empty to send them to the regular bet105 channel.', b105MainHook);
     if(v==null) return;
@@ -2079,10 +2085,11 @@ function smRecapFields(day, book='fanduel'){
   const playLine=t=>`${t.result==='win'?'✅':t.result==='loss'?'❌':'➖'} ${titleCase(t.playerName)} ${sideTxt(t)}${t.line!=null?' '+t.line:''} ${t.marketLabel||''} ${fmtAm(t.price)}${t.sharpLiq?` · ${usd(t.sharpLiq)}`:''}${t.actual!=null?` (${t.actual})`:''}`;
   return { dayList, fields:[
     ...recapFields(`${dayName} · ${recRow(done)}`, recSplit(done,lab)),
+    ...recapFields(`${dayName} · by time to tip`, recSplit(done,outBucket).sort((a,b)=>OUT_BUCKETS.findIndex(x=>a.startsWith(x))-OUT_BUCKETS.findIndex(x=>b.startsWith(x)))),
     ...recapFields(`All-time · ${recRow(fd)}`, recSplit(fd,t=>SPORTS[t.sportKey]?.label||t.sportKey)),
     ...recapFields('All-time by market', recSplit(fd,lab)),
     ...recapFields('All-time by side', recSplit(fd,t=>sideTxt(t))),
-    ...recapFields('All-time by time to tip', recSplit(fd,outBucket)),
+    ...recapFields('All-time by time to tip', recSplit(fd,outBucket).sort((a,b)=>OUT_BUCKETS.findIndex(x=>a.startsWith(x))-OUT_BUCKETS.findIndex(x=>b.startsWith(x)))),
     ...recapFields('All-time by source (direct vs borrowing)', recSplit(fd,t=>t.via?`Borrowing ${bookShort(t.via.book)}`:`${bookShort(book)} direct`)),
     ...recapFields('All-time by exchange', recSplit(fd,smSrc)),
     ...recapFields('All-time by exchange · hold vs arb', recSplit(fd,smSrcHold)),
