@@ -26771,11 +26771,14 @@ async function _tsSyncRw(say) {
 // Tabs bets are only kept when the market has a matching price at FanDuel / Pinnacle / Prop Builder, or ProphetX / Kalshi with $200+ behind it (live OpticOdds read).
 // The bet takes the best of those prices; with no match it is dropped.
 const TABS_SOLO_BOOKS = new Set(["FanDuel", "Pinnacle", "Prop Builder", "ProphetX", "Kalshi"]), TABS_SOLO_EXCH_LIQ = 200;
-async function _tsMatchMarket(rows) {
+async function _tsMatchMarket(rows, progress) {
   const nameOf = bk => BOOK_CODE_NAMES[String(bk || "").trim().toUpperCase()] || String(bk || "").trim();
   const shadows = rows.map(x => ({ _t: x, player: x.player, stat: x.stat, ou: x.ou, line: x.line, odds: x.odds, book: nameOf(x.book), fair: x.fairOdds, altBooks: [], team: x.team, refreshOwn: true }));
   let ok = true;
-  try { await ooRefreshBetsForPic(shadows); } catch (e) { ok = false; console.warn("[TABS SOLO] market match failed", e); }
+  try {   // 6 players at a time (one live lookup each), not one after another
+    let done = 0;
+    for (let i = 0; i < shadows.length; i += 6) { await Promise.all(shadows.slice(i, i + 6).map(sh => ooRefreshBetsForPic([sh]).catch(() => null))); done = Math.min(shadows.length, i + 6); if (progress) progress(done, shadows.length); }
+  } catch (e) { ok = false; console.warn("[TABS SOLO] market match failed", e); }
   if (!ok) return { kept: rows, dropped: [], failed: true };
   const kept = [], dropped = [];
   shadows.forEach(sh => {
@@ -26835,12 +26838,7 @@ async function tabsSoloImport() {
     tabsSolo.push({ key, player: r.player, game: r.game || "", team: _mTeamFor(r.player), gameDate: r.gameDateIso, gameTime: r.gameTime || "", stat, ou: r.ou, line: Number(r.line), odds, book: r.book, ev: Number(r.ev), proj: r.proj, min: mn, fairOdds: _mFairOdds(odds, r.ev), ctx: cx.cls, ctxWhy: cx.why, at: nowIso, release: rel, minToTip: mins, result: "pending", actual: null }); touched.push(tabsSolo[tabsSolo.length - 1]);
     added++;
   });
-  if (touched.length) {
-    say(`Matching ${touched.length} to FanDuel / Pinnacle / Prop Builder / ProphetX / Kalshi ($${TABS_SOLO_EXCH_LIQ}+)\u2026`);
-    const m = await _tsMatchMarket(touched);
-    if (m.failed) showToast("Market lookup failed \u2014 kept the board prices");
-    else if (m.dropped.length) { const gone = new Set(m.dropped); noMatch = m.dropped.length; tabsSolo = tabsSolo.filter(x => !gone.has(x)); added = Math.max(0, added - m.dropped.filter(x => x.at === nowIso).length); upd = Math.max(0, upd - m.dropped.filter(x => x.at !== nowIso).length); }
-  }
+  const toMatch = touched.slice();   // the match runs after the import is saved and shown, in the background
   tabsSoloSelStat = _mNextStat(stat);
   Object.keys(seen).forEach(rel => { if (seen[rel]) tabsSoloMeta[today + "|" + rel + "|" + stat] = { n: seen[rel], at: now }; });
   tabsSoloSave();
@@ -26848,6 +26846,17 @@ async function tabsSoloImport() {
   say(`${stat}: ${added} new${upd ? `, ${upd} updated` : ""} · ${seen.initial} initial / ${seen["30min"]} at 30 min${late ? ` · ${late} already tipped, skipped` : ""}${noMatch ? ` · ${noMatch} dropped (no match at FD / PIN / PB / PX / Kalshi $200+)` : ""}${replaced ? ` · ${replaced} old open line${replaced === 1 ? "" : "s"} from the earlier paste replaced` : ""}`);
   showToast(`Tabs Solo ${stat}: ${added} logged`);
   renderTabsSolo();  { const ss = document.getElementById("ts-stat"); if (ss) ss.value = tabsSoloSelStat; }
+  if (toMatch.length) {
+    const setInfo = t => { tabsSoloInfo = t; const el = document.getElementById("ts-info"); if (el) el.textContent = t; };
+    setInfo(`Imported ${toMatch.length}. Matching to FanDuel / Pinnacle / Prop Builder / ProphetX / Kalshi ($${TABS_SOLO_EXCH_LIQ}+) in the background\u2026`);
+    _tsMatchMarket(toMatch, (d, n) => setInfo(`Matching ${d}/${n} to FD / PIN / PB / PX / Kalshi ($${TABS_SOLO_EXCH_LIQ}+)\u2026`)).then(m => {
+      if (m.failed) { setInfo("Market lookup failed \u2014 kept the board prices"); return; }
+      if (m.dropped.length) { const gone = new Set(m.dropped); tabsSolo = tabsSolo.filter(x => !gone.has(x)); }
+      tabsSoloSave();
+      setInfo(`${stat}: ${toMatch.length - m.dropped.length} matched at FD / PIN / PB / PX / Kalshi $${TABS_SOLO_EXCH_LIQ}+` + (m.dropped.length ? ` \u00b7 ${m.dropped.length} dropped (no match)` : ""));
+      try { renderTabsSolo(); } catch (e) {}
+    }).catch(e => console.warn("[TABS SOLO] match", e));
+  }
 }
 async function tabsSoloGrade(auto) {
   const btn = document.getElementById("ts-grade-btn"); if (btn) { btn.disabled = true; btn.textContent = "GRADING…"; }
