@@ -38,8 +38,9 @@ h2{font-size:12px;letter-spacing:1px;text-transform:uppercase;color:var(--mut);m
   <div class="row">
     <select id="stat"><option value="AUTO">Auto-detect market</option><option>PTS</option><option>REB</option><option>AST</option><option>3PM</option><option>PRA</option></select>
     <select id="minev"><option value="0">Edge 0%+</option><option value="1" selected>Edge 1%+</option><option value="3">Edge 3%+</option><option value="5">Edge 5%+</option></select>
+    <label class="m" style="font-size:12px;display:flex;gap:5px;align-items:center"><input type="checkbox" id="mkt" checked>Only FD / PIN / PB / PX / Kalshi $200+</label>
     <button class="pri" onclick="importBoard()">IMPORT</button>
-    <button onclick="gradeAll()" id="gbtn">GRADE PENDING</button>
+    <button onclick="gradeAll()" id="gbtn">GRADE PENDING</button><span class="m" style="font-size:11px">also grades itself</span>
   </div>
   <div class="row"><button onclick="copyOpen()">COPY OPEN BETS</button><button onclick="copyReport()">COPY REPORT</button><button onclick="exportCsv()">EXPORT CSV</button><button class="del" onclick="clearAll()">CLEAR ALL</button></div>
   <div class="info" id="info"></div>
@@ -49,8 +50,11 @@ h2{font-size:12px;letter-spacing:1px;text-transform:uppercase;color:var(--mut);m
 <div id="copy-toast"></div>
 <script>
 const SOURCES = [];
+const NBA_TEMPLATE = [];
 let slots = SOURCES.map(() => null);
 let merged = null;
+let bets = [];
+// Per-game projection source picker (blended / paceeff / both)
 function localYMD(d) {
   const x = (d instanceof Date) ? d : new Date(d);
   if (isNaN(x.getTime())) return "";
@@ -119,10 +123,473 @@ function showToast(msg) {
 
 // ── TRACKER ────────────────────────────────────────────────────────────────
 
+const EVICTABLE_KEYS = [
+  "nba_season_logs_v1",        // refetch from ESPN
+  "nba_espn_cache",            // refetch
+  "nba_headshot_cache_v1",     // refetch — base64 photos, can be huge
+  "nba_trends_cache",          // recomputed from bets
+  "nba_season_logs_v1_meta",
+  "nba_oo_logos_v1",           // book logos, reloaded from OpticOdds
+  "nba_rw_lineups_raw",        // raw lineup pastes (the parsed lineups are stored separately)
+  "nba_tabs_lineups_raw",
+  "nba_rw_news_feed_v1",       // RotoWire news, re-synced
+];
+function freeStorageSpace(neededBytes) {
+  let freed = 0;
+  for (const k of EVICTABLE_KEYS) {
+    try {
+      const v = localStorage.getItem(k);
+      if (v == null) continue;
+      freed += v.length;
+      localStorage.removeItem(k);
+      console.warn(`[storage] evicted ${k} (${Math.round(v.length / 1024)}kb) to make room for bets`);
+      if (freed >= (neededBytes || 0)) break;
+    } catch (e) {}
+  }
+  return freed;
+}
+// Warn before it becomes a problem, not after.
+const _BULKY_KEYS = new Set(["liq", "liqLevels", "liqBooks", "ooBooks", "keyOff"]);
+function _slimGraded(k, v) { return (_BULKY_KEYS.has(k) && this && this.result && this.result !== "pending") ? undefined : v; }
+function saveBets() {
+  const json = JSON.stringify(bets, _slimGraded);
+  try {
+    localStorage.setItem("nba_blender_bets", json);
+    return true;
+  } catch (e) {
+    // Out of room. Bets outrank every cache here, so evict the refetchable
+    // ones and try again rather than losing the bet.
+    console.warn("[storage] bet save failed, evicting caches and retrying");
+    freeStorageSpace(json.length * 2);
+    try {
+      localStorage.setItem("nba_blender_bets", json);
+      try {
+        if (typeof showToast === "function") showToast("Storage was full \u2014 cleared splits cache to save your bets");
+      } catch (e3) {}
+      return true;
+    } catch (e2) {
+      // Still failing after eviction — this is genuinely bad, make it loud.
+      console.error("SAVE FAILED after eviction — bets are in memory only:", e2);
+      try {
+        if (typeof showToast === "function") {
+          showToast("\u26a0 SAVE FAILED \u2014 EXPORT YOUR BETS NOW");
+        }
+        if (typeof alert === "function") {
+          alert("Storage is full and your bets could NOT be saved.\n\nThey are still in memory. Export them now, before reloading the page.");
+        }
+      } catch (e3) {}
+      return false;
+    }
+  }
+}
+
+function oddsToImplied(odds) {
+  if (!odds || isNaN(odds)) return null;
+  odds = Number(odds);
+  return odds < 0 ? Math.abs(odds)/(Math.abs(odds)+100) : 100/(odds+100);
+}
+
 function oddsToDecimal(odds) {
   if (!odds || isNaN(odds)) return null;
   odds = Number(odds);
   return odds < 0 ? 1+(100/Math.abs(odds)) : 1+(odds/100);
+}
+
+function calcEdge(bookOdds, fairOdds) {
+  // Morning bets store fair as a win probability in percent (0-100); American odds are never inside (-100,100)
+  const f = Number(fairOdds);
+  const fp = (f > 0 && f < 100) ? f / 100 : oddsToImplied(fairOdds), bd = oddsToDecimal(bookOdds);
+  if (fp == null || bd == null) return null;
+  return ((fp * bd) - 1) * 100;
+}
+
+function probToAmerican(p) {
+  if (p == null || p <= 0 || p >= 1) return null;
+  if (p >= 0.5) return Math.round(-100 * p / (1 - p));
+  return Math.round(100 * (1 - p) / p);
+}
+
+const ALT_BOOKS_ORDER = ["FanDuel","Prop Builder","Novig","ProphetX","Kalshi","Fliff","DraftKings","Bookmaker","Pinnacle","Bet105","Kambi","Caesars","Hard Rock","theScore","BetMGM","bet365","Fanatics"];
+
+// Per-book visibility — toggle via Settings (⚙) panel. Persisted to localStorage.
+const PARLAY_MARKET_BY_STAT = {
+  PTS: "player_points", REB: "player_rebounds", AST: "player_assists",
+  "3PM": "player_threes", PRA: "player_pra", PR: "player_pts_rebs",
+  PA: "player_pts_asts", RA: "player_rebs_asts",
+  STL: "player_steals", BLK: "player_blocks", TOV: "player_turnovers"
+};
+// legacy bookmaker key -> book label (fallback for label resolution)
+const BOOK_INFER_ORDER = ["Pinnacle", "Prop Builder", "FanDuel"];
+const _isBlankBook = b => !b || /^[\s\-\u2013\u2014]*$/.test(String(b));
+function inferBookFromAlts(odds, line, alts) {
+  const same = (Array.isArray(alts) ? alts : []).filter(a => a && a.book && a.odds != null && Number(a.odds) === Number(odds) && (a.line == null || Number(a.line) === Number(line)));
+  if (!same.length) return null;
+  for (const b of BOOK_INFER_ORDER) { if (same.some(a => a.book === b)) return b; }
+  const order = (typeof ALT_BOOKS_ORDER !== "undefined") ? ALT_BOOKS_ORDER : [];
+  same.sort((a, b) => order.indexOf(a.book) - order.indexOf(b.book));
+  return same[0].book;
+}
+// True if a and b differ by at most one single-character edit (insert, delete
+// or substitute). Catches spelling variants across sources \u2014 "Sheppard" vs
+// "Shepard", "Kuier" vs "Kuier" with a transposed/dropped letter \u2014 without
+// being loose enough to merge two genuinely different surnames.
+function _oneEditApart(a, b) {
+  if (a === b) return true;
+  const la = a.length, lb = b.length;
+  if (Math.abs(la - lb) > 1 || la < 3 || lb < 3) return false;
+  let i = 0, j = 0, edits = 0;
+  while (i < la && j < lb) {
+    if (a[i] === b[j]) { i++; j++; continue; }
+    edits++;
+    if (edits > 1) return false;
+    if (la === lb) { i++; j++; }   // substitution
+    else if (la > lb) { i++; }     // a has an extra char
+    else { j++; }                  // b has an extra char
+  }
+  edits += (la - i) + (lb - j);
+  return edits <= 1;
+}
+// Loose name match for feed rows: exact normalized first, then ONLY the first and last tokens are
+// compared \u2014 any middle name/initial is dropped from the comparison entirely rather than needing
+// to line up, since sources routinely include/omit it ("Awak Kuier" ~ "Awak Deng Kuier", "Jessica
+// Sheppard" ~ "Jessica Lynn Shepard"). Both the surviving first and last tokens also tolerate a
+// one-letter spelling variant ("Sheppard" ~ "Shepard"), but never both fuzzy at once.
+function ooNameMatch(a, b) {
+  // exact via the alias-aware normaliser first
+  const x = resolveNorm(a || ""), y = resolveNorm(b || "");
+  if (x && y && x === y) return true;
+  // then word-level: strip accents/punctuation, handle "Last, First", compare tokens
+  const toks = n => { let t = String(n || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase(); if (t.includes(",")) { const [l, f] = t.split(",").map(v => v.trim()); t = f + " " + l; } return t.replace(/[^a-z\s]/g, " ").split(/\s+/).filter(w => w && !/^(jr|sr|ii|iii|iv)$/.test(w)); };
+  const xw = toks(a), yw = toks(b);
+  if (xw.length < 2 || yw.length < 2) return false;
+  const f1 = xw[0], f2 = yw[0], l1 = xw[xw.length - 1], l2 = yw[yw.length - 1];
+  const firstOk = f1 === f2
+    || (f1.length === 1 || f2.length === 1 ? f1[0] === f2[0] : _oneEditApart(f1, f2)); // initial vs full, or one-letter typo
+  const lastOk = l1 === l2 || _oneEditApart(l1, l2);
+  if (firstOk && lastOk && (f1 === f2 || l1 === l2)) return true; // require at least one exact side
+  return false;
+}
+const OO_BACKEND_STORAGE = "nba_opticodds_backend";
+const OO_BACKEND_DEFAULT = "https://nfl-props-tracker-1.vercel.app/api/odds";
+function getOOBackend() { try { return localStorage.getItem(OO_BACKEND_STORAGE) || OO_BACKEND_DEFAULT; } catch (e) { return OO_BACKEND_DEFAULT; } }
+async function ooCall(endpoint, params) {
+  const res = await fetch(getOOBackend(), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ endpoint, params: params || {} }) });
+  const text = await res.text();
+  if (!res.ok) { let msg = text; try { const j = JSON.parse(text); msg = j.error + (j.body ? " — " + j.body : ""); } catch (e) {} throw new Error(`backend ${res.status}: ${msg}`); }
+  return JSON.parse(text);
+}
+// Books to request (OpticOdds names) -> this tool's book label. Unlabelled ones (Kalshi) feed Liq only.
+// Requesting BOTH "Prop Builder" and "Props Builder" — OpticOdds may have renamed the
+// book (plural), and a wrong name here just returns silently empty rather than an error,
+// so there's no harm asking for both spellings; whichever OpticOdds actually recognizes
+// comes back and both map to the same "Prop Builder" display label below.
+const OO_BOOKS_REQUEST = ["FanDuel","Prop Builder","Props Builder","Novig","Prophet X","Fliff","DraftKings","BookMaker","Pinnacle","bet105","BetRivers","Kalshi","Caesars","Hard Rock","theScore Bet","BetMGM","bet365","Fanatics"];
+const OO_BOOK_TO_LABEL = { "fanduel":"FanDuel", "prop builder":"Prop Builder", "propbuilder":"Prop Builder", "props builder":"Prop Builder", "propsbuilder":"Prop Builder", "novig":"Novig", "prophet x":"ProphetX", "fliff":"Fliff",
+  "draftkings":"DraftKings", "courtside":"DraftKings", "onyx odds":"DraftKings", "bookmaker":"Bookmaker", "pinnacle":"Pinnacle",
+  "bet105":"Bet105", "betrivers":"Kambi", "kambi":"Kambi", "kalshi":"Kalshi",
+  "caesars":"Caesars", "caesars sportsbook":"Caesars", "hard rock":"Hard Rock", "hard rock bet":"Hard Rock", "hardrock":"Hard Rock", "hardrockbet":"Hard Rock",
+  "thescore":"theScore", "thescore bet":"theScore", "the score":"theScore", "espn bet":"theScore", "espnbet":"theScore", "betmgm":"BetMGM", "bet mgm":"BetMGM", "bet365":"bet365", "fanatics":"Fanatics" };
+const OO_EXCHANGES = ["novig","prophet x","kalshi"];
+const _ooIsExchW = b => OO_EXCHANGES.includes(String(b || "").toLowerCase());
+const _ooChunkW = (a, n) => { const o = []; for (let i = 0; i < a.length; i += n) o.push(a.slice(i, i + n)); return o; };
+function ooPlayToFromFair(fair) {
+  const fp = oddsToImplied(fair); if (!fp) return null;
+  const dec = 1.05 / fp; const b = dec - 1;
+  return b >= 1 ? "+" + Math.round(b * 100) : String(-Math.round(100 / b));
+}
+// OpticOdds market name -> Parlay-style key the fill/CLV code keys on. Period/exotic markets -> null.
+function ooMarketKey(name) {
+  const m = String(name || "").toLowerCase();
+  if (/quarter|half|1st|2nd|3rd|4th|first|last|double|triple|basket|overtime|team|alternate/.test(m)) return null;
+  const has = w => m.includes(w);
+  const P = has("point"), R = has("rebound"), A = has("assist");
+  if (has("three") || has("3-point") || has("3 point") || has("3pt") || has("3pm") || has("3-pt")) return "player_threes";
+  if (has("turnover")) return "player_turnovers";
+  if (has("steal") && !has("block")) return "player_steals";
+  if (has("block") && !has("steal")) return "player_blocks";
+  if (P && R && A) return "player_pra";
+  if (P && R) return "player_pts_rebs";
+  if (P && A) return "player_pts_asts";
+  if (R && A) return "player_rebs_asts";
+  if (P) return "player_points";
+  if (R) return "player_rebounds";
+  if (A) return "player_assists";
+  return null;
+}
+let _ooFixW = { at: 0, list: [] };
+async function ooNbaFixtures(force) {
+  if (!force && _ooFixW.list.length && Date.now() - _ooFixW.at < 120000) return _ooFixW.list;
+  const raw = []; let page = 1;
+  for (let i = 0; i < 20; i++) {
+    const r = await ooCall("/fixtures", { sport: "basketball", league: "nba", page });
+    (r?.data || []).forEach(f => raw.push(f));
+    if (!r?.has_more) break; page++;
+  }
+  const t0 = Date.now() - 2 * 86400000, t1 = Date.now() + 3 * 86400000;
+  const list = raw.filter(f => { const t = new Date(f.start_date).getTime(); return t >= t0 && t <= t1; }).map(f => {
+    const hc = f.home_competitors?.[0], ac = f.away_competitors?.[0];
+    return { id: f.id, start: f.start_date, date: localYMD(new Date(f.start_date)), status: f.status,
+      home: _matchupKey(hc?.name || f.home_team_display || ""), away: _matchupKey(ac?.name || f.away_team_display || ""),
+      homeName: hc?.name || f.home_team_display || "", awayName: ac?.name || f.away_team_display || "" };
+  });
+  console.log("[OpticOdds] NBA fixtures in window:", list.map(f => `${f.away}@${f.home} ${f.date} ${f.status}`));
+  _ooFixW = { at: Date.now(), list };
+  return list;
+}
+// Exchange commission OpticOdds does not take off: ProphetX charges 2% of winnings, so its prices (top and every order-book level) are
+// shown net of that fee. American in, American out.
+const OO_BOOK_FEE = { prophetx: 0.02, "prophet x": 0.02 };
+function _ooFeeAdj(am, fee) { const d = oddsToDecimal(am); if (!d || !fee) return am; const net = decimalToAmerican(1 + (d - 1) * (1 - fee)); return net == null ? am : net; }
+// Odds rows -> Parlay-shaped rows (one per book+line, both sides), plus liq per side.
+function ooRowsFromOdds(odds, fixtureId) {
+  const g = {};
+  odds.forEach(o => {
+    const mk = ooMarketKey(o.market); if (!mk) return;
+    const side = String(o.selection_line || "").toLowerCase(); if (side !== "over" && side !== "under") return;
+    const bk = String(o.sportsbook || "").toLowerCase();
+    const key = [mk, resolveNorm(o.selection || o.name || ""), o.points, bk].join("|");
+    if (!g[key]) g[key] = { market_key: mk, market: o.market, player: o.selection || o.name, bookmaker: o.sportsbook, label: OO_BOOK_TO_LABEL[bk] || null,
+      line: o.points, over_price: null, under_price: null, over_liq: null, under_liq: null, over_book: null, under_book: null, over_link: null, under_link: null, fixture_id: fixtureId, age_seconds: o.timestamp ? Math.round(Date.now() / 1000 - o.timestamp) : null };
+    const row = g[key];
+    let price = Number(o.price), ob = o.order_book;
+    const fee = OO_BOOK_FEE[bk];
+    if (fee && !isNaN(price)) {   // net of the exchange fee, order book included
+      const raw = price; price = _ooFeeAdj(raw, fee);
+      if (Array.isArray(ob) && ob.length) ob = _ooLevelsFromRow(raw, ob, o.limits && o.limits.max).map(l => [_ooFeeAdj(l.price, fee), l.size]);
+    }
+    // Keep the raw {ios, android, desktop} shape — resolveShareLink() (below) decides at copy
+    // time whether to use a link straight (it's already https, a real universal link) or route
+    // it through the /api/go redirector (it's a bare app scheme like novigapp:// with no https
+    // equivalent — Discord won't render a masked link for that, it shows as broken literal text).
+    const dl = o.deep_link && typeof o.deep_link === "object"
+      ? { ios: o.deep_link.ios || null, android: o.deep_link.android || null, desktop: o.deep_link.desktop || null }
+      : (typeof o.deep_link === "string" ? o.deep_link : null);
+    if (side === "over") { if (row.over_price == null || price > row.over_price) { row.over_price = price; row.over_link = dl || row.over_link; } row.over_liq = o.limits?.max ?? row.over_liq; row.over_book = Array.isArray(ob) ? ob : row.over_book; }
+    else { if (row.under_price == null || price > row.under_price) { row.under_price = price; row.under_link = dl || row.under_link; } row.under_liq = o.limits?.max ?? row.under_liq; row.under_book = Array.isArray(ob) ? ob : row.under_book; }
+  });
+  // DraftKings before its clones so the fill lands DK first
+  return Object.values(g).sort((a, b) => (a.bookmaker === "DraftKings" ? -1 : 0) - (b.bookmaker === "DraftKings" ? -1 : 0));
+}
+let _ooPropsCache = { at: 0, key: "", rows: [] };
+// Live props for the fixture the modal's player is in (falls back to every game in the window).
+async function fetchOpticOddsProps(force, playerName) {
+  const fixtures = await ooNbaFixtures(force);
+  const active = fixtures.filter(f => f.status !== "completed");
+  if (!active.length) throw new Error("no upcoming/live NBA fixtures on OpticOdds");
+  // player -> team via template -> fixture
+  const norm = resolveNorm(playerName || "");
+  const curTeam = (typeof teamForPlayer === "function") ? teamForPlayer(playerName) : "";   // current team, not last season's roster
+  const team = curTeam ? _matchupKey(curTeam) : null;
+  let targets = team ? active.filter(f => f.home === team || f.away === team) : [];
+  if (!targets.length) targets = active;
+  const cacheKey = targets.map(f => f.id).sort().join(",");
+  if (!force && _ooPropsCache.rows.length && _ooPropsCache.key === cacheKey && Date.now() - _ooPropsCache.at < 180000) return _ooPropsCache.rows;
+  const rows = [];
+  for (const f of targets) {
+    // main lines first to learn which market names exist, then all lines for the player-prop markets only
+    const mainOdds = [];
+    for (const books of _ooChunkW(OO_BOOKS_REQUEST, 5)) {
+      try { const r = await ooCall("/fixtures/odds", { fixture_id: [f.id], sportsbook: books, is_main: true }); (r?.data?.[0]?.odds || []).forEach(o => mainOdds.push(o)); }
+      catch (e) { console.warn("[OpticOdds] main chunk failed", books, e.message); }
+    }
+    const markets = [...new Set(mainOdds.filter(o => ooMarketKey(o.market)).map(o => o.market))];
+    console.log(`[OpticOdds] ${f.away}@${f.home}: markets seen`, [...new Set(mainOdds.map(o => o.market))], "→ player-prop markets", markets);
+    let full = [];
+    if (markets.length) {
+      for (const books of _ooChunkW(OO_BOOKS_REQUEST, 5)) {
+        try { const r = await ooCall("/fixtures/odds", { fixture_id: [f.id], sportsbook: books, market: markets }); (r?.data?.[0]?.odds || []).forEach(o => full.push(o)); }
+        catch (e) { console.warn("[OpticOdds] full chunk failed", books, e.message); }
+      }
+    }
+    ooRowsFromOdds(full.length ? full : mainOdds, f.id).forEach(r => rows.push(r));
+  }
+  _ooPropsCache = { at: Date.now(), key: cacheKey, rows };
+  return rows;
+}
+// Raw levels for one exchange row/side: [{price(American), size}], best first. Empty if no order book (top only).
+function _ooLevelsFromRow(top, orderBook, topLiq) {
+  const toAmN = d => (d - 1) >= 1 ? Math.round((d - 1) * 100) : -Math.round(100 / (d - 1));
+  const normP = v => { v = Number(v); if (isNaN(v)) return NaN; return (v > 1 && v < 50) ? toAmN(v) : v; };
+  const ob = (Array.isArray(orderBook) ? orderBook : []).filter(l => Array.isArray(l) && l.length >= 2);
+  const levels = [];
+  if (ob.length) {
+    const a0 = normP(ob[0][0]), b0 = normP(ob[0][1]);
+    const priceFirst = Math.abs(a0 - Number(top)) <= Math.abs(b0 - Number(top));
+    if (!window._ooObLoggedW) { window._ooObLoggedW = true; console.log("[OpticOdds] order_book sample top=" + top, JSON.stringify(orderBook).slice(0, 240), "→ priceFirst:", priceFirst); }
+    ob.forEach(l => { const price = priceFirst ? normP(l[0]) : normP(l[1]); const size = priceFirst ? Number(l[1]) : Number(l[0]); if (isNaN(price) || isNaN(size) || size <= 0) return; levels.push({ price, size }); });
+  } else if (topLiq != null) {
+    levels.push({ price: Number(top), size: Number(topLiq) });
+  }
+  return levels.sort((a, b) => b.price - a.price);
+}
+// Depth BEHIND the top level that still clears 5% vs fair. Returns null when there's nothing behind.
+// levelsByBook: { bookName: [{price,size}, ...] }
+function _ooLiqSnapshot(rowsForPlayer, { player, ou, line, fair }) {
+  const side = ou === "over" ? "over" : "under";
+  const priceOf = r => side === "over" ? r.over_price : r.under_price;
+  const liqOf = r => side === "over" ? r.over_liq : r.under_liq;
+  const bookOf = r => side === "over" ? r.over_book : r.under_book;
+  const winPct = p => { const n = Number(p); const q = n > 0 ? 100 / (n + 100) : Math.abs(n) / (Math.abs(n) + 100); return (q * 100).toFixed(1); };
+  const snap = { player, ou, line: Number(line), fair, playTo: ooPlayToFromFair(fair), books: {}, levels: {}, altLevels: {}, at: Date.now() };
+  const ex = (rowsForPlayer || []).filter(r => _ooIsExchW(r.bookmaker) && priceOf(r) != null);
+  // Top-of-book limit badges: exchanges (multi-level depth) plus Pinnacle and Bet105
+  // (each posts a single max limit, not an orderbook) — their limit comes through the
+  // same over_liq/under_liq field (sourced from OpticOdds' limits.max), they just
+  // aren't exchanges, so they're excluded from the levels/depth-summary logic below.
+  const _isLimitBookOnly = bk => { const k = String(bk || "").toLowerCase(); return k === "pinnacle" || k === "bet105"; };
+  const limitBooks = (rowsForPlayer || []).filter(r => (_ooIsExchW(r.bookmaker) || _isLimitBookOnly(r.bookmaker)) && priceOf(r) != null);
+  limitBooks.filter(r => Number(r.line) === Number(line)).forEach(r => { if (!r.label) return; snap.books[r.label] = { book: r.bookmaker, price: Number(priceOf(r)), winPct: Number(winPct(priceOf(r))), liq: liqOf(r) != null ? Number(liqOf(r)) : null, isExch: _ooIsExchW(r.bookmaker) }; });
+  const levelsFor = rows => { const m = {}; rows.forEach(r => { const lv = _ooLevelsFromRow(priceOf(r), bookOf(r), liqOf(r)); if (lv.length) m[r.bookmaker] = lv; }); return m; };
+  snap.levels = levelsFor(ex.filter(r => Number(r.line) === Number(line)));
+  const byLine = {}; ex.filter(r => Number(r.line) !== Number(line)).forEach(r => (byLine[r.line] = byLine[r.line] || []).push(r));
+  Object.keys(byLine).forEach(ln => { const lv = levelsFor(byLine[ln]); if (Object.keys(lv).length) snap.altLevels[String(Number(ln))] = lv; });
+  return snap;
+}
+async function ooRefreshBetsForPic(list) {
+  let refreshed = 0, skipped = 0;
+  for (const b of list) {
+    try {
+      const market = PARLAY_MARKET_BY_STAT[(b.stat || "").toUpperCase()]; if (!market || !b.fair) { skipped++; continue; }
+      let rows; try { rows = await fetchOpticOddsProps(false, b.player); } catch (e) { skipped++; continue; }
+      const mine = rows.filter(r => r.market_key === market && ooNameMatch(r.player || "", b.player));
+      if (!mine.length) { skipped++; continue; }
+      const ou = (b.ou || "over").toLowerCase();
+      const priceFor = (r, side) => side === "over" ? r.over_price : r.under_price;
+      // Alt lines are only ever the ones that were in the modal (with an edge) when you tracked.
+      // We reprice those; we never introduce a line that wasn't there.
+      // Only alt lines where YOU typed the edge in the modal (fairSource "ev"). Projection-derived alts don't count.
+      const existingAlts = (Array.isArray(b.altBooks) ? b.altBooks : []).filter(a => a && a.line != null && Number(a.line) !== Number(b.line) && a.fairSource === "ev" && a.fair != null);
+      const altFairByLine = {}; existingAlts.forEach(a => { const k = String(Number(a.line)); if (altFairByLine[k] == null) altFairByLine[k] = a.fair; });
+      const allowedAlt = new Set(Object.keys(altFairByLine));
+      const fresh = [];
+      b.keyOff = []; b.ooBooks = [...new Set(mine.map(r => r.label).filter(Boolean))];   // FanDuel / Pinnacle / Prop Builder prices that are on the line but under the 5% edge, and every book the feed returned
+      b.ownLive = null; b.ownGone = false;
+      if (b.refreshOwn) mine.forEach(r => { if (r.label && r.label === b.book && Number(r.line) === Number(b.line)) { const pOwn = priceFor(r, ou); if (pOwn != null) b.ownLive = pOwn; } });   // Morning cards: the headline book's own price is re-read too
+      if (b.refreshOwn && b.ownLive == null && b.book && !_isBlankBook(b.book) && mine.some(r => r.label)) b.ownGone = true;   // the feed is up but that book no longer posts this side / line
+      mine.forEach(r => {
+        if (!r.label || r.label === b.book) return;      // your own bet price stays what you got
+        // Same rule as the modal's Fill flow: an exchange (Novig/ProphetX/Kalshi)
+        // posts a real order book, not a single number a book stands behind — a
+        // price with $20 behind it isn't actually bettable at size, so it can't
+        // become the card's headline "Best Price" or an alt-book pill either.
+        if (_ooIsExchW(r.bookmaker)) {
+          const ob = ou === "over" ? r.over_book : r.under_book;
+          const topLiq = ou === "over" ? r.over_liq : r.under_liq;
+          const p0 = priceFor(r, ou);
+          const totalDepth = _ooLevelsFromRow(p0, ob, topLiq).reduce((a, l) => a + l.size, 0);
+          if (totalDepth < 200) return;
+        }
+        if (Number(r.line) === Number(b.line)) {
+          const p = priceFor(r, ou); if (p == null) return;
+          const eg = calcEdge(p, b.fair);
+          if ((eg ?? -1) >= (b.refreshOwn ? 3 : 5)) fresh.push({ book: r.label, odds: p });   // cards: a little wider than the 5% bar so books within 5 cents of the play-to survive to the card's own window
+          else if ((eg ?? -1) >= 0 && /fanduel|pinnacle|prop ?builder|bet ?105/i.test(String(r.label))) b.keyOff.push({ book: r.label, odds: p, edge: eg });   // in range only: still +EV vs the pick's fair price (a price past that is not worth listing)
+          return;
+        }
+        const lk = String(Number(r.line));
+        if (!allowedAlt.has(lk)) return;                  // line wasn't in the modal at track time
+        const p = priceFor(r, ou); if (p == null) return;
+        const fair = altFairByLine[lk] != null ? altFairByLine[lk] : null;
+        if (fair == null) return;
+        if ((calcEdge(p, fair) ?? -1) >= 5) fresh.push({ book: r.label, odds: p, line: r.line, ou, fair, fairSource: existingAlts.find(a => Number(a.line) === Number(r.line))?.fairSource || "ev" });
+      });
+      // keep typed entries for books the feed didn't return — same line, or a typed-EV alt line only
+      const feedBooks = new Set(mine.map(r => r.label).filter(Boolean));
+      (Array.isArray(b.altBooks) ? b.altBooks : []).forEach(a => {
+        if (!a || !a.book || feedBooks.has(a.book) || a.book === b.book) return;
+        if (a.line == null || Number(a.line) === Number(b.line) || allowedAlt.has(String(Number(a.line)))) fresh.push(a);
+      });
+      if (_isBlankBook(b.book)) { const inferred = inferBookFromAlts(b.odds, b.line, fresh); if (inferred) b.book = inferred; }
+      b.altBooks = fresh.filter(a => !(a.book === b.book && Number(a.odds) === Number(b.odds) && (a.line == null || Number(a.line) === Number(b.line))));
+      // deep links for every book at this side, keyed "Book" (your line) or "Book@line" (alt line)
+      const linkFor = r => ou === "over" ? r.over_link : r.under_link;
+      b.links = {};
+      mine.forEach(r => { const u = linkFor(r); if (!u || !r.label) return; b.links[Number(r.line) === Number(b.line) ? r.label : `${r.label}@${r.line}`] = { url: u, odds: priceFor(r, ou), line: r.line }; });
+      b.liq = _ooLiqSnapshot(mine, { player: b.player, ou, line: b.line, fair: b.fair });
+      b.liq.refreshedAt = Date.now();
+      refreshed++;
+    } catch (e) { console.warn("[pic refresh]", b.player, e); skipped++; }
+  }
+  if (refreshed) { try { saveBets(); } catch (e) {} }
+  return { refreshed, skipped };
+}
+// The odds backend serves /api/odds -- the redirector below lives at /api/go on that same host.
+const ooRedirectBase = backendUrl => {
+  const b = String(backendUrl || "").replace(/\/+$/, "");
+  return /\/api\/odds$/i.test(b) ? b.replace(/\/api\/odds$/i, "/api/go") : "https://nfl-props-tracker-1.vercel.app/api/go";
+};
+// Turn a raw OpticOdds deep_link into a link that's safe to paste into chat: if ios/android
+// is already https (a real universal link -- works everywhere, opens the app on its own),
+// use it straight; if only a bare app scheme (novigapp://, etc.) is available, route it
+// through our own https redirector so it still renders/taps in chat apps, and let the
+// redirector pick ios vs android based on whichever device actually opens the link.
+function resolveShareLink(deepLink, backendUrl, bookLabel) {
+  if (!deepLink) return null;
+  if (typeof deepLink === "string") return /^https?:\/\//i.test(deepLink) ? deepLink : null;
+  if (typeof deepLink !== "object") return null;
+  const isHttp = l => typeof l === "string" && /^https?:\/\//i.test(l);
+  const isScheme = l => typeof l === "string" && /^[a-z][a-z0-9+.-]*:\/\//i.test(l) && !isHttp(l);
+  if (isHttp(deepLink.ios)) return deepLink.ios;
+  if (isHttp(deepLink.android)) return deepLink.android;
+  const iosScheme = isScheme(deepLink.ios) ? deepLink.ios : null;
+  const androidScheme = isScheme(deepLink.android) ? deepLink.android : null;
+  const webFallback = isHttp(deepLink.desktop) ? deepLink.desktop : "";
+  if (!iosScheme && !androidScheme) return webFallback || null;
+  const qs = [
+    iosScheme ? `i=${encodeURIComponent(iosScheme)}` : "",
+    androidScheme ? `a=${encodeURIComponent(androidScheme)}` : "",
+    webFallback ? `w=${encodeURIComponent(webFallback)}` : "",
+    bookLabel ? `b=${encodeURIComponent(bookLabel)}` : ""
+  ].filter(Boolean).join("&");
+  return `${ooRedirectBase(backendUrl)}?${qs}`;
+}
+// Copy a plain-text block of deep links for the open props (refreshes from OpticOdds first).
+const BOOK_CODE_NAMES = { FD: "FanDuel", PIN: "Pinnacle", PINN: "Pinnacle", PB: "Prop Builder", DK: "DraftKings", NV: "Novig", NVG: "Novig", PX: "ProphetX", KALSHI: "Kalshi", FLIFF: "Fliff", BOOKMAKER: "Bookmaker", BET105: "Bet105", KAMBI: "Kambi", "PROP BUILDER": "Prop Builder", PROPBUILDER: "Prop Builder", FANDUEL: "FanDuel", PINNACLE: "Pinnacle", DRAFTKINGS: "DraftKings", NOVIG: "Novig", PROPHETX: "ProphetX" };
+// Real logos from OpticOdds (its /sportsbooks list: name + logo URL), fetched once, turned into data URIs so the card picture can draw them, and kept in
+// localStorage. They win over the placeholder badges above; the books that already have a bundled logo keep it.
+const _MATCHUP_NAME_TO_ABBR = {
+  "atlanta hawks":"ATL", "boston celtics":"BOS", "brooklyn nets":"BKN",
+  "charlotte hornets":"CHA", "chicago bulls":"CHI", "cleveland cavaliers":"CLE",
+  "dallas mavericks":"DAL", "denver nuggets":"DEN", "detroit pistons":"DET",
+  "golden state warriors":"GSW", "houston rockets":"HOU", "indiana pacers":"IND",
+  "la clippers":"LAC", "los angeles clippers":"LAC", "los angeles lakers":"LAL",
+  "memphis grizzlies":"MEM", "miami heat":"MIA", "milwaukee bucks":"MIL",
+  "minnesota timberwolves":"MIN", "new orleans pelicans":"NOP", "new york knicks":"NYK",
+  "oklahoma city thunder":"OKC", "orlando magic":"ORL", "philadelphia 76ers":"PHI",
+  "phoenix suns":"PHX", "portland trail blazers":"POR", "sacramento kings":"SAC",
+  "san antonio spurs":"SAS", "toronto raptors":"TOR", "utah jazz":"UTA",
+  "washington wizards":"WAS",
+  // Common abbreviation variants that might appear in the CSV (ESPN / BBRef / RotoWire)
+  "gs":"GSW", "ny":"NYK", "no":"NOP", "nor":"NOP", "noh":"NOP", "sa":"SAS", "utah":"UTA", "wsh":"WAS",
+  "pho":"PHX", "brk":"BKN", "bro":"BKN", "nj":"BKN", "njn":"BKN", "cho":"CHA", "chh":"CHA", 
+  "okl":"OKC"
+};
+// Final canonicalization pass — even if the input is already an abbr, it might
+// be in the non-canonical form (e.g. CSV has "PHO" but our internal key is
+// "PHX"). Map abbr → canonical abbr.
+const _MATCHUP_ABBR_CANONICAL = {
+  "BRK":"BKN", "BKN":"BKN", "BRO":"BKN", "NJ":"BKN", "NJN":"BKN", "CHO":"CHA",
+  "CHA":"CHA", "CHH":"CHA", "GS":"GSW", "GSW":"GSW", "LAC":"LAC", 
+  "LAL":"LAL", "NO":"NOP", "NOP":"NOP", "NOR":"NOP", "NOH":"NOP", "NY":"NYK",
+  "NYK":"NYK", "OKL":"OKC", "OKC":"OKC", "PHO":"PHX", "PHX":"PHX", "SA":"SAS",
+  "SAS":"SAS", "SAN":"SAS", "CHR":"CHA", "UTH":"UTA", "UTAH":"UTA", "UTA":"UTA", "WSH":"WAS", "WAS":"WAS"
+};
+function _matchupKey(teamStr) {
+  if (!teamStr) return null;
+  const lc = teamStr.toLowerCase().trim();
+  if (_MATCHUP_NAME_TO_ABBR[lc]) return _MATCHUP_NAME_TO_ABBR[lc];
+  const up = teamStr.toUpperCase();
+  // Second pass: if the input is already an abbr, normalize it to canonical
+  if (_MATCHUP_ABBR_CANONICAL[up]) return _MATCHUP_ABBR_CANONICAL[up];
+  return up;
+}
+// Lookup matchup adjustment for a bet's stat against an opponent.
+// Returns { opp, stat, oppValue, leagueAvg, boostPct, favorable } or null.
+// `direction` is "over" or "under" — flips favorable sign for unders.
+function decimalToAmerican(dec) {
+  if (!dec || dec <= 1) return null;
+  if (dec >= 2) return Math.round((dec - 1) * 100);
+  return Math.round(-100 / (dec - 1));
 }
 
 const STARTER_LOG_KEY = "nba_starter_log_v1";
@@ -471,6 +938,8 @@ function normTeamAbbr(abbr) {
 // Matched exactly first, then by substring in insertion order — so full names
 // win over cities, and "hornets" is listed before "nets". "Los Angeles" alone is
 // ambiguous (Lakers/Clippers) and deliberately has no city alias.
+const MORNING_EXCHANGES = new Set(["novig", "nv", "nvg", "prophetx", "px", "kalshi", "polymarket", "sporttrade"]);
+function _mIsExchange(book) { return MORNING_EXCHANGES.has(String(book || "").toLowerCase()); }
 const MORNING_STATS = ["AST", "PTS", "PRA", "REB", "3PM"]; // PropShop picker order (alphabetical by market name)
 const MORNING_MARKET_PATTERNS = [
   [/\b(pts\s*\+\s*reb\s*\+\s*ast|points\s*\+\s*rebounds\s*\+\s*assists|points[\s_]+rebounds[\s_]+assists|pts[\s_]+rebs?[\s_]+asts?|pra)\b/i, "PRA"],
@@ -685,6 +1154,26 @@ function parseMorningPropShop(raw, stat) {
 // Each source keeps its OWN lineup store (never mixed into projections or into RW's). A player is a "lineup conflict"
 // when two sources that have both posted disagree on whether he plays / starts; a source that hasn't posted is "no
 // opinion". A conflicted player is blocked on both sides in Morning (we don't know his role / minutes).
+function teamForPlayer(name) {
+  const k = resolveNorm(name || "");
+  if (!k) return "";
+  try { if (typeof merged !== "undefined" && merged) { const r = merged.find(x => resolveNorm(x.rawName) === k); if (r && r.team) return r.team; } } catch (e) {}
+  const votes = {};
+  for (const sl of (typeof slots !== "undefined" ? slots : [])) {
+    if (!sl) continue;
+    const p = sl.players.find(x => x.norm === k);
+    if (p && p.team) { const t = normTeamAbbr(p.team) || String(p.team).toUpperCase(); votes[t] = (votes[t] || 0) + 1; }
+  }
+  const best = Object.entries(votes).sort((a, b) => b[1] - a[1])[0];
+  if (best) return best[0];
+  const t = (typeof NBA_TEMPLATE !== "undefined" ? NBA_TEMPLATE : []).find(p => resolveNorm(p.name) === k);
+  return t ? t.team : "";
+}
+function _mFairOdds(odds, ev) { const p = _mFairProb(odds, ev); return p == null ? null : probToAmerican(p); }
+function _mFairProb(odds, ev) { const d = oddsToDecimal(odds); if (d == null || ev == null) return null; const p = (1 + Number(ev) / 100) / d; return p > 0 && p < 1 ? p : null; }
+
+// Runs every pasted prop through the gates. Returns { cleared, funnel, misses }.
+const TABS_SOLO_MIN_EV = 1, TABS_SOLO_WINDOW_MIN = 45;
 function _tsTipTs(dateIso, timeStr) {
   const m = String(timeStr || "").match(/(\d{1,2}):(\d{2})\s*([AP])M/i), d = String(dateIso || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (!m || !d) return null;
@@ -696,6 +1185,33 @@ function _tsTipTs(dateIso, timeStr) {
 //   downside = a blurb or teammate situation works AGAINST this side (floor risk on an over, upside for someone else on an under, uncertain teammate)
 //   upside   = a blurb works FOR this side (ceiling on an over, floor risk on an under)
 //   clean    = none of the above
+const TABS_SOLO_BOOKS = new Set(["FanDuel", "Pinnacle", "Prop Builder", "ProphetX", "Kalshi"]), TABS_SOLO_EXCH_LIQ = 200;
+async function _tsMatchMarket(rows, progress) {
+  const nameOf = bk => BOOK_CODE_NAMES[String(bk || "").trim().toUpperCase()] || String(bk || "").trim();
+  const shadows = rows.map(x => ({ _t: x, player: x.player, stat: x.stat, ou: x.ou, line: x.line, odds: x.odds, book: nameOf(x.book), fair: x.fairOdds, altBooks: [], team: x.team, refreshOwn: true }));
+  let ok = true;
+  try {   // 6 players at a time (one live lookup each), not one after another
+    let done = 0;
+    for (let i = 0; i < shadows.length; i += 6) { await Promise.all(shadows.slice(i, i + 6).map(sh => ooRefreshBetsForPic([sh]).catch(() => null))); done = Math.min(shadows.length, i + 6); if (progress) progress(done, shadows.length); }
+  } catch (e) { ok = false; console.warn("[TABS SOLO] market match failed", e); }
+  if (!ok) return { kept: rows, dropped: [], failed: true };
+  const kept = [], dropped = [];
+  shadows.forEach(sh => {
+    const x = sh._t, cands = [];
+    const add = (bk, odds, liq) => { const n = nameOf(bk); if (odds == null || isNaN(odds) || !TABS_SOLO_BOOKS.has(n)) return; if (_mIsExchange(n) && !(liq != null && liq >= TABS_SOLO_EXCH_LIQ)) return; cands.push({ book: n, odds: Number(odds) }); };
+    const depth = bk => (sh.liq && sh.liq.books && sh.liq.books[bk]) ? sh.liq.books[bk].liq : null;
+    if (!sh.ownGone) add(sh.ownLive != null ? x.book : sh.book, sh.ownLive != null ? sh.ownLive : x.odds, depth(nameOf(x.book)));
+    (sh.altBooks || []).forEach(a => { if (a && (a.line == null || Number(a.line) === Number(x.line))) add(a.book, a.odds, depth(nameOf(a.book))); });
+    (sh.keyOff || []).forEach(k => add(k.book, k.odds, null));
+    if (sh.liq && sh.liq.books) Object.keys(sh.liq.books).forEach(bk => { const L = sh.liq.books[bk]; if (L && L.price != null) add(bk, L.price, L.liq); });
+    let best = null; cands.forEach(c => { if (!best || c.odds > best.odds) best = c; });
+    const ev = best && x.fairOdds != null ? calcEdge(best.odds, x.fairOdds) : null;
+    if (!best || (ev != null && ev < TABS_SOLO_MIN_EV)) { dropped.push(x); return; }
+    x.odds = best.odds; x.book = best.book; if (ev != null) x.ev = Math.round(ev * 10) / 10;
+    kept.push(x);
+  });
+  return { kept, dropped, failed: false };
+}
 </script>
 <script>
 const KEY = "nba_dimers_lean_v1", STATS = ["PTS", "REB", "AST", "3PM", "PRA"], BUCKETS = [["1-3%", 1, 3], ["3-5%", 3, 5], ["5-10%", 5, 10], ["10%+", 10, Infinity]];
@@ -718,7 +1234,7 @@ function importBoard() {
   const minEv = Number(document.getElementById("minev").value);
   const { results, errors } = parseMorningPropShop(raw, stat);
   if (!results.length) { say("No props found in that paste." + (errors.length ? ` ${errors.length} parse error(s).` : "")); return; }
-  const now = Date.now(); let added = 0, upd = 0, late = 0, replaced = 0, kept = new Set(), scopes = new Set();
+  const fresh = []; const now = Date.now(); let added = 0, upd = 0, late = 0, replaced = 0, kept = new Set(), scopes = new Set();
   const cand = results.filter(r => r.gameDateIso && Number(r.ev) >= minEv && !isNaN(parseInt(r.odds, 10)) && r.ou && r.line != null).filter(r => {
     const tip = _tsTipTs(r.gameDateIso, r.gameTime); if (tip != null && Math.round((tip - now) / 60000) < -5) { late++; return false; } return true;
   });
@@ -726,22 +1242,44 @@ function importBoard() {
   const before = rows.length; rows = rows.filter(x => !(x.result === "pending" && scopes.has(x.stat + "|" + x.gameDate) && !kept.has(x.key))); replaced = before - rows.length;   // a fresh paste replaces that day's open lines for the market
   cand.forEach(r => {
     const key = keyOf(r, stat), odds = parseInt(r.odds, 10), cur = rows.find(x => x.key === key);
-    if (cur) { if (cur.result === "pending") { Object.assign(cur, { odds, book: r.book, ev: Number(r.ev), proj: r.proj }); upd++; } return; }
-    rows.push({ key, player: r.player, game: r.game || "", gameDate: r.gameDateIso, gameTime: r.gameTime || "", stat, ou: r.ou, line: Number(r.line), odds, book: r.book || "", ev: Number(r.ev), proj: r.proj, result: "pending", actual: null }); added++;
+    if (cur) { if (cur.result === "pending") { Object.assign(cur, { odds, book: r.book, ev: Number(r.ev), proj: r.proj, fairOdds: _mFairOdds(odds, r.ev) }); fresh.push(cur); upd++; } return; }
+    rows.push({ key, player: r.player, game: r.game || "", gameDate: r.gameDateIso, gameTime: r.gameTime || "", stat, ou: r.ou, line: Number(r.line), odds, book: r.book || "", ev: Number(r.ev), proj: r.proj, result: "pending", actual: null, fairOdds: _mFairOdds(odds, r.ev) }); fresh.push(rows[rows.length - 1]); added++;
   });
   save(); document.getElementById("paste").value = "";
   say(`${stat}: ${added} new${upd ? `, ${upd} updated` : ""}${late ? ` · ${late} already tipped, skipped` : ""}${replaced ? ` · ${replaced} old open line${replaced === 1 ? "" : "s"} replaced` : ""}`);
   toast(`Dimers ${stat}: ${added} logged`); render();
+  if (fresh.length && document.getElementById("mkt").checked) matchBg(fresh, stat);
 }
-async function gradeAll() {
+// Keep only lines with a live price at FanDuel / Pinnacle / Prop Builder, or ProphetX / Kalshi with $200+ behind it (background, 6 at a time)
+async function matchBg(list, stat) {
+  const set = t => say(t);
+  set(`Matching ${list.length} to FD / PIN / PB / PX / Kalshi ($${TABS_SOLO_EXCH_LIQ}+)…`);
+  try {
+    const m = await _tsMatchMarket(list, (d, n) => set(`Matching ${d}/${n} to FD / PIN / PB / PX / Kalshi ($${TABS_SOLO_EXCH_LIQ}+)…`));
+    if (m.failed) { set("Market lookup failed — kept the board prices"); return; }
+    if (m.dropped.length) { const gone = new Set(m.dropped); rows = rows.filter(x => !gone.has(x)); }
+    save(); render(); set(`${stat}: ${list.length - m.dropped.length} matched at FD / PIN / PB / PX / Kalshi $${TABS_SOLO_EXCH_LIQ}+` + (m.dropped.length ? ` · ${m.dropped.length} dropped (no match)` : ""));
+  } catch (e) { set("Market lookup failed — kept the board prices"); }
+}
+const gameOver = x => {   // 170 min after tip, or any earlier day
+  const today = localYMD(new Date()); if (x.gameDate < today) return true; if (x.gameDate > today) return false;
+  const tip = _tsTipTs(x.gameDate, x.gameTime); return tip != null ? Date.now() > tip + 170 * 60000 : (new Date().getHours() >= 23);
+};
+let grading = false;
+async function gradeAll(auto) {
+  if (grading) return; grading = true;
   const btn = document.getElementById("gbtn"); btn.disabled = true; btn.textContent = "GRADING…";
   const today = localYMD(new Date()); let n = 0;
-  for (const x of rows.filter(y => y.result === "pending" && y.gameDate <= today)) {
+  for (const x of rows.filter(y => y.result === "pending" && y.gameDate <= today && (!auto || gameOver(y)))) {
     try { const r = await gradeBet(x); if (r.ok) { x.result = r.result; x.actual = r.total != null ? r.total : null; n++; } } catch (e) {}
   }
-  if (n) save(); btn.disabled = false; btn.textContent = "GRADE PENDING";
-  toast(n ? `Graded ${n}` : "Nothing final yet"); render();
+  if (n) save(); btn.disabled = false; btn.textContent = "GRADE PENDING"; grading = false;
+  if (!auto || n) toast(n ? `Graded ${n}` : "Nothing final yet"); if (n || !auto) render();
 }
+// grades itself: every 10 minutes, when the page comes back into view, and shortly after opening
+const autoTick = () => { try { if (!document.hidden && rows.some(x => x.result === "pending" && gameOver(x))) gradeAll(true); } catch (e) {} };
+setInterval(autoTick, 10 * 60000); setTimeout(autoTick, 20000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) setTimeout(autoTick, 3000); });
 const zero = () => ({ w: 0, l: 0, pl: 0 });
 function tally(set) { const a = zero(), o = zero(), u = zero(); set.forEach(x => { const add = v => { if (x.result === "hit") { v.w++; v.pl += win(x); } else if (x.result === "miss") { v.l++; v.pl -= 1; } }; add(a); add(x.ou === "over" ? o : u); }); return { a, o, u }; }
 const fmtU = n => (n >= 0 ? "+" : "") + n.toFixed(2) + "u";
