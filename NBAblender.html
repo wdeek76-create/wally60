@@ -378,6 +378,7 @@ table colgroup col.avg-col{width:16%;}
   <button class="tab-btn" onclick="switchTab('results')">PROJECTIONS</button>
   <button class="tab-btn" onclick="switchTab('morning')" style="color:#c4b5fd;">MORNING</button>
   <button class="tab-btn" onclick="switchTab('tabssolo')" style="color:#7dd3fc;">TABS SOLO</button>
+  <button class="tab-btn" onclick="switchTab('dimerssolo')" style="color:#eab308;">DIMERS SOLO</button>
   <button class="tab-btn" onclick="switchTab('tabsreport')" style="color:#7dd3fc;">TABS vs MODEL</button>
   <button class="tab-btn" onclick="switchTab('tracker')">TRACKER</button>
   <button class="tab-btn" onclick="switchTab('gamelog')">GAME LOG</button>
@@ -534,6 +535,7 @@ table colgroup col.avg-col{width:16%;}
   <div id="tracker-tab" style="display:none;"></div>
   <div id="morning-tab" style="display:none;"></div>
   <div id="tabssolo-tab" style="display:none;"></div>
+  <div id="dimerssolo-tab" style="display:none;"></div>
   <div id="tabsreport-tab" style="display:none;"></div>
   <div id="gamelog-tab" style="display:none;"></div>
 
@@ -1494,6 +1496,7 @@ function switchTab(tab) {
   document.getElementById("pace-tab").style.display = tab==="pace"?"block":"none";
   document.getElementById("morning-tab").style.display = tab==="morning"?"block":"none";
   document.getElementById("tabssolo-tab").style.display = tab==="tabssolo"?"block":"none";
+  document.getElementById("dimerssolo-tab").style.display = tab==="dimerssolo"?"block":"none";
   document.getElementById("tabsreport-tab").style.display = tab==="tabsreport"?"block":"none";
   if (tab==="tracker") renderTracker();
   if (tab==="gamelog") renderGameLog();
@@ -1508,6 +1511,7 @@ function switchTab(tab) {
   if (tab==="captool") renderCapTool();
   if (tab==="evcalc") renderNbaModel();
   if (tab==="tabssolo") renderTabsSolo();
+  if (tab==="dimerssolo") renderDimersSolo();
   if (tab==="tabsreport") renderTabsReport();
   if (tab==="morning") {
     renderMorning();
@@ -8319,7 +8323,7 @@ async function _fetchSeasonGameDay(isoDate) {
 // eating the quota instead of guessing.
 // Interactive storage manager: every key, its size, and a delete button.
 // Bets are protected — no delete button, no accidental loss.
-const STORAGE_PROTECTED = ["nba_blender_bets", "nba_morning_bets_v1", "nba_tabs_solo_v1", "nba_tabs_solo_meta_v1", "nba_model_log_v1", "nba_morning_solo_agg_v1"];
+const STORAGE_PROTECTED = ["nba_blender_bets", "nba_morning_bets_v1", "nba_tabs_solo_v1", "nba_tabs_solo_meta_v1", "nba_dimers_solo_v1", "nba_dimers_solo_meta_v1", "nba_model_log_v1", "nba_morning_solo_agg_v1"];
 // Keys that cost real work to replace if dropped (pasted/uploaded by hand).
 const STORAGE_SOURCE_KEYS = [
   "nba_injuries_cache", "nba_matchup_opp_avg_v1", "nba_bbref_adv_v1",
@@ -27021,6 +27025,300 @@ function renderTabsSolo() {
   el.innerHTML = `<div style="max-width:1100px;margin:0 auto;padding:8px;">${paste}${filters}${tiles}${h("By release")}${table("Release", relLines)}${h("By edge")}${table("Edge", edgeLines)}${h("By market")}${table("Market", mktLines)}${h("By RW context (clean vs upside / downside / flagged)")}${table("Context", ctxLines)}${h("Projected vs actual")}${pvaTable}${h("By day")}${table("Day", dayLines)}${h(`Bets (showing ${Math.min(rows.length, tabsSoloShow)} of ${rows.length}, newest first)`)}<div style="overflow-x:auto;"><table style="border-collapse:collapse;font-size:12px;width:100%;min-width:760px;"><tbody>${list}</tbody></table></div>${rows.length > tabsSoloShow ? `<div style="margin-top:8px;display:flex;gap:8px;"><button onclick="tabsSoloShow+=100;renderTabsSolo()" style="background:transparent;border:1px solid #1a1d22;color:#e6edf5;border-radius:6px;padding:6px 12px;font-size:11px;font-weight:700;cursor:pointer;">SHOW 100 MORE</button><button onclick="tabsSoloShow=1e9;renderTabsSolo()" style="background:transparent;border:1px solid #1a1d22;color:#e6edf5;border-radius:6px;padding:6px 12px;font-size:11px;font-weight:700;cursor:pointer;">SHOW ALL ${rows.length}</button></div>` : ""}</div>`;
 }
 
+// ── DIMERS SOLO (clone of Tabs Solo for the Dimers projection set) ───────────────────────────────────────────────────────────────
+// The Dimers projection set, pasted from PropShop on its own and tracked solo for the rest of the year: every line
+// at DIMERS_SOLO_MIN_EV%+ is logged flat 1u at the pasted price, same markets as Morning. Each row is tagged by RELEASE from
+// the game's tip time: "30min" when the paste lands within DIMERS_SOLO_WINDOW_MIN of tip, otherwise "initial" (the first
+// release). Both releases of the same line are kept as separate rows so they can be compared. Own storage, never mixed
+// into the Morning log or the ensemble.
+const DIMERS_SOLO_KEY = "nba_dimers_solo_v1", DIMERS_SOLO_META_KEY = "nba_dimers_solo_meta_v1";
+const DIMERS_SOLO_MIN_EV = 1, DIMERS_SOLO_WINDOW_MIN = 45;
+const DIMERS_SOLO_REL = { initial: "INITIAL", "30min": "30 MIN" };
+let dimersSolo = [], dimersSoloMeta = {}, dimersSoloStat = "ALL", dimersSoloRel = "ALL", dimersSoloInfo = "", dimersSoloSelStat = "AUTO", dimersSoloShow = 60, dimersSoloCtx = "ALL";
+const DIMERS_CTX = { clean: ["CLEAN", "#e6edf5"], upside: ["UPSIDE", "#4ade80"], downside: ["DOWNSIDE", "#fbbf24"], flagged: ["FLAGGED", "#f87171"] };
+try { dimersSolo = JSON.parse(localStorage.getItem(DIMERS_SOLO_KEY) || "[]") || []; } catch (e) { dimersSolo = []; }
+try { dimersSoloMeta = JSON.parse(localStorage.getItem(DIMERS_SOLO_META_KEY) || "{}") || {}; } catch (e) { dimersSoloMeta = {}; }
+// One-time reset (requested 2026-10-25): everything logged before RW context / minutes / sim fair were tracked is wiped once, on first open of this version.
+try { if (localStorage.getItem("nba_dimers_solo_reset_20261025") !== "1") { dimersSolo = []; dimersSoloMeta = {}; localStorage.setItem(DIMERS_SOLO_KEY, "[]"); localStorage.setItem(DIMERS_SOLO_META_KEY, "{}"); localStorage.setItem("nba_dimers_solo_reset_20261025", "1"); } } catch (e) {}
+function dimersSoloSave() { try { localStorage.setItem(DIMERS_SOLO_KEY, JSON.stringify(dimersSolo)); localStorage.setItem(DIMERS_SOLO_META_KEY, JSON.stringify(dimersSoloMeta)); } catch (e) { console.warn("[DIMERS SOLO] save failed", e); } }
+function _dsTipTs(dateIso, timeStr) {
+  const m = String(timeStr || "").match(/(\d{1,2}):(\d{2})\s*([AP])M/i), d = String(dateIso || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m || !d) return null;
+  let h = Number(m[1]) % 12; if (/p/i.test(m[3])) h += 12;
+  return new Date(Number(d[1]), Number(d[2]) - 1, Number(d[3]), h, Number(m[2])).getTime();
+}
+// RW logic for a Dimers Solo bet, as a TAG (nothing is dropped): the same injury / lineup / blurb reads the Morning gates use.
+//   flagged  = his own injury / depth-chart status, lineups disagree, not a clean starter, or a lineup toss-up (RW logic would pass on him)
+//   downside = a blurb or teammate situation works AGAINST this side (floor risk on an over, upside for someone else on an under, uncertain teammate)
+//   upside   = a blurb works FOR this side (ceiling on an over, floor risk on an under)
+//   clean    = none of the above
+function dimersSoloContext(player, team, ou) {
+  try {
+    const g = (typeof _wmInjuryGate === "function") ? _wmInjuryGate(player, team) : { both: null, over: null, under: null };
+    if (g.both) return { cls: "flagged", why: g.both };
+    const lc = lineupConflictFor(player); if (lc) return { cls: "flagged", why: "lineups disagree: " + lc };
+    try { const ld = getLineupsData(), me = ld && ld.players ? ld.players[norm(player)] : null, st = me ? String(me.status || "").toUpperCase() : ""; if (st && st !== "STARTING") return { cls: "flagged", why: "lineups: " + st }; } catch (e) {}
+    const tu = lineupTossupFor(player, ou); if (tu) return { cls: "flagged", why: "toss-up: " + tu };
+    const ben = (typeof getBeneficiaryForPlayer === "function") ? getBeneficiaryForPlayer(player) : null;
+    const ceil = !!(ben && /ceiling/i.test(ben.reason || "")), floor = !!(ben && /floor risk/i.test(ben.reason || ""));
+    if (g[ou]) return { cls: "downside", why: g[ou] };
+    if ((ou === "over" && ceil) || (ou === "under" && floor)) return { cls: "upside", why: (ceil ? "ceiling" : "floor risk") + " from " + ben.causedBy + "'s note" };
+    return { cls: "clean", why: "" };
+  } catch (e) { return { cls: "clean", why: "" }; }
+}
+function dimersSoloRetag() { let n = 0; dimersSolo.filter(x => x.result === "pending").forEach(x => { const c = dimersSoloContext(x.player, x.team, x.ou); if (c.cls !== x.ctx) n++; x.ctx = c.cls; x.ctxWhy = c.why; }); dimersSoloSave(); showToast(`Re-tagged pending bets (${n} changed)`); renderDimersSolo(); }
+// Fresh RotoWire injuries / lineups / news before a Dimers Solo paste is tagged (skipped when synced in the last 3 minutes, or RW isn't connected).
+async function _dsSyncRw(say) {
+  try {
+    if (!(_rwHosted() || getRwKey())) return;
+    const sy = JSON.parse(localStorage.getItem(RW_API_SYNC_KEY) || "null");
+    if (sy && Date.now() - sy.at < 180000) return;
+    say("Syncing RotoWire\u2026");
+    await rwApiSyncAll(true);
+  } catch (e) { console.warn("[DIMERS SOLO] RW sync skipped", e && e.message); }
+}
+// Dimers bets are only kept when the market has a matching price at FanDuel / Pinnacle / Prop Builder, or ProphetX / Kalshi with $200+ behind it (live OpticOdds read).
+// The bet takes the best of those prices; with no match it is dropped.
+const DIMERS_SOLO_BOOKS = new Set(["FanDuel", "Pinnacle", "Prop Builder", "ProphetX", "Kalshi"]), DIMERS_SOLO_EXCH_LIQ = 200;
+async function _dsMatchMarket(rows, progress) {
+  const nameOf = bk => BOOK_CODE_NAMES[String(bk || "").trim().toUpperCase()] || String(bk || "").trim();
+  const shadows = rows.map(x => ({ _t: x, player: x.player, stat: x.stat, ou: x.ou, line: x.line, odds: x.odds, book: nameOf(x.book), fair: x.fairOdds, altBooks: [], team: x.team, refreshOwn: true }));
+  let ok = true;
+  try {   // 6 players at a time (one live lookup each), not one after another
+    let done = 0;
+    for (let i = 0; i < shadows.length; i += 6) { await Promise.all(shadows.slice(i, i + 6).map(sh => ooRefreshBetsForPic([sh]).catch(() => null))); done = Math.min(shadows.length, i + 6); if (progress) progress(done, shadows.length); }
+  } catch (e) { ok = false; console.warn("[DIMERS SOLO] market match failed", e); }
+  if (!ok) return { kept: rows, dropped: [], failed: true };
+  const kept = [], dropped = [];
+  shadows.forEach(sh => {
+    const x = sh._t, cands = [];
+    const add = (bk, odds, liq) => { const n = nameOf(bk); if (odds == null || isNaN(odds) || !DIMERS_SOLO_BOOKS.has(n)) return; if (_mIsExchange(n) && !(liq != null && liq >= DIMERS_SOLO_EXCH_LIQ)) return; cands.push({ book: n, odds: Number(odds) }); };
+    const depth = bk => (sh.liq && sh.liq.books && sh.liq.books[bk]) ? sh.liq.books[bk].liq : null;
+    if (!sh.ownGone) add(sh.ownLive != null ? x.book : sh.book, sh.ownLive != null ? sh.ownLive : x.odds, depth(nameOf(x.book)));
+    (sh.altBooks || []).forEach(a => { if (a && (a.line == null || Number(a.line) === Number(x.line))) add(a.book, a.odds, depth(nameOf(a.book))); });
+    (sh.keyOff || []).forEach(k => add(k.book, k.odds, null));
+    if (sh.liq && sh.liq.books) Object.keys(sh.liq.books).forEach(bk => { const L = sh.liq.books[bk]; if (L && L.price != null) add(bk, L.price, L.liq); });
+    let best = null; cands.forEach(c => { if (!best || c.odds > best.odds) best = c; });
+    const ev = best && x.fairOdds != null ? calcEdge(best.odds, x.fairOdds) : null;
+    if (!best || (ev != null && ev < DIMERS_SOLO_MIN_EV)) { dropped.push(x); return; }
+    x.odds = best.odds; x.book = best.book; if (ev != null) x.ev = Math.round(ev * 10) / 10;
+    kept.push(x);
+  });
+  return { kept, dropped, failed: false };
+}
+async function dimersSoloImport() {
+  const ta = document.getElementById("ds-paste"), info = document.getElementById("ds-info");
+  const raw = ta ? ta.value : "", say = t => { dimersSoloInfo = t; if (info) info.textContent = t; };
+  if (!raw.trim()) { say("Paste the Dimers PropShop board first."); return; }
+  let stat = document.getElementById("ds-stat").value;
+  const relPick = document.getElementById("ds-rel").value;
+  if (stat === "AUTO") {
+    stat = morningDetectMarket(raw);
+    if (!stat) { say("Couldn't tell which market this is — pick it in the Market box."); return; }
+    if (stat.startsWith("UNSUPPORTED:")) { say(`That looks like a ${stat.slice(12)} board — only PTS, 3PM, REB, AST and PRA are tracked.`); return; }
+  }
+  const { results, errors } = parseMorningPropShop(raw, stat);
+  if (!results.length) { say("No props found in that paste." + (errors.length ? ` ${errors.length} parse error(s).` : "")); return; }
+  await _dsSyncRw(say);
+  { const warn = morningPasteWarnings(raw, results, stat, "dimers"); if (warn.length && !confirm("Check this paste before it's stored:\n\n\u2022 " + warn.join("\n\u2022 ") + "\n\nImport it anyway?")) { say("Not imported \u2014 " + warn[0] + "."); return; } }
+  const now = Date.now(), nowIso = new Date().toISOString(), today = localYMD(new Date());
+  let added = 0, upd = 0, late = 0, replaced = 0, noMatch = 0; const touched = []; const seen = { initial: 0, "30min": 0 }, pasteKeys = new Set(), scopes = new Set();
+  results.forEach(r => {   // pass 1: which market / day / release this paste covers, and which lines it holds
+    if (!r.gameDateIso || _mRejected(r.player)) return;
+    const tip = _dsTipTs(r.gameDateIso, r.gameTime), mins = tip != null ? Math.round((tip - now) / 60000) : null;
+    if (mins != null && mins < -5) return;
+    const rel = relPick !== "AUTO" ? relPick : (mins != null && mins <= DIMERS_SOLO_WINDOW_MIN ? "30min" : "initial");
+    scopes.add(stat + "|" + r.gameDateIso + "|" + rel); pasteKeys.add([resolveNorm(r.player), stat, r.gameDateIso, r.ou, Number(r.line), rel].join("|"));
+  });
+  { const before = dimersSolo.length; dimersSolo = dimersSolo.filter(x => !(x.result === "pending" && scopes.has(x.stat + "|" + x.gameDate + "|" + x.release) && !pasteKeys.has(x.key))); replaced = before - dimersSolo.length; }
+  results.forEach(r => {
+    if (!r.gameDateIso || _mRejected(r.player)) return;
+    const tip = _dsTipTs(r.gameDateIso, r.gameTime), mins = tip != null ? Math.round((tip - now) / 60000) : null;
+    if (mins != null && mins < -5) { late++; return; }                       // already tipped: not a bet
+    const rel = relPick !== "AUTO" ? relPick : (mins != null && mins <= DIMERS_SOLO_WINDOW_MIN ? "30min" : "initial");
+    seen[rel]++;
+    if (!(Number(r.ev) >= DIMERS_SOLO_MIN_EV)) return;
+    const odds = parseInt(r.odds, 10); if (isNaN(odds)) return;
+    const key = [resolveNorm(r.player), stat, r.gameDateIso, r.ou, Number(r.line), rel].join("|");
+    const cur = dimersSolo.find(x => x.key === key);
+    const mn = r.minutes > 0 ? Number(r.minutes) : _mCsvMin("dimers", r.player);   // projected minutes: from the PropShop board, else the loaded Dimers file
+    const cx = dimersSoloContext(r.player, _mTeamFor(r.player), r.ou);
+    if (cur) { if (cur.result === "pending") { Object.assign(cur, { odds, book: r.book, ev: Number(r.ev), proj: r.proj, min: mn, fairOdds: _mFairOdds(odds, r.ev), ctx: cx.cls, ctxWhy: cx.why }); upd++; touched.push(cur); } return; }
+    dimersSolo.push({ key, player: r.player, game: r.game || "", team: _mTeamFor(r.player), gameDate: r.gameDateIso, gameTime: r.gameTime || "", stat, ou: r.ou, line: Number(r.line), odds, book: r.book, ev: Number(r.ev), proj: r.proj, min: mn, fairOdds: _mFairOdds(odds, r.ev), ctx: cx.cls, ctxWhy: cx.why, at: nowIso, release: rel, minToTip: mins, result: "pending", actual: null }); touched.push(dimersSolo[dimersSolo.length - 1]);
+    added++;
+  });
+  const toMatch = touched.slice();   // the match runs after the import is saved and shown, in the background
+  dimersSoloSelStat = _mNextStat(stat);
+  Object.keys(seen).forEach(rel => { if (seen[rel]) dimersSoloMeta[today + "|" + rel + "|" + stat] = { n: seen[rel], at: now }; });
+  dimersSoloSave();
+  if (ta) ta.value = "";
+  say(`${stat}: ${added} new${upd ? `, ${upd} updated` : ""} · ${seen.initial} initial / ${seen["30min"]} at 30 min${late ? ` · ${late} already tipped, skipped` : ""}${noMatch ? ` · ${noMatch} dropped (no match at FD / PIN / PB / PX / Kalshi $200+)` : ""}${replaced ? ` · ${replaced} old open line${replaced === 1 ? "" : "s"} from the earlier paste replaced` : ""}`);
+  showToast(`Dimers Solo ${stat}: ${added} logged`);
+  renderDimersSolo();  { const ss = document.getElementById("ds-stat"); if (ss) ss.value = dimersSoloSelStat; }
+  if (toMatch.length) {
+    const setInfo = t => { dimersSoloInfo = t; const el = document.getElementById("ds-info"); if (el) el.textContent = t; };
+    setInfo(`Imported ${toMatch.length}. Matching to FanDuel / Pinnacle / Prop Builder / ProphetX / Kalshi ($${DIMERS_SOLO_EXCH_LIQ}+) in the background\u2026`);
+    _dsMatchMarket(toMatch, (d, n) => setInfo(`Matching ${d}/${n} to FD / PIN / PB / PX / Kalshi ($${DIMERS_SOLO_EXCH_LIQ}+)\u2026`)).then(m => {
+      if (m.failed) { setInfo("Market lookup failed \u2014 kept the board prices"); return; }
+      if (m.dropped.length) { const gone = new Set(m.dropped); dimersSolo = dimersSolo.filter(x => !gone.has(x)); }
+      dimersSoloSave();
+      setInfo(`${stat}: ${toMatch.length - m.dropped.length} matched at FD / PIN / PB / PX / Kalshi $${DIMERS_SOLO_EXCH_LIQ}+` + (m.dropped.length ? ` \u00b7 ${m.dropped.length} dropped (no match)` : ""));
+      try { renderDimersSolo(); } catch (e) {}
+    }).catch(e => console.warn("[DIMERS SOLO] match", e));
+  }
+}
+async function dimersSoloGrade(auto) {
+  const btn = document.getElementById("ds-grade-btn"); if (btn) { btn.disabled = true; btn.textContent = "GRADING…"; }
+  const today = localYMD(new Date()); let graded = 0;
+  for (const x of dimersSolo.filter(y => y.result === "pending" && y.gameDate <= today)) {
+    try { const r = await gradeBet(x); if (r.ok) { x.result = r.result; x.actual = r.total != null ? r.total : null; if (r.actualMin != null) x.actualMin = r.actualMin; graded++; } } catch (e) {}
+  }
+  if (graded) dimersSoloSave();
+  if (!auto || graded) showToast(graded ? `Dimers Solo: graded ${graded}` : "Dimers Solo: nothing final yet");
+  renderDimersSolo();
+  // push the report: right away when you grade by hand; on auto-grade only once the day's bets are all settled (games finish one by one, so no repeat posts)
+  if (graded && getDimersWebhook()) {
+    const days = [...new Set(dimersSolo.filter(x => x.result !== "pending").map(x => x.gameDate))];
+    const dayDone = !dimersSolo.some(x => x.result === "pending" && x.gameDate <= today);
+    if (!auto || dayDone) await dimersSoloPostReport(true);
+  }
+}
+function dimersSoloSet(kind, v) { if (kind === "stat") dimersSoloStat = v; else if (kind === "ctx") dimersSoloCtx = v; else dimersSoloRel = v; renderDimersSolo(); }
+function dimersSoloDelete(key) { dimersSolo = dimersSolo.filter(x => x.key !== key); dimersSoloSave(); renderDimersSolo(); }
+function dimersSoloClear() { if (!confirm(`Delete all ${dimersSolo.length} Dimers Solo bets? This can't be undone.`)) return; dimersSolo = []; dimersSoloMeta = {}; dimersSoloSave(); renderDimersSolo(); }
+// One clean text report of the whole Dimers Solo dashboard (all bets, filters ignored): overall, over vs under, then per market / release / edge / RW context / day, each with its own over-under split.
+function dimersSoloReportText(opts) {
+  // Narrow on purpose (36 characters or less per line) so it reads on a phone: a short main row per bucket, and the over / under split on the line under it.
+  opts = opts || {};
+  const rows = dimersSolo.filter(x => x.result === "hit" || x.result === "miss");
+  if (!rows.length) return "";
+  const win = x => x.odds > 0 ? x.odds / 100 : 100 / Math.abs(x.odds);
+  const agg = set => { const v = { w: 0, l: 0, pl: 0 }; set.forEach(x => { if (x.result === "hit") { v.w++; v.pl += win(x); } else { v.l++; v.pl -= 1; } }); v.n = v.w + v.l; return v; };
+  const u = n => (n >= 0 ? "+" : "") + n.toFixed(1) + "u";
+  const rec = v => `${v.w}-${v.l}`;
+  const pct = v => `${Math.round(v.w / v.n * 100)}%`;
+  const roi = v => { const r = v.pl / v.n * 100; return (r >= 0 ? "+" : "") + r.toFixed(0) + "%"; };
+  const L = 6;
+  const block = (label, set) => {
+    const a = agg(set); if (!a.n) return [];
+    const o = agg(set.filter(x => x.ou === "over")), un = agg(set.filter(x => x.ou === "under"));
+    const out = [`${label.length >= L ? label + " " : label.padEnd(L)}${rec(a)} ${pct(a)} ${u(a.pl)} ${roi(a)}`];
+    const sub = [o.n ? `O ${rec(o)} ${u(o.pl)}` : "", un.n ? `U ${rec(un)} ${u(un.pl)}` : ""].filter(Boolean).join("  ");
+    if (o.n && un.n) out.push("  " + sub); else if (sub) out[0] += "  " + sub.split(" ")[0];   // only one side bet: just say which
+    return out;
+  };
+  const sect = (title, items) => { const ls = [].concat(...items.map(([l, set]) => block(l, set))); return ls.length ? ["", title].concat(ls) : []; };
+  const all = agg(rows), days = [...new Set(rows.map(x => x.gameDate))].sort();
+  const lastDay = days[days.length - 1], multi = days.length > 1;
+  const wk = rows.filter(x => (Date.parse(lastDay) - Date.parse(x.gameDate)) / 864e5 < 7);
+  const openN = dimersSolo.filter(x => x.result === "pending").length;
+  const head = [`DIMERS SOLO \u00b7 ${days[0].slice(5)}${multi ? "\u2192" + lastDay.slice(5) : ""}`, `${all.n} graded${openN ? ` \u00b7 ${openN} open` : ""}`]
+    .concat(sect(multi ? "OVERALL" : "RESULTS", [[lastDay.slice(5), rows.filter(x => x.gameDate === lastDay)]].concat(multi && wk.length !== rows.length ? [["7D", wk]] : []).concat(multi ? [["ALL", rows]] : [])));
+  const S = {
+    today: multi ? sect(`${lastDay === localYMD(new Date()) ? "TODAY" : "LATEST"} ${lastDay.slice(5)} BY MARKET`, MORNING_STATS.map(st => [st, rows.filter(x => x.gameDate === lastDay && x.stat === st)])) : [],
+    market: sect(`BY MARKET${multi ? " \u00b7 ALL TIME" : ""}`, MORNING_STATS.map(st => [st, rows.filter(x => x.stat === st)])),
+    release: sect(`BY RELEASE${multi ? " \u00b7 ALL TIME" : ""}`, Object.keys(DIMERS_SOLO_REL).map(r => [r === "initial" ? "INIT" : "30MIN", rows.filter(x => x.release === r)])),
+    edge: sect(`EDGE 5%+${multi ? " \u00b7 ALL TIME" : ""}`, [["5%+", rows.filter(x => x.ev >= 5)]].concat(MORNING_SOLO_BUCKETS.filter(([l, lo]) => lo >= 5).map(([l, lo, hi]) => [l.replace("%", ""), rows.filter(x => x.ev >= lo && x.ev < hi)])).concat(multi ? [[`5%+ ${lastDay.slice(5)}`, rows.filter(x => x.ev >= 5 && x.gameDate === lastDay)]] : [])),
+    context: sect(`RW CONTEXT${multi ? " \u00b7 ALL TIME" : ""}`, [["CLEAN", "clean"], ["UP", "upside"], ["DOWN", "downside"], ["FLAG", "flagged"]].map(([l, c]) => [l, rows.filter(x => (x.ctx || "clean") === c)])),
+    day: sect("BY DAY", days.slice(-7).reverse().map(d => [d.slice(5), rows.filter(x => x.gameDate === d)])),
+  };
+  const pv = [], pvRow = (lbl, pairs) => { if (!pairs.length) return; const n = pairs.length, ap = pairs.reduce((t, q) => t + q[0], 0) / n, aa = pairs.reduce((t, q) => t + q[1], 0) / n, mae = pairs.reduce((t, q) => t + Math.abs(q[0] - q[1]), 0) / n; pv.push(`${lbl.padEnd(L)}${ap.toFixed(2)}\u2192${aa.toFixed(2)} \u00b1${mae.toFixed(2)} n${n}`); };
+  MORNING_STATS.forEach(st => pvRow(st, rows.filter(x => x.stat === st && x.proj > 0 && x.actual != null).map(x => [Number(x.proj), Number(x.actual)])));
+  { const seen = new Set(), mp = []; rows.forEach(x => { if (!(x.min > 0) || x.actualMin == null) return; const k = resolveNorm(x.player) + "|" + x.gameDate; if (seen.has(k)) return; seen.add(k); mp.push([Number(x.min), Number(x.actualMin)]); }); pvRow("MIN", mp); }
+  S.pva = pv.length ? ["", "PROJ \u2192 ACTUAL (\u00b1 miss)", ...pv] : [];
+  const foot = ["", "1u flat \u00b7 pushes/DNPs out"];
+  const order = opts.order || ["edge", "today", "market", "release", "context", "day", "pva"];
+  let out = head.slice();
+  const maxLen = opts.max || Infinity;
+  order.forEach(k => { const next = out.concat(S[k] || []); if (next.concat(foot).join("\n").length <= maxLen || out.length === head.length) out = next; });   // sections that don't fit are dropped, never cut in half
+  return out.concat(foot).join("\n");
+}
+// Dimers Solo's own webhook (saved only in this browser): grading Dimers Solo posts the performance report there.
+const DIMERS_WEBHOOK_KEY = "nba_dimers_solo_webhook";
+function getDimersWebhook() { try { return localStorage.getItem(DIMERS_WEBHOOK_KEY) || ""; } catch (e) { return ""; } }
+function dimersSoloSetWebhook() {
+  const v = prompt("Paste the Discord webhook URL for the Dimers Solo report (Channel settings \u2192 Integrations \u2192 Webhooks \u2192 Copy Webhook URL).\n\nSaved only in this browser. Leave empty to remove it.", getDimersWebhook());
+  if (v === null) return;
+  const t = v.trim();
+  if (t && !/^https:\/\/(?:[a-z]+\.)?discord(?:app)?\.com\/api\/webhooks\/\d+\/[\w-]+/i.test(t)) { showToast("That doesn't look like a Discord webhook URL"); return; }
+  try { if (t) localStorage.setItem(DIMERS_WEBHOOK_KEY, t); else localStorage.removeItem(DIMERS_WEBHOOK_KEY); } catch (e) {}
+  showToast(t ? "Dimers Solo webhook saved" : "Dimers Solo webhook removed");
+  renderDimersSolo();
+  // already graded before the webhook existed? offer to send what's there right now
+  if (t && dimersSolo.some(x => x.result === "hit" || x.result === "miss") && confirm("Webhook saved. Post the current Dimers Solo report to it now?")) dimersSoloPostReport();
+}
+async function dimersSoloPostReport(quiet) {
+  const hook = getDimersWebhook();
+  if (!hook) { if (!quiet) dimersSoloSetWebhook(); return false; }
+  const t = dimersSoloReportText({ max: 1900, order: ["edge", "today", "market", "day", "context", "release", "pva"] });
+  if (!t) { if (!quiet) showToast("Nothing graded in Dimers Solo yet"); return false; }
+  try {
+    const r = await fetch(hook + (hook.includes("?") ? "&" : "?") + "wait=true", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content: "```\n" + t + "\n```", allowed_mentions: { parse: [] } }) });
+    if (!r.ok) throw new Error("Discord said " + r.status);
+    if (!quiet) showToast("Dimers Solo report posted \u2713"); return true;
+  } catch (e) { showToast("Dimers Solo post failed \u2014 " + (e && e.message || e)); return false; }
+}
+function dimersSoloCopyReport() {
+  const t = dimersSoloReportText(); if (!t) { showToast("Nothing graded in Dimers Solo yet"); return; }
+  const text = "```\n" + t + "\n```";   // code block so Discord keeps the columns lined up
+  try { navigator.clipboard.writeText(text).then(() => showToast("Dimers Solo report copied"), () => prompt("Copy:", text)); } catch (e) { prompt("Copy:", text); }
+}
+function dimersSoloExport() {
+  if (!dimersSolo.length) { showToast("Dimers Solo is empty"); return; }
+  const cols = ["gameDate", "gameTime", "release", "minToTip", "player", "team", "stat", "ou", "line", "odds", "book", "ev", "proj", "min", "fairOdds", "ctx", "ctxWhy", "result", "actual"];
+  const q = v => { const s = v == null ? "" : String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+  const blob = new Blob([cols.join(",") + "\n" + dimersSolo.map(b => cols.map(c => q(b[c])).join(",")).join("\n")], { type: "text/csv" });
+  const url = URL.createObjectURL(blob), a = document.createElement("a");
+  a.href = url; a.download = `DimersSolo ${_psDate()} ${_nowClock()}.csv`; a.style.display = "none"; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 500);
+}
+function renderDimersSolo() {
+  const el = document.getElementById("dimerssolo-tab"); if (!el) return;
+  const esc = _mEsc, today = localYMD(new Date());
+  const mono = "font-family:'JetBrains Mono','Menlo',monospace;";
+  const card = "background:#0a0b0e;border:1px solid #1a1d22;border-radius:10px;padding:14px;margin-bottom:12px;";
+  const C = { over: "#f87171", under: "#4ade80", lab: "#e6edf5" };
+  const btn = (label, onclick, on, color) => `<button onclick="${onclick}" style="background:${on ? (color || "#7dd3fc") + "22" : "transparent"};border:1px solid ${on ? (color || "#7dd3fc") : "#1a1d22"};color:${on ? (color || "#7dd3fc") : "#e6edf5"};border-radius:6px;padding:5px 11px;font-size:11px;font-weight:700;cursor:pointer;">${label}</button>`;
+  const rows = dimersSolo.filter(x => (dimersSoloStat === "ALL" || x.stat === dimersSoloStat) && (dimersSoloRel === "ALL" || x.release === dimersSoloRel) && (dimersSoloCtx === "ALL" || (x.ctx || "clean") === dimersSoloCtx));
+  const win = x => x.odds > 0 ? x.odds / 100 : 100 / Math.abs(x.odds);
+  const agg = set => { const v = { w: 0, l: 0, p: 0, pl: 0, open: 0 }; set.forEach(x => { if (x.result === "hit") { v.w++; v.pl += win(x); } else if (x.result === "miss") { v.l++; v.pl -= 1; } else if (x.result === "void") v.p++; else v.open++; }); return v; };
+  const num = (v, plus) => (plus && v > 0 ? "+" : "") + v.toFixed(2);
+  const cell = v => { const n = v.w + v.l; if (!n) return `<td style="padding:5px 9px;text-align:center;color:#e6edf5;">—</td><td style="padding:5px 9px;text-align:center;color:#e6edf5;">—</td>`; const c = v.pl >= 0 ? "#4ade80" : "#f87171"; return `<td style="padding:5px 9px;text-align:center;white-space:nowrap;color:#fff;">${v.w}-${v.l} <span style="color:#e6edf5;margin-left:6px;">${(v.w / n * 100).toFixed(0)}%</span></td><td style="padding:5px 9px;text-align:center;white-space:nowrap;color:${c};">${num(v.pl, true)}u <span style="opacity:.85;margin-left:6px;">${(v.pl / n * 100).toFixed(0)}%</span></td>`; };
+  const th = (t, span) => `<th${span ? ` colspan="${span}"` : ""} style="padding:6px 9px;font-size:10px;letter-spacing:.5px;text-transform:uppercase;text-align:center;color:#e6edf5;white-space:nowrap;">${t}</th>`;
+  const table = (head, lines) => `<div style="overflow-x:auto;margin-bottom:12px;"><table style="border-collapse:collapse;min-width:620px;font-size:12px;"><thead><tr>${th(head)}${th("All", 2)}${th(`<span style="color:${C.over};">Over</span>`, 2)}${th(`<span style="color:${C.under};">Under</span>`, 2)}</tr></thead><tbody>${lines.map(({ label, set, total }) => { const a = agg(set), o = agg(set.filter(x => x.ou === "over")), u = agg(set.filter(x => x.ou === "under")); return `<tr style="border-top:1px solid #1a1d22;${total ? "background:#0a0d12;font-weight:800;" : ""}"><td style="padding:5px 10px;font-weight:800;color:#fff;white-space:nowrap;">${label}</td>${cell(a)}${cell(o)}${cell(u)}</tr>`; }).join("")}</tbody></table></div>`;
+  const h = t => `<div style="font-size:12px;font-weight:800;color:#fff;letter-spacing:.8px;text-transform:uppercase;margin:6px 0;">${t}</div>`;
+  // paste panel + per-market / per-release check grid for today
+  const gridCell = (stat, rel) => { const m = dimersSoloMeta[today + "|" + rel + "|" + stat]; return m ? `<span title="${m.n} lines seen · pasted ${new Date(m.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}" style="color:#4ade80;font-weight:800;">✓<span style="color:#e6edf5;font-weight:600;font-size:10px;"> ${m.n}</span></span>` : `<span style="color:#6b7380;">○</span>`; };
+  const grid = `<div style="display:grid;grid-template-columns:auto repeat(${MORNING_STATS.length},auto);gap:3px 12px;align-items:center;font-size:11px;"><span></span>${MORNING_STATS.map(s => `<b style="color:#e6edf5;text-align:center;">${s}</b>`).join("")}${Object.keys(DIMERS_SOLO_REL).map(rel => `<b style="color:#e6edf5;">${DIMERS_SOLO_REL[rel]}</b>${MORNING_STATS.map(s => `<span style="text-align:center;">${gridCell(s, rel)}</span>`).join("")}`).join("")}</div>`;
+  const opts = `<option value="AUTO"${dimersSoloSelStat === "AUTO" ? " selected" : ""}>Auto-detect</option>` + MORNING_STATS.map(s => `<option value="${s}"${s === dimersSoloSelStat ? " selected" : ""}>${s} · ${MORNING_STAT_LABEL[s]}</option>`).join("");
+  const sel = "background:#050507;border:1px solid #1a1d22;color:#e2e8f0;border-radius:5px;padding:4px 6px;";
+  const paste = `<div style="${card}"><div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:10px;align-items:flex-start;"><div><div style="font-size:14px;font-weight:800;color:#fff;letter-spacing:1px;">DIMERS SOLO</div><div style="font-size:11px;color:#e6edf5;margin-top:3px;max-width:620px;line-height:1.5;">Paste the Dimers board from PropShop, one market per paste. Every ${DIMERS_SOLO_MIN_EV}%+ line is logged 1u flat. Each line is tagged <b>30 MIN</b> if its game tips within ${DIMERS_SOLO_WINDOW_MIN} min of the paste, otherwise <b>INITIAL</b> (Auto) — per game, so one paste can hold both.</div></div>${grid}</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px;"><label style="font-size:11px;color:#e6edf5;">Market <select id="ds-stat" onchange="dimersSoloSelStat=this.value" style="${sel}">${opts}</select></label><label style="font-size:11px;color:#e6edf5;">Release <select id="ds-rel" style="${sel}"><option value="AUTO">Auto (from tip time)</option><option value="initial">Initial</option><option value="30min">30 min</option></select></label>
+    <button onclick="dimersSoloImport()" style="background:#7c3aed;border:none;color:#fff;border-radius:6px;padding:7px 16px;font-size:12px;font-weight:800;cursor:pointer;">IMPORT</button><button id="ds-grade-btn" onclick="dimersSoloGrade()" style="background:#1e40af;border:none;color:#fff;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:800;cursor:pointer;">GRADE PENDING</button><button onclick="${getDimersWebhook() ? "dimersSoloPostReport()" : "dimersSoloSetWebhook()"}" title="Grading Dimers Solo posts the report to this webhook" style="background:#5865f2;border:none;color:#fff;border-radius:6px;padding:7px 12px;font-size:11px;font-weight:800;cursor:pointer;">${getDimersWebhook() ? "➤ POST REPORT" : "🔗 WEBHOOK"}</button>${getDimersWebhook() ? `<button onclick="dimersSoloSetWebhook()" style="background:transparent;border:1px solid #1a1d22;color:#e6edf5;border-radius:6px;padding:7px 10px;font-size:11px;font-weight:700;cursor:pointer;">⚙</button>` : ""}<button onclick="dimersSoloCopyReport()" title="Copy the whole dashboard as one clean text report" style="background:#7c3aed;border:none;color:#fff;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:800;cursor:pointer;">COPY REPORT</button><button onclick="dimersSoloExport()" style="background:transparent;border:1px solid #1a1d22;color:#e6edf5;border-radius:6px;padding:7px 12px;font-size:11px;font-weight:700;cursor:pointer;">EXPORT CSV</button><button onclick="dimersSoloClear()" style="background:transparent;border:1px solid #7f1d1d;color:#f87171;border-radius:6px;padding:7px 12px;font-size:11px;font-weight:700;cursor:pointer;">CLEAR ALL</button><span id="ds-info" style="font-size:11px;color:#e6edf5;">${esc(dimersSoloInfo)}</span></div>
+    <textarea id="ds-paste" placeholder="Paste the Dimers PropShop board here…" spellcheck="false" style="width:100%;min-height:60px;margin-top:8px;background:#050507;border:1px solid #1a1d22;border-radius:6px;padding:8px 10px;color:#e2e8f0;${mono}font-size:11px;outline:none;resize:vertical;box-sizing:border-box;"></textarea></div>`;
+  const filters = `<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:12px;">${["ALL"].concat(MORNING_STATS).map(s => btn(s, `dimersSoloSet('stat','${s}')`, dimersSoloStat === s)).join("")}<span style="width:14px;"></span>${btn("ALL", "dimersSoloSet('rel','ALL')", dimersSoloRel === "ALL", "#c4b5fd")}${Object.keys(DIMERS_SOLO_REL).map(r => btn(DIMERS_SOLO_REL[r], `dimersSoloSet('rel','${r}')`, dimersSoloRel === r, "#c4b5fd")).join("")}<span style="width:14px;"></span>${btn("ALL", "dimersSoloSet('ctx','ALL')", dimersSoloCtx === "ALL", "#94a3b8")}${Object.keys(DIMERS_CTX).map(c => btn(DIMERS_CTX[c][0], `dimersSoloSet('ctx','${c}')`, dimersSoloCtx === c, DIMERS_CTX[c][1])).join("")}<button onclick="dimersSoloRetag()" title="Re-read RW injuries / lineups / blurbs for the open bets" style="background:transparent;border:1px solid #1a1d22;color:#e6edf5;border-radius:6px;padding:5px 11px;font-size:11px;font-weight:700;cursor:pointer;">RE-TAG OPEN</button></div>`;
+  if (!dimersSolo.length) { el.innerHTML = `<div style="max-width:1100px;margin:0 auto;padding:8px;">${paste}<div style="font-size:12px;color:#e6edf5;">Nothing logged yet.</div></div>`; return; }
+  // summary tiles
+  const tot = agg(rows), n = tot.w + tot.l;
+  const tile = (lab, val, col) => `<div style="background:#0a0b0e;border:1px solid #1a1d22;border-radius:10px;padding:10px 16px;min-width:110px;"><div style="font-size:10px;letter-spacing:.8px;color:#e6edf5;text-transform:uppercase;">${lab}</div><div style="${mono}font-size:22px;font-weight:800;color:${col || "#fff"};margin-top:2px;">${val}</div></div>`;
+  const tiles = `<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px;">${tile("Record", `${tot.w}-${tot.l}${tot.p ? "-" + tot.p : ""}`)}${tile("Win %", n ? (tot.w / n * 100).toFixed(1) + "%" : "—")}${tile("Units", n ? num(tot.pl, true) + "u" : "—", tot.pl >= 0 ? "#4ade80" : "#f87171")}${tile("ROI", n ? (tot.pl / n * 100).toFixed(1) + "%" : "—", tot.pl >= 0 ? "#4ade80" : "#f87171")}${tile("Open", tot.open)}${tile("Bets", rows.length)}</div>`;
+  const relLines = Object.keys(DIMERS_SOLO_REL).map(r => ({ label: DIMERS_SOLO_REL[r], set: rows.filter(x => x.release === r) })).concat([{ label: "All", set: rows, total: true }]);
+  const edgeLines = MORNING_SOLO_BUCKETS.map(([label, lo, hi]) => ({ label, set: rows.filter(x => x.ev >= lo && x.ev < hi) })).concat([{ label: "All", set: rows, total: true }]);
+  const mktLines = MORNING_STATS.map(s => ({ label: `${s}`, set: rows.filter(x => x.stat === s) })).filter(l => l.set.length).concat([{ label: "All", set: rows, total: true }]);
+  const ctxLines = Object.keys(DIMERS_CTX).map(c => ({ label: `<span style="color:${DIMERS_CTX[c][1]};">${DIMERS_CTX[c][0]}</span>`, set: rows.filter(x => (x.ctx || "clean") === c) })).filter(l => l.set.length).concat([{ label: "All", set: rows, total: true }]);
+  // projected vs actual: the stat projection against what the player did, per market, plus minutes
+  const pvaRow = (label, pairs) => { const n = pairs.length; if (!n) return null; const ap = pairs.reduce((t, q) => t + q[0], 0) / n, aa = pairs.reduce((t, q) => t + q[1], 0) / n, mae = pairs.reduce((t, q) => t + Math.abs(q[0] - q[1]), 0) / n; return { label, n, ap, aa, mae, bias: ap - aa }; };
+  const pvaRows = MORNING_STATS.map(st => pvaRow(st, rows.filter(x => x.stat === st && x.proj > 0 && x.actual != null && (x.result === "hit" || x.result === "miss")).map(x => [Number(x.proj), Number(x.actual)]))).filter(Boolean);
+  { const mp = []; const seenMin = new Set(); rows.forEach(x => { if (!(x.min > 0) || x.actualMin == null) return; const k = resolveNorm(x.player) + "|" + x.gameDate; if (seenMin.has(k)) return; seenMin.add(k); mp.push([Number(x.min), Number(x.actualMin)]); }); const r = pvaRow("Minutes", mp); if (r) pvaRows.push(r); }
+  const pvaTable = pvaRows.length ? `<div style="overflow-x:auto;margin-bottom:12px;"><table style="border-collapse:collapse;min-width:520px;font-size:12px;"><thead><tr>${["Market", "Graded", "Avg projected", "Avg actual", "Avg miss", "Bias (proj \u2212 actual)"].map(t => th(t)).join("")}</tr></thead><tbody>${pvaRows.map(r => `<tr style="border-top:1px solid #1a1d22;"><td style="padding:5px 10px;font-weight:800;color:#fff;">${r.label}</td><td style="padding:5px 9px;text-align:center;color:#e6edf5;">${r.n}</td><td style="padding:5px 9px;text-align:center;color:#fff;${mono}">${r.ap.toFixed(2)}</td><td style="padding:5px 9px;text-align:center;color:#fff;${mono}">${r.aa.toFixed(2)}</td><td style="padding:5px 9px;text-align:center;color:#fbbf24;${mono}">${r.mae.toFixed(2)}</td><td style="padding:5px 9px;text-align:center;${mono}color:${Math.abs(r.bias) < 0.15 * Math.max(r.aa, 1) ? "#4ade80" : "#f87171"};">${r.bias >= 0 ? "+" : ""}${r.bias.toFixed(2)}</td></tr>`).join("")}</tbody></table></div>` : `<div style="font-size:12px;color:#e6edf5;margin-bottom:12px;">No graded bets with a projection yet \u2014 hit GRADE PENDING after the games.</div>`;
+  // by day
+  const days = [...new Set(rows.map(x => x.gameDate))].sort().reverse().slice(0, 14);
+  const dayLines = days.map(d => ({ label: d.slice(5), set: rows.filter(x => x.gameDate === d) }));
+  // bet list
+  const resCol = r => r === "hit" ? "#4ade80" : r === "miss" ? "#f87171" : r === "void" ? "#e6edf5" : "#fbbf24";
+  const list = rows.slice().sort((a, b) => (b.gameDate + b.at).localeCompare(a.gameDate + a.at)).slice(0, dimersSoloShow).map(x => `<tr style="border-top:1px solid #1a1d22;"><td style="padding:4px 8px;color:#e6edf5;white-space:nowrap;">${esc(x.gameDate.slice(5))} ${esc((x.gameTime || "").replace(/^[A-Za-z]+-\d+\s*/, ""))}</td><td style="padding:4px 8px;color:#fff;font-weight:700;white-space:nowrap;">${esc(displayPlayerName(x.player))} <span style="color:#7dd3fc;font-weight:600;">${esc(x.team || "")}</span></td><td style="padding:4px 8px;white-space:nowrap;"><b style="color:${x.ou === "over" ? C.over : C.under};">${x.ou === "over" ? "O" : "U"}${x.line}</b> <span style="color:#fff;">${esc(x.stat)}</span></td><td style="padding:4px 8px;${mono}color:#fff;">${x.odds > 0 ? "+" + x.odds : x.odds}</td><td style="padding:4px 8px;color:#e6edf5;">${esc(x.book || "")}</td><td style="padding:4px 8px;${mono}color:#4ade80;white-space:nowrap;">+${x.ev.toFixed(1)}%${x.fairOdds != null ? ` <span style="color:#e6edf5;">fair ${x.fairOdds > 0 ? "+" : ""}${x.fairOdds} (${(100 / oddsToDecimal(x.fairOdds)).toFixed(0)}%)</span>` : ""}</td><td style="padding:4px 8px;${mono}color:#fff;">${x.min != null ? Math.round(x.min) + "m" : "\u2014"}</td><td style="padding:4px 8px;white-space:nowrap;"><span title="${esc(x.ctxWhy || "")}" style="border:1px solid ${(DIMERS_CTX[x.ctx || "clean"] || DIMERS_CTX.clean)[1]}88;color:${(DIMERS_CTX[x.ctx || "clean"] || DIMERS_CTX.clean)[1]};border-radius:5px;padding:1px 6px;font-size:10px;font-weight:800;">${(DIMERS_CTX[x.ctx || "clean"] || DIMERS_CTX.clean)[0]}</span>${x.ctxWhy ? ` <span style="color:#e6edf5;font-size:10px;">${esc(String(x.ctxWhy).slice(0, 48))}</span>` : ""}</td><td style="padding:4px 8px;"><span style="border:1px solid #c4b5fd88;color:#c4b5fd;border-radius:5px;padding:1px 6px;font-size:10px;font-weight:800;">${DIMERS_SOLO_REL[x.release] || x.release}</span>${x.minToTip != null ? ` <span style="color:#e6edf5;font-size:10px;">${x.minToTip}m to tip</span>` : ""}</td><td style="padding:4px 8px;font-weight:800;color:${resCol(x.result)};">${x.result === "pending" ? "OPEN" : x.result.toUpperCase()}${x.actual != null ? ` <span style="color:#e6edf5;font-weight:600;">${x.actual}</span>` : ""}</td><td style="padding:4px 8px;"><a href="#" onclick="dimersSoloDelete('${esc(x.key).replace(/'/g, "")}');return false;" style="color:#6b7380;text-decoration:none;">✕</a></td></tr>`).join("");
+  el.innerHTML = `<div style="max-width:1100px;margin:0 auto;padding:8px;">${paste}${filters}${tiles}${h("By release")}${table("Release", relLines)}${h("By edge")}${table("Edge", edgeLines)}${h("By market")}${table("Market", mktLines)}${h("By RW context (clean vs upside / downside / flagged)")}${table("Context", ctxLines)}${h("Projected vs actual")}${pvaTable}${h("By day")}${table("Day", dayLines)}${h(`Bets (showing ${Math.min(rows.length, dimersSoloShow)} of ${rows.length}, newest first)`)}<div style="overflow-x:auto;"><table style="border-collapse:collapse;font-size:12px;width:100%;min-width:760px;"><tbody>${list}</tbody></table></div>${rows.length > dimersSoloShow ? `<div style="margin-top:8px;display:flex;gap:8px;"><button onclick="dimersSoloShow+=100;renderDimersSolo()" style="background:transparent;border:1px solid #1a1d22;color:#e6edf5;border-radius:6px;padding:6px 12px;font-size:11px;font-weight:700;cursor:pointer;">SHOW 100 MORE</button><button onclick="dimersSoloShow=1e9;renderDimersSolo()" style="background:transparent;border:1px solid #1a1d22;color:#e6edf5;border-radius:6px;padding:6px 12px;font-size:11px;font-weight:700;cursor:pointer;">SHOW ALL ${rows.length}</button></div>` : ""}</div>`;
+}
+
 // ── TABS vs MODEL report ────────────────────────────────────────────────────
 // A shareable daily read of where the Tabs projection set (TABS SOLO log) and our Morning ensemble agree and disagree:
 // BOTH ON (same player / market / side / line), OPPOSITE sides, TABS ONLY, MODEL ONLY, plus Tabs vs each Morning source's board.
@@ -27171,13 +27469,14 @@ async function autoGradeTick() {
   if (!autoGradeOn() || _autoGrading || gradingInProgress || document.hidden) return;
   const trk = bets.filter(b => b && b.result === "pending" && _mGameOver(b)).length;
   const mor = morningBets.filter(b => b.result === "pending" && _mGameOver(b)).length + morningSolo.filter(x => x.result === "pending" && _mGameOver({ gameDate: x.gameDate })).length;
-  const solo = tabsSolo.filter(x => x.result === "pending" && _mGameOver(x)).length;
-  if (!trk && !mor && !solo) return;
+  const solo = tabsSolo.filter(x => x.result === "pending" && _mGameOver(x)).length, dsolo = dimersSolo.filter(x => x.result === "pending" && _mGameOver(x)).length;
+  if (!trk && !mor && !solo && !dsolo) return;
   _autoGrading = true;
   try {
     if (trk) await gradeAllPending(undefined, true);
     if (mor) await morningGradePending(true);
     if (solo) await tabsSoloGrade(true);
+    if (dsolo) await dimersSoloGrade(true);
   } catch (e) { console.warn("[auto-grade]", e); }
   _autoGrading = false;
 }
