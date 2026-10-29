@@ -63,3 +63,13 @@ BACKUP / RESTORE (Sent tab -> Storage)
   current one). Use it on a new browser/computer too.
 - Before the one-time headshot-image cleanup runs, the exact pick lists are copied into the
   browser database; "Undo image cleanup" puts them back if anything were ever missing.
+
+WHERE PICKS ARE SAVED (since Oct 29)
+- Source pick lists (FTN, 4for4, Rotowire, Stokastic, Dimers, Blitz, RTS, Fantasy Points) live in
+  the browser's IndexedDB database (no ~10 MB limit) instead of localStorage. Moved over on the
+  first load; the localStorage copies are removed to free space.
+- Ensemble, hand-added picks and the deleted-picks list stay in localStorage (the Blender reads the
+  Ensemble) AND get a database copy; if a localStorage save ever fails, the copy is used on reload.
+- Sent tab -> Storage shows both: browser storage (and its limit) and what's in the database.
+- One-time: the Oct 29 - Nov 2 board (25 Ensemble picks + their source picks) was rebuilt from the
+  Nick card after it was lost to full storage.

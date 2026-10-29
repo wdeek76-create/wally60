@@ -705,6 +705,77 @@ select.sel:focus { border-color: var(--teal); }
 </div>
 
 <script>
+// ===== DURABLE STORAGE =====
+// localStorage is capped at ~10 MB for the whole site (every source's picks + Ensemble + Blender).
+// Once full, every save failed SILENTLY — a paste looked saved, then a refresh lost it.
+//  • Source pick lists (nfl_props_<source>) now live in the browser's IndexedDB (hundreds of MB),
+//    not localStorage — moved over on first load, then removed from localStorage to free room.
+//  • Ensemble / hand-added picks / deleted list stay in localStorage (the Blender reads the
+//    Ensemble) AND get an IndexedDB copy; if a localStorage save fails, the copy wins on reload.
+// Code everywhere keeps calling localStorage.getItem/setItem — this layer routes those keys.
+const _DUR_MOVE = k => /^nfl_props_(?!ensemble)/.test(k) && !/backup/.test(k);
+const _DUR_MIRROR = k => k === 'nfl_props_ensemble' || k === 'nfl_manual_picks' || k === 'nfl_ens_dismissed';
+const _durMem = new Map();
+let _durDb = null, _durFailed = [];
+const _lsGet = Storage.prototype.getItem, _lsSet = Storage.prototype.setItem, _lsDel = Storage.prototype.removeItem;
+function _durOpen() { return new Promise((res, rej) => { try { const r = indexedDB.open('nfl_tracker_db', 1); r.onupgradeneeded = () => r.result.createObjectStore('kv'); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); } catch (e) { rej(e); } }); }
+function _durPut(k, v, t) {
+  return new Promise(res => {
+    if (!_durDb) return res(false);
+    try { const tx = _durDb.transaction('kv', 'readwrite'); tx.objectStore('kv').put({ v, t }, 'ls:' + k); tx.oncomplete = () => res(true); tx.onerror = tx.onabort = () => { _durFailed.push(k); console.error('[storage] database save failed', k, tx.error); res(false); }; }
+    catch (e) { console.error('[storage] database save failed', k, e); res(false); }
+  });
+}
+function _durIsRouted(st, k) { return st === window.localStorage && !!_durDb && (_DUR_MOVE(k) || _DUR_MIRROR(k)); }
+Storage.prototype.getItem = function (k) { if (this === window.localStorage && _durMem.has(k)) return _durMem.get(k); return _lsGet.call(this, k); };
+Storage.prototype.setItem = function (k, v) {
+  if (!_durIsRouted(this, k)) return _lsSet.call(this, k, v);
+  v = String(v); const t = Date.now();
+  _durMem.set(k, v); _durPut(k, v, t);
+  if (_DUR_MOVE(k)) { try { _lsDel.call(this, k); } catch (e) {} return; }
+  try { _lsSet.call(this, k, v); _lsSet.call(this, 'nfl_dur_t:' + k, String(t)); }
+  catch (e) { console.warn('[storage] browser storage full — "' + k + '" kept in the database copy'); }
+};
+Storage.prototype.removeItem = function (k) {
+  if (_durIsRouted(this, k)) { _durMem.delete(k); try { const tx = _durDb.transaction('kv', 'readwrite'); tx.objectStore('kv').delete('ls:' + k); } catch (e) {} }
+  return _lsDel.call(this, k);
+};
+const _durableReady = (async () => {
+  try { _durDb = await _durOpen(); } catch (e) { console.warn('[storage] IndexedDB unavailable — staying on localStorage only', e); _durDb = null; return; }
+  const recs = await new Promise(res => {
+    const out = {};
+    try {
+      const cur = _durDb.transaction('kv', 'readonly').objectStore('kv').openCursor();
+      cur.onsuccess = () => { const c = cur.result; if (!c) return res(out); if (typeof c.key === 'string' && c.key.startsWith('ls:')) out[c.key.slice(3)] = c.value; c.continue(); };
+      cur.onerror = () => res(out);
+    } catch (e) { res(out); }
+  });
+  const len = v => { try { const a = JSON.parse(v || '[]'); return Array.isArray(a) ? a.length : 0; } catch (e) { return 0; } };
+  // keys that exist in either place
+  const keys = new Set(Object.keys(recs));
+  for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (k && (_DUR_MOVE(k) || _DUR_MIRROR(k))) keys.add(k); }
+  for (const k of keys) {
+    const rec = recs[k], ls = _lsGet.call(localStorage, k);
+    if (_DUR_MOVE(k)) {
+      // database is home; if both exist keep the one with more picks (an older tracker version may have written localStorage)
+      const useLs = ls != null && (!rec || len(ls) > len(rec.v));
+      const v = useLs ? ls : rec.v;
+      _durMem.set(k, v);
+      if (useLs) { const ok = await _durPut(k, v, Date.now()); if (ok) { try { _lsDel.call(localStorage, k); } catch (e) {} } }
+      else if (ls != null) { try { _lsDel.call(localStorage, k); } catch (e) {} }
+    } else if (rec) {
+      const stamp = Number(_lsGet.call(localStorage, 'nfl_dur_t:' + k)) || 0;
+      if (ls == null || rec.t > stamp) {          // localStorage save had failed (or is gone): the database copy is newer
+        _durMem.set(k, rec.v);
+        try { _lsSet.call(localStorage, k, rec.v); _lsSet.call(localStorage, 'nfl_dur_t:' + k, String(rec.t)); _durMem.delete(k); } catch (e) {}
+      }
+    } else if (ls != null) { _durPut(k, ls, Date.now()); }   // first run: give it a database copy
+  }
+  const moved = [...keys].filter(_DUR_MOVE).length;
+  if (moved) console.log('[storage] source pick lists in the database:', moved);
+})();
+</script>
+<script>
 // ===== STATE =====
 // ===== STATE =====
 // Per-source props (separate localStorage per source)
@@ -1369,6 +1440,7 @@ function loadState() {
       localStorage.setItem('nfl_ens_playto_refreeze_v1', '1');
     }
   } catch(e) {}
+  _restoreOct29(); // after every older one-time step, so none of them can undo it
   _backfillEnsembleCreatedAt();
   syncPropsAlias();
 }
@@ -2097,6 +2169,72 @@ function _isMarketLike(s) {
 // A pick you typed in with "+ Add Pick": it stays no matter what — no cleanup, filter or live re-check
 // removes or hides it; only its own delete button does.
 function _isManualPick(p) { return !!(p && p.manual === true && (p.source === 'ensemble' || String(p.id || '').startsWith('ens_manual_'))); }
+// One-time: the Oct 29 – Nov 2 board (25 Ensemble picks) was lost on a refresh when browser storage
+// was full. Rebuilt from the Nick card: every source's pick (edge @ price, projection) + the Ensemble
+// pick. Skips anything already there (same player + market + side + line, within a day).
+// [player, market, side, line, date, game, time, [[src, ev, odds, proj], ...]]
+const RESTORE_OCT29 = [
+  ['Mitchell Evans','rec','U',1.5,'2026-10-29','CAR @ GB','8:15 PM',[['stok',7.7,'-186',1.20],['4for4',9.2,'-186',1.17],['ftn',26.0,'-186',0.82],['rotowire',26.5,'-186',0.81]]],
+  ['John Metchie III','rec','U',1.5,'2026-10-29','CAR @ GB','8:15 PM',[['stok',11.2,'+122',1.90],['4for4',14.6,'+122',1.84],['ftn',19.2,'+122',1.76],['rotowire',28.2,'+122',1.61]]],
+  ['Matthew Golden','rec','U',4.5,'2026-10-29','CAR @ GB','8:15 PM',[['stok',11.7,'+102',4.50],['rotowire',14.1,'+102',4.42],['ftn',15.0,'+102',4.39],['dimers',16.8,'+102',4.33]]],
+  ['Savion Williams','rec','U',2.5,'2026-10-29','CAR @ GB','8:15 PM',[['ftn',17.8,'+105',2.50],['stok',22.2,'+105',2.40],['rotowire',26.2,'+105',2.31]]],
+  ['MarShawn Lloyd','rush_att','U',5.5,'2026-10-29','CAR @ GB','8:15 PM',[['4for4',19.2,'-133',4.85],['ftn',20.6,'-133',4.76],['stok',23.1,'-133',4.60]]],
+  ['Germie Bernard','rec','U',4.5,'2026-11-01','CLE @ PIT','1:00 PM',[['stok',5.6,'+102',4.70],['ftn',17.2,'+102',4.32],['rotowire',27.7,'+102',3.98],['blitz',15.3,'-110',3.91],['dimers',9.5,'+102',4.57]]],
+  ['Jaylen Warren','rec','U',2.5,'2026-11-01','CLE @ PIT','1:00 PM',[['4for4',6.5,'+123',2.98],['ftn',6.9,'+123',2.97],['rotowire',11.8,'+123',2.85],['stok',23.5,'+123',2.60],['dimers',13.2,'+123',2.82]]],
+  ['Treylon Burks','rec','U',1.5,'2026-11-01','PHI @ WAS','8:20 PM',[['ftn',12.6,'+116',1.82],['stok',13.7,'+116',1.80],['rotowire',27.2,'+116',1.57],['blitz',14.2,'+105',1.61],['dimers',9.8,'+116',1.87]]],
+  ['Brevyn Spann-Ford','rec','U',1.5,'2026-11-01','ARI @ DAL','1:00 PM',[['stok',12.7,'+125',1.90],['ftn',51.3,'+125',1.29],['rotowire',104.5,'+125',0.53],['dimers',14.5,'+125',1.87]]],
+  ['Josh Cuevas','rec','U',1.5,'2026-11-01','BAL @ BUF','1:00 PM',[['ftn',21.9,'-118',1.33],['stok',46.7,'-118',0.98],['rotowire',58.9,'-118',0.69],['blitz',23.2,'-130',1.19]]],
+  ['Amon-Ra St. Brown','rec','U',6.5,'2026-11-01','MIN @ DET','1:00 PM',[['stok',11.5,'+147',7.20],['ftn',30.8,'+147',6.56],['rotowire',53.9,'+147',5.83],['dimers',32.8,'+147',6.52]]],
+  ['Jonah Coleman','rec','U',1.5,'2026-11-01','KC @ DEN','4:25 PM',[['ftn',17.1,'+112',1.70],['stok',17.1,'+112',1.70],['rotowire',19.4,'+112',1.66],['dimers',14.9,'+112',1.74]]],
+  ['Rico Dowdle','rush_att','U',6.5,'2026-11-01','CLE @ PIT','1:00 PM',[['stok',9.9,'+112',7.60],['ftn',19.6,'+112',6.98],['4for4',20.5,'+112',6.93],['blitz',10.5,'+112',6.69]]],
+  ["Ja'Kobi Lane",'rec','U',2.5,'2026-11-01','BAL @ BUF','1:00 PM',[['4for4',6.9,'-104',2.64],['stok',8.6,'-104',2.60],['rotowire',33.0,'-104',2.03],['blitz',15.0,'-113',2.21]]],
+  ['Kyler Murray','pass_cmp','O',19.5,'2026-11-01','MIN @ DET','1:00 PM',[['stok',12.8,'-115',20.6],['ftn',14.5,'-115',20.8],['rotowire',17.4,'-115',20.9],['blitz',8.3,'-125',21.7]]],
+  ['Joshua Palmer','rec','U',1.5,'2026-11-01','BAL @ BUF','1:00 PM',[['ftn',5.7,'-194',1.21],['rotowire',8.5,'-194',1.15],['stok',15.6,'-194',1.00],['blitz',31.4,'-194',0.88]]],
+  ['Dalton Kincaid','rec','U',3.5,'2026-11-01','BAL @ BUF','1:00 PM',[['ftn',6.8,'+117',3.90],['4for4',6.8,'+117',3.90],['stok',6.8,'+117',3.90],['dimers',10.6,'+117',3.79]]],
+  ['James Cook III','rec','U',1.5,'2026-11-01','BAL @ BUF','1:00 PM',[['stok',6.7,'+113',1.90],['rotowire',16.0,'+113',1.73],['ftn',19.9,'+113',1.66],['dimers',13.2,'+113',1.78]]],
+  ['Kenyon Sadiq','rec','U',1.5,'2026-11-01','LV @ NYJ','1:00 PM',[['stok',12.9,'+150',2.10],['ftn',23.3,'+150',1.93],['rotowire',59.0,'+150',1.41]]],
+  ['Khalil Shakir','rec','U',3.5,'2026-11-01','BAL @ BUF','1:00 PM',[['stok',5.3,'+114',3.90],['rotowire',8.7,'+114',3.80],['ftn',36.0,'+114',3.08]]],
+  ['Ollie Gordon II','rush_att','U',15.5,'2026-11-01','NE @ MIA','4:25 PM',[['stok',9.0,'-112',14.4],['ftn',20.5,'-112',13.3],['rotowire',22.6,'-112',13.1]]],
+  ['Dyami Brown','rec','U',1.5,'2026-11-01','PHI @ WAS','8:20 PM',[['4for4',5.8,'-160',1.36],['ftn',13.9,'-160',1.20],['rotowire',30.1,'-160',0.88]]],
+  ['Ryan Flournoy','rec','U',3.5,'2026-11-01','ARI @ DAL','1:00 PM',[['stok',7.2,'-125',3.30],['4for4',7.8,'-125',3.28],['rotowire',16.3,'-125',3.02]]],
+  ['Caleb Williams','pass_cmp','O',19.5,'2026-11-02','CHI @ SEA','8:15 PM',[['rotowire',11.1,'-122',20.7],['ftn',16.9,'-122',21.1],['stok',27.4,'-122',21.8]]],
+  ['Caleb Williams','pass_att','O',31.5,'2026-11-02','CHI @ SEA','8:15 PM',[['ftn',6.7,'-130',32.9],['rotowire',8.0,'-130',33.0],['stok',15.4,'-130',33.6]]],
+];
+// Nick-card "play to" for each pick (same order)
+const RESTORE_OCT29_PLAYTO = ['-208','+118','-111','-121','-184','+101','+120','+102','+110','-169','+133','-111','+103','-108','-133','-198','+113','+110','+132','+113','-121','-163','-131','-139','-135'];
+function _restoreOct29() {
+  try {
+    if (localStorage.getItem('nfl_restore_oct29_v1')) return;
+    const same = (a, b) => normName(a.player) === normName(b.player) && a.market === b.market && a.side === b.side && Number(a.line) === Number(b.line)
+      && Math.abs((new Date((a.date || '') + 'T12:00:00') - new Date((b.date || '') + 'T12:00:00')) / 86400000) <= 1;
+    const now = Date.now(); let n = 0, srcAdded = 0;
+    const ens = propsBySource.ensemble || (propsBySource.ensemble = []);
+    RESTORE_OCT29.forEach(([player, market, side, line, date, game, gameTime, srcs], i) => {
+      srcs.forEach(([src, ev, odds, proj], j) => {
+        const arr = propsBySource[src] || (propsBySource[src] = []);
+        const pick = { id: now + i * 10 + j, source: src, player, team: '', game, pos: (MARKET_MAP[market] || {}).pos || '', market, line, side, odds, ev, proj,
+          worstOdds: odds, book: '', date, gameTime, result: '', notes: '', actual: null, pnl: null, altLines: [], updatedAt: now, restored: 'oct29' };
+        if (!arr.some(p => same(p, pick))) { arr.push(pick); srcAdded++; }
+      });
+      const main = srcs.filter(([src]) => ENSEMBLE_SOURCES.includes(src));
+      const alone = srcs.filter(([src]) => !ENSEMBLE_SOURCES.includes(src));
+      const low = main.slice().sort((a, b) => a[1] - b[1])[0];
+      const e = { id: 'ens_' + normName(player) + '|' + market + '|' + side + '|' + Number(line) + '_' + date, source: 'ensemble',
+        tier: Math.min(...main.map(x => x[1])) >= 10 ? 'strong' : 'value', player, team: '', game, pos: (MARKET_MAP[market] || {}).pos || '',
+        market, line, side, odds: main[0][2], book: SOURCE_LABELS[main[0][0]] + ' (best of ' + main.length + ')',
+        ev: Math.round(main.reduce((a, x) => a + x[1], 0) / main.length * 10) / 10, gameTime, date,
+        result: '', notes: '', actual: null, pnl: null,
+        ensembleSources: main.map(([src, ev, odds, proj]) => ({ src, line, odds, ev, worstOdds: odds, proj })), altLines: [],
+        standaloneAgrees: alone.map(([src, ev, odds, proj]) => ({ src, ev, odds, line, book: '', proj })),
+        createdAt: now, sourcesFrozenAt: now + 60000, playTo: { odds: RESTORE_OCT29_PLAYTO[i], src: low[0], ev: low[1] }, restored: 'oct29' }; // frozen after its source picks: keeps the card's numbers until a real re-paste
+      if (!ens.some(x => same(x, e))) { ens.push(e); n++; }
+    });
+    [...ENSEMBLE_SOURCES, 'dimers', 'blitz'].forEach(src => { try { localStorage.setItem(storageKey(src), JSON.stringify(propsBySource[src] || [])); } catch (e) {} });
+    try { localStorage.setItem(storageKey('ensemble'), JSON.stringify(ens)); } catch (e) {}
+    localStorage.setItem('nfl_restore_oct29_v1', String(now));
+    console.warn('[nfl-tracker] restored the Oct 29 - Nov 2 board:', n, 'Ensemble picks,', srcAdded, 'source picks');
+  } catch (e) { console.warn('Oct 29 restore failed', e); }
+}
 // Hand-added picks also live in their OWN store (nfl_manual_picks), copied over on every change.
 // Anything that rewrites the Ensemble list (old one-time restores, Clear Pending, a reset…) can no
 // longer lose one: _keepManualPicks() puts back any that went missing, grade included. Only the
@@ -5508,7 +5646,11 @@ function _storageReport() {
   try { for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); const n = (k.length + (localStorage.getItem(k) || '').length) * 2; total += n; rows.push([k, n]); } } catch (e) {}
   rows.sort((a, b) => b[1] - a[1]);
   let full = false; try { localStorage.setItem('__nfl_space_test', 'x'.repeat(50000)); localStorage.removeItem('__nfl_space_test'); } catch (e) { full = true; }
-  return { total, rows, full };
+  // what lives in the browser database instead (source pick lists) — no practical size limit there
+  const db = []; let dbTotal = 0;
+  _durMem.forEach((v, k) => { if (_DUR_MOVE(k)) { const n = (k.length + String(v || '').length) * 2; dbTotal += n; let c = 0; try { c = JSON.parse(v).length; } catch (e) {} db.push([k, n, c]); } });
+  db.sort((a, b) => b[1] - a[1]);
+  return { total, rows, full, db, dbTotal };
 }
 const _SAFE_TO_CLEAR = ['nfl_props_ensemble_backup_pre_restore', 'nfl_noname_removed_backup', 'nfl_anytime_td_removed_backup', 'nfl_blender_td_removed_backup'];
 // ── Full backup to a file, and restore from one. Everything this site keeps in the browser:
@@ -5518,7 +5660,8 @@ function _idbPutRaw(key, str) { return _idbOpenKV().then(db => new Promise((res,
 function _idbGetRaw(key) { return _idbOpenKV().then(db => new Promise((res, rej) => { const q = db.transaction('kv', 'readonly').objectStore('kv').get(key); q.onsuccess = () => res(q.result ?? null); q.onerror = () => rej(q.error); })).catch(() => null); }
 async function downloadBackup() {
   const data = { app: 'nfl-props-tracker', version: 1, at: new Date().toISOString(), localStorage: {}, idb: {} };
-  try { for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (k && !k.startsWith('__')) data.localStorage[k] = localStorage.getItem(k); } } catch (e) {}
+  try { for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (k && !k.startsWith('__') && !k.startsWith('nfl_dur_t:')) data.localStorage[k] = localStorage.getItem(k); } } catch (e) {}
+  _durMem.forEach((v, k) => { data.localStorage[k] = v; }); // source pick lists live in the browser database
   const sentIdb = await _idbGetRaw(SENT_KEY); if (sentIdb) data.idb[SENT_KEY] = sentIdb;
   // make sure the Sent list in memory is in the file even if neither store had it yet
   if (_sentCache && _sentCache.length) data.idb[SENT_KEY] = JSON.stringify(_sentCache);
@@ -5757,8 +5900,12 @@ function storagePanelHtml() {
         <span id="backupMsg" class="pos"></span>
         ${(() => { let f = null; try { f = localStorage.getItem('nfl_image_strip_backup_v1'); } catch (e) {} return f ? '<button class="btn ghost" title="Puts the pick lists back exactly as they were before the headshot images were removed" onclick="undoImageCleanup()">Undo image cleanup</button>' : ''; })()}
       </div>
-      <table class="tbl"><thead><tr><th>Biggest saved items</th><th class="r">Size</th></tr></thead><tbody>
+      <table class="tbl"><thead><tr><th>Biggest items in browser storage (the ~10 MB one)</th><th class="r">Size</th></tr></thead><tbody>
         ${r.rows.slice(0, 10).map(([k, n]) => `<tr><td class="mono">${escHtml(k)}${_SAFE_TO_CLEAR.includes(k) ? ' <span class="dim">(old backup — safe to clear)</span>' : ''}</td><td class="r mono">${mb(n)}</td></tr>`).join('')}
+      </tbody></table>
+      <table class="tbl"><thead><tr><th>In the browser database — no 10 MB limit (${_durDb ? '<span class="pos">working ✓</span>' : '<span class="neg">not available — still using browser storage</span>'})</th><th class="r">Picks</th><th class="r">Size</th></tr></thead><tbody>
+        ${r.db.length ? r.db.map(([k, n, c]) => `<tr><td class="mono">${escHtml(k)}</td><td class="r mono">${c}</td><td class="r mono">${mb(n)}</td></tr>`).join('') : '<tr><td colspan="3" class="dim">nothing yet</td></tr>'}
+        ${r.db.length ? `<tr><td class="dim">total</td><td></td><td class="r mono">${mb(r.dbTotal)}</td></tr>` : ''}
       </tbody></table></div></div>`;
 }
 function renderSent() {
@@ -7682,7 +7829,8 @@ function formatOddsDisplay(odds) {
 }
 
 // ===== INIT =====
-try {
+// waits for the storage layer (source pick lists come from the browser database)
+_durableReady.catch(() => {}).then(() => { try {
   loadState();
   _sanitizeTeams();
   dedupeAllSources();
@@ -7702,7 +7850,7 @@ try {
   }
 } catch(e) {
   console.error('Init error:', e);
-}
+} });
 
 // Settings modal for OpticOdds (backend URL + connection test)
 function showOpticOddsSettings() {
