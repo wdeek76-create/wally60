@@ -2724,9 +2724,17 @@ function _nhlPaintModelSummary() {
   const t = _nhlModelRunAt.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
   el.innerHTML = `<b style="color:#fff;">Model</b> <span style="color:#9fb8d6;">· live prices · last run ${t}${_nhlModelBusy ? " · running…" : ""}</span>
     ${_nhlModelCounts ? `<span style="color:#fff;margin-left:8px;">${_nhlModelCounts.projected} players projected · <b>${_nhlModelCounts.lines}</b> with a SOG main line · <b>${_nhlModelCounts.all4}</b> of those with all 4 sources</span>` : ""}
+    ${_nhlCoverageHtml()}
     <b style="color:${rows.length ? "#22c55e" : "#9fb8d6"};margin-left:8px;">${rows.length} play${rows.length === 1 ? "" : "s"}</b>
     ${rows.map(r => `<span style="display:inline-block;margin:2px 4px;padding:2px 8px;border:1px solid #22c55e66;background:#22c55e14;border-radius:5px;color:#fff;font-size:12px;"><b>${escapeHtmlBasic(r.player)}</b> ${r.ou === "over" ? "O" : "U"}${r.line} ${Number(r.odds) > 0 ? "+" : ""}${r.odds} ${escapeHtmlBasic(r.book || "")} <span style="color:#22c55e;font-weight:800;">+${r.anchorEv}%</span></span>`).join("")}
     <button onclick="runNhlModel({silent:false})" style="margin-left:8px;background:transparent;border:1px solid #0066cc;color:#00aaff;border-radius:5px;padding:2px 10px;font-size:12px;font-weight:700;cursor:pointer;">Run now</button>${_nhlLinkedNamesHtml().replace("margin-bottom:16px", "margin:8px 0 0")}`;
+}
+// One small warning line, only when a source is missing players who have a line today (with which games).
+function _nhlCoverageHtml() {
+  const m = _nhlModelCounts && _nhlModelCounts.missing; if (!m) return "";
+  const bad = Object.keys(m).filter(k => m[k].length);
+  if (!bad.length) return "";
+  return `<div style="margin-top:4px;font-size:12px;color:#eab308;">⚠ ${bad.map(k => `${_NHL_SRC_TAG[k]} missing ${m[k].length} (${[...new Set(m[k].map(x => x.t))].join(", ")})`).join(" · ")}</div>`;
 }
 function _nhlModelCellHtml(name) {
   const e = _nhlModelEval[nn(name)];
@@ -2839,7 +2847,11 @@ async function runNhlModel(opts) {
     rows.sort((a, b) => b.anchorEv - a.anchorEv);
     _nhlModelRows = rows; _nhlModelRunAt = new Date(); _nhlModelEval = evalMap;
     { const proj = new Set(); PS_SOURCE_KEYS_NHL.forEach(k => Object.values(srcs[k] || {}).forEach(v => { if (v && v.name && v.sog > 0) proj.add(nn(v.name)); }));
-      _nhlModelCounts = { projected: proj.size, lines: Object.keys(mainLine).length, all4: Object.values(evalMap).filter(e => e.have.length === PS_SOURCE_KEYS_NHL.length).length }; }
+      // Coverage: every player with a main SOG line today that a loaded source has no projection for.
+      const missing = {}; PS_SOURCE_KEYS_NHL.forEach(k => { if (srcs[k] && Object.keys(srcs[k]).length) missing[k] = []; });
+      Object.keys(byPL).forEach(key => { const e = byPL[key] && byPL[key][0]; if (!e || !mainLine[nn(e.player)] || mainLine[nn(e.player)].line !== Number(e.line)) return;
+        Object.keys(missing).forEach(k => { if (_nhlModelCsvProj(k, e.player, e.home, e.away) == null && !missing[k].some(x => x.p === e.player)) missing[k].push({ p: e.player, t: e.away + "@" + e.home }); }); });
+      _nhlModelCounts = { projected: proj.size, lines: Object.keys(mainLine).length, all4: Object.values(evalMap).filter(e => e.have.length === PS_SOURCE_KEYS_NHL.length).length, missing }; }
     try { reRender(); _nhlPaintModelSummary(); } catch (e) {}
     try { _nhlFindMissingSources(byPL, mainLine, iso); } catch (e) { console.warn("[NHL names] check failed", e && e.message); }
     // Check-only run: show what the model sees right now, log nothing (model log, tracker and solo untouched).
