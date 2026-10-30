@@ -729,11 +729,16 @@ async function pullNhlRwApi(auto) {
     let fx = null; try { fx = (await ooNhlFixtures()).filter(f => f.date === _ymdLocal(new Date())); } catch (e) {}
     if (fx && fx.length) {
       const playing = new Set(fx.flatMap(f => [_nhlTeamCanon(f.home), _nhlTeamCanon(f.away)]));
-      const apiTeams = new Set(Object.values(d).map(e => _nhlTeamCanon(e.team)).filter(Boolean));
+      // Only a code we recognise as an NHL team can be judged off-slate; an unfamiliar code is kept, never dropped.
+      const NHL32 = new Set(["ANA","BOS","BUF","CGY","CAR","CHI","COL","CBJ","DAL","DET","EDM","FLA","LAK","MIN","MTL","NSH","NJD","NYI","NYR","OTT","PHI","PIT","SJS","SEA","STL","TBL","TOR","UTA","VAN","VGK","WSH","WPG"]);
+      const apiTeams = new Set(Object.values(d).map(e => _nhlTeamCanon(e.team)).filter(t => t && NHL32.has(t)));
       const hit = [...apiTeams].filter(t => playing.has(t)).length;
       if (apiTeams.size && hit / apiTeams.size < 0.6) throw new Error(`RotoWire's feed looks like a different day — only ${hit} of its ${apiTeams.size} teams play today (${fx.length} games). RW slot left alone; it re-checks every 20 min`);
-      let dropped = 0; Object.keys(d).forEach(k => { const t = _nhlTeamCanon(d[k].team); if (t && !playing.has(t)) { delete d[k]; dropped++; } });
-      slateNote = ` · today's slate ✓ ${hit}/${playing.size} teams${dropped ? ` (${dropped} off-slate dropped)` : ""}`;
+      let dropped = 0; const droppedTeams = {};
+      Object.keys(d).forEach(k => { const t = _nhlTeamCanon(d[k].team); if (t && NHL32.has(t) && !playing.has(t)) { delete d[k]; dropped++; droppedTeams[t] = (droppedTeams[t] || 0) + 1; } });
+      const unknown = [...new Set(Object.values(d).map(e => String(e.team || "")).filter(t => t && !NHL32.has(_nhlTeamCanon(t))))];
+      const missingToday = [...playing].filter(t => !apiTeams.has(t));
+      slateNote = ` · today's slate ✓ ${hit}/${playing.size} teams${dropped ? ` · off-slate dropped: ${Object.entries(droppedTeams).map(([t, n]) => t + " " + n).join(", ")}` : ""}${missingToday.length ? ` · not in RotoWire: ${missingToday.join(", ")}` : ""}${unknown.length ? ` · kept unknown codes: ${unknown.join(", ")}` : ""}`;
     } else if (fx) slateNote = " · no NHL games today on the schedule";
     const n = Object.keys(d).length;
     if (n < 30) throw new Error(`only ${n} skaters with shots read from ${rows.length} rows — RW slot left alone (not posted yet, or tap TEST)`);
