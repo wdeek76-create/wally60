@@ -982,11 +982,27 @@ function sharpCheckPings(sk){
   });
   if(changed) LS.set('sm_alerted', JSON.stringify(sharpPinged));
 }
+// Pregame scans only while something can still be SENT: from 9:30 AM ET, while today's slate (ET date)
+// still has a game whose time-to-tip window isn't muted for that sport. Once every game left today is
+// inside a muted window (or there are none), the sport goes quiet until 9:30 AM ET the next morning --
+// tomorrow's games included.
+const smQuiet = {};   // sk -> why it's quiet ('' = scanning)
+const etParts = ms => { const o={}; new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).formatToParts(new Date(ms)).forEach(x=>o[x.type]=x.value); return o; };
+const etDate = ms => { const o=etParts(ms); return `${o.year}-${o.month}-${o.day}`; };
+function smQuietWhy(sk, games, now){
+  const o=etParts(now), mins=+o.hour*60+(+o.minute);
+  if(mins < 9*60+30) return 'until 9:30 AM ET';
+  const today=etDate(now);
+  const live=games.filter(f=>etDate(new Date(f.start).getTime())===today && !smWindowMuted(sk, outBucket({ start:f.start, trackedAt:now })));
+  return live.length ? '' : 'nothing left to send today · back at 9:30 AM ET';
+}
 async function sharpScanSport(sk){
   const now=Date.now();
   // bet105 looks one day further out than FanDuel
   const all=(await sharpFixtures(sk)).filter(f=>!f.live && tipAt(sk, f.start)>now && new Date(f.start).getTime()<now+(sharpDays(sk)+1)*24*3600e3).slice(0,100);
   const fx=all.filter(f=>new Date(f.start).getTime()<now+sharpDays(sk)*24*3600e3).slice(0,80), extra=all.filter(f=>!fx.includes(f));
+  // quiet hours: nothing pulled (the fixture list above is cached, so no backend calls either)
+  smQuiet[sk]=smQuietWhy(sk, all, now); if(smQuiet[sk]){ sharpPrimed[sk]=true; return; }
   sharpLastScan[sk]=Date.now();
   if(!all.length){ sharpPrimed[sk]=true; sharpDiag[sk]={at:Date.now(), games:0, rows:0, byBook:{}, props:0, withExch:0, sides:0}; return; }
   const rows=[];
@@ -1052,7 +1068,7 @@ function renderSharp(){
       + (d.kal ? `<div class="smdiagtop">Kalshi: ${d.kal.rows} rows · ${d.kal.mk} in our markets · ${d.kal.side} with a side · ${d.kal.fd} on FD's line${d.kal.sample.length?`<br><span style="opacity:.7">${d.kal.sample.map(esc).join('<br>')}</span>`:''}</div>` : '');
     return `<div class="smdiag"><b>${esc(SPORTS[k].label)}</b> ${Math.max(0,Math.round((Date.now()-d.at)/1000))}s ago · ${d.games??0} games · ${esc(bk)} · ${d.withExch}/${d.props} props w/ exchange · ${d.sides} with money${d.best!=null?` · best ${d.best<=0?'ARB '+(-d.best).toFixed(1)+'%':(d.best.toFixed(1)+'% hold')}`:''}${d.big!=null?` · ${d.big} at ${usd(sharpMin)}+`:''}${top}</div>`; }).join('');
   const body = list.length ? list.map(sharpCardHtml).join('') : `<div class="empty">${scanned?`Nothing with ${usd(sharpMin)}+ at ${holdOkTxt()} vs FanDuel/bet105 right now. Scanning ${sports.length} sports nonstop.`:'Scanning…'}</div>`;
-  view.innerHTML = `<div class="sh"><span class="t">Sharp Money</span><span class="dim" style="font-size:10.5px">scanning ${scanned}/${sports.length} sports · since ${new Date(sharpStarted).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})}</span></div>${chips}<div class="shlist">${body}</div>${diag||sharpDcLog.length?`<div class="smdiagw"><div class="dim" style="font-size:10px;margin-bottom:3px">LAST SCAN · build ${SM_BUILD}</div>${diag}<div class="dim" style="font-size:10px;margin:6px 0 3px">DISCORD ${discordHook?(sharpDcQ.length?`· ${sharpDcQ.length} waiting`:''):'· FD not connected'}${b105Hook?'':' · b105 not connected'}</div>
+  view.innerHTML = `<div class="sh"><span class="t">Sharp Money</span><span class="dim" style="font-size:10.5px">${(()=>{ const q=sports.filter(k=>smQuiet[k]); return q.length===sports.length ? `⏸ paused · ${esc(smQuiet[q[0]])}` : `scanning ${sports.length-q.length}/${sports.length} sports${q.length?` · ${q.map(k=>SPORTS[k]?.label||k).join('/')} quiet`:''}`; })()}</span></div>${chips}<div class="shlist">${body}</div>${diag||sharpDcLog.length?`<div class="smdiagw"><div class="dim" style="font-size:10px;margin-bottom:3px">LAST SCAN · build ${SM_BUILD}</div>${diag}<div class="dim" style="font-size:10px;margin:6px 0 3px">DISCORD ${discordHook?(sharpDcQ.length?`· ${sharpDcQ.length} waiting`:''):'· FD not connected'}${b105Hook?'':' · b105 not connected'}</div>
 ${sharpDcLog.map(x=>`<div class="smdiag" style="color:${x.ok?'#86efac':'#fca5a5'}">${new Date(x.at).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})} ${esc(x.txt)}</div>`).join('')||'<div class="smdiag dim">nothing sent yet</div>'}</div>`:''}`;
   view.querySelectorAll('[data-shmin]').forEach(b=>b.addEventListener('click',()=>{ sharpMin=Number(b.dataset.shmin); LS.set('props_sharpmin2',String(sharpMin)); renderSharp(); }));
   view.querySelectorAll('[data-shs]').forEach(b=>b.addEventListener('click',()=>{ const k=b.dataset.shs;
