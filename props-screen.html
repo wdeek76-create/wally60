@@ -2813,6 +2813,9 @@ let boardTimer = null;
 // Player page odds: re-pulled every 4s (all book requests at once) -- main lines for every market,
 // plus every line of the market on screen, so stepped alt lines move live too.
 const BOARD_MS = 4000; let boardBusy = false;
+const BOARD_FULL_MS = 30e3, BOARD_IDLE_MS = 5*60e3;
+let boardFullAt = { fx:null, at:0 }, boardTouchAt = Date.now();
+['pointerdown','touchstart','scroll','keydown','wheel'].forEach(ev=>window.addEventListener(ev,()=>{ const idle=Date.now()-boardTouchAt>BOARD_IDLE_MS; boardTouchAt=Date.now(); if(idle && boardTimer && !boardBusy) refreshBoardOdds(); },{passive:true, capture:true}));
 function startBoardTimer(){ clearInterval(boardTimer); boardTimer=setInterval(()=>{ if(!document.hidden && !boardBusy) refreshBoardOdds(); }, BOARD_MS); }
 async function refreshBoardOdds(){
   boardBusy=true; try{ await refreshBoardOdds0(); } finally{ boardBusy=false; }
@@ -2822,16 +2825,21 @@ async function refreshBoardOdds0(){
   if(!p || viewMode!=='sport' || !document.querySelector('.pcard')){ clearInterval(boardTimer); boardTimer=null; return; }
   const fx=p.fixtureId;
   const rows=[];
-  // every market's main lines + all lines of the market on screen, all requests at once
+  // Fast (every 4s): only the market on screen -- its main lines + every line of it. The rest of the
+  // game's main lines (this player's other markets, the game board) every 30s. Nothing after 5 min
+  // without a tap or scroll (the next touch picks it back up).
+  if(Date.now()-boardTouchAt > BOARD_IDLE_MS) return;
   const S0=SPORTS[sportKey], mk0=S0.markets.map(m=>m[0]).filter(k=>p.marketKeys.has(k))[curMktIdx];
   const altNames=mk0?marketNamesFor(p,mk0):[], ack=altNames.length?altKey(p,mk0):null, altRows=[];
+  const full = !altNames.length || boardFullAt.fx!==fx || Date.now()-boardFullAt.at > BOARD_FULL_MS;
   try{ await Promise.all(chunk(bookReqFor(sportKey),5).flatMap(bk=>[
-      oo('/fixtures/odds',{fixture_id:[fx],sportsbook:bk,is_main:true}).then(r=>(r?.data||[]).forEach(d=>(d.odds||[]).forEach(o=>{ o._fx=d.id; if(mainBookRow(sportKey,o)) rows.push(o); }))),
+      oo('/fixtures/odds', full ? {fixture_id:[fx],sportsbook:bk,is_main:true} : {fixture_id:[fx],sportsbook:bk,is_main:true,market:altNames}).then(r=>(r?.data||[]).forEach(d=>(d.odds||[]).forEach(o=>{ o._fx=d.id; if(mainBookRow(sportKey,o)) rows.push(o); }))),
       ...(ack && altCache[ack] ? [oo('/fixtures/odds',{fixture_id:[fx],sportsbook:bk,market:altNames}).then(r=>(r?.data?.[0]?.odds||[]).forEach(o=>{ o._fx=fx; if(mainBookRow(sportKey,o)) altRows.push(o); }))] : []) ]));
     if(ack && altCache[ack] && altRows.length) altCache[ack]=altRows; }
   catch(e){ console.warn('[props] board refresh failed', e.message); return; }
   if(current!==p || viewMode!=='sport' || !document.querySelector('.pcard')) return;
-  mainRows = mainRows.filter(o=>o._fx!==fx).concat(rows);
+  if(full){ boardFullAt={ fx, at:Date.now() }; mainRows = mainRows.filter(o=>o._fx!==fx).concat(rows); }
+  else { const names=new Set(altNames.map(n=>String(n).toLowerCase())); if(rows.length) mainRows = mainRows.filter(o=>!(o._fx===fx && names.has(String(o.market||'').toLowerCase()))).concat(rows); }
   const S=SPORTS[sportKey]; const mkeys=S.markets.map(m=>m[0]).filter(k=>p.marketKeys.has(k));
   mkeys.forEach(k=>{ const ctx=`${p.key}|${k}`; if(document.querySelector(`.mk[data-ctx="${ctx}"]`)) rerenderCard(p,ctx); });
 }
