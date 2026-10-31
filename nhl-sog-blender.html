@@ -5987,6 +5987,52 @@ function setNhlNickWebhook() {
   showNhlToast(v ? "Nick webhook saved — Send to Nick posts straight to the channel" + (_nhlNickRole() ? " and tags the role" : "") : "Nick webhook off — back to copy/paste");
   if (currentTab === "discord") renderNhlDiscordTab();
 }
+// Nick's channel gets one Discord embed per pick instead of an image (same look as the NBA model posts):
+// colored bar (orange over / blue under), matchup + time, the side and line big, play-to, the books at play-to or
+// better with the best marked, each source's projection · fair price · EV at the best price, then agree / edge /
+// worst / model.
+async function _nhlNickEmbeds(picks) {
+  let fx = []; try { fx = await ooNhlFixtures(); } catch (e) {}
+  const am = n => (Number(n) > 0 ? "+" : "") + Number(n);
+  const G = "\u001b[0;32m", R = "\u001b[0;31m", X = "\u001b[0m";
+  return picks.map(b => {
+    const iso = _ymdLocal(new Date(b.date)), gm = String(b.game || "").split("@").map(t => _nhlTeamCanon(t.trim()));
+    const f = fx.find(x => x.date === iso && ((gm[0] && _nhlTeamCanon(x.away) === gm[0]) || (gm[1] && _nhlTeamCanon(x.home) === gm[1]) || (b.team && [_nhlTeamCanon(x.home), _nhlTeamCanon(x.away)].includes(_nhlTeamCanon(b.team)))));
+    const matchup = f ? `${f.away} @ ${f.home} · ${new Date(f.start).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}` : (b.game || "");
+    const over = String(b.ou).toLowerCase().startsWith("o");
+    const pt = _nhlCardPlayTo(b), ptNum = pt != null ? parseInt(pt, 10) : null;
+    const books = (b.allBooks || []).filter(x => !x.alt && (ptNum == null || isNaN(ptNum) || x.price >= ptNum));
+    if (!books.some(x => x.book === b.book)) books.push({ book: b.book, price: Number(b.odds) });
+    const isBest = x => x.book === b.book && x.price === Number(b.odds);   // the card's price (trusted book) leads, others after
+    const seen = new Set(), bookRows = books.sort((x, y) => (isBest(y) - isBest(x)) || (y.price - x.price)).filter(x => !seen.has(x.book) && seen.add(x.book)).slice(0, 5)
+      .map(x => `${x.book.padEnd(14)}${am(x.price).padStart(5)}${isBest(x) ? `  ${G}best${X}` : ""}`);
+    const d = oddsToDecimal(b.odds), projs = b.sourceProjs || {};
+    const srcRows = Object.keys(projs).sort((x, y) => projs[x] - projs[y]).map(k => {
+      const p = _nhlPoissonHit(b.ou, b.line, Number(projs[k])), ev = d ? (p * d - 1) * 100 : null;
+      return `${(_NHL_SRC_TAG[k] === "ROTOWIRE" ? "RW" : _NHL_SRC_TAG[k]).padEnd(7)}${Number(projs[k]).toFixed(2).padStart(5)}  fair ${am(p2american(p)).padStart(5)}  ${ev == null ? "" : (ev >= 0 ? G : R) + ((ev >= 0 ? "+" : "") + ev.toFixed(1) + "%").padStart(6) + X}`;
+    });
+    const evs = Object.keys(projs).map(k => d ? (_nhlPoissonHit(b.ou, b.line, Number(projs[k])) * d - 1) * 100 : null).filter(v => v != null);
+    const agree = evs.filter(v => v > 0).length, edge = _nhlDisplayEv(b), worst = evs.length ? Math.min(...evs) : null;
+    const vals = Object.values(projs).map(Number), model = vals.length ? vals.reduce((a, v) => a + v, 0) / vals.length : null;
+    const foot = [`**${agree}/${evs.length || 4} agree**`, edge != null ? `edge **${edge >= 0 ? "+" : ""}${edge.toFixed(1)}%**` : "", worst != null ? `worst ${worst >= 0 ? "+" : ""}${worst.toFixed(1)}%` : "", model != null ? `model ${model.toFixed(2)}` : ""].filter(Boolean).join(" · ");
+    const logo = b.team ? teamLogoUrlNhl(b.team) : null;
+    return {
+      color: over ? 0xfb923c : 0x38bdf8,
+      title: b.player,
+      description: [matchup, `## ${over ? "OVER" : "UNDER"} ${b.line} SOG`, pt != null ? `play to **${am(pt)}**` : "",
+        "```ansi\n" + bookRows.join("\n") + "\n```", srcRows.length ? "```ansi\n" + srcRows.join("\n") + "\n```" : "", foot].filter(Boolean).join("\n"),
+      ...(logo ? { thumbnail: { url: logo } } : {}),
+    };
+  });
+}
+async function _nhlPostNickEmbeds(picks) {
+  const embeds = await _nhlNickEmbeds(picks), role = _nhlNickRole();
+  for (let i = 0; i < embeds.length; i += 10) {   // Discord: 10 embeds per message
+    const r = await fetch(_nhlNickHook(), { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: "NHL MODEL", content: i === 0 && role ? `<@&${role}>` : "", allowed_mentions: { parse: [], roles: role ? [role] : [] }, embeds: embeds.slice(i, i + 10) }) });
+    if (!r.ok) throw new Error("Discord said " + r.status + " " + (await r.text()).slice(0, 160));
+  }
+}
 // Every card that goes to Discord is kept (this browser's IndexedDB — images are too big for localStorage)
 // and shown on the DISCORD tab, newest first.
 function _nhlCardDb() {
@@ -6136,7 +6182,8 @@ async function sendNhlCard(mode) {
     if (mode === "nick" && _nhlNickHook()) {
       try {
         if (btn) btn.textContent = "Posting…";
-        await _nhlPostToDiscord(blob, "", { url: _nhlNickHook(), role: _nhlNickRole() });
+        try { await _nhlPostNickEmbeds(freshPicks); }   // per-pick embeds; the image is the fallback
+        catch (e) { console.warn("[NHL] Nick embeds failed, sending the image", e); await _nhlPostToDiscord(blob, "", { url: _nhlNickHook(), role: _nhlNickRole() }); }
         markSent();
         showNhlToast(`Posted ${freshPicks.length} to Nick's channel ✓`);
         if (btn) { btn.textContent = "✓ POSTED"; setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 1500); }
