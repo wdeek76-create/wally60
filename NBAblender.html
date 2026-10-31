@@ -649,7 +649,7 @@ table colgroup col.avg-col{width:16%;}
   try {
     const d = new Date(Date.now() - 5 * 3600 * 1000), day = d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
     if (localStorage.getItem("nba_daily_clear_day") === day) return;
-    ["nba_morning_ps_v1", "nba_lineups_v1", "nba_lineups_rg_v1", "nba_lineups_tabs_v1", "nba_lineup_games_v1", "nba_lineup_discord_msg", "nba_injuries_cache",
+    ["nba_morning_ps_v1", "nba_morning_paste_hash_v1", "nba_lineups_v1", "nba_lineups_rg_v1", "nba_lineups_tabs_v1", "nba_lineup_games_v1", "nba_lineup_discord_msg", "nba_injuries_cache",
      "nba_rw_depth_v1", "nba_rg_impact_v1", "nba_rw_lineups_raw", "nba_tabs_lineups_raw", "nba_rw_news_feed_v1", "captool_players"].forEach(k => localStorage.removeItem(k));
     localStorage.setItem("nba_daily_clear_day", day);
   } catch (e) {}
@@ -26190,6 +26190,40 @@ function morningAutoLog() {
 let morningSelSrc = "stok", morningSelStat = "AUTO";
 // After an import the Market box moves on to the next market (PropShop picker order) so the next paste is already set up.
 function _mNextStat(stat) { const i = MORNING_STATS.indexOf(stat); return i < 0 ? "AUTO" : MORNING_STATS[(i + 1) % MORNING_STATS.length]; }
+// ── LIVE PASTE CHECK ───────────────────────────────────────────────────────
+// As soon as something is pasted: what it is (market, props, date), where it will go, and warnings (same text pasted twice, same board as another source, re-paste replaces,
+// wrong day, market box disagreeing with the header). Pure preview: nothing is stored until IMPORT.
+const MORNING_HASH_KEY = "nba_morning_paste_hash_v1";
+let morningPasteHash = {}; try { morningPasteHash = JSON.parse(localStorage.getItem(MORNING_HASH_KEY) || "{}") || {}; } catch (e) { morningPasteHash = {}; }
+const _mHash = t => { const x = String(t || "").replace(/\s+/g, " ").trim(); let h = 5381; for (let i = 0; i < x.length; i++) h = ((h << 5) + h + x.charCodeAt(i)) | 0; return String(h) + ":" + x.length; };
+function _mHashSave(src, stat, raw) { morningPasteHash[src + "|" + stat] = { h: _mHash(raw), at: Date.now() }; try { localStorage.setItem(MORNING_HASH_KEY, JSON.stringify(morningPasteHash)); } catch (e) {} }
+let _mLiveTimer = null;
+function morningPasteLiveSoon() { clearTimeout(_mLiveTimer); _mLiveTimer = setTimeout(morningPasteLive, 250); }
+function morningPasteLive() {
+  const box = document.getElementById("morning-paste-live"), ta = document.getElementById("morning-paste"); if (!box || !ta) return;
+  const raw = ta.value;
+  if (!raw.trim()) { box.innerHTML = ""; return; }
+  const src = document.getElementById("morning-src").value, sel = document.getElementById("morning-stat").value;
+  const ok = t => `<span style="color:#4ade80;">✓ ${t}</span>`, warn = t => `<span style="color:#fbbf24;">⚠ ${t}</span>`, bad = t => `<span style="color:#f87171;">✗ ${t}</span>`;
+  const out = [];
+  try {
+    let stat = sel === "AUTO" ? morningDetectMarket(raw) : sel;
+    if (!stat) { box.innerHTML = bad("Can't tell the market — pick it in the Market box"); return; }
+    if (String(stat).startsWith("UNSUPPORTED:")) { box.innerHTML = bad(`That's a ${String(stat).slice(12)} board — not one of our markets`); return; }
+    const { results } = parseMorningPropShop(raw, stat);
+    if (!results.length) { box.innerHTML = bad("No props found in this paste"); return; }
+    const dates = [...new Set(results.map(r => r.gameDateIso).filter(Boolean))].sort(), today = localYMD(new Date());
+    out.push(ok(`${_mSrc(src).label} · ${stat} · ${results.length} props`));
+    if (dates.length) out.push(dates.every(d => d === today) ? ok("today's slate") : warn(`dated ${dates.map(d => d.slice(5)).join(" / ")} (today is ${today.slice(5)})`));
+    if (sel !== "AUTO") { const hdr = morningDetectMarket(raw); if (hdr && !String(hdr).startsWith("UNSUPPORTED") && hdr !== sel) out.push(warn(`the header says ${hdr} but the Market box is ${sel}`)); }
+    const hh = _mHash(raw), hits = Object.keys(morningPasteHash).filter(k => morningPasteHash[k].h === hh);
+    if (hits.length) { const k = hits[0], [ks, kt] = k.split("|"), at = new Date(morningPasteHash[k].at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }); out.push(bad(`exact same text already pasted as ${_mSrc(ks).label} ${kt} at ${at}`)); }
+    const prev = (morningPs[src] || []).filter(p => p.stat === stat).length;
+    out.push(prev ? warn(`replaces ${prev} ${_mSrc(src).label} ${stat} props already in`) : ok(`new for ${_mSrc(src).label} ${stat}`));
+    morningPasteWarnings(raw, results, stat, src).filter(w => !/header says|Market box/.test(w)).forEach(w => out.push(warn(w)));
+  } catch (e) { out.push(bad("couldn't read this paste")); }
+  box.innerHTML = out.join(" &nbsp;·&nbsp; ");
+}
 function morningImport() {
   const ta = document.getElementById("morning-paste");
   const src = document.getElementById("morning-src").value;
@@ -26216,7 +26250,7 @@ function morningImport() {
   });
   const prev = (morningPs[src] || []).filter(p => p.stat === stat).length;
   morningPs[src] = (morningPs[src] || []).filter(p => p.stat !== stat).concat(Object.values(byKey));
-  saveMorningPs();
+  saveMorningPs(); _mHashSave(src, stat, raw);
   try { morningSoloCapture(src, stat, results); } catch (e) { console.warn("[MORNING solo] capture failed", e); }
   const n = Object.values(byKey).length;
   const logged = morningAutoLog();
@@ -26479,12 +26513,13 @@ function renderMorning() {
       <div style="display:grid;gap:3px;">${loadedGrid}</div>
     </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px;">
-      <label style="font-size:11px;color:#a8b0bb;">Source <select id="morning-src" onchange="morningSelSrc=this.value" style="background:#050507;border:1px solid #1a1d22;color:#e2e8f0;border-radius:5px;padding:4px 6px;">${srcOpts}</select></label>
-      <label style="font-size:11px;color:#a8b0bb;">Market <select id="morning-stat" onchange="morningSelStat=this.value" style="background:#050507;border:1px solid #1a1d22;color:#e2e8f0;border-radius:5px;padding:4px 6px;">${statOpts}</select></label>
+      <label style="font-size:11px;color:#a8b0bb;">Source <select id="morning-src" onchange="morningSelSrc=this.value;morningPasteLiveSoon()" style="background:#050507;border:1px solid #1a1d22;color:#e2e8f0;border-radius:5px;padding:4px 6px;">${srcOpts}</select></label>
+      <label style="font-size:11px;color:#a8b0bb;">Market <select id="morning-stat" onchange="morningSelStat=this.value;morningPasteLiveSoon()" style="background:#050507;border:1px solid #1a1d22;color:#e2e8f0;border-radius:5px;padding:4px 6px;">${statOpts}</select></label>
       <button onclick="morningImport()" style="background:#7c3aed;border:none;color:#fff;border-radius:6px;padding:7px 16px;font-size:12px;font-weight:800;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;">IMPORT</button>
       <span id="morning-import-info" style="font-size:11px;color:#a8b0bb;"></span>
     </div>
-    <textarea id="morning-paste" placeholder="Paste the PropShop board here…" spellcheck="false" style="width:100%;min-height:70px;margin-top:8px;background:#050507;border:1px solid #1a1d22;border-radius:6px;padding:8px 10px;color:#e2e8f0;font-family:'JetBrains Mono','Menlo',monospace;font-size:11px;outline:none;resize:vertical;box-sizing:border-box;"></textarea>
+    <textarea id="morning-paste" oninput="morningPasteLiveSoon()" placeholder="Paste the PropShop board here…" spellcheck="false" style="width:100%;min-height:70px;margin-top:8px;background:#050507;border:1px solid #1a1d22;border-radius:6px;padding:8px 10px;color:#e2e8f0;font-family:'JetBrains Mono','Menlo',monospace;font-size:11px;outline:none;resize:vertical;box-sizing:border-box;"></textarea>
+    <div id="morning-paste-live" style="font-size:12px;font-weight:700;margin-top:6px;min-height:16px;"></div>
   </div>`;
 
   // RotoWire daily news status — the news gate reads the same injury store the Projections tab uses
@@ -26622,7 +26657,7 @@ function renderMorning() {
       <div style="font-size:11px;color:#a8b0bb;">PropShop ensemble · STOK / RG / SABER / RW · 3 of 4 at ${MORNING_QUAL_EV}%+ EV, 4th ≥ 0% · RW news gate · picks go straight into the Tracker</div>
     </div>
     ${newsPanel}${lineupPanel}${pastePanel}${funnelPanel}${boardPanel}${logPanel}</div>`;
-  if (prevPaste) document.getElementById("morning-paste").value = prevPaste;
+  if (prevPaste) { document.getElementById("morning-paste").value = prevPaste; morningPasteLiveSoon(); }
   if (prevSrc) document.getElementById("morning-src").value = prevSrc;
   if (prevStat) document.getElementById("morning-stat").value = prevStat;
   if (prevInfo) document.getElementById("morning-import-info").textContent = prevInfo;
