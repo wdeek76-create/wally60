@@ -26190,6 +26190,30 @@ function morningAutoLog() {
 let morningSelSrc = "stok", morningSelStat = "AUTO";
 // After an import the Market box moves on to the next market (PropShop picker order) so the next paste is already set up.
 function _mNextStat(stat) { const i = MORNING_STATS.indexOf(stat); return i < 0 ? "AUTO" : MORNING_STATS[(i + 1) % MORNING_STATS.length]; }
+// What is on the table right now: "13 bets · 4 same player" (bets on a player who has another bet), plus what the last price check dropped.
+let morningLastCheck = null;   // { at, dropped: n, kept: n }
+function morningSummary() {
+  const picks = morningCardPicks(), by = {};
+  picks.forEach(b => { const k = resolveNorm(b.player || ""); (by[k] = by[k] || []).push(b); });
+  const multi = Object.values(by).filter(g => g.length > 1);
+  const same = multi.reduce((a, g) => a + g.length, 0);
+  const names = multi.map(g => `${displayPlayerName(g[0].player)} ×${g.length}`).join(", ");
+  return { n: picks.length, same, players: multi.length, names };
+}
+// After a run: refresh the live prices and drop every open pick that is no longer in range (no real book, past the play-to, line pulled). Official bets already in the Tracker are never touched.
+let _mChecking = false;
+async function morningCheckRange(quiet) {
+  if (_mChecking) return; _mChecking = true;
+  try {
+    const picks = morningCardPicks(); if (!picks.length) { morningLastCheck = null; return; }
+    try { await morningRefreshPicks(picks); } catch (e) {}
+    const ok = b => _mRealBook(b) && _mInRange(b, b.odds) && !b.liveMissing;
+    const bad = picks.filter(b => !ok(b)), gone = new Set(bad.filter(b => !b.trackerId).map(b => String(b.id)));
+    if (gone.size) { morningBets = morningBets.filter(b => !gone.has(String(b.id))); saveMorningBets(); }
+    morningLastCheck = { at: Date.now(), dropped: gone.size, kept: picks.length - gone.size };
+    if (!quiet || gone.size) showToast(gone.size ? `Dropped ${gone.size} out of range — ${picks.length - gone.size} left` : `All ${picks.length} still in range`);
+  } finally { _mChecking = false; try { renderMorning(); } catch (e) {} }
+}
 // ── LIVE PASTE CHECK ───────────────────────────────────────────────────────
 // As soon as something is pasted: what it is (market, props, date), where it will go, and warnings (same text pasted twice, same board as another source, re-paste replaces,
 // wrong day, market box disagreeing with the header). Pure preview: nothing is stored until IMPORT.
@@ -26268,7 +26292,7 @@ function morningImport() {
   showToast(`${_mSrc(src).label} ${stat}: ${n} props${logged ? ` · ${logged} logged` : ""}`);
   renderMorning();  { const ss = document.getElementById("morning-stat"); if (ss) ss.value = morningSelStat; const sr = document.getElementById("morning-src"); if (sr) sr.value = morningSelSrc; const inf = document.getElementById("morning-import-info"); if (inf && nextSrcNote) inf.textContent += nextSrcNote; }
   if (nextSrcNote) showToast(nextSrcNote.trim());
-  if (logged) morningResolveUnbooked();
+  if (logged) morningResolveUnbooked().then(() => morningCheckRange(true)).catch(() => {});
 }
 function morningParseNews() {
   const src = document.getElementById("morning-news-paste"), dst = document.getElementById("rw-injury-paste");
@@ -26640,10 +26664,10 @@ function renderMorning() {
       <div style="font-size:13px;font-weight:800;color:#d4dae3;letter-spacing:1px;text-transform:uppercase;">Send <span style="color:#a8b0bb;font-weight:600;font-size:11px;text-transform:none;letter-spacing:0;">· every pick goes into the Tracker; records, grading and CLV live there</span></div>
       <div style="display:flex;gap:6px;flex-wrap:wrap;">
         <button onclick="morningToggleAutoGrade()" title="Grade everything automatically, every 10 min, once the games should be over" style="background:${autoGradeOn() ? "#22c55e22" : "transparent"};border:1px solid ${autoGradeOn() ? "#22c55e" : "#1a1d22"};color:${autoGradeOn() ? "#22c55e" : "#e6edf5"};border-radius:6px;padding:6px 12px;font-size:11px;font-weight:800;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;">AUTO-GRADE: ${autoGradeOn() ? "ON" : "OFF"}</button>
-        ${btn("⧉ NICK", "morningSendCard('nick')", false, "#00aaff")}${btn(getNickWebhook() ? "➤ NICK" : "🔗 NICK WEBHOOK", "morningPostNick()", !!getNickWebhook(), "#00aaff")}${getNickWebhook() ? btn("⚙", "morningSetNickWebhook()", false) : ""}${btn("📝 RECAP", "morningCopyDiscordRecap()", false, "#fbbf24")}${getMorningWebhook() ? btn("➤ POST RECAP", "morningPostDiscordRecap()", false, "#fbbf24") : ""}${btn("🖼 DISCORD", "morningSendCard('discord')", false, "#cc66ff")}${btn(getMorningWebhook() ? "➤ POST" : "🔗 WEBHOOK", "morningPostDiscord()", !!getMorningWebhook(), "#5865f2")}${getMorningWebhook() ? btn("⚙", "morningSetWebhook()", false) : ""}${btn("→ TRACKER", "switchTab('tracker')", false, "#22c55e")}${btn("🧹 UNSENT FROM TRACKER", "morningCleanUnsentFromTracker()", false, "#f87171")}${btn("COPY TODAY", "morningCopyCard()", false)}
+        ${btn("⧉ NICK", "morningSendCard('nick')", false, "#00aaff")}${btn(getNickWebhook() ? "➤ NICK" : "🔗 NICK WEBHOOK", "morningPostNick()", !!getNickWebhook(), "#00aaff")}${getNickWebhook() ? btn("⚙", "morningSetNickWebhook()", false) : ""}${btn("📝 RECAP", "morningCopyDiscordRecap()", false, "#fbbf24")}${getMorningWebhook() ? btn("➤ POST RECAP", "morningPostDiscordRecap()", false, "#fbbf24") : ""}${btn("🖼 DISCORD", "morningSendCard('discord')", false, "#cc66ff")}${btn(getMorningWebhook() ? "➤ POST" : "🔗 WEBHOOK", "morningPostDiscord()", !!getMorningWebhook(), "#5865f2")}${getMorningWebhook() ? btn("⚙", "morningSetWebhook()", false) : ""}${btn(_mChecking ? "CHECKING\u2026" : "\u21bb CHECK RANGE", "morningCheckRange()", false, "#7dd3fc")}${btn("→ TRACKER", "switchTab('tracker')", false, "#22c55e")}${btn("🧹 UNSENT FROM TRACKER", "morningCleanUnsentFromTracker()", false, "#f87171")}${btn("COPY TODAY", "morningCopyCard()", false)}
       </div>
     </div>
-    <div style="font-size:12px;color:#a8b0bb;">${morningBets.filter(b => b.result === "pending").length} open · ${morningBets.filter(b => b.cardAt || b.discordSent).length} sent on a card or to Discord · ${bets.filter(b => b && b.source === "morning").length} in the Tracker. Open the Tracker tab for the list, record, units, CLV and grading.</div>
+    ${(() => { const sm = morningSummary(), lc = morningLastCheck; return `<div style="font-size:13px;color:#e6edf5;font-weight:700;" title="${_mEsc(sm.names)}">${sm.n} bet${sm.n === 1 ? "" : "s"}${sm.same ? ` \u00b7 ${sm.same} same player` : ""}${lc ? ` <span style="color:#a8b0bb;font-weight:600;">\u00b7 checked ${new Date(lc.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}${lc.dropped ? `, ${lc.dropped} out of range dropped` : ", all in range"}</span>` : ""}</div>${sm.same ? `<div style="font-size:11px;color:#a8b0bb;margin-top:2px;">${_mEsc(sm.names)}</div>` : ""}`; })()}
   </div>`;
 
   // Keep whatever's in the paste box / selects across re-renders
