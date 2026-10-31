@@ -27446,84 +27446,30 @@ function morningSetNickWebhook() {
   showToast(t ? "Nick webhook saved" + (getNickRole() ? " (pings the role)" : "") : "Nick webhook removed");
   renderMorning();
 }
-// Nick's post as Discord embeds (one per pick) with the same data as his card: price + play-to, every book in range, each source's projection / fair / EV, agree count, edge, worst, anchor and model.
-async function _nickEmbeds(picks) {
-  const nm = bk => BOOK_CODE_NAMES[String(bk || "").trim().toUpperCase()] || bk;
-  const odds = o => o > 0 ? `+${o}` : `${o}`;
-  const timeOf = b => { const m = String(b.gameTime || "").match(/(\d{1,2}:\d{2}\s*[AP]M)/i); return m ? m[1].toUpperCase().replace(/\s+/, " ") : ""; };
-  const depthOf = (b, bk) => (b.liqBooks && b.liqBooks[bk] && b.liqBooks[bk].liq != null) ? b.liqBooks[bk].liq : null;
-  const depthTo = (b, bk) => {
-    try {
-      const meta = b.liqBooks && b.liqBooks[bk], lv = meta && b.liqLevels && b.liqLevels[meta.book];
-      if (!lv || !lv.length || b.fairProb == null) return null;
-      const thr = (1 + MORNING_QUAL_EV / 100) / b.fairProb, ok = lv.filter(l => oddsToDecimal(l.price) >= thr);
-      return ok.length ? { total: ok.reduce((a, l) => a + l.size, 0), worst: ok[ok.length - 1].price, n: ok.length } : null;
-    } catch (e) { return null; }
-  };
-  const topSize = (b, bk, fallback) => { try { const meta = b.liqBooks && b.liqBooks[bk], lv = meta && b.liqLevels && b.liqLevels[meta.book]; if (lv && lv.length) return lv[0].size; } catch (e) {} return fallback; };
-  const sorted = picks.slice().sort((a, b) => { const ta = Date.parse("1/1/2000 " + timeOf(a)) || 0, tb = Date.parse("1/1/2000 " + timeOf(b)) || 0; return ta - tb || String(a.player).localeCompare(String(b.player)); });
-  return sorted.map(b => {
-    const stat = (typeof STAT_FULL_NAME !== "undefined" && STAT_FULL_NAME[b.stat]) ? STAT_FULL_NAME[b.stat] : b.stat;
-    const isOver = String(b.ou).toLowerCase() === "over", bookN = nm(b.book), pt = morningPlayTo(b);
-    // Books: same rules as the card (one price per book, live first, in range of the play-to, best first, exchange depth)
-    const seen = new Set([bookN]);
-    const alts = (b.altBooks || []).map(a => ({ book: nm(a.book), odds: a.odds, liq: a.liq })).concat((b.sourcePrices || []).map(x => ({ book: nm(x.book), odds: x.odds, liq: x.liq })))
-      .filter(x => x.odds && !isNaN(x.odds) && x.book && _mAltInRange(b, x.odds)).filter(x => { if (seen.has(x.book)) return false; seen.add(x.book); return true; }).sort((x, y) => y.odds - x.odds);
-    const bookRow = (book, o, best) => {
-      const ex = _mIsExchange(book), top = ex ? topSize(b, book, depthOf(b, book)) : null, dt = ex ? depthTo(b, book) : null;
-      const cents = x => { const d = oddsToDecimal(x); return d > 1 ? ` (${(100 / d).toFixed(1)}\u00a2)` : ""; };   // exchanges quote cents (win %): -127 = (55.9\u00a2)
-      let row = `${String(book).slice(0, 13).padEnd(13)}${odds(o).padStart(5)}${ex ? cents(o) : ""}${best ? "  best" : ""}${top != null ? `  $${Math.round(top)}` : ""}`;
-      if (dt && dt.n > 1) row += `\n${"".padEnd(13)}$${Math.round(dt.total)} @ ${odds(dt.worst)}${cents(dt.worst)} to play-to`;
-      return row;
-    };
-    const books = [bookRow(bookN, b.odds, true)].concat(alts.map(x => bookRow(x.book, x.odds, false))).join("\n");
-    const fairTxt = k => { const f = b.sourceFairs && b.sourceFairs[k]; return f != null && oddsToDecimal(f) ? ` fair ${f > 0 ? "+" : ""}${f} (${(100 / oddsToDecimal(f)).toFixed(0)}%)` : ""; };
-    const srcRows = MORNING_SRC_KEYS.map(k => {
-      const hasP = b.sourceProjs && b.sourceProjs[k] != null, hasE = b.sourceEvs && b.sourceEvs[k] != null; if (!hasP && !hasE) return "";
-      const ev = hasE ? Number(b.sourceEvs[k]) : null;
-      return `${_mSrc(k).label.padEnd(6)}${(hasP ? Number(b.sourceProjs[k]).toFixed(1) : "—").padStart(5)}${fairTxt(k)}${ev != null ? `  ${ev >= 0 ? "+" : ""}${ev.toFixed(1)}%` : ""}`;
-    }).filter(Boolean).join("\n");
-    const fprobs = MORNING_SRC_KEYS.map(k => { const f = b.sourceFairs && b.sourceFairs[k]; const d = f != null ? oddsToDecimal(f) : null; return d ? { k, f, p: 1 / d } : null; }).filter(Boolean);
-    const fmtF = x => `${x.f > 0 ? "+" : ""}${x.f} (${(x.p * 100).toFixed(0)}%)`;
-    const anchorF = fprobs.find(x => x.k === b.anchorSrc), lowF = fprobs.length ? fprobs.reduce((a, x) => x.p < a.p ? x : a) : null;
-    const f1 = [`${(b.sourcesAgreed || []).length}/${b.requiredQual || 4} agree`, b.ev != null ? `edge +${Number(b.ev).toFixed(1)}%` : "", b.minEv != null ? `worst ${b.minEv >= 0 ? "+" : ""}${Number(b.minEv).toFixed(1)}%` : ""].filter(Boolean).join(" · ");
-    const f2 = [b.anchorSrc && b.anchorProj != null ? `anchor ${_mSrc(b.anchorSrc).label} ${Number(b.anchorProj).toFixed(1)}${b.anchorEv != null ? ` ${Number(b.anchorEv) >= 0 ? "+" : ""}${Number(b.anchorEv).toFixed(1)}%` : ""}` : "", anchorF ? `anchor fair ${fmtF(anchorF)}` : "", lowF && (!anchorF || lowF.k !== anchorF.k) ? `low ${_mSrc(lowF.k).label} ${fmtF(lowF)}` : "", b.modelProj != null ? `model ${Number(b.modelProj).toFixed(1)}` : "", b.expMin != null ? `${Number(b.expMin).toFixed(0)} min` : ""].filter(Boolean).join(" · ");
-    const gm = [String(b.game || b.team || "").replace(/\s+/g, " "), timeOf(b)].filter(Boolean).join(" · ");
-    const em = {
-      color: isOver ? 0xf87171 : 0x4ade80,   // red = over, green = under
-      title: displayPlayerName(b.player),
-      description: `${gm}\n**${String(b.ou).toUpperCase()} ${b.line} ${String(stat).replace(/\b[a-z]/g, c => c.toUpperCase())}**${pt ? ` · play to **${pt.replace("−", "-")}**` : ""}\n\`\`\`\n${books}\n\`\`\`${srcRows ? `\n\`\`\`\n${srcRows}\n\`\`\`` : ""}\n**${f1}**${f2 ? `\n${f2}` : ""}`,
-    };
-    return em;
-  });
-}
 async function morningPostNick() {
   const hook = getNickWebhook();
   if (!hook) { morningSetNickWebhook(); return; }
   let picks = morningCardPicks();
   if (!picks.length) { showToast("No pending morning picks to send"); return; }
   if (!confirm(`Post ${picks.length} pick${picks.length === 1 ? "" : "s"} to Nick's channel now?`)) return;
-  showToast("Refreshing live prices + exchange depth…");
+  showToast("Refreshing live prices + exchange depth\u2026");
   try { await morningRefreshPicks(picks); } catch (e) {}
   picks = _mDropUnpriced(picks);
   if (!picks.length) { showToast("No picks with a real price on this run"); return; }
-  let embeds;
-  try { embeds = await _nickEmbeds(picks); } catch (e) { console.error("[NICK embeds]", e); showToast("Post failed — " + (e && e.message || "see console")); return; }
-  // Discord: 10 embeds and 6000 characters per message; the role ping goes on the first message only
-  const size = e => (e.title || "").length + (e.description || "").length;
-  const msgs = []; let cur = [], len = 0;
-  embeds.forEach(e => { if (cur.length && (cur.length >= 10 || len + size(e) > 5500)) { msgs.push(cur); cur = []; len = 0; } cur.push(e); len += size(e); });
-  if (cur.length) msgs.push(cur);
+  showToast("Building Nick card\u2026");
+  let blob;
+  try { blob = await _morningCardBlob(picks, "nick"); } catch (e) { console.error("[MORNING card]", e); showToast("Card failed \u2014 " + (e && e.message || "see console")); return; }
+  if (!blob) { showToast("Card failed"); return; }
+  const fd = new FormData();
   const role = getNickRole();
+  fd.append("payload_json", JSON.stringify({ content: role ? `<@&${role}>` : "",   // the role ping and nothing else; the picture says the rest
+     allowed_mentions: role ? { parse: [], roles: [role] } : { parse: [] } }));
+  fd.append("files[0]", new File([blob], `nba-model-nick-${localYMD(new Date())}.png`, { type: "image/png" }));
   try {
-    for (let i = 0; i < msgs.length; i++) {
-      const body = { content: i === 0 && role ? `<@&${role}>` : "", embeds: msgs[i], allowed_mentions: role && i === 0 ? { parse: [], roles: [role] } : { parse: [] } };
-      const r = await fetch(hook + (hook.includes("?") ? "&" : "?") + "wait=true", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-      if (!r.ok) { const t = await r.text().catch(() => ""); throw new Error(`Discord said ${r.status} ${t.slice(0, 120)}`); }
-      if (i < msgs.length - 1) await new Promise(res => setTimeout(res, 700));
-    }
-  } catch (e) { showToast("Nick post failed — " + (e && e.message || e)); return; }
-  showToast(`Posted ${picks.length} pick${picks.length === 1 ? "" : "s"} to Nick's channel ✓`);
+    const r = await fetch(hook + (hook.includes("?") ? "&" : "?") + "wait=true", { method: "POST", body: fd });
+    if (!r.ok) { const t = await r.text().catch(() => ""); throw new Error(`Discord said ${r.status} ${t.slice(0, 120)}`); }
+  } catch (e) { showToast("Nick post failed \u2014 " + (e && e.message || e)); return; }
+  showToast(`Posted ${picks.length} pick${picks.length === 1 ? "" : "s"} to Nick's channel \u2713`);
 }
 async function morningPostDiscord() {
   const hook = getMorningWebhook();
