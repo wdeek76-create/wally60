@@ -4415,7 +4415,7 @@ async function grabClosingLines(isoDate) {
     if (!todays.length) { showToast(`No bets needing closing lines on ${day}`); return; }
     showToast(`Fetching closing odds for ${day}…`);
     let rows;
-    try { rows = await fetchClosingFromOpticOdds(day); }
+    try { rows = await fetchClosingFromOpticOdds(day, new Set(todays.map(b => PARLAY_MARKET_BY_STAT[(b.stat || "").toUpperCase()]).filter(Boolean))); }
     catch (e) {
       showToast("Closing-odds fetch failed — see console (check backend via OO ⚙)");
       console.error("grabClosingLines:", e);
@@ -5208,7 +5208,7 @@ async function fillBooksFromOpticOdds() {
   }
 }
 // Closing lines from OpticOdds for one local date, in Parlay closing-row shape.
-async function fetchClosingFromOpticOdds(isoDate) {
+async function fetchClosingFromOpticOdds(isoDate, wantMarkets) {
   const pull = async extra => { const raw = []; let page = 1; for (let i = 0; i < 20; i++) { const r = await ooCall("/fixtures", Object.assign({ sport: "basketball", league: "nba", page }, extra || {})); (r?.data || []).forEach(f => raw.push(f)); if (!r?.has_more) break; page++; } return raw; };
   const onDay = raw => raw.filter(f => localYMD(new Date(f.start_date)) === isoDate && f.status !== "unplayed");
   // Ask for just that day's window first (the full list is paged and can run out of pages as the season grows); if that returns nothing or is refused, fall back to the full list like before.
@@ -5228,6 +5228,19 @@ async function fetchClosingFromOpticOdds(isoDate) {
     let odds = [];
     try { const r = await ooCall("/fixtures/odds/historical", { fixture_id: f.id, sportsbook: books }); odds = r?.data?.[0]?.odds || []; }
     catch (e) { window._clvHistFail = (window._clvHistFail || 0) + 1; console.warn("[CLV] historical failed", f.id, e.message); continue; }
+    // Without a market filter OpticOdds can leave the player-prop closes empty (clv: null). Like the other tool, ask again per market by name
+    // (e.g. ["Player Points"]) for the prop markets we bet, and use those rows when they carry the close.
+    try {
+      const want = wantMarkets && wantMarkets.size ? wantMarkets : null;
+      const names = [...new Set(odds.map(o => o.market).filter(n => { const k = ooMarketKey(n); return k && (!want || want.has(k)); }))];
+      const propClv = odds.some(o => ooMarketKey(o.market) && o.clv && o.clv.price != null);
+      if (names.length && !propClv) {
+        const again = [];
+        for (const nm of names) { try { const r2 = await ooCall("/fixtures/odds/historical", { fixture_id: f.id, sportsbook: books, market: [nm] }); (r2?.data?.[0]?.odds || []).forEach(o => again.push(o)); } catch (e2) { console.warn("[CLV] per-market historical failed", f.id, nm, e2.message); } }
+        if (again.some(o => o.clv && o.clv.price != null)) odds = again.concat(odds.filter(o => !ooMarketKey(o.market)));
+        console.log(`[CLV] ${f.id}: per-market re-ask — ${again.length} odds, ${again.filter(o => o.clv && o.clv.price != null).length} with a close`);
+      }
+    } catch (e) { console.warn("[CLV] per-market step failed", e); }
     const g = {};
     // The feed's field names for the closing price have changed before, so look in every likely place (and for decimal odds too).
     const asNum = v => { if (v == null || v === "") return null; if (typeof v === "object") return asNum(v.american != null ? v.american : v.price != null ? v.price : v.odds != null ? v.odds : v.american_odds); const n = Number(String(v).replace("+", "")); return isNaN(n) ? null : n; };
