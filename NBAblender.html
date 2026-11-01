@@ -4423,7 +4423,7 @@ async function grabClosingLines(isoDate) {
     }
     console.log(`[CLV] ${day}: ${rows.length} closing rows`);
     window._clvDiag = { day, fixtures: (window._clvFixtures != null ? window._clvFixtures : "?"), rows: rows.length, markets: [...new Set(rows.map(r => r && r.market_key))].join(", "), books: [...new Set(rows.map(r => r && r.bookmaker))].join(", ") };
-    if (!rows.length) { showToast(`No closing rows returned for ${day}`); return; }
+    if (!rows.length) { const fx = window._clvFixtures; showToast(fx === 0 ? `No finished NBA games found in OpticOdds for ${day}` : `OpticOdds listed ${fx} game(s) on ${day} but returned no closing odds${window._clvHistFail ? ` (${window._clvHistFail} odds call(s) failed \u2014 see console)` : ""}`); return; }
     // Same diagnostic as the fill — shows why a bet failed to match rather than
     // just reporting a count.
     console.log("[CLV] sample row:", rows[0]);
@@ -5209,14 +5209,13 @@ async function fillBooksFromOpticOdds() {
 }
 // Closing lines from OpticOdds for one local date, in Parlay closing-row shape.
 async function fetchClosingFromOpticOdds(isoDate) {
-  const raw = []; let page = 1;
-  for (let i = 0; i < 20; i++) {
-    const r = await ooCall("/fixtures", { sport: "basketball", league: "nba", page });
-    (r?.data || []).forEach(f => raw.push(f));
-    if (!r?.has_more) break; page++;
-  }
-  const day = raw.filter(f => localYMD(new Date(f.start_date)) === isoDate && f.status !== "unplayed");
-  window._clvFixtures = day.length;
+  const pull = async extra => { const raw = []; let page = 1; for (let i = 0; i < 20; i++) { const r = await ooCall("/fixtures", Object.assign({ sport: "basketball", league: "nba", page }, extra || {})); (r?.data || []).forEach(f => raw.push(f)); if (!r?.has_more) break; page++; } return raw; };
+  const onDay = raw => raw.filter(f => localYMD(new Date(f.start_date)) === isoDate && f.status !== "unplayed");
+  // Ask for just that day's window first (the full list is paged and can run out of pages as the season grows); if that returns nothing or is refused, fall back to the full list like before.
+  let day = [];
+  try { const t0 = new Date(isoDate + "T00:00:00").getTime(); day = onDay(await pull({ start_date_after: new Date(t0 - 6 * 3600e3).toISOString(), start_date_before: new Date(t0 + 36 * 3600e3).toISOString() })); } catch (e) { console.warn("[CLV] windowed fixtures failed, using the full list", e && e.message); }
+  if (!day.length) day = onDay(await pull());
+  window._clvFixtures = day.length; window._clvHistFail = 0;
   console.log(`[CLV] OpticOdds fixtures on ${isoDate}:`, day.map(f => `${f.away_team_display} @ ${f.home_team_display} (${f.status})`));
   if (!day.length) return [];
   // CLV_BOOK_PRIORITY keys -> OpticOdds names (max 5 books per call)
@@ -5228,7 +5227,7 @@ async function fetchClosingFromOpticOdds(isoDate) {
   for (const f of day) {
     let odds = [];
     try { const r = await ooCall("/fixtures/odds/historical", { fixture_id: f.id, sportsbook: books }); odds = r?.data?.[0]?.odds || []; }
-    catch (e) { console.warn("[CLV] historical failed", f.id, e.message); continue; }
+    catch (e) { window._clvHistFail = (window._clvHistFail || 0) + 1; console.warn("[CLV] historical failed", f.id, e.message); continue; }
     const g = {};
     odds.forEach(o => {
       const mk = ooMarketKey(o.market); if (!mk || !o.clv || o.clv.price == null) return;
