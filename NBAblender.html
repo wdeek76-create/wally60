@@ -4423,7 +4423,7 @@ async function grabClosingLines(isoDate) {
     }
     console.log(`[CLV] ${day}: ${rows.length} closing rows`);
     window._clvDiag = { day, fixtures: (window._clvFixtures != null ? window._clvFixtures : "?"), rows: rows.length, markets: [...new Set(rows.map(r => r && r.market_key))].join(", "), books: [...new Set(rows.map(r => r && r.bookmaker))].join(", ") };
-    if (!rows.length) { const fx = window._clvFixtures; const dbg = window._clvDebug || {}; console.log("[CLV] debug", dbg); if (dbg.odds && !dbg.priced && dbg.sample) { try { setTimeout(() => prompt("OpticOdds sent no closing price I can read. Copy this whole line and send it to me:", JSON.stringify(dbg.sample).slice(0, 1500)), 600); } catch (e) {} } showToast(fx === 0 ? `No finished NBA games found in OpticOdds for ${day}` : `OpticOdds listed ${fx} game(s) on ${day} but no closing odds: ${dbg.odds || 0} odds back, ${dbg.mapped || 0} known markets, ${dbg.priced || 0} priced${window._clvHistFail ? `, ${window._clvHistFail} odds call(s) failed` : ""}`); return; }
+    if (!rows.length) { const fx = window._clvFixtures; const dbg = window._clvDebug || {}; console.log("[CLV] debug", dbg);  showToast(fx === 0 ? `No finished NBA games found in OpticOdds for ${day}` : (dbg.odds && !dbg.priced && dbg.olv) ? `OpticOdds has the opening lines for ${day} but has NOT published the closing lines yet (closing = empty on ${dbg.clvNull} of ${dbg.odds} odds). Try again later.` : `OpticOdds listed ${fx} game(s) on ${day} but no closing odds: ${dbg.odds || 0} odds back, ${dbg.mapped || 0} known markets, ${dbg.priced || 0} priced${window._clvHistFail ? `, ${window._clvHistFail} odds call(s) failed` : ""}`); return; }
     // Same diagnostic as the fill — shows why a bet failed to match rather than
     // just reporting a count.
     console.log("[CLV] sample row:", rows[0]);
@@ -5232,11 +5232,13 @@ async function fetchClosingFromOpticOdds(isoDate) {
     // The feed's field names for the closing price have changed before, so look in every likely place (and for decimal odds too).
     const asNum = v => { if (v == null || v === "") return null; if (typeof v === "object") return asNum(v.american != null ? v.american : v.price != null ? v.price : v.odds != null ? v.odds : v.american_odds); const n = Number(String(v).replace("+", "")); return isNaN(n) ? null : n; };
     const toAm = n => { if (n == null) return null; if (Math.abs(n) >= 100) return n; if (n > 1 && n < 30) return n >= 2 ? Math.round((n - 1) * 100) : Math.round(-100 / (n - 1)); return null; };   // decimal -> American
-    const closeOf = o => { const c = o.clv || o.closing || o.close || o.closing_line || {}; const cands = [c.price, c.american, c.american_odds, c.odds, o.closing_price, o.close_price, o.closing_odds, o.price, o.american_odds, o.american_price, o.price_american, o.odds, o.latest_price, o.last_price, o.current_price]; for (const v of cands) { const n = toAm(asNum(v)); if (n != null) return n; } return null; };
-    const lineOf = o => { const c = o.clv || o.closing || {}; return c.points != null ? c.points : (o.points != null ? o.points : (o.line != null ? o.line : o.selection_points)); };
+    const lastEntry = o => { const e = Array.isArray(o.entries) ? o.entries.filter(x => x && (x.price != null || x.american != null)) : []; if (!e.length) return null; return e.slice().sort((a, b) => String(a.timestamp || a.created_at || "").localeCompare(String(b.timestamp || b.created_at || ""))).pop(); };   // price history: the last entry is the close
+    const closeOf = o => { const c = o.clv || o.closing || o.close || o.closing_line || lastEntry(o) || {}; const cands = [c.price, c.american, c.american_odds, c.odds, o.closing_price, o.close_price, o.closing_odds, o.price, o.american_odds, o.american_price, o.price_american, o.odds, o.latest_price, o.last_price, o.current_price]; for (const v of cands) { const n = toAm(asNum(v)); if (n != null) return n; } return null; };
+    const lineOf = o => { const c = o.clv || o.closing || lastEntry(o) || {}; return c.points != null ? c.points : (o.points != null ? o.points : (o.line != null ? o.line : o.selection_points)); };
     const sideOf = o => { const t = String(o.selection_line || o.side || o.selection_type || "").toLowerCase(); if (t === "over" || t === "under") return t; const nm = String(o.name || o.selection_name || "").toLowerCase(); return /\bover\b/.test(nm) ? "over" : /\bunder\b/.test(nm) ? "under" : ""; };
-    const dbg = window._clvDebug = window._clvDebug || { odds: 0, mapped: 0, priced: 0, sample: null }; dbg.odds += odds.length;
+    const dbg = window._clvDebug = window._clvDebug || { odds: 0, mapped: 0, priced: 0, sample: null }; dbg.odds += odds.length; dbg.olv = dbg.olv || 0; dbg.clvNull = dbg.clvNull || 0;
     odds.forEach(o => {
+      if (o.olv) dbg.olv++; if (o.clv == null) dbg.clvNull++;
       const mk = ooMarketKey(o.market); if (!mk) return; dbg.mapped++;
       if (!dbg.sample) dbg.sample = o;   // first odd with a known market: shown if nothing gets a price
       const cpx = closeOf(o); if (cpx == null) return; dbg.priced++;
