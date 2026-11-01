@@ -4423,7 +4423,7 @@ async function grabClosingLines(isoDate) {
     }
     console.log(`[CLV] ${day}: ${rows.length} closing rows`);
     window._clvDiag = { day, fixtures: (window._clvFixtures != null ? window._clvFixtures : "?"), rows: rows.length, markets: [...new Set(rows.map(r => r && r.market_key))].join(", "), books: [...new Set(rows.map(r => r && r.bookmaker))].join(", ") };
-    if (!rows.length) { const fx = window._clvFixtures; showToast(fx === 0 ? `No finished NBA games found in OpticOdds for ${day}` : `OpticOdds listed ${fx} game(s) on ${day} but returned no closing odds${window._clvHistFail ? ` (${window._clvHistFail} odds call(s) failed \u2014 see console)` : ""}`); return; }
+    if (!rows.length) { const fx = window._clvFixtures; const dbg = window._clvDebug || {}; console.log("[CLV] debug", dbg); showToast(fx === 0 ? `No finished NBA games found in OpticOdds for ${day}` : `OpticOdds listed ${fx} game(s) on ${day} but no closing odds: ${dbg.odds || 0} odds back, ${dbg.mapped || 0} known markets, ${dbg.priced || 0} priced${window._clvHistFail ? `, ${window._clvHistFail} odds call(s) failed` : ""}`); return; }
     // Same diagnostic as the fill — shows why a bet failed to match rather than
     // just reporting a count.
     console.log("[CLV] sample row:", rows[0]);
@@ -5215,7 +5215,7 @@ async function fetchClosingFromOpticOdds(isoDate) {
   let day = [];
   try { const t0 = new Date(isoDate + "T00:00:00").getTime(); day = onDay(await pull({ start_date_after: new Date(t0 - 6 * 3600e3).toISOString(), start_date_before: new Date(t0 + 36 * 3600e3).toISOString() })); } catch (e) { console.warn("[CLV] windowed fixtures failed, using the full list", e && e.message); }
   if (!day.length) day = onDay(await pull());
-  window._clvFixtures = day.length; window._clvHistFail = 0;
+  window._clvFixtures = day.length; window._clvHistFail = 0; window._clvDebug = { odds: 0, mapped: 0, priced: 0, sample: null };
   console.log(`[CLV] OpticOdds fixtures on ${isoDate}:`, day.map(f => `${f.away_team_display} @ ${f.home_team_display} (${f.status})`));
   if (!day.length) return [];
   // CLV_BOOK_PRIORITY keys -> OpticOdds names (max 5 books per call)
@@ -5229,17 +5229,21 @@ async function fetchClosingFromOpticOdds(isoDate) {
     try { const r = await ooCall("/fixtures/odds/historical", { fixture_id: f.id, sportsbook: books }); odds = r?.data?.[0]?.odds || []; }
     catch (e) { window._clvHistFail = (window._clvHistFail || 0) + 1; console.warn("[CLV] historical failed", f.id, e.message); continue; }
     const g = {};
+    const dbg = window._clvDebug = window._clvDebug || { odds: 0, mapped: 0, priced: 0, sample: null }; dbg.odds += odds.length; if (!dbg.sample && odds[0]) dbg.sample = Object.keys(odds[0]).join(",");
     odds.forEach(o => {
-      const mk = ooMarketKey(o.market); if (!mk || !o.clv || o.clv.price == null) return;
+      const mk = ooMarketKey(o.market); if (!mk) return; dbg.mapped++;
+      // closing price: the feed's own CLV close if it has one, else the last price the book had (for a finished game that is the close)
+      const cpx = o.clv && o.clv.price != null ? o.clv.price : (o.price != null ? o.price : null);
+      if (cpx == null) return; dbg.priced++;
       const side = String(o.selection_line || "").toLowerCase(); if (side !== "over" && side !== "under") return;
       // "Props Builder" (plural, in case that's what OpticOdds now calls it) collapses
       // to the same "propbuilder" key as "Prop Builder" so CLV_BOOK_PRIORITY still ranks it.
       let bk = String(o.sportsbook || "").toLowerCase().replace(/\s+/g, "");
       if (bk === "propsbuilder") bk = "propbuilder";
-      const ln = o.clv.points != null ? o.clv.points : o.points;
+      const ln = o.clv && o.clv.points != null ? o.clv.points : o.points;
       const key = [mk, resolveNorm(o.selection || o.name || ""), ln, bk].join("|");
       if (!g[key]) g[key] = { market_key: mk, player: o.selection || o.name, bookmaker: bk, line: ln, over_price: null, under_price: null };
-      if (side === "over") g[key].over_price = Number(o.clv.price); else g[key].under_price = Number(o.clv.price);
+      if (side === "over") g[key].over_price = Number(cpx); else g[key].under_price = Number(cpx);
     });
     Object.values(g).forEach(r => out.push(r));
   }
