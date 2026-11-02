@@ -630,6 +630,7 @@ a.pfgo{text-decoration:none;display:inline-block}
 .pfprice{display:inline-flex;align-items:center;font-weight:800;font-size:13px;padding:3px 8px 3px 4px;border-radius:8px;background:var(--bg3);border:1px solid var(--line2)}
 .pfprice .pfbk{margin-right:5px}
 .pftag{font-size:11px;font-weight:700;padding:3px 7px;border-radius:8px;background:var(--bg3);color:var(--dim)}
+.pfswap{flex:0 0 auto;width:28px;height:28px;border-radius:8px;border:1px solid var(--line2);background:var(--bg3);color:var(--text);font-weight:800;font-size:14px;margin-right:6px;cursor:pointer}
 .pftag.via{background:rgba(59,130,246,.16);color:#60a5fa}
 .pftag.money{color:var(--text)}
 .pftag.good{background:rgba(34,197,94,.14);color:var(--green)}
@@ -3807,7 +3808,15 @@ let autoWhy = null, autoLastMsg = '';
 const why = k => { if(autoWhy) autoWhy[k]=(autoWhy[k]||0)+1; };
 // books a parlay leg may borrow exchange money from (DK skins count as DK), and how close the target has to be
 const PF_BORROW = new Set(['fanduel','props builder','draftkings','bet105','bovada','fanatics']);
-const PF_BORROW_C = 10;
+let pfBorrowC = Number(LS.get('props_pfborrow','10'))||10;   // how far (cents) the target can sit off the borrowed book
+// long shots: plus-money legs only (+150 to +600), e.g. anytime TDs -- still need the exchange money,
+// with the hold cap eased to 5% for them (long prices rarely sit at 0-1%)
+let pfLong = LS.get('props_pflong','0')==='1';
+const PF_LONG_MIN = 150, PF_LONG_MAX = 600, PF_LONG_HOLD = 5;
+const pfLongOk = c => !pfLong || (Number(c.refRow?.price)>=PF_LONG_MIN && Number(c.refRow?.price)<=PF_LONG_MAX);
+// legs swapped out of the auto parlays (the next best takes their place); cleared with Reset swaps
+const pfExclude = new Set();
+const pfCandKey = c => `${c.p.fixtureId}|${c.p.key}|${c.mkey}|${c.side}|${c.line}`;
 function buildAutoCandidates(){
   const S=SPORTS[sportKey];
   const out=[];
@@ -3886,7 +3895,7 @@ function buildAutoCandidates(){
         // (better than the target by at most 10c) has it -- "borrow" that book's money, bet the target
         if(autoTargetBook && LL.total < pfMin){
           const tk=canonBook(refRow.sportsbook), tc=cents(refRow.price);
-          myRows.filter(o=>PF_BORROW.has(canonBook(o.sportsbook)) && canonBook(o.sportsbook)!==tk && toDec(o.price)>toDec(refRow.price) && cents(o.price)-tc<=PF_BORROW_C)
+          myRows.filter(o=>PF_BORROW.has(canonBook(o.sportsbook)) && canonBook(o.sportsbook)!==tk && toDec(o.price)>toDec(refRow.price) && cents(o.price)-tc<=pfBorrowC)
             .forEach(o=>{ const LB=legLadder(myRows, o.price, S.threeWay); if(LB.total>LL.total){ LL=LB; via={ book:canonBook(o.sportsbook), price:Number(o.price), cents:cents(o.price)-tc }; } });
         }
         const hold = autoHoldPref ? LL.bestHold : null;
@@ -4151,21 +4160,21 @@ const pfSports = () => pfLeague==='__all' ? PF_ALL.filter(k=>SPORTS[k]) : [pfLea
 let pfPropSide = LS.get('props_pfside','both');
 const pfSideOk = c => c.isMain || c.side==='single' || pfPropSide==='both' || c.side===pfPropSide;
 // every sport's scan merged (null while nothing has loaded yet)
-function pfScanAll(){ const lists=pfSports().map(sk=>pfScan(sk)); if(lists.every(l=>l==null)) return null; return lists.flatMap(l=>l||[]).filter(pfSideOk).sort((x,y)=>(x.src==='exch'?0:1)-(y.src==='exch'?0:1) || (x.hold??99)-(y.hold??99) || y.liq-x.liq); }
+function pfScanAll(){ const lists=pfSports().map(sk=>pfScan(sk)); if(lists.every(l=>l==null)) return null; return lists.flatMap(l=>l||[]).filter(pfSideOk).filter(pfLongOk).sort((x,y)=>(x.src==='exch'?0:1)-(y.src==='exch'?0:1) || (x.hold??99)-(y.hold??99) || y.liq-x.liq); }
 function pfScan(skArg){
   const sk=skArg||pfLeagueKey(), d=pfData(sk), pfCache=pfCacheBy[sk]||{};
   // a sport with no data yet: load it once (a failed / empty load isn't retried for 5 min -- otherwise
   // every redraw would start another load, and "All sports" would spin on a league with nothing)
   if(!d){ if(!pfLoading.has(sk) && Date.now()-(pfTried[sk]||0)>5*60e3){ pfLoading.add(sk); pfTried[sk]=Date.now(); ensureSportData(sk).finally(()=>{ pfLoading.delete(sk); if(viewMode==='parlay') setTimeout(renderParlay,0); }); } return null; }
   if(!autoTargetBook){ autoTargetBook='fanduel'; LS.set('props_autotarget','fanduel'); }
-  const key=[sk, autoScope, autoTargetBook, parlayMaxHold, pfGame, pfMin].join('|');   // pfMin too: borrowing kicks in under it
+  const key=[sk, autoScope, autoTargetBook, parlayMaxHold, pfGame, pfMin, pfBorrowC, pfLong].join('|');   // pfMin too: borrowing kicks in under it
   if(pfCache.key===key && pfCache.rows===d.mainRows) return pfCache.list.filter(c=>c.src!=='exch' || c.liq>=pfMin);
   const byFx={}; d.mainRows.forEach(o=>{ if(PF_SKIP_BOOKS.has(rawBook(o))) return; (byFx[o._fx]=byFx[o._fx]||[]).push(o); });
   const plByFx={}; d.players.forEach(p=>{ (plByFx[p.fixtureId]=plByFx[p.fixtureId]||[]).push(p); });
   const g=[sportKey,fixtures,mainRows,players], a=[autoFixture,autoMinLiqMains,autoMinLiqProps,autoMinPinMains,autoMinPinProps,autoEdge,autoSharpMin,autoHoldPref,autoWhy];
-  const out=[], all=[];
+  const out=[], all=[], holdWas=parlayMaxHold;
   try{
-    sportKey=sk; fixtures=d.fixtures;
+    sportKey=sk; fixtures=d.fixtures; if(pfLong) parlayMaxHold=Math.max(parlayMaxHold, PF_LONG_HOLD);
     autoFixture=pfGame; autoMinLiqMains=autoMinLiqProps=autoMinPinMains=autoMinPinProps=0; autoEdge=''; autoSharpMin=0; autoHoldPref=true; autoWhy=null;
     Object.keys(byFx).forEach(fid=>{
       if(pfGame && fid!==pfGame) return;
@@ -4196,7 +4205,7 @@ function pfScan(skArg){
       });
     });
   } finally {
-    [sportKey,fixtures,mainRows,players]=g;
+    [sportKey,fixtures,mainRows,players]=g; parlayMaxHold=holdWas;
     [autoFixture,autoMinLiqMains,autoMinLiqProps,autoMinPinMains,autoMinPinProps,autoEdge,autoSharpMin,autoHoldPref,autoWhy]=a;
   }
   // exchange-backed first (preferred), then sharp-book ones; best hold first inside each
@@ -4251,7 +4260,7 @@ function pfDetHtml(ref, tgt, L, mine, sharp){
 // other side (props) or the sharp books' devig (mains); ranked by EV at the target. Not SGP: one
 // leg per game. SGP: the best game's legs. Up to 5 different parlays.
 function pfAutoParlays(){
-  const all=pfSports().flatMap(sk=>pfCacheBy[sk]?.list||[]).filter(pfSideOk).filter(c=>(c.src!=='exch' || c.liq>=pfMin) && c.refRow && c.fairP!=null && Math.abs(Number(c.refRow.price))<1000).sort((a,b)=>b.ev-a.ev);
+  const all=pfSports().flatMap(sk=>pfCacheBy[sk]?.list||[]).filter(pfSideOk).filter(pfLongOk).filter(c=>!pfExclude.has(pfCandKey(c))).filter(c=>(c.src!=='exch' || c.liq>=pfMin) && c.refRow && c.fairP!=null && Math.abs(Number(c.refRow.price))<1000).sort((a,b)=>b.ev-a.ev);
   const seen=new Set(), pool=all.filter(c=>{ const k=c.p.fixtureId+'|'+c.p.key+'|'+c.mkey; if(seen.has(k)) return false; seen.add(k); return true; });
   const oneGame = !pfSgp && new Set(pool.map(c=>c.p.fixtureId)).size>=pfLegs;
   const pick=(list,start)=>{ const out=[], team=new Map(), games=new Set();
@@ -4289,7 +4298,7 @@ function pfParlayCardHtml(P, i){
     <div class="pfparh"><div><div class="pfname">Parlay ${i+1} <span class="pfbet">${P.legs.length} legs${P.sameGame?' · same game':''}</span></div>
       <div class="pfmeta">${esc(bookShort(tgt))} ${fmtAm(pfBoost?P.boosted:P.price)}${pfBoost?` (+${pfBoost}% boost, ${fmtAm(P.price)})`:''} · fair ${fmtAm(P.fair)}${P.sameGame?' · SGP: the slip price will be lower':''}</div></div>
       <span class="pftag${P.ev>0?' good':''}" style="font-size:12.5px">${P.ev>0?'+':''}${P.ev.toFixed(1)}% EV</span></div>
-    ${P.legs.map(c=>{ const u=deepLinkFor(c.refRow)||BOOK_HOME[rawBook(c.refRow)]; return `<div class="pfleg">${pfLogoHtml(c)}<div class="pfmain"><div class="pfname" style="font-size:13px">${esc(c.p.isGame&&c.fx?fxLabel(c.fx):titleCase(c.p.name))} <span class="pfbet">${esc(pfBetTxt(c))}</span></div>
+    ${P.legs.map(c=>{ const u=deepLinkFor(c.refRow)||BOOK_HOME[rawBook(c.refRow)]; return `<div class="pfleg"><button class="pfswap" data-pfswap="${esc(pfCandKey(c))}" title="Swap this leg for the next best">↻</button>${pfLogoHtml(c)}<div class="pfmain"><div class="pfname" style="font-size:13px">${esc(c.p.isGame&&c.fx?fxLabel(c.fx):titleCase(c.p.name))} <span class="pfbet">${esc(pfBetTxt(c))}</span></div>
       <div class="pfmeta">${pfBookImg(rawBook(c.refRow))}<b>${fmtAm(c.refRow.price)}</b> · ${c.src==='exch' ? `${usd(c.liq)} exch · ${holdTxt(c.hold??0)}` : `${esc((c.sharpBooks||[]).map(bookShort).join('/'))} fair ${fmtAm(c.sharpFair)}`} · <span class="${c.ev>0?'pos':''}">${c.ev>0?'+':''}${c.ev.toFixed(1)}%</span>${c.fx?` · ${esc(fxLabel(c.fx))}`:''}</div></div>${u?`<a class="pflegln" href="${esc(u)}" target="_blank" rel="noopener">↗</a>`:''}</div>`; }).join('')}
     ${cmp.length?`<div class="pfopt" style="margin-top:8px"><label>Whole parlay by book${P.sameGame?' (legs multiplied)':''}</label><div class="plstrip pfcmp">${cmp.map(b=>bookChipHtml(b.k, b.price, b.k==='fanduel'?(fdParlayLink(b.rows)||BOOK_HOME.fanduel):BOOK_HOME[b.k], b.k===tgt)).join('')}</div></div>`:''}
     <div class="pfparb">${linkBtn}<button class="pfgo2" data-pfuse="${i}">Use this</button></div>
@@ -4365,6 +4374,9 @@ function pfHtml(){
       ${autoScope!=='mains'?`<div class="pfopt"><label>Props</label>${seg('data-pfside',[['both','Both'],['over','Overs'],['under','Unders']],pfPropSide)}</div>`:''}
       <div class="pfopt"><label>Max hold</label>${seg('data-maxhold',[[0,'0%'],[1,'1%'],[2,'2%'],[3,'3%']],parlayMaxHold)}</div>
       <div class="pfopt"><label>Min money</label>${seg('data-pfmin',[[250,'$250'],[500,'$500'],[1000,'$1k'],[2500,'$2.5k']],pfMin)}</div>
+      <div class="pfopt"><label>Borrow within</label>${seg('data-pfborrow',[[10,'10c'],[20,'20c'],[30,'30c']],pfBorrowC)}</div>
+      <div class="pfopt"><label>Long shots</label>${seg('data-pflong',[[0,'Off'],[1,`+${PF_LONG_MIN} to +${PF_LONG_MAX}`]],pfLong?1:0)}</div>
+      ${pfMode==='auto'&&pfExclude.size?`<div class="pfopt"><label>Swapped out</label><div class="seg"><button data-pfunswap>Reset ${pfExclude.size} swap${pfExclude.size===1?'':'s'}</button></div></div>`:''}
       ${pfMode==='auto'?'':`<div class="pfopt"><label>Sort</label>${seg('data-pfsort',[['hold','Tightest'],['money','Most $']],pfSort)}</div>`}
       <div class="pfopt"><label>Build</label><div style="display:flex;gap:6px">${seg('data-pfmode',[['pick','Pick'],['auto','Auto']],pfMode)}<div class="seg"><button class="${pfSgp?'on':''}" data-pfsgp="1">SGP</button></div></div></div>
       ${pfMode==='auto'?`<div class="pfopt"><label>Legs</label><div style="display:flex;gap:6px;align-items:center"><div class="seg"><button data-pflegs="-1">−</button><input id="pfLegsIn" type="text" inputmode="numeric" value="${pfLegs}"><button data-pflegs="1">+</button></div></div></div>`:''}
@@ -4388,6 +4400,10 @@ function pfRowHtml(r){
 }
 function bindPf(view){
   $('#pfLeague')?.addEventListener('change',e=>{ pfLeague=e.target.value===sportKey?'':e.target.value; pfGame=''; pfShow=30; renderParlay(); });
+  view.querySelectorAll('[data-pfborrow]').forEach(b=>b.addEventListener('click',()=>{ pfBorrowC=Number(b.dataset.pfborrow)||10; LS.set('props_pfborrow',String(pfBorrowC)); renderParlay(); }));
+  view.querySelectorAll('[data-pflong]').forEach(b=>b.addEventListener('click',()=>{ pfLong=b.dataset.pflong==='1'; LS.set('props_pflong',pfLong?'1':'0'); renderParlay(); }));
+  view.querySelectorAll('[data-pfswap]').forEach(b=>b.addEventListener('click',ev=>{ ev.stopPropagation(); pfExclude.add(b.dataset.pfswap); renderParlay(); }));
+  view.querySelector('[data-pfunswap]')?.addEventListener('click',()=>{ pfExclude.clear(); renderParlay(); });
   view.querySelectorAll('[data-pfside]').forEach(b=>b.addEventListener('click',()=>{ pfPropSide=b.dataset.pfside; LS.set('props_pfside',pfPropSide); renderParlay(); }));
   $('#pfGame')?.addEventListener('change',e=>{ pfGame=e.target.value; renderParlay(); });
   $('#pfBook')?.addEventListener('change',e=>{ autoTargetBook=e.target.value; LS.set('props_autotarget',autoTargetBook); renderParlay(); });
