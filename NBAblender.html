@@ -16713,7 +16713,14 @@ function _rebuildBeneficiariesCache() {
         // actual returning-language in the sentence, not just the injured
         // player's own status.
         const isReturning = /expected to play|set to return|return to|making.*debut|season debut|return.*floor|is (?:probable|questionable) but expected/.test(ctx);
-        if (isReturning) {
+        // The NAMED player is the one coming back ("White (calf) is off the injury report, so his return ... even if he plays limited minutes"):
+        // that is not a floor risk for him, it is a return with a possible minutes limit (no overs, unders are fine).
+        const nmL = run.toLowerCase(), nmEsc = nmL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const selfReturn = /off the injury report|\b(?:his|her) return\b|returns? (?:from|to action)|back from|cleared to (?:play|return)|been activated|will return|set to return|making his return|minutes (?:limit|restriction)|limited minutes/.test(ctx)
+          && (ctx.includes(nmL + " (") || /\b(?:his|her) return\b/.test(ctx) || new RegExp(nmEsc + "[^.]{0,40}(?:return|off the injury report|cleared|activated)").test(ctx));
+        if (selfReturn) {
+          reason = `${run} returning \u2192 possible minutes limit`;
+        } else if (isReturning) {
           reason = `${rec.name} returning → floor risk`;
         } else if (/cut into|cut.*playing time|limit.*minutes|reduce.*role|fewer minutes/.test(ctx)) {
           reason = `${rec.name} out → floor risk (losing minutes)`;
@@ -23771,7 +23778,8 @@ function _wmInjuryGate(playerRaw, team) {
     if (ben) {
       const bi = _wmImportance(ben.causedBy, team);
       if (bi.tier !== "LOW") {   // a fringe player's note shouldn't move anyone's line
-        if (/floor risk/i.test(ben.reason || "")) out.over = "floor risk from " + ben.causedBy + "'s injury note (" + bi.note + ")";
+        if (/minutes limit/i.test(ben.reason || "")) out.over = "returning from injury, possible minutes limit (" + ben.causedBy + "'s note)";
+        else if (/floor risk/i.test(ben.reason || "")) out.over = "floor risk from " + ben.causedBy + "'s injury note (" + bi.note + ")";
         else out.under = "upside from " + ben.causedBy + "'s injury note (" + bi.note + ")";
       }
     }
@@ -25335,13 +25343,14 @@ function _lineupBen(name, re) {
   return out;
 }
 function lineupUpsideFor(name) { return _lineupBen(name, /ceiling/i); }          // blurb says more role / minutes / starting for him
-function lineupFloorFor(name) { return _lineupBen(name, /floor risk/i); }        // blurb says a return / bigger role for someone cuts his minutes
+function lineupFloorFor(name) { return _lineupBen(name, /floor risk/i); }
+function lineupReturnFor(name) { return _lineupBen(name, /minutes limit/i); }   // the blurb says a teammate is coming back, maybe on a minutes limit        // blurb says a return / bigger role for someone cuts his minutes
 // Everyone out / GTD on a team that has a game (any lineup source or the injury feed) whose RotoWire blurb names someone who gets the upside.
 function lineupUpsides() {
   const res = [], seen = new Set();
   let views = []; try { views = _lineupViews(); } catch (e) {}
   const inGame = new Set(); views.forEach(v => Object.keys(v.teams).forEach(t => inGame.add(t)));
-  const consider = (team, nm, st) => { const k = resolveNorm(nm || ""); if (!k || seen.has(k)) return; const up = lineupUpsideFor(nm), down = lineupFloorFor(nm); if (!up.length && !down.length) return; seen.add(k); res.push({ team, name: nm, text: `${nm}: ${st}`, up, down }); };
+  const consider = (team, nm, st) => { const k = resolveNorm(nm || ""); if (!k || seen.has(k)) return; const up = lineupUpsideFor(nm), down = lineupFloorFor(nm), ret = lineupReturnFor(nm); if (!up.length && !down.length && !ret.length) return; seen.add(k); res.push({ team, name: nm, text: `${nm}: ${st}`, up, down, ret }); };
   views.forEach(v => Object.entries(v.teams).forEach(([team, t]) => {
     Object.entries(t.status).forEach(([k, st]) => consider(team, t.names[k] || k, st));
     Object.entries(t.flag || {}).forEach(([k, f]) => consider(team, t.names[k] || k, f === "PROB" ? "returning" : f));
@@ -25449,7 +25458,8 @@ function _topLine(x, color) {
   const t = String(x.text || ""), nm = String(x.name || ""), esc = _mEsc;
   const altH = x.alt && x.alt.length ? ` <span style="color:#fbbf24;">\u2192 possibly starting instead: ${x.alt.map(a => esc(a.name) + " " + a.pct + "%").join(" \u00b7 ")}</span>` : "";
   const dn = x.down && x.down.length ? ` <span style="color:#fb923c;background:#fb923c22;border:1px solid #fb923c77;border-radius:5px;padding:0 6px;font-weight:800;white-space:nowrap;">\u25bc FLOOR RISK ${esc(x.down.slice(0, 3).join(", "))}</span>` : "";
-  const up = (x.up && x.up.length ? ` <span style="color:#4ade80;background:#4ade8022;border:1px solid #4ade8077;border-radius:5px;padding:0 6px;font-weight:800;white-space:nowrap;">\u25b2 UPSIDE ${esc(x.up.slice(0, 3).join(", "))}</span>` : "") + dn;
+  const rt = x.ret && x.ret.length ? ` <span style="color:#fbbf24;background:#fbbf2422;border:1px solid #fbbf2477;border-radius:5px;padding:0 6px;font-weight:800;white-space:nowrap;">\u21ba RETURNING (POSSIBLE MINUTES LIMIT) ${esc(x.ret.slice(0, 3).join(", "))}</span>` : "";
+  const up = rt + (x.up && x.up.length ? ` <span style="color:#4ade80;background:#4ade8022;border:1px solid #4ade8077;border-radius:5px;padding:0 6px;font-weight:800;white-space:nowrap;">\u25b2 UPSIDE ${esc(x.up.slice(0, 3).join(", "))}</span>` : "") + dn;
   if (nm && t.startsWith(nm + ":")) return `<span>\u00b7 <b style="color:${color};">${esc(nm)}</b> ${esc(t.slice(nm.length + 1))}${altH}${up}</span>`;
   return `<span>\u00b7 ${esc(t)}${up}</span>`;
 }
@@ -25492,7 +25502,7 @@ function _lineupShareHtml(logos, opts) {
     const alt = x.alt && x.alt.length ? ` <span style="color:#fbbf24;">\u2192 possibly starting instead: <b>${x.alt.map(a => esc(a.name) + " " + a.pct + "%").join(" \u00b7 ")}</b></span>` : "";
     const altN = new Set((x.alt || []).map(a => norm(a.name)));
     const upn = (x.up || []).filter(n => !altN.has(norm(n)));
-    const up = noBlurbs ? "" : (upn.length ? ` ${chip("\u25b2 UPSIDE " + upn.slice(0, 3).join(", "), "#4ade80")}` : "") + (x.down && x.down.length ? ` ${chip("\u25bc FLOOR RISK " + x.down.slice(0, 3).join(", "), "#fb923c")}` : "");
+    const up = noBlurbs ? "" : (upn.length ? ` ${chip("\u25b2 UPSIDE " + upn.slice(0, 3).join(", "), "#4ade80")}` : "") + (x.down && x.down.length ? ` ${chip("\u25bc FLOOR RISK " + x.down.slice(0, 3).join(", "), "#fb923c")}` : "") + (x.ret && x.ret.length ? ` ${chip("\u21ba RETURNING (POSSIBLE MINUTES LIMIT) " + x.ret.slice(0, 3).join(", "), "#fbbf24")}` : "");
     if (x.html) return `<span style="white-space:normal;">${x.html}</span>`;
     return `<span style="white-space:normal;">${chip(x.name, c)} ${esc(rest)}${alt}${up}</span>`;
   };
@@ -27553,6 +27563,7 @@ function _mStatusPills(b, esc, nick) {
     if (ben) {
       const r = String(ben.reason || ""), who = `${ben.causedBy}${ben.causedByStatus ? " " + ben.causedByStatus : ""}`;
       if (/ceiling/i.test(r)) out.push(pill(`\u25b2 CEILING \u00b7 ${who}${ben.posOverlap === 2 ? " \u00b7 same pos" : ""}`, "#4ade80"));
+      else if (/minutes limit/i.test(r)) out.push(pill(`\u21ba RETURNING (POSSIBLE MINUTES LIMIT)`, "#fbbf24"));
       else if (/floor risk/i.test(r)) out.push(pill(`\u25bc FLOOR RISK \u00b7 ${who}`, "#fb923c"));
       else out.push(pill(`named in ${who}'s report`, "#93c5fd"));
     }
