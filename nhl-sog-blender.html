@@ -7583,6 +7583,7 @@ function renderNhlTotals() {
         <input type="number" step="0.5" value="${minEv}" onchange="localStorage.setItem('${NHLT_MINEV_KEY}', this.value);renderNhlTotals()" style="width:60px;background:#0a1628;border:1px solid #0d2035;border-radius:6px;padding:6px 8px;color:#fff;">
         <button id="nhlt-scan-btn" onclick="scanNhlTotals()" style="background:#0066cc;border:none;color:#fff;border-radius:6px;padding:7px 16px;font-size:13px;font-weight:700;cursor:pointer;">Scan totals</button>
         <button onclick="gradeNhlTotals()" style="background:#0a1628;border:1px solid #0d2035;color:#00aaff;border-radius:6px;padding:7px 14px;font-size:13px;font-weight:600;cursor:pointer;">Grade + closes</button>
+        <button onclick="copyNhltPlays()" title="Team totals 8%+ and game totals 12%+ from the latest scan, with every price at or better than play-to on the exchanges, Pinnacle, BetOnline, FanDuel, Bookmaker and Bet105" style="background:#0a1628;border:1px solid #22c55e;color:#22c55e;border-radius:6px;padding:7px 14px;font-size:13px;font-weight:700;cursor:pointer;">⧉ Copy plays</button>
         <span style="font-size:12px;color:#fff;">${nhltLastScan ? "last scan " + new Date(nhltLastScan).toLocaleTimeString() : ""}</span>
       </div>
       <div style="font-size:12px;color:#fff;margin-bottom:12px;max-width:1100px;">Each team's goals ~ Poisson on the model's team number; a regulation tie adds one goal (OT or shootout), won in proportion to model goals. Best price comes from Pinnacle, Props Builder, FanDuel, Bet105, Bookmaker or BetOnline. One play per market per game (the better side), logged at the price it was found; it is never changed afterwards.</div>
@@ -7590,6 +7591,44 @@ function renderNhlTotals() {
       ${_nhltDashHtml(bets, grp)}
       <div class="dpanel wide" style="margin-top:12px;"><div class="dhead"><span>Plays</span></div>${bets.length ? `<div style="overflow-x:auto;border:1px solid #0d2035;border-radius:8px;width:fit-content;max-width:100%;margin:0 auto;"><table style="border-collapse:collapse;"><thead style="background:#0a1628;"><tr>${["Date", "Game", "Market", "Side", "Model", "Odds", "Fair", "EV", "Play to", "Close / CLV", "Final", "P&L", "Result", ""].map(th).join("")}</tr></thead><tbody>${betRows}</tbody></table></div>` : `<span style="color:#fff;font-size:13px;">No totals plays logged yet.</span>`}</div>
     </div>`;   // Plays panel
+}
+// Copy plays: from the latest scan, team totals at 8%+ and game totals at 12%+ EV, each with every price at or
+// better than play-to on the books you bet (exchanges, Pinnacle, BetOnline, FanDuel, Bookmaker, Bet105).
+const NHLT_COPY_MIN = { team: 8, game: 12 };
+const NHLT_COPY_BOOKS = ["Novig", "ProphetX", "Kalshi", "Pinnacle", "BetOnline", "FanDuel", "Bookmaker", "Bet105"];
+function nhltCopyPlaysText() {
+  const dateIso = (document.getElementById("nhlt-date") || {}).value || _ymdLocal(new Date());
+  const am = n => (Number(n) > 0 ? "+" : "") + n;
+  const usd = n => n >= 1000 ? "$" + (n / 1000).toFixed(1).replace(/\.0$/, "") + "k" : "$" + Math.round(n);
+  const out = [];
+  nhltSlate.filter(x => x.f.date === dateIso && !x.missing && !x.started).forEach(x => (x.markets || []).forEach(m => {
+    if (m.line == null) return;
+    const kind = m.mk === "game" ? "game" : "team";
+    ["over", "under"].forEach(sd => {
+      const side = m.sides[sd]; if (!side) return;
+      const pt = side.playTo != null ? Number(side.playTo) : null;
+      const books = (side.all || []).filter(b => NHLT_COPY_BOOKS.includes(b.book) && (pt == null || b.price >= pt)).sort((a, b) => b.price - a.price);
+      if (!books.length) return;
+      const ev = nhltEv(side.pWin, side.pPush, books[0].price);
+      if (ev == null || ev < NHLT_COPY_MIN[kind]) return;
+      out.push({ ev, kind, text: `${x.f.away} @ ${x.f.home} ${new Date(x.f.start).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })} — ${kind === "game" ? "Game total" : _nhlTeamCanon(m.mk) + " team total"} ${sd.toUpperCase()} ${m.line} (model ${m.mean.toFixed(2)}) · play to ${pt != null ? am(pt) : "?"}\n   ${books.map(b => `${am(b.price)} ${b.book}${b.limit != null && nhlIsExch(b.book) ? ` (${usd(b.limit)})` : ""}`).join(" · ")} → EV ${ev >= 0 ? "+" : ""}${ev.toFixed(1)}%` });
+    });
+  }));
+  if (!out.length) return null;
+  out.sort((a, b) => b.ev - a.ev);
+  const d = new Date(dateIso + "T12:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+  const tt = out.filter(o => o.kind === "team"), gt = out.filter(o => o.kind === "game");
+  return [`NHL Totals · ${d}`,
+    ...(gt.length ? ["", `Game totals (${NHLT_COPY_MIN.game}%+)`, ...gt.map(o => o.text)] : []),
+    ...(tt.length ? ["", `Team totals (${NHLT_COPY_MIN.team}%+)`, ...tt.map(o => o.text)] : [])].join("\n");
+}
+function copyNhltPlays() {
+  if (!nhltSlate.length) { showNhlToast("Hit Scan totals first"); return; }
+  const t = nhltCopyPlaysText();
+  if (!t) { showNhlToast(`Nothing at ${NHLT_COPY_MIN.team}%+ team / ${NHLT_COPY_MIN.game}%+ game totals within play-to right now`); return; }
+  const done = () => showNhlToast("Copied totals plays");
+  if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(t).then(done).catch(() => { console.log(t); showNhlToast("Copy blocked — it's in the console"); });
+  else { console.log(t); showNhlToast("Copy not supported — it's in the console"); }
 }
 function nhltSetResult(id, r) { const b = nhltBets.find(x => x.id === id); if (!b) return; b.result = r; nhltSave(); renderNhlTotals(); }
 function nhltDelete(id) { if (!confirm("Delete this totals play?")) return; nhltBets = nhltBets.filter(x => x.id !== id); nhltSave(); renderNhlTotals(); }
