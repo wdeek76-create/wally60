@@ -4136,17 +4136,27 @@ let pfBoost = Number(LS.get('props_pfboost','0'))||0;   // profit boost % on the
 let pfLeague = '';   // '' = the sport tab on screen
 let pfGame = '';
 let pfShow = 30;
-const pfLoading = new Set();
-function pfLeagueKey(){ return pfLeague||sportKey; }
+const pfLoading = new Set(), pfTried = {};
+function pfLeagueKey(){ return pfLeague && pfLeague!=='__all' ? pfLeague : sportKey; }   // '__all' = every sport (pfSports)
 function pfData(sk){ if(sk===sportKey && players?.length) return {fixtures, mainRows, players}; const c=loadSportCache(sk); return c&&c.players ? c : null; }
 // The scan is the heavy part, so it runs once per (lines loaded, markets, target, hold, game) and
 // every other tap (open a play, sort, mode, boost, add/remove) just re-draws from that result.
 // One game at a time too, so each player only searches his own game's lines.
 const PF_SKIP_BOOKS = new Set(['onyx odds','courtside']);   // DK skins -- not shown in the parlay tool
-let pfCache = { key:null, rows:null, list:null };
-function pfScan(){
-  const sk=pfLeagueKey(), d=pfData(sk);
-  if(!d){ if(!pfLoading.has(sk)){ pfLoading.add(sk); ensureSportData(sk).finally(()=>{ pfLoading.delete(sk); if(viewMode==='parlay') renderParlay(); }); } return null; }
+const pfCacheBy = {};   // sport -> { key, rows, list, all }
+// "All sports": every sport with props / main lines worth parlaying (not golf / soccer / tennis)
+const PF_ALL = ['nfl','nba','nhl','mlb','cfb','ncaab','wnba','ufc'];
+const pfSports = () => pfLeague==='__all' ? PF_ALL.filter(k=>SPORTS[k]) : [pfLeagueKey()];
+// props: overs, unders or both (main lines and Yes/ML picks aren't affected)
+let pfPropSide = LS.get('props_pfside','both');
+const pfSideOk = c => c.isMain || c.side==='single' || pfPropSide==='both' || c.side===pfPropSide;
+// every sport's scan merged (null while nothing has loaded yet)
+function pfScanAll(){ const lists=pfSports().map(sk=>pfScan(sk)); if(lists.every(l=>l==null)) return null; return lists.flatMap(l=>l||[]).filter(pfSideOk).sort((x,y)=>(x.src==='exch'?0:1)-(y.src==='exch'?0:1) || (x.hold??99)-(y.hold??99) || y.liq-x.liq); }
+function pfScan(skArg){
+  const sk=skArg||pfLeagueKey(), d=pfData(sk), pfCache=pfCacheBy[sk]||{};
+  // a sport with no data yet: load it once (a failed / empty load isn't retried for 5 min -- otherwise
+  // every redraw would start another load, and "All sports" would spin on a league with nothing)
+  if(!d){ if(!pfLoading.has(sk) && Date.now()-(pfTried[sk]||0)>5*60e3){ pfLoading.add(sk); pfTried[sk]=Date.now(); ensureSportData(sk).finally(()=>{ pfLoading.delete(sk); if(viewMode==='parlay') setTimeout(renderParlay,0); }); } return null; }
   if(!autoTargetBook){ autoTargetBook='fanduel'; LS.set('props_autotarget','fanduel'); }
   const key=[sk, autoScope, autoTargetBook, parlayMaxHold, pfGame, pfMin].join('|');   // pfMin too: borrowing kicks in under it
   if(pfCache.key===key && pfCache.rows===d.mainRows) return pfCache.list.filter(c=>c.src!=='exch' || c.liq>=pfMin);
@@ -4191,7 +4201,7 @@ function pfScan(){
   }
   // exchange-backed first (preferred), then sharp-book ones; best hold first inside each
   const list=out.sort((x,y)=>(x.src==='exch'?0:1)-(y.src==='exch'?0:1) || (x.hold??99)-(y.hold??99) || y.liq-x.liq);
-  pfCache={ key, rows:d.mainRows, list, all };
+  pfCacheBy[sk]={ key, rows:d.mainRows, list, all };
   return list.filter(c=>c.src!=='exch' || c.liq>=pfMin);
 }
 const PF_SHARP = new Set(['pinnacle','betonline','bookmaker','circa sports','circa']);
@@ -4241,7 +4251,7 @@ function pfDetHtml(ref, tgt, L, mine, sharp){
 // other side (props) or the sharp books' devig (mains); ranked by EV at the target. Not SGP: one
 // leg per game. SGP: the best game's legs. Up to 5 different parlays.
 function pfAutoParlays(){
-  const all=((pfCache.list)||[]).filter(c=>(c.src!=='exch' || c.liq>=pfMin) && c.refRow && c.fairP!=null && Math.abs(Number(c.refRow.price))<1000).sort((a,b)=>b.ev-a.ev);
+  const all=pfSports().flatMap(sk=>pfCacheBy[sk]?.list||[]).filter(pfSideOk).filter(c=>(c.src!=='exch' || c.liq>=pfMin) && c.refRow && c.fairP!=null && Math.abs(Number(c.refRow.price))<1000).sort((a,b)=>b.ev-a.ev);
   const seen=new Set(), pool=all.filter(c=>{ const k=c.p.fixtureId+'|'+c.p.key+'|'+c.mkey; if(seen.has(k)) return false; seen.add(k); return true; });
   const oneGame = !pfSgp && new Set(pool.map(c=>c.p.fixtureId)).size>=pfLegs;
   const pick=(list,start)=>{ const out=[], team=new Map(), games=new Set();
@@ -4319,8 +4329,8 @@ function pfAdd(c){
 }
 let pfList = [];
 function pfHtml(){
-  const sk=pfLeagueKey(), d=pfData(sk);
-  let list = pfScan()||[];
+  const sk=pfLeagueKey(), allSp=pfLeague==='__all', d=allSp ? (pfSports().map(pfData).find(Boolean)||null) : pfData(sk);
+  let list = pfScanAll()||[];
   if(pfSort==='money') list = list.slice().sort((x,y)=>y.liq-x.liq || (x.hold??99)-(y.hold??99));
   if(pfSgp && !pfGame){
     // same game: once a leg is in, only that game; otherwise (auto) the game with the most / tightest plays
@@ -4329,10 +4339,10 @@ function pfHtml(){
     if(fid) list = list.filter(c=>c.p.fixtureId===fid);
   }
   pfList = list;
-  const games = (d?.fixtures||[]).filter(f=>!f.live).sort((a,b)=>new Date(a.start)-new Date(b.start));
+  const games = (allSp ? pfSports().flatMap(k=>pfData(k)?.fixtures||[]) : (d?.fixtures||[])).filter(f=>!f.live).sort((a,b)=>new Date(a.start)-new Date(b.start));
   const seg=(attr,opts,cur)=>`<div class="seg">${opts.map(([v,t])=>`<button class="${String(cur)===String(v)?'on':''}" ${attr}="${v}">${t}</button>`).join('')}</div>`;
   if(d && pfMode==='auto') pfParlays = pfAutoParlays();
-  const rows = !d ? `<div class="empty" style="padding:14px">Loading ${esc(SPORTS[sk].label)} lines…</div>`
+  const rows = !d ? `<div class="empty" style="padding:14px">Loading ${allSp?"every sport's":esc(SPORTS[sk].label)} lines…</div>`
     : pfMode==='auto' ? (pfParlays.length ? pfParlays.map(pfParlayCardHtml).join('') : `<div class="empty" style="padding:14px">Not enough legs for a ${pfLegs}-leg parlay${pfSgp?' in one game':''} right now.</div>`)
     : !list.length ? `<div class="empty" style="padding:14px">Nothing within ${parlayMaxHold}% hold vs ${esc(bookShort(autoTargetBook))} right now.</div>`
     : list.slice(0,pfShow).map((c,i)=>{ const on=pfInSlip(c);
@@ -4346,12 +4356,13 @@ function pfHtml(){
   return `<div class="pfcard">
     <div class="pfhead"><div><div class="pftitle">Parlay finder</div><div class="pfsub">${!d?'loading…':pfMode==='auto'?`${pfParlays.length||'no'} parlays${pfSgp?' · same game':''} · sharp money + sharp books (mains) · ${esc(bookShort(autoTargetBook))}`:`${list.length} play${list.length===1?'':'s'} · ${esc(bookShort(autoTargetBook))} vs exchanges${autoScope!=='props'?' + sharps':''}`}</div></div><button class="pfround" id="pfRefresh" title="Refresh lines">↻</button></div>
     <div class="pfsel">
-      <select id="pfLeague">${Object.entries(SPORTS).map(([k,v])=>`<option value="${k}"${k===sk?' selected':''}>${esc(v.label)}</option>`).join('')}</select>
+      <select id="pfLeague"><option value="__all"${allSp?' selected':''}>All sports</option>${Object.entries(SPORTS).map(([k,v])=>`<option value="${k}"${!allSp&&k===sk?' selected':''}>${esc(v.label)}</option>`).join('')}</select>
       <select id="pfGame"><option value="">All games</option>${games.map(f=>`<option value="${esc(f.id)}"${f.id===pfGame?' selected':''}>${esc(fxLabel(f))} · ${esc(etTime(f.start))}</option>`).join('')}</select>
       <select id="pfBook">${BOOKS.map(b=>`<option value="${b.toLowerCase()}"${autoTargetBook===b.toLowerCase()?' selected':''}>${esc(b)}</option>`).join('')}</select>
     </div>
     <div class="pfopts">
       <div class="pfopt"><label>Markets</label>${seg('data-pfscope',[['both','Both'],['mains','Mains'],['props','Props']],autoScope)}</div>
+      ${autoScope!=='mains'?`<div class="pfopt"><label>Props</label>${seg('data-pfside',[['both','Both'],['over','Overs'],['under','Unders']],pfPropSide)}</div>`:''}
       <div class="pfopt"><label>Max hold</label>${seg('data-maxhold',[[0,'0%'],[1,'1%'],[2,'2%'],[3,'3%']],parlayMaxHold)}</div>
       <div class="pfopt"><label>Min money</label>${seg('data-pfmin',[[250,'$250'],[500,'$500'],[1000,'$1k'],[2500,'$2.5k']],pfMin)}</div>
       ${pfMode==='auto'?'':`<div class="pfopt"><label>Sort</label>${seg('data-pfsort',[['hold','Tightest'],['money','Most $']],pfSort)}</div>`}
@@ -4377,9 +4388,10 @@ function pfRowHtml(r){
 }
 function bindPf(view){
   $('#pfLeague')?.addEventListener('change',e=>{ pfLeague=e.target.value===sportKey?'':e.target.value; pfGame=''; pfShow=30; renderParlay(); });
+  view.querySelectorAll('[data-pfside]').forEach(b=>b.addEventListener('click',()=>{ pfPropSide=b.dataset.pfside; LS.set('props_pfside',pfPropSide); renderParlay(); }));
   $('#pfGame')?.addEventListener('change',e=>{ pfGame=e.target.value; renderParlay(); });
   $('#pfBook')?.addEventListener('change',e=>{ autoTargetBook=e.target.value; LS.set('props_autotarget',autoTargetBook); renderParlay(); });
-  $('#pfRefresh')?.addEventListener('click',async()=>{ const sk=pfLeagueKey(); toast('Refreshing lines…'); try{ await ensureSportData(sk,0); }catch(e){} renderParlay(); });
+  $('#pfRefresh')?.addEventListener('click',async()=>{ toast('Refreshing lines…'); try{ await Promise.all(pfSports().map(sk=>ensureSportData(sk,0).catch(()=>{}))); }catch(e){} renderParlay(); });
   $('#pfmore')?.addEventListener('click',()=>{ pfShow+=30; renderParlay(); });
   view.querySelectorAll('[data-pfscope]').forEach(b=>b.addEventListener('click',()=>{ autoScope=b.dataset.pfscope; LS.set('props_autoscope',autoScope); renderParlay(); }));
   view.querySelectorAll('[data-maxhold]').forEach(b=>b.addEventListener('click',()=>{ parlayMaxHold=Number(b.dataset.maxhold); LS.set('props_parlaymaxhold',String(parlayMaxHold)); renderParlay(); }));
