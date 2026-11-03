@@ -2248,6 +2248,29 @@ async function nlRefreshTracked(){
 }
 // Backup: every setting, webhook, tracked bet and record this page keeps (its whole localStorage),
 // as one .json file; Import puts it all back (same file works on another phone).
+// Auto-backup to Discord: the same full backup (every bet, webhook and setting) posted as a .json file
+// to a private channel -- once a day, and again whenever 10+ bets were added since the last one.
+// If the page ever comes up empty: download the latest file from that channel, tap Import backup.
+const smBackupJson = () => { const data={}; try{ for(let i=0;i<localStorage.length;i++){ const k=localStorage.key(i); if(k==='oo_book_logos') continue; data[k]=localStorage.getItem(k); } }catch(e){} return JSON.stringify({ tool:'sharp-money', at:new Date().toISOString(), data }); };
+async function smAutoBackup(force){
+  const hook=LS.get('sm_backup_hook',''); if(!hook) return false;
+  let last={}; try{ last=JSON.parse(LS.get('sm_backup_last','{}'))||{}; }catch(e){}
+  const n=tracked.length+nlTracked.length;
+  if(!force && last.day===etToday() && Math.abs(n-(last.n||0))<10) return false;
+  try{
+    const fd=new FormData();
+    fd.append('payload_json', JSON.stringify({ username:'Sharp Money backup', content:`🗄️ Backup ${new Date().toLocaleString('en-US',{timeZone:'America/New_York',month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})} ET · ${tracked.length} pregame · ${nlTracked.length} in-game bets — to restore: download this file, then Tracker → Import backup`, allowed_mentions:{parse:[]} }));
+    fd.append('files[0]', new Blob([smBackupJson()],{type:'application/json'}), `sharp-money-backup-${etToday()}.json`);
+    const r=await fetch(hook,{ method:'POST', body:fd }); if(!r.ok) throw new Error(String(r.status));
+    LS.set('sm_backup_last', JSON.stringify({ day:etToday(), n, at:Date.now() })); return true;
+  }catch(e){ console.warn('[sharp] auto-backup failed', e.message); return false; }
+}
+setTimeout(()=>smAutoBackup(), 20e3); setInterval(()=>smAutoBackup(), 10*60e3);
+async function smSetBackupHook(){
+  const v=prompt('Auto-backup: paste the Discord webhook URL of a PRIVATE channel (it gets your bets AND webhook URLs). Leave empty to turn it off.', LS.get('sm_backup_hook','')); if(v==null) return;
+  LS.set('sm_backup_hook', v.trim()); if(viewMode==='tracker') renderTracker();
+  if(v.trim()){ const ok=await smAutoBackup(true); toast(ok?'Backup posted — it will keep posting daily':'Backup post failed — check the URL'); }
+}
 function smBackup(){
   const data={}; try{ for(let i=0;i<localStorage.length;i++){ const k=localStorage.key(i); if(k==='oo_book_logos') continue; data[k]=localStorage.getItem(k); } }catch(e){}
   const blob=new Blob([JSON.stringify({ tool:'sharp-money', at:new Date().toISOString(), data },null,1)],{type:'application/json'});
@@ -2290,7 +2313,7 @@ function smRestore(){
     }catch(e){ toast('Import failed: '+e.message); } };
   inp.click();
 }
-const backupHtml = () => `<div class="nlctl" style="margin:0 0 12px"><button data-bk="recap">Post FD recap</button>${Object.entries(RECAP_BOOK).filter(([k])=>k==='fanduel').map(([k,B])=>`<button data-rch="${k}" class="${LS.get(B.key,'')?'on':''}">${({fanduel:'FD',bet105:'b105',b105main:'b105 main lines'})[k]} recap channel${LS.get(B.key,'')?' ✓':''}</button>`).join('')}<span class="dim">Backup</span><button data-bk="save">⬇ Download backup</button><button data-bk="load">⬆ Import backup</button><button data-bk="copy">⧉ Copy FD tracker</button><button data-bk="paste">⎘ Paste FD tracker</button></div>`;
+const backupHtml = () => `<div class="nlctl" style="margin:0 0 12px"><button data-bk="recap">Post FD recap</button>${Object.entries(RECAP_BOOK).filter(([k])=>k==='fanduel').map(([k,B])=>`<button data-rch="${k}" class="${LS.get(B.key,'')?'on':''}">${({fanduel:'FD',bet105:'b105',b105main:'b105 main lines'})[k]} recap channel${LS.get(B.key,'')?' ✓':''}</button>`).join('')}<span class="dim">Backup</span><button data-bk="bkch" class="${LS.get('sm_backup_hook','')?'on':''}">${LS.get('sm_backup_hook','')?'Auto-backup ✓':'Auto-backup to Discord'}</button><button data-bk="bknow">Back up now</button><button data-bk="save">⬇ Download backup</button><button data-bk="load">⬆ Import backup</button><button data-bk="copy">⧉ Copy FD tracker</button><button data-bk="paste">⎘ Paste FD tracker</button></div>`;
 const lastRecapDay = book => { const days=[...new Set(tracked.filter(t=>RECAP_BOOK[book].has(t)&&t.start&&t.final).map(t=>etDayOf(new Date(t.start).getTime())))].sort(); return days[days.length-1]||etToday(); };
 async function setRecapHook(book){
   const B=RECAP_BOOK[book];
@@ -2300,7 +2323,7 @@ async function setRecapHook(book){
   if(viewMode==='tracker') renderTracker();
 }
 const bindBackup = v => { v.querySelectorAll('[data-rch]').forEach(b=>b.onclick=()=>setRecapHook(b.dataset.rch));
-  v.querySelectorAll('[data-bk]').forEach(b=>b.onclick=()=>b.dataset.bk==='recap105'?smPostRecap(lastRecapDay('bet105'), true, 'bet105'):b.dataset.bk==='recapmain'?smPostRecap(lastRecapDay('b105main'), true, 'b105main'):b.dataset.bk==='copy'?smCopyTracker():b.dataset.bk==='paste'?smPasteTracker():b.dataset.bk==='save'?smBackup():b.dataset.bk==='recap'?(()=>{ const days=[...new Set(tracked.filter(t=>t.src==='sharp'&&t.start&&t.final).map(t=>etDayOf(new Date(t.start).getTime())))].sort(); smPostRecap(days[days.length-1]||etToday(), true); })():smRestore()); };
+  v.querySelectorAll('[data-bk]').forEach(b=>b.onclick=()=>b.dataset.bk==='bkch'?smSetBackupHook():b.dataset.bk==='bknow'?(async()=>{ if(!LS.get('sm_backup_hook','')){ smSetBackupHook(); return; } const ok=await smAutoBackup(true); toast(ok?'Backup posted to Discord':'Backup post failed'); })():b.dataset.bk==='recap105'?smPostRecap(lastRecapDay('bet105'), true, 'bet105'):b.dataset.bk==='recapmain'?smPostRecap(lastRecapDay('b105main'), true, 'b105main'):b.dataset.bk==='copy'?smCopyTracker():b.dataset.bk==='paste'?smPasteTracker():b.dataset.bk==='save'?smBackup():b.dataset.bk==='recap'?(()=>{ const days=[...new Set(tracked.filter(t=>t.src==='sharp'&&t.start&&t.final).map(t=>etDayOf(new Date(t.start).getTime())))].sort(); smPostRecap(days[days.length-1]||etToday(), true); })():smRestore()); };
 let nlHist=false;
 function renderNbaLive(){
   const v=$('#view'), now=Date.now();
