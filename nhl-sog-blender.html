@@ -7586,7 +7586,7 @@ function renderNhlTotals() {
         <button id="nhlt-scan-btn" onclick="scanNhlTotals()" style="background:#0066cc;border:none;color:#fff;border-radius:6px;padding:7px 16px;font-size:13px;font-weight:700;cursor:pointer;">Scan totals</button>
         <button onclick="gradeNhlTotals()" style="background:#0a1628;border:1px solid #0d2035;color:#00aaff;border-radius:6px;padding:7px 14px;font-size:13px;font-weight:600;cursor:pointer;">Grade + closes</button>
         <button onclick="copyNhltPlays(this)" title="Team totals 8%+ and game totals 12%+ from the latest scan, with every price at or better than play-to on the exchanges, Pinnacle, BetOnline, FanDuel, Bookmaker and Bet105" style="background:#0a1628;border:1px solid #22c55e;color:#22c55e;border-radius:6px;padding:7px 14px;font-size:13px;font-weight:700;cursor:pointer;">⧉ Copy plays</button>
-        <button onclick="copyNhltPlays(this, 'slate')" title="Every game's model side on the game total and both team totals — no prices, no projections" style="background:#0a1628;border:1px solid #0d2035;color:#9fb8d6;border-radius:6px;padding:7px 14px;font-size:13px;font-weight:700;cursor:pointer;">⧉ Copy slate</button>
+        <button onclick="copyNhltPlays(this, 'slate')" title="Today's tracked totals plays with the price we got and play-to" style="background:#0a1628;border:1px solid #0d2035;color:#9fb8d6;border-radius:6px;padding:7px 14px;font-size:13px;font-weight:700;cursor:pointer;">⧉ Copy slate</button>
         <span style="font-size:12px;color:#fff;">${nhltLastScan ? "last scan " + new Date(nhltLastScan).toLocaleTimeString() : ""}</span>
       </div>
       <div style="font-size:12px;color:#fff;margin-bottom:12px;max-width:1100px;">Each team's goals ~ Poisson on the model's team number; a regulation tie adds one goal (OT or shootout), won in proportion to model goals. Best price comes from Pinnacle, Props Builder, FanDuel, Bet105, Bookmaker or BetOnline. One play per market per game (the better side), logged at the price it was found; it is never changed afterwards.</div>
@@ -7629,38 +7629,35 @@ function nhltCopyPlaysText() {
   const sec = (title, list) => list.length ? `\n\n${title}\n` + list.map(o => o.text).join("\n\n") : "";
   return `NHL Totals ${d}` + sec(`Game totals ${NHLT_COPY_MIN.game}%+`, gt) + sec(`Team totals ${NHLT_COPY_MIN.team}%+`, tt);
 }
-// Copy slate: the model's side on every market (game total + each team total) with the price we got — no EV, no projections.
+// Copy slate: today's tracked totals plays (what we logged), each with the price + book we got and play-to.
 function nhltCopySlateText() {
   const dateIso = (document.getElementById("nhlt-date") || {}).value || _ymdLocal(new Date());
-  const games = nhltSlate.filter(x => x.f.date === dateIso && !x.missing && !x.started);
-  if (!games.length) return null;
+  const am = n => (Number(n) > 0 ? "+" : "") + n;
+  const plays = nhltBets.filter(b => b.date === dateIso).sort((a, b) => String(a.start || "").localeCompare(String(b.start || "")) || (a.market === "game" ? -1 : 1));
+  if (!plays.length) return null;
   const d = new Date(dateIso + "T12:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
-  const lines = [`NHL Totals ${d}`];
-  games.forEach(x => {
-    const rows = (x.markets || []).filter(m => m.line != null && m.sides.over && m.sides.under).map(m => {
-      const sd = m.sides.over.pWin >= m.sides.under.pWin ? "over" : "under";
-      // the price we got: the logged play's price on this side, else the best price there now
-      const got = m.loggedBet && m.loggedBet.side === sd ? { price: m.loggedBet.odds, book: m.loggedBet.book } : m.sides[sd].best;
-      const pt = m.sides[sd].playTo, am = n => (Number(n) > 0 ? "+" : "") + n;
-      return `${m.mk === "game" ? "Game" : _nhlTeamCanon(m.mk)} ${sd === "over" ? "Over" : "Under"} ${m.line}${got ? ` ${am(got.price)} ${got.book}` : ""}${pt != null ? `, play to ${am(pt)}` : ""}`;
-    });
-    if (!rows.length) return;
-    lines.push("", `${x.f.away} at ${x.f.home} ${new Date(x.f.start).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`, ...rows);
+  const lines = [`NHL Totals ${d}`]; let last = null;
+  plays.forEach(b => {
+    const g = `${b.away} at ${b.home}${b.start ? " " + new Date(b.start).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : ""}`;
+    if (g !== last) { lines.push("", g); last = g; }
+    lines.push(`${b.market === "game" ? "Game" : b.team} ${b.side === "over" ? "Over" : "Under"} ${b.line} ${am(b.odds)} ${b.book}${b.playTo != null ? `, play to ${am(b.playTo)}` : ""}`);
   });
-  return lines.length > 1 ? lines.join("\n") : null;
+  return lines.join("\n");
 }
 // Always re-scans first (fresh prices; the scan isn't kept across page loads), then copies. If the clipboard is
 // blocked after the wait, the message opens in a box to copy by hand.
 async function copyNhltPlays(btn, kind) {
   const dateIso = (document.getElementById("nhlt-date") || {}).value || _ymdLocal(new Date());
-  if (!nhltSaber[dateIso]) { showNhlToast("No model file for this date — upload the Saber CSV first"); return; }
-  const orig = btn ? btn.textContent : "";
-  if (btn) { btn.disabled = true; btn.textContent = "Scanning…"; }
-  try { await scanNhlTotals({ silent: true, dateIso }); } catch (e) {}
-  if (btn) { btn.disabled = false; btn.textContent = orig; }
+  if (kind !== "slate") {   // Copy plays re-scans for fresh prices; Copy slate is just what's tracked
+    if (!nhltSaber[dateIso]) { showNhlToast("No model file for this date — upload the Saber CSV first"); return; }
+    const orig = btn ? btn.textContent : "";
+    if (btn) { btn.disabled = true; btn.textContent = "Scanning…"; }
+    try { await scanNhlTotals({ silent: true, dateIso }); } catch (e) {}
+    if (btn) { btn.disabled = false; btn.textContent = orig; }
+  }
   const t = kind === "slate" ? nhltCopySlateText() : nhltCopyPlaysText();
-  if (!t) { showNhlToast(kind === "slate" ? "No upcoming games on the slate" : `Nothing at ${NHLT_COPY_MIN.team}%+ team / ${NHLT_COPY_MIN.game}%+ game totals within play-to right now`); return; }
-  try { await navigator.clipboard.writeText(t); showNhlToast(kind === "slate" ? "Copied slate (fresh scan)" : "Copied totals plays (fresh scan)"); return; } catch (e) {}
+  if (!t) { showNhlToast(kind === "slate" ? "No totals plays tracked for this date" : `Nothing at ${NHLT_COPY_MIN.team}%+ team / ${NHLT_COPY_MIN.game}%+ game totals within play-to right now`); return; }
+  try { await navigator.clipboard.writeText(t); showNhlToast(kind === "slate" ? "Copied today's tracked totals" : "Copied totals plays (fresh scan)"); return; } catch (e) {}
   const box = document.createElement("div");
   box.style.cssText = "position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;";
   box.innerHTML = `<div style="background:#0a1628;border:1px solid #0d2035;border-radius:10px;padding:14px;width:min(720px,92vw);"><div style="color:#fff;font-weight:800;margin-bottom:8px;">Totals plays — copy</div><textarea style="width:100%;height:320px;background:#060b14;color:#fff;border:1px solid #0d2035;border-radius:6px;padding:8px;font:12px monospace;"></textarea><div style="text-align:right;margin-top:8px;"><button style="background:#0066cc;border:none;color:#fff;border-radius:6px;padding:6px 14px;font-weight:700;cursor:pointer;">Done</button></div></div>`;
