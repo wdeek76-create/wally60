@@ -222,7 +222,10 @@ a.shst{text-decoration:none;color:var(--text)}
 // Sharp Money -- FanDuel vs the exchanges (ProphetX / Novig / Kalshi). Scans NFL / NBA / WNBA / NHL
 // nonstop while open, pings + posts to Discord on new sharp sides, and keeps its own tracker.
 // The odds helpers below are the same code PocketMarket (props-screen.html) uses.
-const LS = { get:(k,d)=>{ try{ const v=localStorage.getItem(k); return v==null?d:v; }catch(e){ return d; } }, set:(k,v)=>{ try{ localStorage.setItem(k,v); }catch(e){} } };
+const LS = { get:(k,d)=>{ try{ const v=localStorage.getItem(k); return v==null?d:v; }catch(e){ return d; } }, set:(k,v)=>{ try{ localStorage.setItem(k,v); return true; }catch(e){
+    // storage full (all tools opened from the same place share ~5 MB): drop the prop screen's odds caches
+    // (they're rebuilt on the next load) and try once more -- never lose a bet or a webhook to a cache
+    try{ Object.keys(localStorage).filter(x=>x.startsWith('props_cache_')).forEach(x=>localStorage.removeItem(x)); localStorage.setItem(k,v); return true; }catch(e2){ return false; } } } };
 const BACKEND_DEFAULT = 'https://nfl-props-tracker-1.vercel.app/api/odds';
 const getBackend = () => LS.get('oo_backend_url', BACKEND_DEFAULT);
 const OO_TIMEOUT_MS = 20000;
@@ -1085,7 +1088,7 @@ ${sharpDcLog.map(x=>`<div class="smdiag" style="color:${x.ok?'#86efac':'#fca5a5'
   view.querySelector('[data-shdc]')?.addEventListener('click', async ()=>{
     const v=prompt('Paste your Discord webhook URL (Server Settings → Integrations → Webhooks → New Webhook → Copy Webhook URL). Leave empty to turn Discord off.', discordHook);
     if(v==null) return;
-    discordHook=v.trim(); LS.set('props_discord_hook', discordHook); renderSharp();
+    discordHook=v.trim(); if(!LS.set('props_discord_hook', discordHook)) smStorageWarn(); renderSharp();
     if(discordHook){
       const r=prompt('Role to tag on every alert (e.g. SM): paste its Role ID.\nDiscord → Settings → Advanced → Developer Mode ON, then Server Settings → Roles → ⋯ next to SM → Copy Role ID.\nLeave empty for no tag.', discordRole);
       if(r!=null){ discordRole=(String(r).match(/\d{15,}/)||[''])[0]; LS.set('props_discord_role', discordRole); }
@@ -1192,7 +1195,9 @@ let sportKey = null, fixtures = [], players = [], mainRows = [], viewMode = 'sha
 let tracked = (()=>{ try{ return JSON.parse(LS.get('sm_tracked','[]'))||[]; }catch(e){ return []; } })();
 // FanDuel's tracker is player props only: drop any FD game total / ML / spread tracked before that rule
 tracked = tracked.filter(t=>!((t.bookKey||'fanduel')==='fanduel' && ['total','ml','spread'].includes(t.mkey)));
-const saveTracked = () => { LS.set('sm_tracked', JSON.stringify(tracked)); const n=$('#tkN'); if(n) n.textContent=tracked.filter(t=>!t.final).length||''; };
+// a save that still fails after clearing the odds caches: say so instead of losing it quietly
+let smWarnAt=0; const smStorageWarn = () => { if(Date.now()-smWarnAt<60e3) return; smWarnAt=Date.now(); try{ toast('⚠ Phone storage for this page is full — that didn\'t save. Tap Download backup now.'); }catch(e){} };
+const saveTracked = () => { if(!LS.set('sm_tracked', JSON.stringify(tracked))) smStorageWarn(); const n=$('#tkN'); if(n) n.textContent=tracked.filter(t=>!t.final).length||''; };
 // one-time: bring over Sharp Money bets that were tracked inside PocketMarket
 (()=>{ if(LS.get('sm_migrated','')) return; try{ const old=JSON.parse(LS.get('props_tracked','[]'))||[]; const mine=old.filter(t=>t.src==='sharp' && !tracked.some(x=>x.id===t.id)); if(mine.length){ tracked=mine.concat(tracked); saveTracked(); } }catch(e){} LS.set('sm_migrated','1'); })();
 const parseAm = v => { const x=String(v).trim().replace(/\s+/g,''); if(!/^[+-]?\d+$/.test(x)) return null; const n=Number(x); return Math.abs(n)>=100 ? n : null; };
