@@ -1794,7 +1794,12 @@ async function rwNewsLoad(){
 const SM_RW_MS = 10*60e3;
 const smRw0 = () => ({ at:0, inj:{}, news:{} });
 let smRw = (()=>{ try{ const o=JSON.parse(LS.get('sm_rw_lite','null')); return o&&o.at&&o.inj?o:smRw0(); }catch(e){ return smRw0(); } })();
-let smRwTeams = (()=>{ try{ return JSON.parse(LS.get('sm_rw_teams','null'))||{ day:'', m:{} }; }catch(e){ return { day:'', m:{} }; } })();
+let smRwTeams = (()=>{ try{ return JSON.parse(LS.get('sm_rw_teams2','null'))||{ day:'', m:{} }; }catch(e){ return { day:'', m:{} }; } })();  // normName -> { t:team, p:position }
+try{ localStorage.removeItem('sm_rw_teams'); }catch(e){}
+const _rwPos = o => String(_rwPick(o,['Position','Player.Position','Pos','Player.Pos','Position.Abbreviation','Player.Position.Abbreviation'])||'').toUpperCase().trim();
+// position groups: guards / forwards / centers ("G-F" is both)
+const smPosG = p => { const s=new Set(); String(p||'').toUpperCase().split(/[-\/ ]+/).forEach(x=>{ if(/^(PG|SG|G)$/.test(x)) s.add('G'); else if(/^(SF|PF|F)$/.test(x)) s.add('F'); else if(/^C$/.test(x)) s.add('C'); }); return s; };
+const smSamePos = (a, b) => { const A=smPosG(a), B=smPosG(b); return [...A].some(x=>B.has(x)); };
 let smRwBusy = null;
 function smRwLoad(force){
   if(!force && Date.now()-smRw.at < SM_RW_MS) return Promise.resolve();
@@ -1803,14 +1808,14 @@ function smRwLoad(force){
     const inj={}, news={}, now=Date.now(); let got=false;
     try{ (await rwFetchFeed0('NBAInjuries')).forEach(o=>{ const nm=_rwName(o); if(!nm) return; got=true;
       inj[normName(nm)]={ name:nm, team:rwTeamKey(_rwTeam(o)), st:rwNormStatus(_rwPick(o,['Injury.Status','InjuryStatus','Status','Injury.Designation','Designation'])),
-        type:String(_rwPick(o,['Injury.Type','Injury.Location','InjuryType','Injury.Body','Body','Injury.Part'])||'').trim().slice(0,30) }; }); }catch(e){ console.warn('[sm] RW injuries', e.message); }
+        type:String(_rwPick(o,['Injury.Type','Injury.Location','InjuryType','Injury.Body','Body','Injury.Part'])||'').trim().slice(0,30), pos:_rwPos(o) }; }); }catch(e){ console.warn('[sm] RW injuries', e.message); }
     try{ (await rwFetchFeed0('NBANews')).forEach(o=>{ const nm=_rwName(o); if(!nm) return; got=true;
       const t=rwTime(String(_rwPick(o,['DateTime','Date','Updated','LastUpdated','Published'])||'')); if(!isNaN(t) && now-t>36*3600e3) return;
       const x={ team:rwTeamKey(_rwTeam(o)), h:String(_rwPick(o,['Headline','Title','News.Headline'])||'').trim().slice(0,160),
         a:String(_rwPick(o,['Analysis','Impact','News.Analysis','Details','Notes','Body'])||'').trim().slice(0,400), t:isNaN(t)?0:t };
       if(!x.h && !x.a) return; const k=normName(nm); if(!news[k] || x.t>news[k].t) news[k]=x; }); }catch(e){ console.warn('[sm] RW news', e.message); }
-    if(smRwTeams.day!==etToday()){ try{ const m={}; (await rwFetchFeed0('NBAPlayers')).forEach(o=>{ const nm=_rwName(o), tm=rwTeamKey(_rwTeam(o)); if(nm && tm) m[normName(nm)]=tm; });
-      if(Object.keys(m).length){ smRwTeams={ day:etToday(), m }; LS.set('sm_rw_teams', JSON.stringify(smRwTeams)); } }catch(e){} }
+    if(smRwTeams.day!==etToday()){ try{ const m={}; (await rwFetchFeed0('NBAPlayers')).forEach(o=>{ const nm=_rwName(o), tm=rwTeamKey(_rwTeam(o)); if(nm && tm) m[normName(nm)]={ t:tm, p:_rwPos(o) }; });
+      if(Object.keys(m).length){ smRwTeams={ day:etToday(), m }; LS.set('sm_rw_teams2', JSON.stringify(smRwTeams)); } }catch(e){} }
     if(got){ smRw={ at:now, inj, news }; LS.set('sm_rw_lite', JSON.stringify(smRw)); }
     else smRw.at = now - SM_RW_MS + 2*60e3;   // nothing came back: try again in ~2 min
   })().finally(()=>{ smRwBusy=null; });
@@ -1829,15 +1834,22 @@ function smRwFlag(e){
   if(nw){ const all=`${nw.h} ${nw.a}`, risky=SM_RW_RISK.test(all) && !SM_RW_OK.test(nw.h); if(risky) iffy=true;
     const ago=nw.t ? (m=>m<60?`${m}m ago`:`${Math.round(m/60)}h ago`)(Math.max(0,Math.round((Date.now()-nw.t)/60000))) : '';
     lines.push(`${risky?'⚠️ ':''}_${nw.h||nw.a.slice(0,140)}_${ago?` · ${ago}`:''}`); if(risky) short.push(nw.h||nw.a.slice(0,80)); }
-  // teammates: questionable / doubtful, or ruled out with news in the last 18h (long-term outs are already in the line)
-  const team = me?.team || nw?.team || smRwTeams.m[k] || '';
+  // teammates: questionable / doubtful, or ruled out with news in the last 18h (long-term outs are already in the line).
+  // Iffy when: a same-position teammate is Q / doubtful (or freshly out on an Under), or 2+ teammates are
+  // up in the air -- the rotation's in flux. A fresh out on an Over is just a ↑.
+  const R=smRwTeams.m[k], team = me?.team || nw?.team || R?.t || '', myPos = me?.pos || R?.p || e.info?.pos || '';
   if(team){ const under = e.side==='under';
-    const mates=Object.entries(smRw.inj).filter(([kk,x])=>kk!==k && x.team===team && (/^(DOUBTFUL|GTD)$/.test(x.st) || (x.st==='OUT' && smRwFresh(smRw.news[kk]))));
-    mates.slice(0,4).forEach(([,x])=>{ const out=x.st==='OUT'; if(out && under) iffy=true;
-      lines.push(`${out&&under?'⚠️ ':out?'↑ ':''}Teammate **${x.name}** ${SM_RW_ST[x.st]}${out?(under?' — more minutes for him':' — more minutes'):''}`);
-      short.push(`${x.name.split(' ').slice(-1)[0]} ${SM_RW_ST[x.st]}`); }); }
+    const mates=Object.entries(smRw.inj).filter(([kk,x])=>kk!==k && x.team===team && (/^(DOUBTFUL|GTD)$/.test(x.st) || (x.st==='OUT' && smRwFresh(smRw.news[kk]))))
+      .map(([kk,x])=>({ ...x, pos:x.pos||smRwTeams.m[kk]?.p||'' })).map(x=>({ ...x, same:!!myPos && smSamePos(myPos, x.pos) }))
+      .sort((a,b)=>b.same-a.same);
+    const qN=mates.filter(x=>x.st!=='OUT').length;
+    if(qN>=2){ iffy=true; lines.push(`⚠️ **${qN} teammates questionable** — rotation up in the air`); short.push(`${qN} teammates Q`); }
+    mates.slice(0,5).forEach(x=>{ const out=x.st==='OUT', bad = x.same ? (!out || under) : (out && under); if(bad) iffy=true;
+      const tag = `${x.pos?` (${x.pos})`:''}${x.same?' · **same position**':''}`;
+      lines.push(`${bad?'⚠️ ':out?'↑ ':''}Teammate **${x.name}**${tag} ${SM_RW_ST[x.st]}${out?(under?' — more minutes for him':' — more minutes'):''}`);
+      short.push(`${x.name.split(' ').slice(-1)[0]}${x.same?' (same pos)':''} ${SM_RW_ST[x.st]}`); }); }
   if(!lines.length) return null;
-  return { iffy, txt:lines.join('\n'), short:short.join(' · ') || (nw?.h||'in the news') };
+  return { iffy, txt:lines.join('\n'), short:short.slice(0,3).join(' · ')+(short.length>3?` +${short.length-3}`:'') || (nw?.h||'in the news') };
 }
 function rwBadge(){ const n=rwNews.items.filter(x=>!rwSeen.has(x.id) && rwIsToday(x) && inProj(x.name, x.team)).length; const b=$('#nwN'); if(b) b.textContent = n ? n : ''; }
 // RotoWire sends dates like "2026-10-22 09:15:00" or "10/22/2026 9:15 AM" -- Safari (iPhone) can't
