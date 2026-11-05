@@ -530,6 +530,7 @@ select.sel:focus { border-color: var(--teal); }
     <button class="btn ghost" id="discordSendBtn" onclick="makeDiscordCard('partners', { send: true })" style="display:none;color:#a5b4fc;border-color:rgba(129,140,248,0.4)" title="Posts the Discord Card straight to your Discord webhook and logs every pick on it to the Sent tab">📤 Send to Discord</button>
     <button class="btn ghost" id="nickSendBtn" onclick="makeDiscordCard('nick', { send: true })" style="display:none;color:#a5b4fc;border-color:rgba(129,140,248,0.4)" title="Posts the Nick Card straight to the Nick webhook (not logged to Sent)">📤 Send Nick Card</button>
     <button class="btn ghost" id="nickCardBtn" onclick="makeDiscordCard('nick')" style="display:none" title="Same card plus the sources grid (edges + projections) and agreeing standalones — internal">🖼 Nick Card</button>
+    <button class="btn ghost" onclick="openStorageModal()" title="How much is saved, where, backup / restore">💾 Storage</button>
     <button class="btn ghost" onclick="openManageModal()">⋯ Manage</button>
   </div>
 </div>
@@ -593,6 +594,8 @@ select.sel:focus { border-color: var(--teal); }
     <div class="modal-actions">
       <button class="btn ghost" onclick="closePasteModal()">Done</button>
       <button class="btn ghost" id="skipMarketBtn" onclick="skipMarket()" title="Mark this market done without importing (nothing at 5%+) and move to the next">Skip market ▸</button>
+      <button class="btn ghost" onclick="const f=document.getElementById('csvFile');f.value='';f.click()" title="PropShop → export CSV for this source: every market in one file">📄 Import CSV</button>
+      <input type="file" id="csvFile" accept=".csv,text/csv" style="display:none" onchange="importCsvFile(this.files[0])">
       <button class="btn primary" onclick="parsePaste()">Import</button>
     </div>
   </div>
@@ -3184,6 +3187,86 @@ function parseDimers(raw, minEdge) {
 }
 
 // ===== PARSE IMPORT =====
+// ===== PROPSHOP CSV EXPORT =====
+// PropShop's "export CSV": one row per book —
+//   Team, home_team, away_team, Date, Start (UTC), Book, Player, O/U, Market (player_xxx), Line, Proj,
+//   Odds (American, "+" left off), Kelly, Edge, ROI (%), dist, Last Update
+// ROI (%) is the EV% the tracker uses everywhere (Edge is model prob − implied, in points).
+// Every market is in one file, so one import covers the whole source. Per player+market+side: the
+// best real book (Props Builder isn't bettable) is the pick; the other books at that line give the
+// worst playable odds; other lines that still clear the edge become alt lines.
+const _isPropShopCsv = raw => /^﻿?"?Team"?\s*,.*"?Player"?.*"?Market"?.*"?ROI/i.test(String(raw || '').split(/\r?\n/, 1)[0]);
+function _csvRows(raw) {
+  const rows = []; let row = [], cur = '', q = false;
+  const t = String(raw).replace(/^﻿/, '');
+  for (let i = 0; i < t.length; i++) {
+    const c = t[i];
+    if (q) { if (c === '"') { if (t[i + 1] === '"') { cur += '"'; i++; } else q = false; } else cur += c; }
+    else if (c === '"') q = true;
+    else if (c === ',') { row.push(cur); cur = ''; }
+    else if (c === '\n' || c === '\r') { if (c === '\r' && t[i + 1] === '\n') i++; row.push(cur); cur = ''; if (row.some(x => x !== '')) rows.push(row); row = []; }
+    else cur += c;
+  }
+  if (cur !== '' || row.length) { row.push(cur); if (row.some(x => x !== '')) rows.push(row); }
+  return rows;
+}
+function parsePropShopCsv(raw, minEdge) {
+  const rows = _csvRows(raw); const errors = []; const results = [];
+  if (rows.length < 2) return { results, errors: ['CSV has no rows'], markets: [] };
+  const H = rows[0].map(h => h.trim().toLowerCase()); const col = n => H.indexOf(n);
+  const ix = { team: col('team'), home: col('home_team'), away: col('away_team'), date: col('date'), start: col('start'), book: col('book'), player: col('player'),
+    ou: col('o/u'), market: col('market'), line: col('line'), proj: col('proj'), odds: col('odds'), roi: col('roi (%)') };
+  if (ix.player < 0 || ix.market < 0 || ix.line < 0 || ix.odds < 0 || ix.roi < 0) return { results, errors: ['CSV is missing Player / Market / Line / Odds / ROI (%) columns'], markets: [] };
+  const fmtOdds = o => { const n = Math.round(parseFloat(o)); return isNaN(n) ? null : (n > 0 ? '+' + n : String(n)); };
+  const abbr = name => _NFL_TEAM_ALIASES[String(name || '').trim().toLowerCase()] || String(name || '').trim();
+  const groups = {}, markets = new Set(), skippedMkts = new Set();
+  rows.slice(1).forEach((r, n) => {
+    try {
+      const book = String(r[ix.book] || '').trim();
+      if (/^(pb|props?[\s-]*builders?)$/i.test(book)) return;             // Props Builder: not bettable
+      const mk = marketFromPasteHeader(String(r[ix.market] || '').trim());
+      if (!mk || mk.unknown) { skippedMkts.add(String(r[ix.market] || '').trim()); return; }
+      markets.add(mk.key);
+      const player = String(r[ix.player] || '').trim(), side = /^o/i.test(r[ix.ou]) ? 'O' : /^u/i.test(r[ix.ou]) ? 'U' : null;
+      const line = parseFloat(r[ix.line]), odds = fmtOdds(r[ix.odds]), ev = parseFloat(r[ix.roi]);
+      if (!player || !side || isNaN(line) || !odds || isNaN(ev)) return;
+      // Date + Start are UTC ("2026-11-10 01:15" = Monday 8:15 PM ET) -> local date and time
+      let date = String(r[ix.date] || '').trim(), gameTime = '';
+      const when = new Date(date + 'T' + (String(r[ix.start] || '00:00:00').trim() || '00:00:00') + 'Z');
+      if (!isNaN(when)) { date = when.getFullYear() + '-' + String(when.getMonth() + 1).padStart(2, '0') + '-' + String(when.getDate()).padStart(2, '0'); gameTime = when.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }); }
+      const game = ix.away >= 0 && ix.home >= 0 ? abbr(r[ix.away]) + ' @ ' + abbr(r[ix.home]) : '';
+      const proj = parseFloat(r[ix.proj]);
+      const k = normName(player) + '|' + mk.key + '|' + side + '|' + game + '|' + date;
+      (groups[k] = groups[k] || { player, market: mk.key, side, game, date, gameTime, team: String(r[ix.team] || '').trim(), proj: isNaN(proj) ? null : proj, rows: [] })
+        .rows.push({ line, odds, ev, book });
+    } catch (e) { errors.push('Row ' + (n + 2) + ': ' + e.message); }
+  });
+  Object.values(groups).forEach(g => {
+    const ok = g.rows.filter(x => x.ev >= minEdge);
+    if (!ok.length) return;
+    const best = ok.slice().sort((a, b) => b.ev - a.ev || parseInt(b.odds) - parseInt(a.odds))[0];
+    let worst = best.odds;
+    g.rows.forEach(x => { if (x.line === best.line && x.ev >= 5 && parseInt(x.odds) < parseInt(worst)) worst = x.odds; });
+    const altMap = {};
+    g.rows.forEach(x => {
+      if (Number(x.line) === Number(best.line) || x.ev < 5) return;
+      const kk = String(Number(x.line));
+      if (!altMap[kk]) altMap[kk] = { line: x.line, odds: x.odds, ev: x.ev, worstOdds: x.odds, book: x.book };
+      else { if (parseInt(x.odds) > parseInt(altMap[kk].odds)) Object.assign(altMap[kk], { odds: x.odds, ev: x.ev, book: x.book }); if (parseInt(x.odds) < parseInt(altMap[kk].worstOdds)) altMap[kk].worstOdds = x.odds; }
+    });
+    results.push({ id: Date.now() + Math.random(), source: currentSource, player: g.player, team: g.team, game: g.game, pos: (MARKET_MAP[g.market] || {}).pos || '',
+      market: g.market, line: best.line, side: g.side, odds: best.odds, book: best.book, ev: Math.round(best.ev * 100) / 100,
+      gameTime: g.gameTime, date: g.date, result: '', notes: '', actual: null, pnl: null, worstOdds: worst, altLines: Object.values(altMap), proj: g.proj });
+  });
+  if (skippedMkts.size) console.log('[csv] markets not tracked, skipped:', [...skippedMkts].join(', '));
+  return { results, errors, markets: [...markets] };
+}
+function importCsvFile(file) {
+  if (!file) return;
+  file.text().then(t => { const ta = document.getElementById('pasteArea'); ta.value = t; parsePaste(); })
+    .catch(e => { const info = document.getElementById('parseInfo'); info.textContent = "Couldn't read that file: " + e.message; info.className = 'parse-info err'; });
+}
+
 async function parsePaste() {
   const raw = document.getElementById('pasteArea').value;
   const minEdge = parseFloat(document.getElementById('minEdge').value) || 5;
@@ -3198,6 +3281,9 @@ async function parsePaste() {
   } else if (currentSource === 'rts') {
     info.textContent = 'Matching RTS rows to the schedule…'; info.className = 'parse-info';
     parseResult = await parseRtsCsv(raw);
+  } else if (PROPSHOP_SOURCES.includes(currentSource) && _isPropShopCsv(raw)) {
+    parseResult = parsePropShopCsv(raw, minEdge);
+    parseResult._marketNote = `CSV: ${parseResult.markets.length} market${parseResult.markets.length === 1 ? '' : 's'} (${parseResult.markets.map(k => PROPSHOP_MARKET_LABELS[k] || (MARKET_MAP[k] || {}).label || k).join(', ')})`;
   } else if (PROPSHOP_SOURCES.includes(currentSource)) {
     let marketKey = document.getElementById('pasteMarket').value;
     const det = detectMarketFromPaste(raw);
@@ -3228,6 +3314,7 @@ async function parsePaste() {
   const marketNote = (_noName.length ? `⚠ ${_noName.length} held back: no player name (see console) · ` : '') + (_notTracked ? `${_notTracked} anytime TD skipped · ` : '') + (parseResult._marketNote ? parseResult._marketNote + ' · ' : '');
 
   if (parsed.length === 0) {
+    if (parseResult.markets && PROPSHOP_SOURCES.includes(currentSource)) { parseResult.markets.forEach(k => markMarketPasted(currentSource, k)); refreshMarketDropdown(); }
     let msg = marketNote + `No props found above ${minEdge}% edge.` + (PROPSHOP_SOURCES.includes(currentSource) ? ' Use "Skip market" to move on.' : '');
     if (errors.length) msg += ` (${errors.length} row errors — check console)`;
     info.textContent = msg;
@@ -3259,7 +3346,8 @@ async function parsePaste() {
   let progressNote = '';
   if (PROPSHOP_SOURCES.includes(currentSource)) {
     const mk = document.getElementById('pasteMarket')?.value;
-    if (mk) markMarketPasted(currentSource, mk);
+    if (parseResult.markets) parseResult.markets.forEach(k => markMarketPasted(currentSource, k)); // CSV: every market in the file
+    else if (mk) markMarketPasted(currentSource, mk);
     const done = pastedCountFor(currentSource);
     progressNote = ` · ${done}/${PROPSHOP_MARKET_ORDER.length} markets done this week`;
     refreshMarketDropdown();
@@ -5700,6 +5788,18 @@ async function undoImageCleanup() {
   try { localStorage.setItem('nfl_image_strip_backup_v1', String(Date.now())); } catch (e) {}
   alert(failed.length ? 'Not enough storage to put back: ' + failed.join(', ') : 'Put back. Reloading…');
   location.reload();
+}
+// Storage panel as a pop-up, from the top bar (same panel as the bottom of the Sent tab)
+function openStorageModal() {
+  let ov = document.getElementById('storageModal');
+  if (!ov) {
+    ov = document.createElement('div'); ov.id = 'storageModal'; ov.className = 'modal-ov';
+    ov.addEventListener('click', e => { if (e.target === ov) ov.classList.remove('open'); });
+    document.body.appendChild(ov);
+  }
+  ov.innerHTML = `<div class="modal" style="max-width:900px;width:95%">${storagePanelHtml()}
+    <div class="modal-actions"><button class="btn ghost" onclick="openStorageModal()">↻ Refresh</button><button class="btn ghost" onclick="document.getElementById('storageModal').classList.remove('open')">Close</button></div></div>`;
+  ov.classList.add('open');
 }
 function freeStorageSpace() {
   const r = _storageReport(), del = r.rows.filter(([k]) => _SAFE_TO_CLEAR.includes(k));

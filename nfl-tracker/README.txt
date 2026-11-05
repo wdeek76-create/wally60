@@ -73,3 +73,15 @@ WHERE PICKS ARE SAVED (since Oct 29)
 - Sent tab -> Storage shows both: browser storage (and its limit) and what's in the database.
 - One-time: the Oct 29 - Nov 2 board (25 Ensemble picks + their source picks) was rebuilt from the
   Nick card after it was lost to full storage.
+
+PROPSHOP CSV IMPORT
+- In PropShop, export the CSV for a source. In the tracker: pick that source -> + Paste Props ->
+  "Import CSV" -> choose the file (pasting the CSV text into the box works too).
+- One file = every market for that source; all its markets get ticked off for the week.
+- Edge = the CSV's "ROI (%)". Props Builder rows are ignored. Per player + market + side the best
+  real book is the pick; other books at that line give the worst playable price; other lines that
+  clear the edge are alt lines. Game times in the file are UTC and are converted to local time.
+- Importing the same file again updates picks instead of duplicating them.
+
+STORAGE BUTTON
+- "Storage" in the top bar opens the storage panel (usage, what's in the database, backup/restore).
