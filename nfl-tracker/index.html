@@ -4004,9 +4004,15 @@ async function autoGrade() {
   const minDate = dates[0];
   const daysBack = Math.min(45, Math.max(3, Math.ceil((new Date(today + 'T12:00:00') - new Date(minDate + 'T12:00:00')) / 86400000) + 1));
   status.textContent = 'Fetching OpticOdds schedule…';
-  let fixtures = [];
+  let fixtures = [], ooDown = null;
+  // OpticOdds down / key problem used to stop grading right here, so ESPN was never tried.
+  // Now: no OpticOdds schedule -> every date goes straight to ESPN.
   try { fixtures = await ooFixtures(daysBack, 7, true); }
-  catch (e) { status.textContent = 'OpticOdds schedule failed: ' + e.message + ' — open ⚙ OpticOdds → Test connection.'; status.className = 'status err'; return; }
+  catch (e) { ooDown = e.message; console.warn('[grade] OpticOdds schedule failed — grading from ESPN only:', e.message); }
+  const _espCache = {};
+  const _espFor = d => _espCache[d] || (_espCache[d] = espnBoxLookupForDate(d).catch(e => { console.warn('[grade] ESPN failed for', d, e.message); return { lookup: {}, teamsLoaded: new Set() }; }));
+  const _shiftDay = (d, n) => { const x = new Date(d + 'T12:00:00'); x.setDate(x.getDate() + n); return x.getFullYear() + '-' + String(x.getMonth() + 1).padStart(2, '0') + '-' + String(x.getDate()).padStart(2, '0'); };
+  const espTeams = new Set(); let espnGraded = 0;
 
   for (const date of dates) {
     const finals = fixtures.filter(f => f.date === date && f.status === 'completed');
@@ -4028,15 +4034,18 @@ async function autoGrade() {
     // it's missing, matched by date/matchup. Same lookup shape as ooBuildLookup, so grading
     // below doesn't need to know which source a given player's stats came from.
     const dateProps = pending.filter(p => (p.date || today) === date);
-    const stillMissing = dateProps.some(p => { const t = _matchupTeams(p.game); return !(t && t.length === 2 && t.every(x => teamsLoaded.has(x))); });
-    if (stillMissing) {
-      status.textContent = `OpticOdds missing box score for ${date} — trying ESPN…`;
-      try {
-        const esp = await espnBoxLookupForDate(date);
-        Object.keys(esp.lookup).forEach(k => { if (!lookup[k]) lookup[k] = esp.lookup[k]; });
-        esp.teamsLoaded.forEach(t => teamsLoaded.add(t));
-        console.log('[grade]', date, 'ESPN fallback teams loaded:', [...esp.teamsLoaded]);
-      } catch (e) { console.warn('[grade] ESPN fallback failed for', date, e.message); }
+    const isMissing = p => { const t = _matchupTeams(p.game); return !(t && t.length === 2 && t.every(x => teamsLoaded.has(x))); };
+    // ESPN for the games OpticOdds didn't cover. The pick's own date first, then the day before and
+    // after: older picks were sometimes saved with the next day's date for night games (UTC), and
+    // ESPN files games under their Eastern date. Grading below still requires the pick's OWN two
+    // teams to be final, so an adjacent day can't grade it off a different game.
+    for (const d of [date, _shiftDay(date, -1), _shiftDay(date, 1)]) {
+      if (!dateProps.some(isMissing)) break;
+      status.textContent = `${ooDown ? 'OpticOdds unavailable' : 'OpticOdds missing box scores'} for ${date} — trying ESPN (${d})…`;
+      const esp = await _espFor(d);
+      Object.keys(esp.lookup).forEach(k => { if (!lookup[k]) lookup[k] = esp.lookup[k]; });
+      esp.teamsLoaded.forEach(t => { if (!teamsLoaded.has(t)) espTeams.add(t); teamsLoaded.add(t); });
+      console.log('[grade]', date, 'ESPN', d, 'teams loaded:', [...esp.teamsLoaded]);
     }
     lastLookupSample = lookup;
     console.log('[grade]', date, 'team player counts:', teamCounts, '| teams loaded (incl. ESPN):', [...teamsLoaded]);
@@ -4079,6 +4088,7 @@ async function autoGrade() {
       else if (result === 'loss') p.pnl = odds > 0 ? -1.0 : -(Math.abs(odds) / 100);
       else p.pnl = 0;
       totalGraded++;
+      if (t.some(x => espTeams.has(x))) espnGraded++;
       batch.push(snapshot);
       // The manual quick-grade path (setResult) cascades a grade to matching
       // pending props in every OTHER source — bulk auto-grade never did, so a
@@ -4128,7 +4138,8 @@ async function autoGrade() {
   render();
   populateGradeDates();
 
-  const parts = [`✓ Graded ${totalGraded}`];
+  const parts = [`✓ Graded ${totalGraded}${espnGraded ? ` (${espnGraded} from ESPN)` : ''}`];
+  if (ooDown) parts.push(`OpticOdds unavailable (${ooDown}) — used ESPN`);
   if (totalCascaded) parts.push(`also graded ${totalCascaded} matching in other sources`);
   if (allDnp.length) parts.push(`⚠ ${allDnp.length} need review (${allDnp.slice(0,4).join(', ')}${allDnp.length>4?' +'+(allDnp.length-4):''}) — top of Pending`);
   if (allMissed.length) parts.push(`${allMissed.length} pending (game not final)`);
@@ -7015,7 +7026,7 @@ function _espnGroupStats(groupName, row) {
     if (num('rec') !== undefined) g.receptions = num('rec');
     if (num('yds') !== undefined) g.receivingyards = num('yds');
     if (num('td') !== undefined) g.receivingtouchdowns = num('td');
-    if (num('lng') !== undefined) g.longreception = num('lng');
+    if (num('lng') !== undefined) g.longreception = num('lng'); else if (num('long') !== undefined) g.longreception = num('long');
     if (num('tgts') !== undefined) g.receivingtargets = num('tgts');
     return g;
   }
@@ -7051,11 +7062,16 @@ async function espnBoxLookupForDate(dateStr) {
         (tb.statistics || []).forEach(sg => {
           const gname = String(sg.name || '').toLowerCase();
           if (!['passing', 'rushing', 'receiving', 'kicking'].includes(gname)) return;
-          const keys = (sg.keys && sg.keys.length ? sg.keys : (sg.labels || [])).map(k => String(k).toLowerCase());
+          // ESPN gives each column a long key ("receptions", "receivingYards") AND a short label
+          // ("REC", "YDS"). _espnGroupStats reads the short labels, but this used to fill the row with
+          // the long keys whenever they existed (they always do) -> every ESPN box score came back
+          // empty and the fallback graded nothing. Fill the row under both names.
+          const keys = (sg.keys || []).map(k => String(k).toLowerCase());
+          const labels = (sg.labels || []).map(k => String(k).toLowerCase());
           (sg.athletes || []).forEach(a => {
             const nm = a.athlete?.displayName; if (!nm) return;
             const norm = normName(nm); if (!norm) return;
-            const row = {}; (a.stats || []).forEach((v, i) => { if (keys[i]) row[keys[i]] = v; });
+            const row = {}; (a.stats || []).forEach((v, i) => { if (keys[i]) row[keys[i]] = v; if (labels[i]) row[labels[i]] = v; });
             const stats = _espnGroupStats(gname, row);
             if (!stats || !Object.keys(stats).length) return;
             if (!lookup[norm]) lookup[norm] = { rawName: nm, team: ab };
