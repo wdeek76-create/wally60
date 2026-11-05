@@ -38,7 +38,7 @@ h2{font-size:12px;letter-spacing:1px;text-transform:uppercase;color:var(--mut);m
     <label class="filebtn"><input type="file" accept=".csv,text/csv" onchange="loadPs(this)" hidden>LOAD PROPSHOP CSV</label>
     <label class="filebtn alt"><input type="file" accept=".csv,text/csv" onchange="toPs(this)" hidden>PROJECTIONS CSV &rarr; PROPSHOP FILE</label>
   </div>
-  <div class="row"><button onclick="copyPlays()">COPY PLAYS</button><button onclick="gradeAll()" id="gbtn">GRADE PENDING</button><span class="m" style="font-size:11px">also grades itself</span></div>
+  <div class="row"><button onclick="copyPlays()">COPY PLAYS</button><button onclick="copyAgree()" style="border-color:#a78bfa;color:#a78bfa">COPY AGREE (ALL 5%+)</button><button onclick="gradeAll()" id="gbtn">GRADE PENDING</button><span class="m" style="font-size:11px">also grades itself</span></div>
   <div class="row"><button onclick="copyReport()">COPY REPORT</button><button onclick="exportCsv()">EXPORT CSV</button><button class="del" onclick="clearAll()">CLEAR ALL</button></div>
   <div class="info" id="info"></div>
 </div>
@@ -478,6 +478,10 @@ function _tsTipTs(dateIso, timeStr) {
 // copy them back with each book's price and the play-to (the worst price that still holds 5% EV), and grade them over / under.
 const KEY = "nba_sim_solo_v1", STATS = ["PTS", "REB", "AST", "3PM", "PRA"], BUCKETS = [["5-10%", 5, 10], ["10-15%", 10, 15], ["15-25%", 15, 25], ["25%+", 25, Infinity], ["under 5%", -Infinity, 5]];
 const PLAY_TO_EV = 5;
+// Same rule as Morning: the bet price must be at FanDuel / Prop Builder / Pinnacle / Bet105. Exchanges (Novig / ProphetX / Kalshi) only count with real size,
+// and PropShop's export carries no depth, so here they are listed (with cents) but never the headline.
+const HEAD_BOOKS = new Set(["FanDuel", "Prop Builder", "Pinnacle", "Bet105"]), EXCH = new Set(["Novig", "ProphetX", "Kalshi", "Polymarket"]);
+const cents = o => `(${(100 / dec(o)).toFixed(1)}\u00a2)`;
 const MARKET = { player_points: "PTS", player_rebounds: "REB", player_assists: "AST", player_threes_made: "3PM", player_threes: "3PM", player_points_rebounds_assists: "PRA" };
 const BOOK = { fanduel: "FanDuel", "prop-builder": "Prop Builder", propbuilder: "Prop Builder", pinnacle: "Pinnacle", novig: "Novig", prophetx: "ProphetX", kalshi: "Kalshi", fanatics: "Fanatics",
   draftkings: "DraftKings", fliff: "Fliff", bet105: "Bet105", bookmaker: "Bookmaker", caesars: "Caesars", "hard-rock": "Hard Rock", thescore: "theScore", betrivers: "BetRivers", polymarket: "Polymarket" };
@@ -523,11 +527,13 @@ function loadPs(inp) {
       const k = [resolveNorm(r.Player), stat, ou, gameDate].join("|");
       (groups[k] = groups[k] || []).push({ player: String(r.Player).trim(), team: r.Team || "", gameDate, gameTime, stat, ou, line, odds, roi, book: bookName(r.Book), proj: Number(r.Proj) || null });
     });
-    const now = Date.now(), dates = new Set(); let added = 0, upd = 0, late = 0, under = 0;
+    const now = Date.now(), dates = new Set(); let added = 0, upd = 0, late = 0, under = 0, noHead = 0;
     Object.values(groups).forEach(list => {
       const byLine = {}; list.forEach(x => (byLine[x.line] = byLine[x.line] || []).push(x));
       const main = Object.keys(byLine).sort((a, b) => byLine[b].length - byLine[a].length || (list[0].ou === "over" ? Number(a) - Number(b) : Number(b) - Number(a)))[0];
-      const best = byLine[main].reduce((a, x) => x.odds > a.odds ? x : a);
+      const headMain = byLine[main].filter(x => HEAD_BOOKS.has(x.book)), headAny = list.filter(x => HEAD_BOOKS.has(x.book));
+      if (!headAny.length) { noHead++; return; }
+      const best = headMain.length ? headMain.reduce((a, x) => x.odds > a.odds ? x : a) : headAny.reduce((a, x) => x.roi > a.roi ? x : a);
       if (best.roi < minEv) { under++; return; }
       const tip = _tsTipTs(best.gameDate, best.gameTime); if (tip != null && tip < now - 5 * 60000) { late++; return; }
       dates.add(best.gameDate);
@@ -539,7 +545,7 @@ function loadPs(inp) {
       rows.push(rec); added++;
     });
     save();
-    say(`${src}: ${added} new${upd ? `, ${upd} updated` : ""}${under ? ` \u00b7 ${under} under ${minEv}%` : ""}${late ? ` \u00b7 ${late} already tipped` : ""}${dates.size ? ` \u00b7 ${[...dates].join(", ")}` : ""}`);
+    say(`${src}: ${added} new${upd ? `, ${upd} updated` : ""}${under ? ` \u00b7 ${under} under ${minEv}%` : ""}${noHead ? ` \u00b7 ${noHead} with no FD / PB / PIN / Bet105 price` : ""}${late ? ` \u00b7 ${late} already tipped` : ""}${dates.size ? ` \u00b7 ${[...dates].join(", ")}` : ""}`);
     toast(`${src}: ${added} plays loaded`); fSrc = src; render();
   });
 }
@@ -616,13 +622,44 @@ function playsText() {
       L.push(STAT_NAME[st]);
       set.forEach(x => {
         L.push(`${x.player} ${x.ou === "over" ? "O" : "U"} ${x.line} \u00b7 ${x.book} ${fo(x.odds)} (+${x.ev.toFixed(1)}%) \u00b7 play to ${fo(x.playTo)}`);
-        const others = (x.books || []).map(b => `${b.book} ${b.line !== x.line ? (x.ou === "over" ? "O" : "U") + b.line + " " : ""}${fo(b.odds)}`);
+        const others = (x.books || []).map(b => `${b.book} ${b.line !== x.line ? (x.ou === "over" ? "O" : "U") + b.line + " " : ""}${fo(b.odds)}${EXCH.has(b.book) ? " " + cents(b.odds) : ""}`);
         if (others.length) L.push(`  also: ${others.join(", ")}`);
       });
     });
   });
   return L.join("\n");
 }
+// AGREE: the same play (player / market / side / line / day) open from 2+ sources, every one of them at 5%+. The text shows each source's edge,
+// and the play-to comes from the LOWER edge (the most conservative fair).
+const AGREE_EV = 5;
+function agreeList() {
+  const g = {};
+  rows.filter(x => x.result === "pending" && (fStat === "ALL" || x.stat === fStat)).forEach(x => { const k = [resolveNorm(x.player), x.stat, x.gameDate, x.ou, Number(x.line)].join("|"); (g[k] = g[k] || []).push(x); });
+  return Object.values(g).map(list => {
+    const bySrc = {}; list.forEach(x => { if (!bySrc[x.src] || x.ev > bySrc[x.src].ev) bySrc[x.src] = x; });
+    const srcs = Object.values(bySrc); if (srcs.length < 2 || srcs.some(x => x.ev < AGREE_EV)) return null;
+    const low = srcs.reduce((a, x) => x.ev < a.ev ? x : a), best = srcs.reduce((a, x) => x.odds > a.odds ? x : a);
+    return { player: low.player, stat: low.stat, ou: low.ou, line: low.line, gameDate: low.gameDate, gameTime: low.gameTime, srcs: srcs.sort((a, b) => b.ev - a.ev), low, best, playTo: low.playTo, books: best.books || [] };
+  }).filter(Boolean).sort((a, b) => b.low.ev - a.low.ev);
+}
+function agreeText() {
+  const list = agreeList(); if (!list.length) return "";
+  const L = [`AGREE · ${list.length} · every source ${AGREE_EV}%+ · play to from the lower edge`];
+  [...new Set(list.map(x => x.gameDate))].sort().forEach(d => {
+    L.push("", d.slice(5));
+    STATS.forEach(st => {
+      const set = list.filter(x => x.gameDate === d && x.stat === st); if (!set.length) return;
+      L.push(STAT_NAME[st]);
+      set.forEach(x => {
+        L.push(`${x.player} ${x.ou === "over" ? "O" : "U"} ${x.line} · ${x.best.book} ${fo(x.best.odds)} · ${x.srcs.map(s => `${s.src} +${s.ev.toFixed(1)}%`).join(" / ")} · play to ${fo(x.playTo)}`);
+        const others = x.books.map(b => `${b.book} ${b.line !== x.line ? (x.ou === "over" ? "O" : "U") + b.line + " " : ""}${fo(b.odds)}${EXCH.has(b.book) ? " " + cents(b.odds) : ""}`);
+        if (others.length) L.push(`  also: ${others.join(", ")}`);
+      });
+    });
+  });
+  return L.join("\n");
+}
+function copyAgree() { const t = agreeText(); if (!t) { toast(`No plays where 2+ sources are all ${AGREE_EV}%+`); return; } (navigator.clipboard ? navigator.clipboard.writeText(t) : Promise.reject()).then(() => toast(`Copied ${agreeList().length} agreeing plays`), () => { prompt("Copy:", t); }); }
 function copyPlays() { const t = playsText(); if (!t) { toast("No open plays"); return; } (navigator.clipboard ? navigator.clipboard.writeText(t) : Promise.reject()).then(() => toast("Plays copied"), () => { prompt("Copy:", t); }); }
 function reportText() {
   const set = view(), t = tally(set), L = [];
