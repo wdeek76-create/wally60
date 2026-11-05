@@ -26252,6 +26252,67 @@ async function morningCheckRange(quiet) {
     if (!quiet || gone.size) showToast(gone.size ? `Dropped ${gone.size} out of range — ${picks.length - gone.size} left` : `All ${picks.length} still in range`);
   } finally { _mChecking = false; try { renderMorning(); } catch (e) {} }
 }
+// ── PROPSHOP CSV (one file per source, every market at once) ───────────────
+// PropShop's CSV export: one row per book with Player, O/U, Market, Line, Proj, Odds, ROI (%), Book, Date + Start (UTC), home/away team.
+// ROI (%) is the same EV% the board shows. Per player / market / side we take the line most books hang, and the best price on it.
+// The file only carries +EV rows, so a source with no row for a player is simply missing there (the ensemble needs all 4 sources anyway).
+const _PS_CSV_MARKET = { player_points: "PTS", player_rebounds: "REB", player_assists: "AST", player_threes_made: "3PM", player_threes: "3PM", player_points_rebounds_assists: "PRA" };
+function _psCsvBook(b) {
+  const k = String(b || "").toLowerCase().trim(), k1 = k.replace(/[-_]+/g, " ");
+  return OO_BOOK_TO_LABEL[k] || OO_BOOK_TO_LABEL[k1] || OO_BOOK_TO_LABEL[k1.replace(/\s+/g, "")] || ({ betrivers: "Kambi", "bally bet": "Bally Bet", betparx: "betPARX", prizepicks: "PrizePicks" })[k1] || k1.replace(/\b\w/g, c => c.toUpperCase());
+}
+function parsePropShopCsv(text) {
+  const rows = parseCSV(text), out = {}, skipped = new Set();
+  if (!rows.length || !("Player" in rows[0]) || !("Market" in rows[0]) || !("ROI (%)" in rows[0])) return null;
+  const groups = {};
+  rows.forEach(r => {
+    const stat = _PS_CSV_MARKET[String(r.Market || "").trim()]; if (!stat) { skipped.add(r.Market); return; }
+    const ou = String(r["O/U"] || "").toLowerCase(); if (ou !== "over" && ou !== "under") return;
+    const odds = parseInt(r.Odds, 10), line = Number(r.Line), ev = Number(r["ROI (%)"]); if (isNaN(odds) || isNaN(line) || isNaN(ev)) return;
+    const k = [resolveNorm(r.Player), stat, ou].join("|");
+    (groups[k] = groups[k] || []).push({ r, stat, ou, odds, line, ev });
+  });
+  Object.values(groups).forEach(list => {
+    const byLine = {}; list.forEach(x => (byLine[x.line] = byLine[x.line] || []).push(x));
+    const main = Object.keys(byLine).sort((a, b) => byLine[b].length - byLine[a].length || Number(a) - Number(b))[0];
+    const at = byLine[main], best = at.reduce((a, x) => x.odds > a.odds ? x : a, at[0]), r = best.r;
+    const t = Date.parse(`${r.Date}T${r.Start || "00:00:00"}Z`), d = isNaN(t) ? null : new Date(t);
+    const away = _matchupKey(r.away_team) || "", home = _matchupKey(r.home_team) || "";
+    const row = { player: String(r.Player).trim(), team: String(r.Team || "").trim(), game: away && home ? `${away} @ ${home}` : "", gameTime: d ? d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }) : "",
+      gameDateIso: d ? localYMD(d) : String(r.Date || ""), ou: best.ou, line: best.line, odds: best.odds, book: _psCsvBook(r.Book), liq: null, ev: best.ev, proj: Number(r.Proj) || null, minutes: null, simFair: null,
+      csvBooks: at.map(x => ({ book: _psCsvBook(x.r.Book), odds: x.odds, ev: x.ev })) };
+    (out[best.stat] = out[best.stat] || []).push(row);
+  });
+  return { byStat: out, rows: rows.length, skipped: [...skipped].filter(Boolean) };
+}
+function morningImportCsv(src, input) {
+  const f = input.files && input.files[0]; if (!f) return;
+  f.text().then(text => {
+    input.value = "";
+    const info = document.getElementById("morning-import-info");
+    const res = parsePropShopCsv(text);
+    if (!res) { showToast("That doesn't look like a PropShop CSV export"); if (info) info.textContent = "Not a PropShop CSV (needs Player / Market / O/U / Line / Odds / ROI (%) columns)."; return; }
+    const stats = Object.keys(res.byStat); if (!stats.length) { showToast("No PTS / REB / AST / 3PM / PRA rows in that file"); return; }
+    const hh = _mHash(text), dupe = Object.keys(morningPasteHash).find(k => k.endsWith("|CSV") && morningPasteHash[k].h === hh && !k.startsWith(src + "|"));
+    if (dupe && !confirm(`This is the exact same file you loaded for ${_mSrc(dupe.split("|")[0]).label}. Load it for ${_mSrc(src).label} anyway?`)) return;
+    const today = localYMD(new Date()), dates = [...new Set(stats.flatMap(st => res.byStat[st].map(x => x.gameDateIso)))];
+    if (dates.length && !dates.includes(today) && !confirm(`This file is for ${dates.join(", ")}, not today (${today}). Load it anyway?`)) return;
+    let n = 0; const per = [];
+    stats.forEach(stat => {
+      const list = res.byStat[stat].map(r => ({ _rid: Date.now() + Math.floor(Math.random() * 1e6), stat, ...r, team: _mTeamFor(r.player) || normTeamAbbr(r.team) || r.team }));
+      morningPs[src] = (morningPs[src] || []).filter(p => p.stat !== stat).concat(list);
+      try { morningSoloCapture(src, stat, list); } catch (e) {}
+      n += list.length; per.push(`${stat} ${list.length}`);
+    });
+    saveMorningPs(); _mHashSave(src, "CSV", text);
+    const msg = `${_mSrc(src).label} CSV: ${n} props · ${per.join(" · ")}${res.skipped.length ? ` · skipped ${res.skipped.length} other market${res.skipped.length === 1 ? "" : "s"}` : ""}`;
+    const logged = morningAutoLog(); if (logged) saveMorningBets();
+    showToast(msg + (logged ? ` · ${logged} logged` : ""));
+    renderMorning();
+    { const inf = document.getElementById("morning-import-info"); if (inf) inf.textContent = msg + (logged ? ` · ${logged} logged` : ""); }
+    if (logged) morningResolveUnbooked().then(() => morningCheckRange(true)).catch(() => {});
+  });
+}
 // ── LIVE PASTE CHECK ───────────────────────────────────────────────────────
 // As soon as something is pasted: what it is (market, props, date), where it will go, and warnings (same text pasted twice, same board as another source, re-paste replaces,
 // wrong day, market box disagreeing with the header). Pure preview: nothing is stored until IMPORT.
@@ -26596,6 +26657,10 @@ function renderMorning() {
       <label style="font-size:11px;color:#a8b0bb;">Market <select id="morning-stat" onchange="morningSelStat=this.value;morningPasteLiveSoon()" style="background:#050507;border:1px solid #1a1d22;color:#e2e8f0;border-radius:5px;padding:4px 6px;">${statOpts}</select></label>
       <button onclick="morningImport()" style="background:#7c3aed;border:none;color:#fff;border-radius:6px;padding:7px 16px;font-size:12px;font-weight:800;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;">IMPORT</button>
       <span id="morning-import-info" style="font-size:11px;color:#a8b0bb;"></span>
+    </div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:8px;">
+      <span style="font-size:11px;color:#a8b0bb;font-weight:700;">OR UPLOAD THE PROPSHOP CSV (all markets at once):</span>
+      ${MORNING_SRC_KEYS.map(k => `<label style="cursor:pointer;border:1px solid ${_mSrc(k).color};color:${_mSrc(k).color};border-radius:6px;padding:5px 10px;font-size:11px;font-weight:800;font-family:'Plus Jakarta Sans',sans-serif;">⇧ ${_mSrc(k).label} CSV<input type="file" accept=".csv,text/csv" hidden onchange="morningImportCsv('${k}', this)"></label>`).join("")}
     </div>
     <textarea id="morning-paste" oninput="morningPasteLiveSoon()" placeholder="Paste the PropShop board here…" spellcheck="false" style="width:100%;min-height:70px;margin-top:8px;background:#050507;border:1px solid #1a1d22;border-radius:6px;padding:8px 10px;color:#e2e8f0;font-family:'JetBrains Mono','Menlo',monospace;font-size:11px;outline:none;resize:vertical;box-sizing:border-box;"></textarea>
     <div id="morning-paste-live" style="font-size:12px;font-weight:700;margin-top:6px;min-height:16px;"></div>
