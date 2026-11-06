@@ -649,7 +649,7 @@ table colgroup col.avg-col{width:16%;}
   try {
     const d = new Date(Date.now() - 5 * 3600 * 1000), day = d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
     if (localStorage.getItem("nba_daily_clear_day") === day) return;
-    ["nba_morning_ps_v1", "nba_morning_paste_hash_v1", "nba_lineups_v1", "nba_lineups_rg_v1", "nba_lineups_tabs_v1", "nba_lineup_games_v1", "nba_lineup_discord_msg", "nba_injuries_cache",
+    ["nba_morning_ps_v1", "nba_morning_paste_hash_v1", "nba_morning_skip_v1", "nba_lineups_v1", "nba_lineups_rg_v1", "nba_lineups_tabs_v1", "nba_lineup_games_v1", "nba_lineup_discord_msg", "nba_injuries_cache",
      "nba_rw_depth_v1", "nba_rg_impact_v1", "nba_rw_lineups_raw", "nba_tabs_lineups_raw", "nba_rw_news_feed_v1", "captool_players"].forEach(k => localStorage.removeItem(k));
     localStorage.setItem("nba_daily_clear_day", day);
   } catch (e) {}
@@ -26216,11 +26216,27 @@ function _mLogRow(r) {
   // The Tracker copy is made when the pick goes out on a card (see _mDropUnpriced), not when it first clears: picks pop in and out as boards are re-pasted, and the ones that never reach a card shouldn't land in the Tracker.
   return true;
 }
+// Plays you remove from the ensemble (today only): never auto-logged, kept off the cards, hidden from the ENSEMBLE list.
+const MORNING_SKIP_KEY = "nba_morning_skip_v1";
+let morningSkip = new Set(); try { morningSkip = new Set(JSON.parse(localStorage.getItem(MORNING_SKIP_KEY) || "[]")); } catch (e) {}
+const _mSkipKey = r => [resolveNorm(r.player || ""), String(r.stat || "").toUpperCase(), r.ou, Number(r.line), r.gameDateIso || r.gameDate || ""].join("|");
+const _mSkipped = r => morningSkip.has(_mSkipKey(r));
+function morningRemovePlay(i) {
+  const r = (window._morningCleared || [])[i]; if (!r) return;
+  const m = morningBets.find(b => b.result === "pending" && resolveNorm(b.player) === resolveNorm(r.player) && String(b.stat).toUpperCase() === String(r.stat).toUpperCase() && Number(b.line) === Number(r.line) && b.ou === r.ou);
+  const tb = m ? bets.find(x => x && x.source === "morning" && x.result === "pending" && (String(x.morningId) === String(m.id) || String(x.id) === String(m.trackerId))) : null;
+  if (!confirm(`Remove ${r.player} ${r.ou.toUpperCase()} ${r.line} ${r.stat} for today?${tb ? "\n\nIt is in the Tracker as an open bet \u2014 that copy is removed too." : ""}`)) return;
+  morningSkip.add(_mSkipKey(r)); try { localStorage.setItem(MORNING_SKIP_KEY, JSON.stringify([...morningSkip])); } catch (e) {}
+  if (m) morningBets = morningBets.filter(b => b !== m);
+  if (tb) bets = bets.filter(x => x !== tb);
+  try { saveMorningBets(); if (tb) saveBets(); } catch (e) {}
+  showToast(`Removed ${r.player} ${r.stat}`); renderMorning();
+}
 function morningAutoLog() {
   if (!morningNewsLoadedAt()) return 0;   // never auto-log blind — today's RW news has to be in
   const { cleared } = computeMorningEnsemble();
   let added = 0;
-  cleared.forEach(r => { if (_mLogRow(r)) added++; });
+  cleared.forEach(r => { if (!_mSkipped(r) && _mLogRow(r)) added++; });
   if (added) saveMorningBets();
   return added;
 }
@@ -26727,17 +26743,17 @@ function renderMorning() {
 
   let viewBody = "";
   if (morningView === "ensemble") {
-    const rows = cleared.filter(r => statOk(r.stat) && _mNameHit(r.player));
+    const rows = cleared.filter(r => statOk(r.stat) && _mNameHit(r.player) && !_mSkipped(r));
     window._morningCleared = cleared;
-    viewBody = rows.length ? `<div style="display:flex;justify-content:flex-end;margin-bottom:6px;">${getNickWebhook() ? btn("➤ NICK", "morningPostNick()", true, "#00aaff") : ""}${btn("🖼 DISCORD", "morningPostDiscord()", !!getMorningWebhook(), "#5865f2")}${btn(getMorningWebhook() ? "➤ POST TO DISCORD" : "🔗 SET DISCORD WEBHOOK", "morningPostDiscord()", !!getMorningWebhook(), "#5865f2")}${btn("LOG ALL TO MORNING", "morningLogAll()", true, "#c4b5fd")}</div>
-      <div style="overflow-x:auto;"><table style="border-collapse:collapse;width:100%;"><thead><tr>${["PLAYER", "STAT", "SIDE", "LINE", "ANCHOR · MODEL", "AGREE · SOURCES (PROJ · EV)", "BEST", "BOOK", "FAIR", "WORST EV", ""].map(th).join("")}</tr></thead><tbody>
-      ${rows.map(r => { const i = cleared.indexOf(r), logged = _mAlreadyLogged(r); return `<tr style="border-top:1px solid #1a1d22;${logged ? "opacity:.5;" : ""}">
+    viewBody = rows.length ? `<div style="display:flex;justify-content:flex-end;margin-bottom:6px;">${getNickWebhook() ? btn("➤ NICK", "morningPostNick()", true, "#00aaff") : ""}${btn("🖼 DISCORD", "morningPostDiscord()", !!getMorningWebhook(), "#5865f2")}${btn("LOG ALL TO MORNING", "morningLogAll()", true, "#c4b5fd")}</div>
+      <div style="overflow-x:auto;"><table style="border-collapse:collapse;width:100%;"><thead><tr>${["PLAYER", "STAT", "SIDE", "LINE", "ANCHOR · MODEL", "AGREE · SOURCES (PROJ · EV)", "BEST", "BOOK", "FAIR", "PLAY TO", "WORST EV", ""].map(th).join("")}</tr></thead><tbody>
+      ${rows.map(r => { const i = cleared.indexOf(r), logged = _mAlreadyLogged(r); return `<tr style="border-top:1px solid #1a1d22;">
         ${td(_mPlayerCell(r.player, r.team))}${td(r.stat, "font-weight:800;color:#fff;")}${td(r.ou.toUpperCase(), `font-weight:800;color:${r.ou === "over" ? "#4ade80" : "#f87171"};`)}${td(r.line, "color:#fff;")}
         ${td(_mAnchorModelHtml(r))}
         ${td(`<span style="display:inline-flex;gap:5px;align-items:center;"><b style="color:#c4b5fd;">${r.sourcesAgreed.length}/${r.requiredQual}</b>${_mSrcPills(r.sourceProjs, r.sourceEvs, r.missingSrc, r.missingProj)}</span>`)}
-        ${td(_mFmtOdds(r.odds), "color:#fff;font-weight:700;")}${td(_mEsc(r.book || "—"))}${td(_mFmtOdds(r.fairOdds))}
+        ${td(_mFmtOdds(r.odds), "color:#fff;font-weight:700;")}${td(_mEsc(r.book || "—"))}${td(_mFmtOdds(r.fairOdds))}${td(morningPlayTo(r) || "—", "color:#fff;font-weight:700;")}
         ${td(`${r.minEv >= 0 ? "+" : ""}${r.minEv.toFixed(1)}%`)}
-        ${td(logged ? `<span style="font-size:11px;font-weight:800;color:#4ade80;">✓ LOGGED</span>` : btn("LOG", `morningTrackRow(${i})`, true, "#c4b5fd"))}
+        ${td(`<span style="display:inline-flex;gap:6px;align-items:center;">${logged ? `<span style="font-size:11px;font-weight:800;color:#4ade80;">✓ LOGGED</span>` : btn("LOG", `morningTrackRow(${i})`, true, "#c4b5fd")}<button onclick="morningRemovePlay(${i})" title="Remove this play for today" style="background:transparent;border:1px solid #f8717166;color:#f87171;border-radius:5px;padding:2px 8px;font-size:12px;font-weight:800;cursor:pointer;">\u2715</button></span>`)}
       </tr>`; }).join("")}</tbody></table></div>`
       : `<div style="font-size:12px;color:#525a64;padding:8px 0;">Nothing has cleared yet. An ensemble pick needs all 4 sources (or 3 when the 4th has no row for that player), 3 at ${MORNING_QUAL_EV}%+ EV, the 4th not negative, every projection on the bet's side of the line, and a clean RW news check. Check NEAR MISSES for what's close.</div>`;
   } else if (morningView === "misses") {
@@ -27388,7 +27404,7 @@ function morningAltLinesHtml(statOk) {
 function morningCardPicks() {
   const today = localYMD(new Date());
   // Picks that cleared with a source missing (old 3-of-3 relief) stay in the log but never go on a card.
-  const open = morningBets.filter(b => b.result === "pending" && (MORNING_GAP_RELIEF || !b.missingSrc));
+  const open = morningBets.filter(b => b.result === "pending" && (MORNING_GAP_RELIEF || !b.missingSrc) && !_mSkipped(b));
   const t = open.filter(b => b.gameDate === today);
   return (t.length ? t : open).slice().reverse();
 }
