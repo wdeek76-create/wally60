@@ -547,7 +547,7 @@ All-time by arb money
 Under $1k (560): 318-242 · +61.18u · +10.0%
 $1k–2.5k (81): 45-36 · +3.23u · +3.4%
 $2.5k+ (39): 23-16 · +5.80u · +14.0%`;
-const SM_SECS=['head','sport','market','side','tip','source','exch','exchHold','hold','money','news'];
+const SM_SECS=['head','sport','market','side','tip','source','exch','exchHold','hold','money','news','small'];
 const smEmptySecs=()=>Object.fromEntries(SM_SECS.map(k=>[k,{}]));
 const smR0=()=>({w:0,l:0,p:0,u:0,s:0,n:0});
 function smParseBase(txt){
@@ -582,6 +582,8 @@ function smRecAdd(sec, label, t){ if(label==null) return; const r=sec[label]||(s
 const smBetDay=t=>etDayOf(new Date(t.start||t.trackedAt).getTime());
 function smRecordBet(t){
   const bk=t.bookKey||'fanduel', R=smBookRec(bk), day=smBetDay(t), D=R.days[day]=R.days[day]||smEmptySecs(), muted=smMuted(t), L=smLabels(t,bk);
+  // background $150 tier (under the minimum, never sent): its own section only, kept out of the real record
+  if(t.small){ [R.all, D].forEach(S=>{ S.small=S.small||{}; smRecAdd(S.small,'All',t); smRecAdd(S.small,L.market,t); smRecAdd(S.small,L.side,t); }); return; }
   [R.all, D].forEach(S=>{ SM_SECS.forEach(k=>{ S[k]=S[k]||{}; }); smRecAdd(S.head,'all',t); smRecAdd(S.head, muted?'muted':'sent', t); smRecAdd(S.tip, smTipLab(t), t);
     if(!muted) ['sport','market','side','source','exch','exchHold','hold','money','news'].forEach(k=>smRecAdd(S[k], L[k], t)); });
 }
@@ -609,7 +611,7 @@ function sharpSummaryHtml(){
     ${sub('By side')}${rows(A.side)}${sub('By sport')}${rows(A.sport)}${sub('By prop type')}${rows(A.market)}
     ${sub('By time to tip (all windows)')}${rows(A.tip,smTipOrd)}${sub('By exchange money')}${rows(A.money)}
     ${sub('By source (direct vs borrowing)')}${rows(A.source)}${sub('By hold / arb')}${rows(A.hold,smHoldOrder)}
-    ${sub('By exchange')}${rows(A.exch)}${sub('By exchange · hold vs arb')}${rows(A.exchHold)}${Object.keys(A.news||{}).length?sub('NBA · RotoWire news (iffy vs clean)')+rows(A.news):''}</div>`;
+    ${sub('By exchange')}${rows(A.exch)}${sub('By exchange · hold vs arb')}${rows(A.exchHold)}${Object.keys(A.news||{}).length?sub('NBA · RotoWire news (iffy vs clean)')+rows(A.news):''}${A.small?.All?.n?sub(`$${SM_SMALL}+ under your minimum (background only, not sent)`)+row('All',A.small.All)+rows(Object.fromEntries(Object.entries(A.small).filter(([k])=>k!=='All'))):''}</div>`;
 }
 
 // ───────────────────────── sharp money ─────────────────────────
@@ -651,6 +653,7 @@ const TOT_MKS = new Set(['total','h1_total','tt','h1_tt']);             // over/
 const GAME_TOT_MKS = new Set(['total','h1_total']);                     // the whole game, not one team
 const MAIN_LBL = { total:'GAME TOTAL', ml:'MONEYLINE', spread:'SPREAD', h1_total:'1H TOTAL', h1_ml:'1H MONEYLINE', h1_spread:'1H SPREAD', tt:'TEAM TOTAL', h1_tt:'1H TEAM TOTAL' };
 const sharpMinFor = e => e.tgt!=='fanduel' && SHARP_MAINS.has(e.mk) ? Math.max(5000, sharpMin) : sharpMin;
+const SM_SMALL = 150;   // background tier: $150 up to the minimum is tracked (never sent) to see how those do
 const sharpQual = e => e.kind==='10c' ? !e.gone : e.L.total>=sharpMinFor(e);
 // Bet link that works on a phone and in Discord: FanDuel gets its https addToBetslip link (opens
 // the FD app with the bet in the slip when it's installed, the site otherwise), built from the row's
@@ -1113,19 +1116,20 @@ function sharpExampleEntry(){
 // Tracked as Sharp Money (src:'sharp'): its own record in the Tracker, kept out of NBA Props 2026.
 // Built straight from the scan (works for any sport, not only the one on screen) with the fields
 // the tracker's grading/refresh reads.
-function sharpAutoTrack(e){
+function sharpAutoTrack(e, small){
   const o=e.soft[0], bk=canonBook(o.sportsbook), f=e.f;
   const tSide = e.side==='yes'?'Yes':e.side==='no'?'No':e.side;
   // main lines keep the team + bet number, so they can be graded (and two teams' spreads aren't one bet)
   const teamSel = TEAM_MKS.has(e.mk) ? String(e.sd||'').replace(/^t:/,'') : (e.mk==='tt'||e.mk==='h1_tt') ? e.key : null;
   const betLine = TEAM_MKS.has(e.mk) && !ML_MKS.has(e.mk) ? sharpLine(o) : null;
-  if(tracked.some(t=>t.src==='sharp' && t.playerKey===e.key && t.fixtureId===e.fx && t.mkey===e.mk && t.side===tSide && (t.line??null)===(e.line??null) && (t.bookKey||'fanduel')===bk && (t.teamSel??null)===teamSel && (t.betLine??null)===betLine)) return;
+  const dup=tracked.find(t=>t.src==='sharp' && t.playerKey===e.key && t.fixtureId===e.fx && t.mkey===e.mk && t.side===tSide && (t.line??null)===(e.line??null) && (t.bookKey||'fanduel')===bk && (t.teamSel??null)===teamSel && (t.betLine??null)===betLine);
+  if(dup){ if(dup.small && !small && !dup.final){ delete dup.small; dup.sharpLiq=e.L.total; saveTracked(); } return; }
   const snap=snapshotFrom(e.own.filter(x=>x._sd===e.side), tSide, e.line);
   tracked.unshift({ id:Date.now()+Math.random().toString(36).slice(2,6), src:'sharp', sportKey:e.sk, fixtureId:e.fx, start:f?.start||null, away:f?.away.ab||f?.away.name||'', home:f?.home.ab||f?.home.name||'', card:null,
     playerKey:e.key, playerName:e.player, pid:e.pid, headshot:'', teamAb:'', teamLogo:'',
     mkey:e.mk, marketLabel:marketLabel(e.sk,e.mk), marketNames:[...new Set(e.own.map(x=>x.market))], side:tSide, line:e.line??null,
     price:Number(o.price), book:bookLabel(o.sportsbook), bookKey:bk, pinned:true, trackedAt:Date.now(), mainLineAtTrack:mainLineOf(e.own, e.side),
-    isTeam:false, teamSide:null, favDog:null, stakeUnits:null, isGame:false, teamSel, betLine, sharpLiq:e.L.total, sharpEdge:o._edge, via:e.via||null, rw:smRwFlag(e)||null,
+    isTeam:false, teamSide:null, favDog:null, stakeUnits:null, isGame:false, teamSel, betLine, sharpLiq:e.L.total, sharpEdge:o._edge, via:e.via||null, rw:smRwFlag(e)||null, ...(small?{ small:true }:{}),
     exBy:(()=>{ const m={}; (e.L.rows||[]).forEach(l=>Object.entries(l.by||{}).forEach(([k,v])=>{ m[k]=Math.round((m[k]||0)+v); })); return Object.keys(m).length?m:null; })(),
     snapshots:[snap], live:null, actual:null, result:null, open:null, close:null });
   saveTracked();
@@ -1146,6 +1150,9 @@ function sharpCheckPings(sk){
     sharpAutoTrack(e);
     if(sharpPingsOn) sharpPing(e);
   });
+  // $150 tier: FanDuel props with $150+ but under the minimum -- tracked quietly, nothing sent or pinged
+  Object.values(sharpTape).filter(e=>e.sk===sk && e.kind!=='10c' && (e.tgt||'fanduel')==='fanduel' && !SHARP_MAINS.has(e.mk) && !sharpLive(e) && !e.gone
+    && e.L.total>=SM_SMALL && e.L.total<sharpMinFor(e)).forEach(e=>sharpAutoTrack(e, true));
   if(changed) LS.set('sm_alerted', JSON.stringify(sharpPinged));
 }
 // Pregame scans only while something can still be SENT: from 7:30 AM ET, while today's slate (ET date)
@@ -1432,7 +1439,7 @@ function trackCardHtml(t){
     <div class="tkt"><span class="tkpl">${esc(titleCase(t.playerName))}</span>${res}</div>
     <div class="tkb">${esc(sideTxt(t))}${t.line!=null?' '+t.line:''} ${esc(t.marketLabel||'')} - <b>${esc(bookShort(t.bookKey||t.book))} ${fmtAm(t.price)}</b>${t.sharpLiq ? (t.sharpEdge!=null && Number(t.sharpEdge.toFixed(1))>0 ? ` - ${usd(t.sharpLiq)} arb money - +${Number(t.sharpEdge).toFixed(1)}% arb` : ` - ${usd(t.sharpLiq)} at 0% hold`) : ''}</div>
     ${hrsOut(t)!=null&&hrsOut(t)>0?`<div class="tkm">Tracked ${hrsOut(t)<1?Math.round(hrsOut(t)*60)+'m':hrsOut(t).toFixed(1)+'h'} before tip</div>`:''}
-    ${t.via?`<div class="tkm">Via ${esc(bookShort(t.via.book))} ${fmtAm(t.via.price)} - ${t.via.cents??0}c</div>`:''}
+    ${t.small?`<div class="tkm" style="color:#94a3b8">$${SM_SMALL}+ tier · background only (not sent)</div>`:''}${t.via?`<div class="tkm">Via ${esc(bookShort(t.via.book))} ${fmtAm(t.via.price)} - ${t.via.cents??0}c</div>`:''}
     <div class="tkm">${esc(t.away||'')} @ ${esc(t.home||'')}${t.start?` - ${etDay(t.start)} ${etTime(t.start)}`:''}${t.score?` - ${esc(t.score)}`:''}${act?` - ${act}`:''}</div>
     <div class="tka"><button data-tkprice="${t.id}">Edit odds</button>${!t.final?`<button data-tkgrade="${t.id}|win">W</button><button data-tkgrade="${t.id}|loss">L</button>`:`<button data-tkgrade="${t.id}|">Reopen</button>`}<button data-tkrm="${t.id}">Remove</button></div>
   </div>`;
@@ -2441,6 +2448,8 @@ function smRecapFields(day, book='fanduel'){
     ...recapFields('All-time by source (direct vs borrowing)', smRows(A.source)),
     ...recapFields('All-time by exchange', smRows(A.exch)),
     ...(Object.keys(A.news||{}).length ? recapFields('All-time by RotoWire news', smRows(A.news)) : []),
+    ...(D?.small?.All?.n ? recapFields(`${dayName} · $${SM_SMALL}+ under the minimum (not sent)`, smRows(D.small)) : []),
+    ...(A.small?.All?.n ? recapFields(`All-time · $${SM_SMALL}+ under the minimum (not sent)`, smRows(A.small)) : []),
     ...recapFields('All-time by exchange · hold vs arb', smRows(A.exchHold)),
     ...recapFields('All-time by hold / arb', smRows(A.hold, smHoldOrder)),
     ...recapFields('All-time by arb money', smRows(A.money)) ];
