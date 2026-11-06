@@ -1872,30 +1872,38 @@ const SM_RW_OK = /\b(will play|cleared|available|off the injury report|no restri
 const SM_RW_ST = { OUT:'OUT', DOUBTFUL:'Doubtful', GTD:'Questionable', DTD:'Day-to-day', PROBABLE:'Probable' };
 const smRwFresh = x => x && (!x.t || Date.now()-x.t < 18*3600e3);
 // { iffy, txt (Discord), short (card) } for an NBA prop, or null when RotoWire has nothing on it
+// Iffy = the news cuts against the bet. SM plays are mostly Unders, so what matters most is UPSIDE for
+// him: teammates out / questionable (more minutes, more shots), or his own blurb saying a bigger role.
+// His own Q tag is just a note (Doubtful / Out still flag). On an Over it flips: his own minutes-limit /
+// bench / rest blurb is the iffy part, and teammates out are a ↑.
+const SM_RW_UPSIDE = /\b(start(s|ing)? (tonight|in place|for)|will start|enter(s)? the starting|in the starting lineup|expanded role|increased (role|minutes|usage|workload)|more minutes|bigger role|larger role|step(s)? into|pick up (the )?slack|absorb|minutes (restriction|limit) (lifted|removed)|no (longer|minutes) restrict)/i;
 function smRwFlag(e){
   if(!e || e.sk!=='nba' || SHARP_MAINS.has(e.mk) || TEAM_MKS.has(e.mk) || !e.player || !smRw.at || Date.now()-smRw.at>3*3600e3) return null;
-  const k=normName(e.player), me=smRw.inj[k], nw=smRwFresh(smRw.news[k]) ? smRw.news[k] : null;
+  const k=normName(e.player), me=smRw.inj[k], nw=smRwFresh(smRw.news[k]) ? smRw.news[k] : null, under=e.side!=='over';
   const lines=[], short=[]; let iffy=false;
-  if(me && SM_RW_ST[me.st]){ if(me.st!=='PROBABLE') iffy=true; const t=`${SM_RW_ST[me.st]}${me.type?` (${me.type})`:''}`; lines.push(`${me.st==='PROBABLE'?'':'⚠️ '}**${t}**`); short.push(t); }
-  if(nw){ const all=`${nw.h} ${nw.a}`, risky=SM_RW_RISK.test(all) && !SM_RW_OK.test(nw.h); if(risky) iffy=true;
+  // his own status: a note, unless he's Doubtful / Out
+  if(me && SM_RW_ST[me.st]){ const bad=/^(OUT|DOUBTFUL)$/.test(me.st); if(bad) iffy=true; const t=`${SM_RW_ST[me.st]}${me.type?` (${me.type})`:''}`;
+    lines.push(`${bad?'⚠️ ':''}${bad?`**${t}**`:`Himself: ${t}`}`); if(bad) short.push(t); }
+  // his own blurb: upside news hurts an Under, a minutes cut / bench / rest hurts an Over
+  if(nw){ const all=`${nw.h} ${nw.a}`, up=SM_RW_UPSIDE.test(all), down=SM_RW_RISK.test(all) && !SM_RW_OK.test(nw.h) && !up;
+    const bad = under ? up : down; if(bad) iffy=true;
     const ago=nw.t ? (m=>m<60?`${m}m ago`:`${Math.round(m/60)}h ago`)(Math.max(0,Math.round((Date.now()-nw.t)/60000))) : '';
-    lines.push(`${risky?'⚠️ ':''}_${nw.h||nw.a.slice(0,140)}_${ago?` · ${ago}`:''}`); if(risky) short.push(nw.h||nw.a.slice(0,80)); }
+    lines.push(`${bad?'⚠️ ':up?'↑ ':''}_${nw.h||nw.a.slice(0,140)}_${ago?` · ${ago}`:''}`); if(bad) short.push(up?'upside news':(nw.h||nw.a.slice(0,80))); }
   // teammates: questionable / doubtful, or ruled out with news in the last 18h (long-term outs are already in the line).
-  // Iffy when: a same-position teammate is Q / doubtful (or freshly out on an Under), or 2+ teammates are
-  // up in the air -- the rotation's in flux. A fresh out on an Over is just a ↑.
+  // On an Under that's upside for him: iffy on a fresh out, a same-position Q, or 2+ teammates Q. On an Over it's a ↑.
   const R=smRwTeams.m[k], team = me?.team || nw?.team || R?.t || '', myPos = me?.pos || R?.p || e.info?.pos || '';
-  if(team){ const under = e.side==='under';
+  if(team){
     const mates=Object.entries(smRw.inj).filter(([kk,x])=>kk!==k && x.team===team && (/^(DOUBTFUL|GTD)$/.test(x.st) || (x.st==='OUT' && smRwFresh(smRw.news[kk]))))
       .map(([kk,x])=>({ ...x, pos:x.pos||smRwTeams.m[kk]?.p||'' })).map(x=>({ ...x, same:!!myPos && smSamePos(myPos, x.pos) }))
-      .sort((a,b)=>b.same-a.same);
+      .sort((a,b)=>(b.st==='OUT')-(a.st==='OUT') || b.same-a.same);
     const qN=mates.filter(x=>x.st!=='OUT').length;
-    if(qN>=2){ iffy=true; lines.push(`⚠️ **${qN} teammates questionable** — rotation up in the air`); short.push(`${qN} teammates Q`); }
-    mates.slice(0,5).forEach(x=>{ const out=x.st==='OUT', bad = x.same ? (!out || under) : (out && under); if(bad) iffy=true;
+    if(qN>=2){ if(under) iffy=true; lines.push(`${under?'⚠️':'↑'} **${qN} teammates questionable** — ${under?'upside for him if they sit':'more minutes if they sit'}`); short.push(`${qN} teammates Q`); }
+    mates.slice(0,5).forEach(x=>{ const out=x.st==='OUT', bad = under && (out || x.same); if(bad) iffy=true;
       const tag = `${x.pos?` (${x.pos})`:''}${x.same?' · **same position**':''}`;
-      lines.push(`${bad?'⚠️ ':out?'↑ ':''}Teammate **${x.name}**${tag} ${SM_RW_ST[x.st]}${out?(under?' — more minutes for him':' — more minutes'):''}`);
+      lines.push(`${bad?'⚠️ ':'↑ '}Teammate **${x.name}**${tag} ${SM_RW_ST[x.st]}${out?' — more minutes for him':' — upside if he sits'}`);
       short.push(`${x.name.split(' ').slice(-1)[0]}${x.same?' (same pos)':''} ${SM_RW_ST[x.st]}`); }); }
   if(!lines.length) return null;
-  return { iffy, txt:lines.join('\n'), short:short.slice(0,3).join(' · ')+(short.length>3?` +${short.length-3}`:'') || (nw?.h||'in the news') };
+  return { iffy, txt:lines.join('\n'), short:short.slice(0,3).join(' · ')+(short.length>3?` +${short.length-3}`:'') || (me&&SM_RW_ST[me.st]?`Himself ${SM_RW_ST[me.st]}`:'') || (nw?.h||'in the news') };
 }
 function rwBadge(){ const n=rwNews.items.filter(x=>!rwSeen.has(x.id) && rwIsToday(x) && inProj(x.name, x.team)).length; const b=$('#nwN'); if(b) b.textContent = n ? n : ''; }
 // RotoWire sends dates like "2026-10-22 09:15:00" or "10/22/2026 9:15 AM" -- Safari (iPhone) can't
