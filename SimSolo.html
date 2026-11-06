@@ -28,7 +28,7 @@ h2{font-size:12px;letter-spacing:1px;text-transform:uppercase;color:var(--mut);m
 </style></head><body>
 <div class="wrap">
 <h1>SIM SOLO</h1>
-<div class="sub">Upload PropShop's sim export for Sharpr and for Tabs (filtered to our books). Every 5%+ play is kept 1u flat with the play-to (5% EV), graded itself, and split by source, market, 5%+ / 10%+ and over / under. AGREE = Sharpr and Tabs both 5%+ on the same play; Dimers is tracked on its own.</div>
+<div class="sub">Upload PropShop's sim export for Sharpr and for Tabs (filtered to our books). Every 5%+ play is kept 1u flat with the play-to (5% EV), tagged clean / upside / downside / flagged from the RotoWire data the blender synced, graded itself, and split by source, market, 5%+ / 10%+ and over / under. AGREE = Sharpr and Tabs both 5%+ on the same play; Dimers is tracked on its own.</div>
 <div class="card">
   <h2>Upload PropShop sim exports</h2>
   <div class="row" style="margin-top:0">
@@ -514,6 +514,49 @@ function csvRows(text) {
   row.push(f); if (row.some(x => x !== "")) out.push(row); return out;
 }
 const asObjects = text => { const t = csvRows(text.replace(/^\uFEFF/, "")), h = (t[0] || []).map(x => x.trim()); return t.slice(1).map(r => Object.fromEntries(h.map((k, i) => [k, r[i] == null ? "" : r[i]]))); };
+// ── RotoWire context + model gates (read-only) ─────────────────────────────
+// This page has no RotoWire connection of its own: it reads what the blender last synced on this same site (injuries + blurbs, RW / RG / Tabs lineups).
+// Open the blender (or hit REFRESH RW there) first so it is current. The checks mirror the Morning gates:
+//   FLAGGED  = he is on the injury report, RW lists him as anything but STARTING, or the lineup sources disagree on him
+//   DOWNSIDE / UPSIDE = a teammate's injury blurb names him: more role (helps an over, hurts an under) or less role / he is returning (hurts an over)
+const TEAM_ALIAS = { PHO: "PHX", GS: "GSW", NO: "NOP", NOR: "NOP", SA: "SAS", NY: "NYK", WSH: "WAS", UTAH: "UTA", BK: "BKN", BRK: "BKN", CHO: "CHA", NJ: "BKN" };
+const tm = t => { const u = String(t || "").toUpperCase().trim(); return TEAM_ALIAS[u] || u; };
+let _rw = null, _rwAt = 0;
+function rwData() {
+  if (_rw && Date.now() - _rwAt < 30000) return _rw;
+  const rd = k => { try { return JSON.parse(localStorage.getItem(k) || "null"); } catch (e) { return null; } };
+  const inj = rd("nba_injuries_cache"), rw = rd("nba_lineups_v1"), rg = rd("nba_lineups_rg_v1"), tabs = rd("nba_lineups_tabs_v1");
+  const injBy = new Map(); ((inj && inj.records) || []).forEach(r => { const nm = r && r.athlete && r.athlete.displayName; if (nm) injBy.set(norm(nm), { name: nm, team: tm(r.athlete.team && r.athlete.team.abbreviation), status: String(r.status || ""), blurb: String(r.longComment || "") + " " + String(r.shortComment || "") }); });
+  _rw = { at: inj && inj.fetchedAt, day: inj && inj.day, injBy, rw: rw && rw.players ? rw.players : null, rg: rg && rg.teams ? rg.teams : null, tabs: tabs && tabs.teams ? tabs.teams : null };
+  _rwAt = Date.now(); return _rw;
+}
+const CEIL_RE = /divide (?:the )?minutes|split (?:the )?(?:minutes|work|load)|share (?:the )?(?:minutes|load|work)|minutes (?:among|between)|continue to (?:handle|see|start|play|get)|most of the (?:work|minutes)|bulk of the|pick up|absorb|increased?|expanded|larger|more (?:minutes|run|looks|shots|touches|playing time)|step (?:up|into)|start|replace|fill in|benefit|open(?:s)? (?:up )?minutes|uptick|bigger role/i;
+const FLOOR_RE = /cut into|fewer minutes|lose minutes|reduced (?:role|minutes)|less playing time|bench role|relegated|limit(?:ed)? (?:his|her)? ?minutes/i;
+const RETURN_RE = /off the injury report|\b(?:his|her) return\b|back from|cleared to (?:play|return)|activated|will return|limited minutes|minutes (?:limit|restriction)/i;
+function ctxFor(player, team, ou) {
+  try {
+    const d = rwData(), k = norm(player), t = tm(team);
+    const own = d.injBy.get(k); if (own) return { cls: "flagged", why: `on the injury report (${own.status || "listed"})` };
+    const me = d.rw && d.rw[k]; if (me && me.status && String(me.status).toUpperCase() !== "STARTING") return { cls: "flagged", why: `RW lineups: ${me.status}` };
+    const starts = src => { const tt = src && (src[t] || null); return tt && Array.isArray(tt.starters) ? tt.starters.includes(k) : null; };
+    const rwStart = me ? String(me.status).toUpperCase() === "STARTING" : null, rgS = starts(d.rg), tbS = starts(d.tabs);
+    const votes = [rwStart, rgS, tbS].filter(v => v !== null && v !== undefined);
+    if (votes.length >= 2 && votes.some(v => v) && votes.some(v => !v)) return { cls: "flagged", why: "lineup sources disagree on him starting" };
+    const last = String(player).trim().split(/\s+/).slice(-1)[0];
+    for (const r of d.injBy.values()) {
+      if (!r.blurb.trim() || norm(r.name) === k || (t && r.team && r.team !== t) || !/out|doubt|ques|game|gtd|day/i.test(r.status)) continue;
+      const sent = r.blurb.split(/(?<=[.!?])\s+/).find(x => x.includes(player) || (last.length > 3 && new RegExp("\\b" + last + "\\b").test(x)));
+      if (!sent) continue;
+      if (RETURN_RE.test(sent) && sent.includes(player) && !/once (?:he|she)|when (?:he|she)|until (?:he|she)/i.test(sent)) return ou === "over" ? { cls: "downside", why: `returning, possible minutes limit (${r.name} note)` } : { cls: "clean", why: "" };
+      if (FLOOR_RE.test(sent)) return ou === "over" ? { cls: "downside", why: `floor risk from ${r.name} (${r.status})` } : { cls: "upside", why: `floor risk from ${r.name} (${r.status})` };
+      if (CEIL_RE.test(sent)) return ou === "over" ? { cls: "upside", why: `more role with ${r.name} ${r.status}` } : { cls: "downside", why: `upside from ${r.name} ${r.status} (bad for the under)` };
+    }
+    return { cls: "clean", why: "" };
+  } catch (e) { return { cls: "clean", why: "" }; }
+}
+// a bet you would actually place is HELD when the context says flagged or downside (same rule the Morning gates use)
+function gateFor(x) { const c = ctxFor(x.player, x.team, x.ou); return (c.cls === "flagged" || c.cls === "downside") ? c.why : null; }
+const CTX_COL = { clean: "#e6edf5", upside: "#4ade80", downside: "#fbbf24", flagged: "#f87171" };
 // 1) PropShop CSV -> one play per player / market / side: the line most of our books hang, the best price on it; every other book (and alt line) listed
 const SOURCES = ["SHARPR", "TABS", "DIMERS"], AGREE_SRCS = new Set(["SHARPR", "TABS"]),   // Dimers is tracked solo only, never part of AGREE
   META_KEY = "nba_sim_solo_meta_v1", MIN_EV = 5;
@@ -548,7 +591,8 @@ function loadPs(inp, src) {
       dates.add(best.gameDate);
       const books = list.filter(x => x !== best).sort((a, b) => a.line - b.line || b.odds - a.odds).map(x => ({ book: x.book, line: x.line, odds: x.odds, roi: x.roi }));
       const key = [src, resolveNorm(best.player), best.stat, best.gameDate, best.ou, best.line].join("|");
-      const rec = { key, src, player: best.player, team: best.team, gameDate: best.gameDate, gameTime: best.gameTime, stat: best.stat, ou: best.ou, line: best.line, odds: best.odds, book: best.book, ev: best.roi, proj: best.proj, playTo: playTo(best.odds, best.roi), books, result: "pending", actual: null };
+      const cx = ctxFor(best.player, best.team, best.ou);
+      const rec = { ctx: cx.cls, ctxWhy: cx.why, key, src, player: best.player, team: best.team, gameDate: best.gameDate, gameTime: best.gameTime, stat: best.stat, ou: best.ou, line: best.line, odds: best.odds, book: best.book, ev: best.roi, proj: best.proj, playTo: playTo(best.odds, best.roi), books, result: "pending", actual: null };
       const cur = rows.find(x => x.key === key);
       if (cur) { if (cur.result === "pending") { Object.assign(cur, rec, { result: cur.result }); upd++; } cur.touched = now; return; }
       rec.touched = now; rows.push(rec); added++;
@@ -615,12 +659,16 @@ function agreeRows() {
     const bySrc = {}; list.forEach(x => { if (!bySrc[x.src] || x.ev > bySrc[x.src].ev) bySrc[x.src] = x; });
     const srcs = Object.values(bySrc); if (srcs.length < 2 || srcs.some(x => x.ev < MIN_EV)) return null;
     const low = srcs.reduce((a, x) => x.ev < a.ev ? x : a), best = srcs.reduce((a, x) => x.odds > a.odds ? x : a), graded = srcs.find(x => x.result !== "pending");
-    return { key: "AGREE|" + k, src: "AGREE", player: low.player, stat: low.stat, ou: low.ou, line: low.line, gameDate: low.gameDate, gameTime: low.gameTime, odds: best.odds, book: best.book, ev: low.ev, playTo: low.playTo,
+    const order = { flagged: 3, downside: 2, upside: 1, clean: 0 }, worstCx = srcs.reduce((a, x) => (order[x.ctx] || 0) > (order[a.ctx] || 0) ? x : a);
+    return { ctx: worstCx.ctx || "clean", ctxWhy: worstCx.ctxWhy || "", team: low.team, key: "AGREE|" + k, src: "AGREE", player: low.player, stat: low.stat, ou: low.ou, line: low.line, gameDate: low.gameDate, gameTime: low.gameTime, odds: best.odds, book: best.book, ev: low.ev, playTo: low.playTo,
       srcEvs: srcs.sort((a, b) => b.ev - a.ev).map(x => ({ src: x.src, ev: x.ev })), books: best.books || [], result: graded ? graded.result : "pending", actual: graded ? graded.actual : null };
   }).filter(Boolean);
 }
 const baseRows = src => src === "AGREE" ? agreeRows() : src === "ALL" ? rows : rows.filter(x => x.src === src);
-function view(src) { return baseRows(src || fSrc).filter(x => (fStat === "ALL" || x.stat === fStat) && x.ev >= fThr); }
+let fCtx = "ALL";   // ALL | clean | upside | iffy (downside + flagged)
+const ctxOk = x => fCtx === "ALL" || (fCtx === "iffy" ? (x.ctx === "downside" || x.ctx === "flagged") : (x.ctx || "clean") === fCtx);
+function view(src) { return baseRows(src || fSrc).filter(x => (fStat === "ALL" || x.stat === fStat) && x.ev >= fThr && ctxOk(x)); }
+function setCtx(c) { fCtx = c; render(); }
 function setThr(t) { fThr = t; render(); }
 function render() {
   const set = view(), t = tally(set), open = set.filter(x => x.result === "pending").length;
@@ -629,6 +677,8 @@ function render() {
   const srcChips = ["ALL"].concat(SOURCES, ["AGREE"]).map(s => chip(s === "AGREE" ? "AGREE (Sharpr + Tabs 5%+)" : s, fSrc === s, `setSrc('${s}')`)).join(" ");
   const thrChips = [5, 10].map(v => chip(v + "%+", fThr === v, `setThr(${v})`)).join(" ");
   const mktChips = ["ALL"].concat(STATS).map(s => chip(s, fStat === s, `setStat('${s}')`)).join(" ");
+  const ctxChips = [["ALL", "ALL"], ["clean", "CLEAN"], ["upside", "UPSIDE"], ["iffy", "IFFY"]].map(([k, l]) => chip(l, fCtx === k, `setCtx('${k}')`)).join(" ");
+  const rwd = rwData(), rwNote = rwd.at ? `RotoWire data from the blender: ${new Date(rwd.at).toLocaleString([], { month: "numeric", day: "numeric", hour: "numeric", minute: "2-digit" })}` : "No RotoWire data yet \u2014 open the blender (REFRESH RW) on this site first; until then every play reads CLEAN";
   const days = [...new Set(set.map(x => x.gameDate))].sort().reverse();
   const recent = set.slice().sort((a, b) => (b.gameDate + b.player).localeCompare(a.gameDate + a.player)).slice(0, 80);
   const resCls = r => r === "hit" ? "g" : r === "miss" ? "r" : "m";
@@ -636,12 +686,13 @@ function render() {
   const agreeOpen = agreeList();
   const edgeTxt = x => x.srcEvs ? x.srcEvs.map(e => `${e.src} +${e.ev.toFixed(1)}%`).join(" / ") : `+${x.ev.toFixed(1)}%`;
   document.getElementById("out").innerHTML = `
-  <div class="card"><div class="row" style="margin:0 0 6px">${srcChips}</div><div class="row" style="margin:0 0 6px">${thrChips}<span style="width:8px;display:inline-block"></span>${mktChips}</div>
+  <div class="card"><div class="row" style="margin:0 0 6px">${srcChips}</div><div class="row" style="margin:0 0 6px">${thrChips}<span style="width:8px;display:inline-block"></span>${mktChips}</div><div class="row" style="margin:0 0 6px"><span class="m" style="font-size:11px">RW context</span> ${ctxChips}</div><div class="info" style="margin-top:0">${rwNote}</div>
     <div class="tiles">${tile("All", t.a)}${tile("Over", t.o, "o")}${tile("Under", t.u, "u")}</div>
     <div class="info">${fSrc === "AGREE" ? "Agreements" : fSrc} \u00b7 ${fThr}%+ \u00b7 ${set.length} plays \u00b7 ${open} open</div></div>
   <div class="card"><h2>By source \u00b7 ${fThr}%+${fStat === "ALL" ? "" : " \u00b7 " + fStat}</h2>${tbl("Source", bySrc)}</div>
+  <div class="card"><h2>Clean vs iffy \u00b7 ${fSrc === "AGREE" ? "agree" : fSrc} \u00b7 ${fThr}%+</h2>${tbl("RW context", [["clean", "CLEAN"], ["upside", "UPSIDE"], ["downside", "DOWNSIDE"], ["flagged", "FLAGGED"]].map(([k, l]) => ({ label: `<span style="color:${CTX_COL[k]}">${l}</span>`, set: baseRows(fSrc).filter(x => (x.ctx || "clean") === k && x.ev >= fThr && (fStat === "ALL" || x.stat === fStat)) })).filter(l => l.set.length))}</div>
   <div class="card"><h2>By market \u00b7 ${fSrc === "AGREE" ? "agree" : fSrc} \u00b7 ${fThr}%+</h2>${tbl("Market", STATS.map(s => ({ label: s, set: baseRows(fSrc).filter(x => x.stat === s && x.ev >= fThr) })).filter(l => l.set.length).concat([{ label: "All", set: baseRows(fSrc).filter(x => x.ev >= fThr), total: true }]))}</div>
-  <div class="card"><h2>5%+ alignments \u00b7 open (${agreeOpen.length})</h2>${agreeOpen.length ? `<div class="scroll"><table><thead><tr>${th("Player")}${th("Pick")}${th("Best")}${th("Edges")}${th("Play to")}</tr></thead><tbody>${agreeOpen.map(x => `<tr><td>${x.player}<br><span class="m" style="font-weight:400;font-size:11px">${x.stat} \u00b7 ${x.gameDate.slice(5)} ${x.gameTime}</span></td><td class="${x.ou === "over" ? "o" : "u"}">${x.ou === "over" ? "O" : "U"} ${x.line}</td><td>${x.book} ${fo(x.odds)}</td><td style="white-space:normal;font-size:12px">${edgeTxt(x)}</td><td>${fo(x.playTo)}</td></tr>`).join("")}</tbody></table></div>` : '<div class="m">No open play where both sources are 5%+ yet.</div>'}</div>
+  <div class="card"><h2>5%+ alignments \u00b7 open (${agreeOpen.length})</h2>${agreeOpen.length ? `<div class="scroll"><table><thead><tr>${th("Player")}${th("Pick")}${th("Best")}${th("Edges")}${th("Play to")}${th("Model gates")}</tr></thead><tbody>${agreeOpen.map(x => { const gt = gateFor(x); return `<tr><td>${x.player}<br><span class="m" style="font-weight:400;font-size:11px">${x.stat} \u00b7 ${x.gameDate.slice(5)} ${x.gameTime}</span></td><td class="${x.ou === "over" ? "o" : "u"}">${x.ou === "over" ? "O" : "U"} ${x.line}</td><td>${x.book} ${fo(x.odds)}</td><td style="white-space:normal;font-size:12px">${edgeTxt(x)}</td><td>${fo(x.playTo)}</td><td style="white-space:normal;font-size:11px;max-width:220px;color:${gt ? "#f87171" : "#4ade80"}">${gt ? "HELD \u2014 " + gt : "\u2713 clear"}</td></tr>`; }).join("")}</tbody></table></div>` : '<div class="m">No open play where both sources are 5%+ yet.</div>'}</div>
   <div class="card"><h2>By day</h2>${days.length ? tbl("Day", days.map(d => ({ label: d.slice(5), set: set.filter(x => x.gameDate === d) }))) : '<div class="m">Nothing yet.</div>'}</div>
   <div class="card"><h2>Plays (latest ${recent.length})</h2><div class="scroll"><table><thead><tr>${th("Player")}${th("Pick")}${th("Best")}${th("Play to")}${th("Result")}${th("")}</tr></thead><tbody>${recent.map(x => `<tr><td>${x.player}<br><span class="m" style="font-weight:400;font-size:11px">${x.src} \u00b7 ${x.stat} \u00b7 ${x.gameDate.slice(5)} ${x.gameTime}</span></td><td class="${x.ou === "over" ? "o" : "u"}">${x.ou === "over" ? "O" : "U"} ${x.line}</td><td>${x.book} ${fo(x.odds)}<br><span class="g" style="font-size:12px">${edgeTxt(x)}</span></td><td>${fo(x.playTo)}</td><td class="${resCls(x.result)}">${x.result === "pending" ? "\u2014" : x.result.toUpperCase() + (x.actual != null ? ` (${x.actual})` : "")}</td><td>${x.src === "AGREE" ? "" : `<button class="chip del" onclick="del('${x.key.replace(/'/g, "\\'")}')">\u00d7</button>`}</td></tr>`).join("")}</tbody></table></div></div>`;
   const st = document.getElementById("srcstat"); if (st) st.innerHTML = SOURCES.map(s => { const m = meta[s]; const n = rows.filter(x => x.src === s && x.result === "pending").length; return `<div><b>${s}</b> ${m ? `loaded ${new Date(m.at).toLocaleString([], { month: "numeric", day: "numeric", hour: "numeric", minute: "2-digit" })} \u00b7 ${n} open` : "not loaded yet"}</div>`; }).join("");
@@ -672,8 +723,9 @@ function agreeList() {
   return agreeRows().filter(x => x.result === "pending" && (fStat === "ALL" || x.stat === fStat)).map(x => ({ ...x, srcs: x.srcEvs, best: { book: x.book, odds: x.odds }, low: { ev: x.ev } })).sort((a, b) => b.ev - a.ev);
 }
 function agreeText() {
-  const list = agreeList(); if (!list.length) return "";
-  const L = [`AGREE · ${list.length} · every source ${AGREE_EV}%+ · play to from the lower edge`];
+  const all = agreeList(); if (!all.length) return "";
+  const held = all.filter(x => gateFor(x)), list = all.filter(x => !gateFor(x));
+  const L = [`AGREE · ${list.length} · every source ${AGREE_EV}%+ · passed the model gates · play to from the lower edge`];
   [...new Set(list.map(x => x.gameDate))].sort().forEach(d => {
     L.push("", d.slice(5));
     STATS.forEach(st => {
@@ -686,6 +738,7 @@ function agreeText() {
       });
     });
   });
+  if (held.length) { L.push("", `HELD by the model gates (${held.length})`); held.forEach(x => L.push(`${x.player} ${x.ou === "over" ? "O" : "U"} ${x.line} ${x.stat} \u2014 ${gateFor(x)}`)); }
   return L.join("\n");
 }
 function copyAgree() { const t = agreeText(); if (!t) { toast(`No plays where 2+ sources are all ${AGREE_EV}%+`); return; } (navigator.clipboard ? navigator.clipboard.writeText(t) : Promise.reject()).then(() => toast(`Copied ${agreeList().length} agreeing plays`), () => { prompt("Copy:", t); }); }
@@ -700,6 +753,8 @@ function reportText() {
       const t = tally(set);
       L.push("", `${src} ${thr}%+  ${f(t.a)}`, `  O ${f(t.o)} · U ${f(t.u)}`);
       STATS.forEach(st => { const x = tally(set.filter(r => r.stat === st)); if (x.a.w + x.a.l) L.push(`  ${st}: ${f(x.a)} (O ${x.o.w}-${x.o.l} · U ${x.u.w}-${x.u.l})`); });
+      const cl = tally(set.filter(r => (r.ctx || "clean") === "clean" || r.ctx === "upside")), iff = tally(set.filter(r => r.ctx === "downside" || r.ctx === "flagged"));
+      if (iff.a.w + iff.a.l) L.push(`  clean/upside ${f(cl.a)} \u00b7 iffy ${f(iff.a)}`);
     });
   });
   return L.length > 1 ? L.join("\n") : "SIM SOLO — nothing graded yet";
