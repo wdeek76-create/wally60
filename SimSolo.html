@@ -704,48 +704,47 @@ function render() {
   const st = document.getElementById("srcstat"); if (st) st.innerHTML = SOURCES.map(s => { const m = meta[s]; const n = rows.filter(x => x.src === s && x.result === "pending").length; return `<div><b>${s}</b> ${m ? `loaded ${new Date(m.at).toLocaleString([], { month: "numeric", day: "numeric", hour: "numeric", minute: "2-digit" })} \u00b7 ${n} open` : "not loaded yet"}</div>`; }).join("");
 }
 
-// Copy back: every open play, best book and price, the play-to, and the other books (alt lines marked)
-function playsText() {
-  const open = view().filter(x => x.result === "pending"); if (!open.length) return "";
-  const L = [`${fSrc === "ALL" ? "SIM" : fSrc} PLAYS \u00b7 ${open.length} \u00b7 play to = ${PLAY_TO_EV}% EV`];
-  [...new Set(open.map(x => x.gameDate))].sort().forEach(d => {
-    L.push("", d.slice(5));
-    STATS.forEach(st => {
-      const set = open.filter(x => x.gameDate === d && x.stat === st).sort((a, b) => b.ev - a.ev); if (!set.length) return;
-      L.push(STAT_NAME[st]);
-      set.forEach(x => {
-        L.push(`${x.player} ${x.ou === "over" ? "O" : "U"} ${x.line} \u00b7 ${x.book} ${fo(x.odds)} (+${x.ev.toFixed(1)}%) \u00b7 play to ${fo(x.playTo)}`);
-        const others = (x.books || []).map(b => `${b.book} ${b.line !== x.line ? (x.ou === "over" ? "O" : "U") + b.line + " " : ""}${fo(b.odds)}${EXCH.has(b.book) ? " " + cents(b.odds) : ""}`);
-        if (others.length) L.push(`  also: ${others.join(", ")}`);
-      });
+// Copy text in the same shape as the blender's "Copy Open Props": one row per bet (player, side, line, stat, price, book), the other books at that line
+// with the play-to under it, other lines on an "alts:" row; a player with several bets gets a "(N Props)" header and numbered rows.
+const STAT_WORD = { PTS: "points", REB: "rebounds", AST: "assists", "3PM": "threes", PRA: "PRA" }, STAT_RANK = ["PTS", "REB", "AST", "PRA", "3PM"];
+function fmtPlays(items, header) {
+  const byP = new Map(); items.forEach(x => { const k = resolveNorm(x.player); if (!byP.has(k)) byP.set(k, []); byP.get(k).push(x); });
+  const groups = [...byP.values()].sort((a, b) => Math.max(...b.map(x => x.ev)) - Math.max(...a.map(x => x.ev)));
+  const L = [`${header}: (${items.length})`, ""];
+  groups.forEach((g, gi) => {
+    g.sort((a, b) => STAT_RANK.indexOf(a.stat) - STAT_RANK.indexOf(b.stat) || a.line - b.line);
+    const multi = g.length > 1, team = g[0].team ? ` (${tm(g[0].team)})` : "";
+    if (multi) L.push(`${g[0].player}${team} (${g.length} Props)`);
+    g.forEach((x, i) => {
+      const ou = x.ou === "over" ? "over" : "under", stat = STAT_WORD[x.stat] || x.stat, pre = multi ? `  ${i + 1}. ` : "", ind = multi ? "     " : "";
+      const same = (x.books || []).filter(b => Number(b.line) === Number(x.line)), alt = (x.books || []).filter(b => Number(b.line) !== Number(x.line));
+      const head = `${pre}${multi ? "" : `${x.player}${team}  `}${ou} ${x.line} ${stat} ${fo(x.odds)} ${x.book}${x.edges ? `  (${x.edges})` : ""}`;
+      L.push(same.length ? head : `${head}  play to ${fo(x.playTo)}`);
+      const bk = b => `${b.book} ${fo(b.odds)}${EXCH.has(b.book) ? " " + cents(b.odds) : ""}`;
+      if (same.length) L.push(`${ind}${same.map(bk).join("  ")}  play to ${fo(x.playTo)}`);
+      if (alt.length) {
+        const byLine = {}; alt.forEach(b => (byLine[b.line] = byLine[b.line] || []).push(b));
+        L.push(`${ind}alts: ${Object.values(byLine).map(gr => `${gr.map(b => `${b.book} ${ou[0]}${b.line} ${fo(b.odds)}${EXCH.has(b.book) ? " " + cents(b.odds) : ""}`).join("  ")}  play to ${fo(playTo(gr[0].odds, gr[0].roi))}`).join("  ")}`);
+      }
     });
+    if (gi < groups.length - 1) L.push("");
   });
   return L.join("\n");
 }
-// AGREE: the same play (player / market / side / line / day) open from 2+ sources, every one of them at 5%+. The text shows each source's edge,
-// and the play-to comes from the LOWER edge (the most conservative fair).
-const AGREE_EV = 5;
+// Copy back: every open play, best book and price, the play-to, and the other books (alt lines marked)
+function playsText() {
+  const open = view().filter(x => x.result === "pending"); if (!open.length) return "";
+  return fmtPlays(open.map(x => ({ ...x, edges: `+${x.ev.toFixed(1)}%` })), `NBA ${fSrc === "ALL" ? "sim" : fSrc} props`);
+}
 function agreeList() {
   return agreeRows().filter(x => x.result === "pending" && (fStat === "ALL" || x.stat === fStat)).map(x => ({ ...x, srcs: x.srcEvs, best: { book: x.book, odds: x.odds }, low: { ev: x.ev } })).sort((a, b) => b.ev - a.ev);
 }
 function agreeText() {
   const all = agreeList(); if (!all.length) return "";
   const held = all.filter(x => gateFor(x)), list = all.filter(x => !gateFor(x));
-  const L = [`AGREE · ${list.length} · every source ${AGREE_EV}%+ · passed the model gates · play to from the lower edge`];
-  [...new Set(list.map(x => x.gameDate))].sort().forEach(d => {
-    L.push("", d.slice(5));
-    STATS.forEach(st => {
-      const set = list.filter(x => x.gameDate === d && x.stat === st); if (!set.length) return;
-      L.push(STAT_NAME[st]);
-      set.forEach(x => {
-        L.push(`${x.player} ${x.ou === "over" ? "O" : "U"} ${x.line} · ${x.best.book} ${fo(x.best.odds)} · ${x.srcs.map(s => `${s.src} +${s.ev.toFixed(1)}%`).join(" / ")} · play to ${fo(x.playTo)}`);
-        const others = x.books.map(b => `${b.book} ${b.line !== x.line ? (x.ou === "over" ? "O" : "U") + b.line + " " : ""}${fo(b.odds)}${EXCH.has(b.book) ? " " + cents(b.odds) : ""}`);
-        if (others.length) L.push(`  also: ${others.join(", ")}`);
-      });
-    });
-  });
-  if (held.length) { L.push("", `HELD by the model gates (${held.length})`); held.forEach(x => L.push(`${x.player} ${x.ou === "over" ? "O" : "U"} ${x.line} ${x.stat} \u2014 ${gateFor(x)}`)); }
-  return L.join("\n");
+  let t = list.length ? fmtPlays(list.map(x => ({ ...x, edges: x.srcEvs.map(e => `${e.src} +${e.ev.toFixed(1)}%`).join(" / ") })), "NBA agree props (Sharpr + Tabs 5%+, play to from the lower edge)") : "NBA agree props: (0)";
+  if (held.length) t += `\n\nHELD by the model gates (${held.length})\n` + held.map(x => `${x.player} ${x.ou} ${x.line} ${STAT_WORD[x.stat] || x.stat} \u2014 ${gateFor(x)}`).join("\n");
+  return t;
 }
 function copyAgree() { const t = agreeText(); if (!t) { toast(`No plays where 2+ sources are all ${AGREE_EV}%+`); return; } (navigator.clipboard ? navigator.clipboard.writeText(t) : Promise.reject()).then(() => toast(`Copied ${agreeList().length} agreeing plays`), () => { prompt("Copy:", t); }); }
 function copyPlays() { const t = playsText(); if (!t) { toast("No open plays"); return; } (navigator.clipboard ? navigator.clipboard.writeText(t) : Promise.reject()).then(() => toast("Plays copied"), () => { prompt("Copy:", t); }); }
