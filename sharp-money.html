@@ -894,6 +894,32 @@ if(!b105Role || b105Role===discordRole){ b105Role=B105_ROLE; LS.set('sm_b105_rol
 let b105MainHook = LS.get('sm_b105main_hook','') || LS.get('sm_b105tot_hook',''), b105MainRole = LS.get('sm_b105main_role','') || LS.get('sm_b105tot_role','');
 // BetOnline main lines go with bet105's: the main lines channel (else the b105 channel)
 const isMainCh = e => (e?.tgt==='bet105' || e?.tgt==='betonline') && SHARP_MAINS.has(e.mk) && !!b105MainHook;
+// ── Telegram ── the same FanDuel plays also go to a Telegram channel through your own bot
+// (@BotFather → /newbot → token; add the bot to the channel as an admin). Token + chat saved only on
+// this device. Posts straight to api.telegram.org -- nothing goes through Vercel.
+let tgToken = LS.get('sm_tg_token',''), tgChat = LS.get('sm_tg_chat','');
+const tgOn = () => !!(tgToken && tgChat);
+const tgEsc = t => String(t??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+// Discord markdown -> Telegram HTML: **bold**, _italic_, __underline__, ```code```, <t:..:R> countdown dropped
+const tgMd = t => { const blocks=[]; t=String(t??'').replace(/```\n?([\s\S]*?)```/g,(m,c)=>{ blocks.push(c); return `\u0000${blocks.length-1}\u0000`; });
+  t=tgEsc(t.replace(/\n?starts <t:\d+:R>/g,'').replace(/<t:\d+:R>/g,''))
+    .replace(/\*\*(.+?)\*\*/g,'<b>$1</b>').replace(/__(.+?)__/g,'<u>$1</u>').replace(/(^|[\s(])_(.+?)_(?=[\s).,]|$)/gm,'$1<i>$2</i>');
+  return t.replace(/\u0000(\d+)\u0000/g,(m,i)=>`<pre>${tgEsc(blocks[+i].replace(/\n$/,''))}</pre>`); };
+function tgText(pl){ const em=pl.embeds?.[0]||{}; const title=tgEsc(em.title||'');
+  return [em.url?`<b><a href="${tgEsc(em.url)}">${title}</a></b>`:`<b>${title}</b>`, tgMd(em.description||''),
+    ...(em.fields||[]).map(f=>`<b>${tgMd(f.name)}</b>\n${tgMd(f.value)}`)].filter(Boolean).join('\n\n').slice(0,4000); }
+async function tgApi(method, fd){ const r=await fetch(`https://api.telegram.org/bot${tgToken}/${method}`, { method:'POST', body:fd }); const d=await r.json().catch(()=>({}));
+  if(!d.ok) throw new Error(d.description||`HTTP ${r.status}`); return d.result; }
+async function tgSend(text, photo){
+  if(!tgOn()) return false;
+  try{ const fd=new FormData(); fd.append('chat_id', tgChat); fd.append('parse_mode','HTML');
+    if(photo && text.length<=1024){ fd.append('caption', text); fd.append('photo', photo, 'vs.png'); await tgApi('sendPhoto', fd); }
+    else { fd.append('text', text); fd.append('link_preview_options', JSON.stringify({ is_disabled:true })); await tgApi('sendMessage', fd); }
+    return true; }catch(err){ console.warn('[tg]', err.message); tgLastErr=err.message; return false; } }
+let tgLastErr='';
+// the bot's newest chat (after it's added to a channel/group, or someone messages it)
+async function tgFindChat(){ try{ const fd=new FormData(); fd.append('allowed_updates', JSON.stringify(['message','channel_post','my_chat_member']));
+  const u=await tgApi('getUpdates', fd); for(let i=u.length-1;i>=0;i--){ const c=(u[i].channel_post||u[i].message||u[i].my_chat_member)?.chat; if(c) return { id:String(c.id), name:c.title||c.username||c.first_name||'' }; } }catch(e){ tgLastErr=e.message; } return null; }
 const hookFor = e => (isMainCh(e) ? b105MainHook : (e?.tgt==='bet105'||e?.tgt==='betonline') ? b105Hook : discordHook);
 const roleFor = e => (isMainCh(e) ? b105MainRole : (e?.tgt==='bet105'||e?.tgt==='betonline') ? b105Role : discordRole);
 const roleTag = (role=discordRole) => role ? { content:`<@&${role}>`, allowed_mentions:{ roles:[role] } } : { allowed_mentions:{ parse:[] } };
@@ -976,8 +1002,11 @@ async function sharpDcPump(){
         // same order as the title, then the role tag: "-108 Giannis Antetokounmpo Under 4.5 Rebounds @SM"
         const head=String(pl.embeds?.[0]?.title||'');
         // borrowing play: thumbnail is "target VIA borrowed book" (drawn here, uploaded with the post)
-        if(e.via){ const vs=await smVsImage(bk2(e), e.via.book).catch(()=>null); if(vs && pl.embeds?.[0]){ pl.embeds[0].thumbnail={ url:'attachment://vs.png' }; pl.files=[{ name:'vs.png', blob:vs }]; } }
-        ok=await discordPost({ ...pl, ...rt, content:[head, rt.content].filter(Boolean).join(' ') }, m=>{ why=m; }, hookFor(e)); }catch(err){ why=err.message; }
+        const vs = e.via ? await smVsImage(bk2(e), e.via.book).catch(()=>null) : null;
+        const tgP = tgOn() && (e.tgt||'fanduel')==='fanduel' ? tgSend(tgText(pl), vs) : null;   // Telegram: same play, same time
+        if(vs && pl.embeds?.[0]){ pl.embeds[0].thumbnail={ url:'attachment://vs.png' }; pl.files=[{ name:'vs.png', blob:vs }]; }
+        if(hookFor(e)) ok=await discordPost({ ...pl, ...rt, content:[head, rt.content].filter(Boolean).join(' ') }, m=>{ why=m; }, hookFor(e));
+        if(tgP){ const tok=await tgP; if(!tok) why=[why, `Telegram: ${tgLastErr}`].filter(Boolean).join(' · '); if(!hookFor(e)) ok=tok; } }catch(err){ why=err.message; }
       if(ok){ dcMarkSent(e); if(e.tgt!=='bet105') fdSentBump(); }
       if(e.sk==='nba'){ const tb=tracked.find(t=>t.src==='sharp' && !t.final && t.playerKey===e.key && t.fixtureId===e.fx && t.mkey===e.mk); const r=smRwFlag(e); if(tb && r && !tb.rw){ tb.rw=r; saveTracked(); } }
       sharpDcNote(ok, ok ? `sent ${tag}${name}` : `FAILED ${tag}${name}: ${why||'?'}`);
@@ -1113,7 +1142,7 @@ function sharpCheckPings(sk){
     // Discord + tracker always; the on-screen banner/notification only with Pings on
     // muted time-to-tip windows: tracked as usual, just not sent
     const ob=e.f?.start ? outBucket({ start:e.f.start, trackedAt:Date.now() }) : null;
-    if(hookFor(e) && !smWindowMuted(e.sk, ob)) sharpDiscord(e);
+    if((hookFor(e) || (tgOn() && (e.tgt||'fanduel')==='fanduel')) && !smWindowMuted(e.sk, ob)) sharpDiscord(e);
     sharpAutoTrack(e);
     if(sharpPingsOn) sharpPing(e);
   });
@@ -1198,7 +1227,7 @@ function renderSharp(){
   const chips = `<div class="mnav" style="position:static"><button class="mchip${!sharpSportF.size?' on':''}" data-shs="all">All</button>${sports.map(k=>`<button class="mchip${sharpSportF.has(k)?' on':''}" data-shs="${k}">${esc(SPORTS[k].label)}${counts[k]?` <span class="tcount">${counts[k]}</span>`:''}</button>`).join('')}</div>
     <div class="mnav" style="position:static">${[250,350,500,1000,2500].map(v=>`<button class="mchip${sharpMin===v?' on':''}" data-shmin="${v}">${usd(v)}+</button>`).join('')}</div>
     <div class="mnav" style="position:static"><span class="dim" style="font-size:10.5px;align-self:center">Send <span title="NHL always sends">(NHL: all)</span></span>${OUT_BUCKETS.map(b=>`<button class="mchip${smMuteOut.has(b)?'':' on'}" data-shout="${esc(b)}">${esc(b.replace(' to tip','').replace(' out',''))}</button>`).join('')}</div>
-    <div class="mnav" style="position:static"><button class="mchip${smScanOn?' on':''}" data-shscan>${smScanOn?'▶ Scan on':'⏸ Scan off'}</button><button class="mchip${sharpPingsOn?' on':''}" data-shping>${sharpPingsOn?'🔔 Pings on':'🔕 Pings off'}</button><button class="mchip${discordHook?' on':''}" data-shdc>${discordHook?'FD Discord ✓':'FD Discord'}</button></div>`;
+    <div class="mnav" style="position:static"><button class="mchip${smScanOn?' on':''}" data-shscan>${smScanOn?'▶ Scan on':'⏸ Scan off'}</button><button class="mchip${sharpPingsOn?' on':''}" data-shping>${sharpPingsOn?'🔔 Pings on':'🔕 Pings off'}</button><button class="mchip${discordHook?' on':''}" data-shdc>${discordHook?'FD Discord ✓':'FD Discord'}</button><button class="mchip${tgOn()?' on':''}" data-shtg>${tgOn()?'Telegram ✓':'Telegram'}</button></div>`;
   const scanned = sports.filter(k=>sharpLastScan[k]).length;
   // What each sport's last scan actually got back -- if a sport shows 0 for the exchanges, the
   // feed isn't returning their odds; if it shows props but 0 sides, nothing arbs FanDuel right now.
@@ -1218,6 +1247,16 @@ ${sharpDcLog.map(x=>`<div class="smdiag" style="color:${x.ok?'#86efac':'#fca5a5'
     sharpPingsOn=!sharpPingsOn; LS.set('props_sharppings',sharpPingsOn?'1':'0');
     if(sharpPingsOn && window.Notification && Notification.permission==='default'){ try{ Notification.requestPermission(); }catch(e){} }
     sharpSchedule(); renderSharp();
+  });
+  view.querySelector('[data-shtg]')?.addEventListener('click', async ()=>{
+    const v=prompt('Telegram bot token (Telegram → @BotFather → /newbot → copy the token). Add the bot to your channel as an admin first. Leave empty to turn Telegram off.', tgToken);
+    if(v==null) return; tgToken=v.trim(); LS.set('sm_tg_token', tgToken);
+    if(!tgToken){ tgChat=''; LS.set('sm_tg_chat',''); renderSharp(); return; }
+    const found=await tgFindChat();
+    const c=prompt(`Channel to post in: @channelname, or its chat ID.${found?`\nFound: ${found.name} (${found.id}) -- leave as is to use it.`:'\nTip: post anything in the channel after adding the bot, then come back here and it fills in.'}`, tgChat||found?.id||'');
+    if(c==null) return; tgChat=c.trim(); LS.set('sm_tg_chat', tgChat); renderSharp();
+    if(tgOn()){ const ok=await tgSend('✅ <b>PocketMarket Smart Money</b> connected.'); toast(ok?'Telegram connected':`Telegram failed: ${tgLastErr||'check token / channel'}`);
+      if(ok){ await new Promise(r=>setTimeout(r,600)); tgSend('🧪 <b>Example alert</b> (not a real bet)\n\n'+tgText(sharpDiscordPayload(sharpExampleEntry(), true))); } }
   });
   view.querySelector('[data-shdc]')?.addEventListener('click', async ()=>{
     const v=prompt('Paste your Discord webhook URL (Server Settings → Integrations → Webhooks → New Webhook → Copy Webhook URL). Leave empty to turn Discord off.', discordHook);
