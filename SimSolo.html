@@ -28,17 +28,16 @@ h2{font-size:12px;letter-spacing:1px;text-transform:uppercase;color:var(--mut);m
 </style></head><body>
 <div class="wrap">
 <h1>SIM SOLO</h1>
-<div class="sub">Load PropShop's CSV export for one projection set (Sharpr, Tabs, ...) filtered to our books. Every play at your edge is kept 1u flat with each book's price and the play-to (5% EV), then graded over vs under.</div>
+<div class="sub">Upload PropShop's sim export for Sharpr and for Tabs (filtered to our books). Every 5%+ play is kept 1u flat with the play-to (5% EV), graded itself, and split by source, market, 5%+ / 10%+ and over / under. AGREE = both sources 5%+ on the same play.</div>
 <div class="card">
+  <h2>Upload PropShop sim exports</h2>
   <div class="row" style="margin-top:0">
-    <label class="m" style="font-size:12px">Source <input type="text" id="src" value="SHARPR"></label>
-    <select id="minev"><option value="0">Edge 0%+</option><option value="3">Edge 3%+</option><option value="5" selected>Edge 5%+</option><option value="10">Edge 10%+</option></select>
+    <label class="filebtn"><input type="file" accept=".csv,text/csv" onchange="loadPs(this,'SHARPR')" hidden>&#8679; SHARPR CSV</label>
+    <label class="filebtn" style="background:#f59e0b;border-color:#f59e0b"><input type="file" accept=".csv,text/csv" onchange="loadPs(this,'TABS')" hidden>&#8679; TABS CSV</label>
   </div>
-  <div class="row">
-    <label class="filebtn"><input type="file" accept=".csv,text/csv" onchange="loadPs(this)" hidden>LOAD PROPSHOP CSV</label>
-    <label class="filebtn alt"><input type="file" accept=".csv,text/csv" onchange="toPs(this)" hidden>PROJECTIONS CSV &rarr; PROPSHOP FILE</label>
-  </div>
-  <div class="row"><button onclick="copyPlays()">COPY PLAYS</button><button onclick="copyAgree()" style="border-color:#a78bfa;color:#a78bfa">COPY AGREE (ALL 5%+)</button><button onclick="gradeAll()" id="gbtn">GRADE PENDING</button><span class="m" style="font-size:11px">also grades itself</span></div>
+  <div id="srcstat" class="info" style="display:grid;gap:2px"></div>
+  <div class="row"><label class="filebtn alt"><input type="file" accept=".csv,text/csv" onchange="toPs(this,'SHARPR')" hidden>SHARPR PROJECTIONS &rarr; PROPSHOP FILE</label></div>
+  <div class="row"><button onclick="copyAgree()" style="border-color:#a78bfa;color:#a78bfa">COPY 5%+ ALIGNMENTS</button><button onclick="copyPlays()">COPY PLAYS (filters)</button><button onclick="gradeAll()" id="gbtn">GRADE PENDING</button></div>
   <div class="row"><button onclick="copyReport()">COPY REPORT</button><button onclick="exportCsv()">EXPORT CSV</button><button class="del" onclick="clearAll()">CLEAR ALL</button></div>
   <div class="info" id="info"></div>
 </div>
@@ -510,9 +509,12 @@ function csvRows(text) {
 }
 const asObjects = text => { const t = csvRows(text.replace(/^\uFEFF/, "")), h = (t[0] || []).map(x => x.trim()); return t.slice(1).map(r => Object.fromEntries(h.map((k, i) => [k, r[i] == null ? "" : r[i]]))); };
 // 1) PropShop CSV -> one play per player / market / side: the line most of our books hang, the best price on it; every other book (and alt line) listed
-function loadPs(inp) {
+const SOURCES = ["SHARPR", "TABS"], META_KEY = "nba_sim_solo_meta_v1", MIN_EV = 5;
+let meta = {}; try { meta = JSON.parse(localStorage.getItem(META_KEY) || "{}") || {}; } catch (e) { meta = {}; }
+let fThr = 5;
+function loadPs(inp, src) {
   const file = inp.files && inp.files[0]; if (!file) return;
-  const src = document.getElementById("src").value.trim() || "SIM", minEv = Number(document.getElementById("minev").value);
+  const minEv = MIN_EV;
   file.text().then(text => {
     inp.value = "";
     const recs = asObjects(text);
@@ -541,18 +543,23 @@ function loadPs(inp) {
       const key = [src, resolveNorm(best.player), best.stat, best.gameDate, best.ou, best.line].join("|");
       const rec = { key, src, player: best.player, team: best.team, gameDate: best.gameDate, gameTime: best.gameTime, stat: best.stat, ou: best.ou, line: best.line, odds: best.odds, book: best.book, ev: best.roi, proj: best.proj, playTo: playTo(best.odds, best.roi), books, result: "pending", actual: null };
       const cur = rows.find(x => x.key === key);
-      if (cur) { if (cur.result === "pending") { Object.assign(cur, rec, { result: cur.result }); upd++; } return; }
-      rows.push(rec); added++;
+      if (cur) { if (cur.result === "pending") { Object.assign(cur, rec, { result: cur.result }); upd++; } cur.touched = now; return; }
+      rec.touched = now; rows.push(rec); added++;
     });
+    // a fresh upload replaces this source's OPEN plays for the same day(s): lines that dropped out of the export are removed (graded ones stay)
+    const keep = new Set(Object.values(groups).length ? rows.filter(x => x.src === src && dates.has(x.gameDate) && x.touched === now).map(x => x.key) : []);
+    const before = rows.length; rows = rows.filter(x => !(x.src === src && x.result === "pending" && dates.has(x.gameDate) && !keep.has(x.key))); const gone = before - rows.length;
+    rows.forEach(x => { delete x.touched; });
+    meta[src] = { at: now, n: added + upd, file: file.name }; try { localStorage.setItem(META_KEY, JSON.stringify(meta)); } catch (e) {}
     save();
-    say(`${src}: ${added} new${upd ? `, ${upd} updated` : ""}${under ? ` \u00b7 ${under} under ${minEv}%` : ""}${noHead ? ` \u00b7 ${noHead} with no FD / PB / PIN / Bet105 price` : ""}${late ? ` \u00b7 ${late} already tipped` : ""}${dates.size ? ` \u00b7 ${[...dates].join(", ")}` : ""}`);
-    toast(`${src}: ${added} plays loaded`); fSrc = src; render();
+    say(`${src}${gone ? ` \u00b7 ${gone} old open plays replaced` : ""}: ${added} new${upd ? `, ${upd} updated` : ""}${under ? ` \u00b7 ${under} under ${minEv}%` : ""}${noHead ? ` \u00b7 ${noHead} with no FD / PB / PIN / Bet105 price` : ""}${late ? ` \u00b7 ${late} already tipped` : ""}${dates.size ? ` \u00b7 ${[...dates].join(", ")}` : ""}`);
+    toast(`${src}: ${added + upd} plays loaded`); render();
   });
 }
 // 2) Any projection CSV (Sharpr, Dimers, ...) -> the PropShop upload format
-function toPs(inp) {
+function toPs(inp, src) {
   const file = inp.files && inp.files[0]; if (!file) return;
-  const src = document.getElementById("src").value.trim() || "SIM";
+  src = src || "SHARPR";
   file.text().then(text => {
     inp.value = "";
     const t = csvRows(text.replace(/^\uFEFF/, "")), head = (t[0] || []).map(x => x.trim().toLowerCase()), ix = (...n) => { for (const x of n) { const i = head.indexOf(x); if (i >= 0) return i; } return -1; };
@@ -593,24 +600,46 @@ function tbl(first, lines) {
 function setStat(s) { fStat = s; render(); }
 function setSrc(s) { fSrc = s; render(); }
 function del(key) { rows = rows.filter(x => x.key !== key); save(); render(); }
-function view() { return rows.filter(x => (fStat === "ALL" || x.stat === fStat) && (fSrc === "ALL" || x.src === fSrc)); }
+// AGREE: the same play (player / market / side / line / day) from 2+ sources, each at 5%+. One 1u bet at the best headline price; its edge = the LOWER source edge.
+function agreeRows() {
+  const g = {};
+  rows.forEach(x => { const k = [resolveNorm(x.player), x.stat, x.gameDate, x.ou, Number(x.line)].join("|"); (g[k] = g[k] || []).push(x); });
+  return Object.entries(g).map(([k, list]) => {
+    const bySrc = {}; list.forEach(x => { if (!bySrc[x.src] || x.ev > bySrc[x.src].ev) bySrc[x.src] = x; });
+    const srcs = Object.values(bySrc); if (srcs.length < 2 || srcs.some(x => x.ev < MIN_EV)) return null;
+    const low = srcs.reduce((a, x) => x.ev < a.ev ? x : a), best = srcs.reduce((a, x) => x.odds > a.odds ? x : a), graded = srcs.find(x => x.result !== "pending");
+    return { key: "AGREE|" + k, src: "AGREE", player: low.player, stat: low.stat, ou: low.ou, line: low.line, gameDate: low.gameDate, gameTime: low.gameTime, odds: best.odds, book: best.book, ev: low.ev, playTo: low.playTo,
+      srcEvs: srcs.sort((a, b) => b.ev - a.ev).map(x => ({ src: x.src, ev: x.ev })), books: best.books || [], result: graded ? graded.result : "pending", actual: graded ? graded.actual : null };
+  }).filter(Boolean);
+}
+const baseRows = src => src === "AGREE" ? agreeRows() : src === "ALL" ? rows : rows.filter(x => x.src === src);
+function view(src) { return baseRows(src || fSrc).filter(x => (fStat === "ALL" || x.stat === fStat) && x.ev >= fThr); }
+function setThr(t) { fThr = t; render(); }
 function render() {
   const set = view(), t = tally(set), open = set.filter(x => x.result === "pending").length;
   const tile = (lab, v, cls) => { const n = v.w + v.l; return `<div class="tile"><b>${lab}</b><span class="${cls || ""}">${v.w}-${v.l}</span><i class="${v.pl >= 0 ? "g" : "r"}">${n ? (v.w / n * 100).toFixed(0) + "% \u00b7 " + fmtU(v.pl) : "\u2014"}</i></div>`; };
-  const srcs = ["ALL"].concat([...new Set(rows.map(x => x.src))]);
-  const chips = srcs.map(s => `<button class="chip ${fSrc === s ? "on" : ""}" onclick="setSrc('${s.replace(/'/g, "")}')">${s}</button>`).join(" ") + `<span style="width:10px;display:inline-block"></span>` + ["ALL"].concat(STATS).map(s => `<button class="chip ${fStat === s ? "on" : ""}" onclick="setStat('${s}')">${s}</button>`).join(" ");
+  const chip = (lab, on, fn) => `<button class="chip ${on ? "on" : ""}" onclick="${fn}">${lab}</button>`;
+  const srcChips = ["ALL"].concat(SOURCES, ["AGREE"]).map(s => chip(s === "AGREE" ? "AGREE (all 5%+)" : s, fSrc === s, `setSrc('${s}')`)).join(" ");
+  const thrChips = [5, 10].map(v => chip(v + "%+", fThr === v, `setThr(${v})`)).join(" ");
+  const mktChips = ["ALL"].concat(STATS).map(s => chip(s, fStat === s, `setStat('${s}')`)).join(" ");
   const days = [...new Set(set.map(x => x.gameDate))].sort().reverse();
   const recent = set.slice().sort((a, b) => (b.gameDate + b.player).localeCompare(a.gameDate + a.player)).slice(0, 80);
   const resCls = r => r === "hit" ? "g" : r === "miss" ? "r" : "m";
+  const bySrc = SOURCES.concat(["AGREE"]).map(s => ({ label: s === "AGREE" ? "AGREE" : s, set: view(s) }));
+  const agreeOpen = agreeList();
+  const edgeTxt = x => x.srcEvs ? x.srcEvs.map(e => `${e.src} +${e.ev.toFixed(1)}%`).join(" / ") : `+${x.ev.toFixed(1)}%`;
   document.getElementById("out").innerHTML = `
-  <div class="card"><div class="row" style="margin:0 0 10px">${chips}</div>
+  <div class="card"><div class="row" style="margin:0 0 6px">${srcChips}</div><div class="row" style="margin:0 0 6px">${thrChips}<span style="width:8px;display:inline-block"></span>${mktChips}</div>
     <div class="tiles">${tile("All", t.a)}${tile("Over", t.o, "o")}${tile("Under", t.u, "u")}</div>
-    <div class="info">${set.length} plays \u00b7 ${open} open</div></div>
-  <div class="card"><h2>By market</h2>${tbl("Market", STATS.map(s => ({ label: s, set: set.filter(x => x.stat === s) })).filter(l => l.set.length).concat([{ label: "All", set, total: true }]))}</div>
-  <div class="card"><h2>By edge</h2>${tbl("Edge", BUCKETS.map(([label, lo, hi]) => ({ label, set: set.filter(x => x.ev >= lo && x.ev < hi) })).filter(l => l.set.length).concat([{ label: "All", set, total: true }]))}</div>
+    <div class="info">${fSrc === "AGREE" ? "Agreements" : fSrc} \u00b7 ${fThr}%+ \u00b7 ${set.length} plays \u00b7 ${open} open</div></div>
+  <div class="card"><h2>By source \u00b7 ${fThr}%+${fStat === "ALL" ? "" : " \u00b7 " + fStat}</h2>${tbl("Source", bySrc)}</div>
+  <div class="card"><h2>By market \u00b7 ${fSrc === "AGREE" ? "agree" : fSrc} \u00b7 ${fThr}%+</h2>${tbl("Market", STATS.map(s => ({ label: s, set: baseRows(fSrc).filter(x => x.stat === s && x.ev >= fThr) })).filter(l => l.set.length).concat([{ label: "All", set: baseRows(fSrc).filter(x => x.ev >= fThr), total: true }]))}</div>
+  <div class="card"><h2>5%+ alignments \u00b7 open (${agreeOpen.length})</h2>${agreeOpen.length ? `<div class="scroll"><table><thead><tr>${th("Player")}${th("Pick")}${th("Best")}${th("Edges")}${th("Play to")}</tr></thead><tbody>${agreeOpen.map(x => `<tr><td>${x.player}<br><span class="m" style="font-weight:400;font-size:11px">${x.stat} \u00b7 ${x.gameDate.slice(5)} ${x.gameTime}</span></td><td class="${x.ou === "over" ? "o" : "u"}">${x.ou === "over" ? "O" : "U"} ${x.line}</td><td>${x.book} ${fo(x.odds)}</td><td style="white-space:normal;font-size:12px">${edgeTxt(x)}</td><td>${fo(x.playTo)}</td></tr>`).join("")}</tbody></table></div>` : '<div class="m">No open play where both sources are 5%+ yet.</div>'}</div>
   <div class="card"><h2>By day</h2>${days.length ? tbl("Day", days.map(d => ({ label: d.slice(5), set: set.filter(x => x.gameDate === d) }))) : '<div class="m">Nothing yet.</div>'}</div>
-  <div class="card"><h2>Plays (latest ${recent.length})</h2><div class="scroll"><table><thead><tr>${th("Player")}${th("Pick")}${th("Best")}${th("Play to")}${th("Result")}${th("")}</tr></thead><tbody>${recent.map(x => `<tr><td>${x.player}<br><span class="m" style="font-weight:400;font-size:11px">${x.src} \u00b7 ${x.stat} \u00b7 ${x.gameDate.slice(5)} ${x.gameTime}</span></td><td class="${x.ou === "over" ? "o" : "u"}">${x.ou === "over" ? "O" : "U"} ${x.line}</td><td>${x.book} ${fo(x.odds)}<br><span class="g" style="font-size:12px">+${x.ev.toFixed(1)}%</span></td><td>${fo(x.playTo)}</td><td class="${resCls(x.result)}">${x.result === "pending" ? "\u2014" : x.result.toUpperCase() + (x.actual != null ? ` (${x.actual})` : "")}</td><td><button class="chip del" onclick="del('${x.key.replace(/'/g, "\\'")}')">\u00d7</button></td></tr>`).join("")}</tbody></table></div></div>`;
+  <div class="card"><h2>Plays (latest ${recent.length})</h2><div class="scroll"><table><thead><tr>${th("Player")}${th("Pick")}${th("Best")}${th("Play to")}${th("Result")}${th("")}</tr></thead><tbody>${recent.map(x => `<tr><td>${x.player}<br><span class="m" style="font-weight:400;font-size:11px">${x.src} \u00b7 ${x.stat} \u00b7 ${x.gameDate.slice(5)} ${x.gameTime}</span></td><td class="${x.ou === "over" ? "o" : "u"}">${x.ou === "over" ? "O" : "U"} ${x.line}</td><td>${x.book} ${fo(x.odds)}<br><span class="g" style="font-size:12px">${edgeTxt(x)}</span></td><td>${fo(x.playTo)}</td><td class="${resCls(x.result)}">${x.result === "pending" ? "\u2014" : x.result.toUpperCase() + (x.actual != null ? ` (${x.actual})` : "")}</td><td>${x.src === "AGREE" ? "" : `<button class="chip del" onclick="del('${x.key.replace(/'/g, "\\'")}')">\u00d7</button>`}</td></tr>`).join("")}</tbody></table></div></div>`;
+  const st = document.getElementById("srcstat"); if (st) st.innerHTML = SOURCES.map(s => { const m = meta[s]; const n = rows.filter(x => x.src === s && x.result === "pending").length; return `<div><b>${s}</b> ${m ? `loaded ${new Date(m.at).toLocaleString([], { month: "numeric", day: "numeric", hour: "numeric", minute: "2-digit" })} \u00b7 ${n} open` : "not loaded yet"}</div>`; }).join("");
 }
+
 // Copy back: every open play, best book and price, the play-to, and the other books (alt lines marked)
 function playsText() {
   const open = view().filter(x => x.result === "pending"); if (!open.length) return "";
@@ -633,14 +662,7 @@ function playsText() {
 // and the play-to comes from the LOWER edge (the most conservative fair).
 const AGREE_EV = 5;
 function agreeList() {
-  const g = {};
-  rows.filter(x => x.result === "pending" && (fStat === "ALL" || x.stat === fStat)).forEach(x => { const k = [resolveNorm(x.player), x.stat, x.gameDate, x.ou, Number(x.line)].join("|"); (g[k] = g[k] || []).push(x); });
-  return Object.values(g).map(list => {
-    const bySrc = {}; list.forEach(x => { if (!bySrc[x.src] || x.ev > bySrc[x.src].ev) bySrc[x.src] = x; });
-    const srcs = Object.values(bySrc); if (srcs.length < 2 || srcs.some(x => x.ev < AGREE_EV)) return null;
-    const low = srcs.reduce((a, x) => x.ev < a.ev ? x : a), best = srcs.reduce((a, x) => x.odds > a.odds ? x : a);
-    return { player: low.player, stat: low.stat, ou: low.ou, line: low.line, gameDate: low.gameDate, gameTime: low.gameTime, srcs: srcs.sort((a, b) => b.ev - a.ev), low, best, playTo: low.playTo, books: best.books || [] };
-  }).filter(Boolean).sort((a, b) => b.low.ev - a.low.ev);
+  return agreeRows().filter(x => x.result === "pending" && (fStat === "ALL" || x.stat === fStat)).map(x => ({ ...x, srcs: x.srcEvs, best: { book: x.book, odds: x.odds }, low: { ev: x.ev } })).sort((a, b) => b.ev - a.ev);
 }
 function agreeText() {
   const list = agreeList(); if (!list.length) return "";
@@ -662,12 +684,18 @@ function agreeText() {
 function copyAgree() { const t = agreeText(); if (!t) { toast(`No plays where 2+ sources are all ${AGREE_EV}%+`); return; } (navigator.clipboard ? navigator.clipboard.writeText(t) : Promise.reject()).then(() => toast(`Copied ${agreeList().length} agreeing plays`), () => { prompt("Copy:", t); }); }
 function copyPlays() { const t = playsText(); if (!t) { toast("No open plays"); return; } (navigator.clipboard ? navigator.clipboard.writeText(t) : Promise.reject()).then(() => toast("Plays copied"), () => { prompt("Copy:", t); }); }
 function reportText() {
-  const set = view(), t = tally(set), L = [];
-  const f = (lab, v) => { const n = v.w + v.l; return `${lab} ${v.w}-${v.l}${n ? ` ${(v.w / n * 100).toFixed(0)}% ${fmtU(v.pl)}` : ""}`; };
-  L.push(`${fSrc === "ALL" ? "SIM" : fSrc} SOLO${fStat === "ALL" ? "" : " \u00b7 " + fStat}`, f("All  ", t.a), f("Over ", t.o), f("Under", t.u), "");
-  STATS.forEach(s => { const x = tally(set.filter(r => r.stat === s)); if (x.a.w + x.a.l) L.push(`${s}: ${f("", x.a)}`, `  O ${x.o.w}-${x.o.l} ${fmtU(x.o.pl)} \u00b7 U ${x.u.w}-${x.u.l} ${fmtU(x.u.pl)}`); });
-  L.push(""); BUCKETS.forEach(([lab, lo, hi]) => { const x = tally(set.filter(r => r.ev >= lo && r.ev < hi)); if (x.a.w + x.a.l) L.push(`${lab}: ${f("", x.a)}`, `  O ${x.o.w}-${x.o.l} ${fmtU(x.o.pl)} \u00b7 U ${x.u.w}-${x.u.l} ${fmtU(x.u.pl)}`); });
-  return L.join("\n");
+  // per source (and AGREE): 5%+ and 10%+, each with the market lines and over / under
+  const f = v => { const n = v.w + v.l; return `${v.w}-${v.l}${n ? ` ${(v.w / n * 100).toFixed(0)}% ${fmtU(v.pl)}` : ""}`; };
+  const L = ["SIM SOLO"];
+  SOURCES.concat(["AGREE"]).forEach(src => {
+    [5, 10].forEach(thr => {
+      const set = baseRows(src).filter(x => x.ev >= thr && x.result !== "pending"); if (!set.length) return;
+      const t = tally(set);
+      L.push("", `${src} ${thr}%+  ${f(t.a)}`, `  O ${f(t.o)} · U ${f(t.u)}`);
+      STATS.forEach(st => { const x = tally(set.filter(r => r.stat === st)); if (x.a.w + x.a.l) L.push(`  ${st}: ${f(x.a)} (O ${x.o.w}-${x.o.l} · U ${x.u.w}-${x.u.l})`); });
+    });
+  });
+  return L.length > 1 ? L.join("\n") : "SIM SOLO — nothing graded yet";
 }
 function copyReport() { const t = reportText(); (navigator.clipboard ? navigator.clipboard.writeText(t) : Promise.reject()).then(() => toast("Report copied"), () => { prompt("Copy:", t); }); }
 function exportCsv() {
