@@ -2436,23 +2436,24 @@ function smRecapFields(day, book='fanduel'){
   const B=RECAP_BOOK[book], R=smBookRec(B.book), A=R.all, D=R.days[day];
   const dayName=new Date(day+'T12:00:00').toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'});
   const has = !!(D && D.head?.all?.n);
+  // tighter: the day up top, then all-time; the overall lines are sent plays only -- muted windows and
+  // the background $150 tier are noted on their own lines, never in the overall
+  const notSent=(S)=>[ S.head.muted?.n ? `Muted windows: ${smFmt(S.head.muted)} (${S.head.muted.n})` : '',
+    S.small?.All?.n ? `$${SM_SMALL}+ tier (background): ${smFmt(S.small.All)} (${S.small.All.n})` : '' ].filter(Boolean);
   const fields = !has ? [] : [
-    ...recapFields(`${dayName} · ${smFmt(D.head.sent||smR0())}`, smRows(D.market)),
-    ...(D.head.muted?.n ? recapFields(`${dayName} · muted windows (not sent)`, [`${smFmt(D.head.muted)} (${D.head.muted.n})`, `With them: ${smFmt(D.head.all)}`]) : []),
-    ...recapFields(`${dayName} · by time to tip`, smRows(D.tip, smTipOrd)),
-    ...recapFields(`All-time · ${smFmt(A.head.sent||smR0())}`, smRows(A.sport)),
-    ...(A.head.muted?.n ? recapFields('All-time · muted windows (not sent)', [`${smFmt(A.head.muted)} (${A.head.muted.n})`, `With them: ${smFmt(A.head.all)}`]) : []),
-    ...recapFields('All-time by market', smRows(A.market)),
-    ...recapFields('All-time by side', smRows(A.side)),
-    ...recapFields('All-time by time to tip', smRows(A.tip, smTipOrd)),
-    ...recapFields('All-time by source (direct vs borrowing)', smRows(A.source)),
-    ...recapFields('All-time by exchange', smRows(A.exch)),
-    ...(Object.keys(A.news||{}).length ? recapFields('All-time by RotoWire news', smRows(A.news)) : []),
-    ...(D?.small?.All?.n ? recapFields(`${dayName} · $${SM_SMALL}+ under the minimum (not sent)`, smRows(D.small)) : []),
-    ...(A.small?.All?.n ? recapFields(`All-time · $${SM_SMALL}+ under the minimum (not sent)`, smRows(A.small)) : []),
-    ...recapFields('All-time by exchange · hold vs arb', smRows(A.exchHold)),
-    ...recapFields('All-time by hold / arb', smRows(A.hold, smHoldOrder)),
-    ...recapFields('All-time by arb money', smRows(A.money)) ];
+    ...recapFields(`📅 ${dayName} — ${smFmt(D.head.sent||smR0())}`, smRows(D.market)),
+    ...recapFields('Time to tip', smRows(D.tip, smTipOrd), true),
+    ...recapFields('Side', smRows(D.side), true),
+    ...(notSent(D).length ? recapFields('Not sent (not in the record)', notSent(D)) : []),
+    ...recapFields(`📈 All-time — ${smFmt(A.head.sent||smR0())}`, smRows(A.sport)),
+    ...recapFields('By market', smRows(A.market)),
+    ...recapFields('Time to tip', smRows(A.tip, smTipOrd), true),
+    ...recapFields('Side', smRows(A.side), true),
+    ...recapFields('Source', smRows(A.source), true),
+    ...recapFields('Hold / arb', smRows(A.hold, smHoldOrder), true),
+    ...recapFields('Arb money', smRows(A.money), true),
+    ...(Object.keys(A.news||{}).length ? recapFields('RotoWire (NBA)', smRows(A.news), true) : []),
+    ...(notSent(A).length ? recapFields('Not sent · all-time', notSent(A)) : []) ];
   return { has, fields };
 }
 // FD and b105 recaps: each to its own recap channel (falls back to that book's alert channel until set)
@@ -2469,6 +2470,10 @@ async function smPostRecap(day, manual, book='fanduel'){
   if(!hook){ if(manual) toast(`Set the ${B.name} recap channel first`); return false; }
   smDumpGraded(true); const R=smRecapFields(day, book); if(!R.has){ if(manual) toast('Nothing graded for that day yet'); return false; }
   const ok=await postRecapFields(hook, B.title, R.fields);
+  // same recap to the Telegram channel the FD plays go to
+  if(ok && book==='fanduel' && tgOn()){ const parts=[`📊 <b>${tgEsc(B.title)}</b>`, ...R.fields.map(f=>`<b>${tgMd(f.name)}</b>\n${tgMd(f.value)}`)], msgs=[''];
+    parts.forEach(x=>{ if((msgs[msgs.length-1]+'\n\n'+x).length>3900) msgs.push(''); msgs[msgs.length-1]+=(msgs[msgs.length-1]?'\n\n':'')+x; });
+    for(const m of msgs){ await tgSend(m); await new Promise(z=>setTimeout(z,800)); } }
   if(ok) LS.set(B.flag+day,'1'); if(manual) toast(ok?'Recap posted':'Recap failed'); return ok;
 }
 // one recap post at a time: the auto check fires from several places (tracker refresh, the minute
@@ -2588,7 +2593,7 @@ function renderNbaLive(){
   const head=`<div class="sh"><span class="t">In-game · NBA</span><span class="dim" style="font-size:10.5px">${nlGames.length?`${nlGames.length} game${nlGames.length===1?'':'s'} on · ${nlPlays.length} plays · ${nlLast?Math.round((now-nlLast)/1000)+'s ago':'…'}`:nextTip?`idle · wakes at tip ${etTime(new Date(nextTip).toISOString())}`:'idle · no NBA games soon'}</span></div>
     <div class="nlctl"><span class="dim">Exch min (each)</span>${[0,100,250,500,1000].map(x=>`<button class="${nlKalMin===x?'on':''}" data-nlk="${x}">${x?usd(x):'Any'}</button>`).join('')}<button id="nlRecap">Post recap</button><button id="nlRecapCh" class="${LS.get('nbal_recap_hook','')?'on':''}">Recap channel${LS.get('nbal_recap_hook','')?' ✓':''}</button><button class="${nlHook?'on':''}" id="nlDc" style="margin-left:auto">${nlHook?'Discord ✓':'Set Discord'}</button></div>${nlErr?`<div class="dim" style="font-size:11px;color:var(--red)">${esc(nlErr.slice(0,90))}</div>`:''}
     ${nlGames.length&&nlKal?`<div class="smdiagw"><div class="smdiag">${esc(Object.entries(nlKal.books).map(([b,n])=>`${b} ${n}`).join(' · ')||'no odds')}<div class="smdiagtop">Kalshi: ${nlKal.rows} rows · ${nlKal.mk} in our markets · ${nlKal.side} with a side · ${nlKal.fd} on FD's line${nlKal.sample.length?`<br><span style="opacity:.7">${nlKal.sample.map(esc).join('<br>')}</span>`:''}</div></div></div>`:''}`;
-  const cards = !nlGames.length ? '<div class="empty">Runs only while NBA games are live (from tip to the final buzzer). Nothing on right now.</div>'
+  const cards = NL_OFF ? '<div class="empty">⏸ In-game NBA is turned off for now — not scanning or sending. Your record below is kept.</div>' : !nlGames.length ? '<div class="empty">Runs only while NBA games are live (from tip to the final buzzer). Nothing on right now.</div>'
     : !nlPlays.length ? '<div class="empty">Watching… nothing at 0.0% or better right now.</div>'
     : nlPlays.map(p=>{ const f=p.f, lg=bookLogo('fanduel'), url=sharpLink(p.fd)||BOOK_HOME.fanduel;
       return `<div class="nlcard${nlFresh.has(p.key)?' new':''}"><div class="nlh"><div><div class="nlnm">${esc(titleCase(p.name))} <span>${nlSide(p.side)}${p.line!=null?' '+p.line:''} ${esc(marketLabel(p.sk||'nba',p.mk))}</span></div><div class="nlmeta">${f?`${esc(SPORTS[p.sk]?.label||'')} · ${esc(f.away.ab||f.away.name)} @ ${esc(f.home.ab||f.home.name)} · LIVE`:''}</div></div>
@@ -2633,7 +2638,10 @@ function renderNbaLive(){
 // scan every 4s only while a game is on (keeps going with the page in the background, like the FD
 // scanner); otherwise just check the schedule every minute
 let nlTimer=null;
+// In-game NBA is switched off for now: no schedule checks, no scans, nothing sent (recaps still run)
+const NL_OFF = true;
 async function nlTick(){
+  if(NL_OFF){ if(nlTimer){ clearInterval(nlTimer); nlTimer=null; } smAutoRecap(); return; }
   const on=(await nlActiveGames()).length>0;
   if(on){ if(!nlTimer){ nlTimer=setInterval(nlScan, 4000); nlScan(); } }
   else { if(nlTimer){ clearInterval(nlTimer); nlTimer=null; nlGames=[]; nlPlays=[]; nlSave(); if(viewMode==='nbalive') renderNbaLive(); } nlAutoRecap(); smAutoRecap(); }
