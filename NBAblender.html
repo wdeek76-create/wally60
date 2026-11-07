@@ -649,7 +649,7 @@ table colgroup col.avg-col{width:16%;}
   try {
     const d = new Date(Date.now() - 5 * 3600 * 1000), day = d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
     if (localStorage.getItem("nba_daily_clear_day") === day) return;
-    ["nba_morning_ps_v1", "nba_morning_paste_hash_v1", "nba_morning_skip_v1", "nba_lineups_v1", "nba_lineups_rg_v1", "nba_lineups_tabs_v1", "nba_lineup_games_v1", "nba_lineup_discord_msg", "nba_injuries_cache",
+    ["nba_morning_ps_v1", "nba_morning_paste_hash_v1", "nba_morning_skip_v1", "nba_saber_status_v1", "nba_lineups_v1", "nba_lineups_rg_v1", "nba_lineups_tabs_v1", "nba_lineup_games_v1", "nba_lineup_discord_msg", "nba_injuries_cache",
      "nba_rw_depth_v1", "nba_rg_impact_v1", "nba_rw_lineups_raw", "nba_tabs_lineups_raw", "nba_rw_news_feed_v1", "captool_players"].forEach(k => localStorage.removeItem(k));
     localStorage.setItem("nba_daily_clear_day", day);
   } catch (e) {}
@@ -1323,6 +1323,7 @@ function loadFile(idx, input, onDone) {
   reader.onload = e => {
     const players = parseSource(e.target.result);
     slots[idx] = {label: file.name, players};
+    if (SOURCES[idx] && SOURCES[idx].key === "saber") { try { _saveSaberStatus(e.target.result); } catch (err) { console.warn("[SABER status]", err); } }
     if (players.length && !players.some(pl => pl.pts > 0 || pl.reb > 0 || pl.ast > 0 || pl.threepm > 0)) showToast(`\u26a0 ${SOURCES[idx].label}: ${players.length} players but no projections in this file yet \u2014 re-download it once the source publishes numbers`);
     setLog(`${SOURCES[idx].label} loaded: ${players.length} players`);
     buildSlots();
@@ -11182,8 +11183,21 @@ function copyOpenGameLines() {
   );
 }
 
+// The books a Morning bet's picture shows: the live alt books + every source board price, one per book, within the card's play-to window.
+function _mCardBooksFor(b) {
+  try {
+    const m = morningBets.find(x => String(x.id) === String(b.morningId) || String(x.trackerId) === String(b.id)); if (!m) return [];
+    const nm = bk => BOOK_CODE_NAMES[String(bk || "").trim().toUpperCase()] || bk, seen = new Set([nm(b.book)]);
+    return (m.altBooks || []).map(a => ({ book: nm(a.book), odds: a.odds })).concat((m.sourcePrices || []).map(x => ({ book: nm(x.book), odds: x.odds })), [{ book: nm(m.book), odds: m.odds }])
+      .filter(x => x.odds != null && !isNaN(x.odds) && x.book && _mOurBook(x.book) && _mAltInRange(m, x.odds)).filter(x => { if (seen.has(x.book)) return false; seen.add(x.book); return true; })
+      .map(x => ({ book: x.book, odds: Number(x.odds), line: b.line, fair: b.fair }));
+  } catch (e) { return []; }
+}
 function _copyOpenFiltered(kind) {
-  const open = bets.filter(b => b.result === "pending");
+  // Morning bets list every book the picture shows; book codes (PB, FD, ...) are named, and each book appears once (its best price)
+  const _nmB = bk => BOOK_CODE_NAMES[String(bk || "").trim().toUpperCase()] || bk;
+  const _oneEach = (b, list) => { const by = new Map(); list.forEach(a => { if (!a || !a.book || a.odds == null) return; const k = _nmB(a.book) + "|" + (a.line != null ? Number(a.line) : Number(b.line)); const cur = by.get(k); if (!cur || Number(a.odds) > Number(cur.odds)) by.set(k, { ...a, book: _nmB(a.book) }); }); return [...by.values()].filter(a => !(a.book === _nmB(b.book) && (a.line == null || Number(a.line) === Number(b.line)))); };
+  const open = bets.filter(b => b.result === "pending").map(b => b.source === "morning" ? { ...b, book: _nmB(b.book), altBooks: _oneEach(b, (Array.isArray(b.altBooks) ? b.altBooks : []).concat(_mCardBooksFor(b))) } : b);
   if (!open.length) { showToast("No open plays to copy"); return; }
   const isTotal = b => (b.stat || "").toUpperCase() === "GAME_TOTAL";
   const filtered = open.filter(b => kind === "totals" ? isTotal(b) : !isTotal(b));
@@ -11208,6 +11222,7 @@ function _copyOpenFiltered(kind) {
     let best = null;
     candidates.forEach(c => {
       if (c.line != null && b.line != null && Number(c.line) !== Number(b.line)) return; // alt lines never headline
+      if (c !== candidates[0] && typeof _mIsExchange === "function" && _mIsExchange(c.book)) return;   // an exchange price never headlines here (no depth check in a copy); it is listed with the books
       if (!c.fair) return;
       const ev = calcEdge(c.odds, c.fair);
       if (ev == null) return;
@@ -11253,7 +11268,7 @@ function _copyOpenFiltered(kind) {
   }
 
   const headerLabel = kind === "totals" ? "totals" : "props";
-  const lines = [`NBA early ${headerLabel}: (${enriched.length})`, ""];
+  const lines = [`NBA Model${kind === "totals" ? " totals" : ""}: (${enriched.length})`, ""];
 
   // For props mode: precompute how many props each player has so we know whether
   // to render a flat row or a "Player (TEAM) (N Props)" header + numbered list.
@@ -23763,6 +23778,19 @@ function _wmImportanceBase(name, team) {
   if (projMin != null) bits.push("proj " + Math.round(projMin) + " min");
   return { tier, usg, per, mpg, projMin, note: tier + (bits.length ? " · " + bits.join(", ") : "") };
 }
+// Saber's CSV carries its own injury tag (Status: O / D / Q / P) and Role (Starter). PropShop's upload format drops both, so they are kept here
+// from the Saber upload (today only) and used by the gates: a Saber Q / D / O holds the player himself, and counts as an uncertain teammate.
+const SABER_STATUS_KEY = "nba_saber_status_v1";
+function _saveSaberStatus(text) {
+  const rows = parseCSV(text); if (!rows.length || !("Status" in rows[0])) return;
+  const players = {};
+  rows.forEach(r => { const nm = String(r.Name || r.Player || "").trim(); if (!nm) return; const st = String(r.Status || "").trim().toUpperCase(), role = String(r.Role || "").trim();
+    if (st || role) players[norm(nm)] = { name: nm, team: normTeamAbbr(String(r.Team || "").trim()) || String(r.Team || "").trim(), status: st, role }; });
+  localStorage.setItem(SABER_STATUS_KEY, JSON.stringify({ day: localYMD(new Date()), at: Date.now(), players }));
+}
+function getSaberStatus() { try { const d = JSON.parse(localStorage.getItem(SABER_STATUS_KEY) || "null"); return d && d.day === localYMD(new Date()) ? d : null; } catch (e) { return null; } }
+const _SABER_LABEL = { O: "OUT", D: "DOUBTFUL", Q: "Q", P: "P" };
+function saberStatusFor(name) { const d = getSaberStatus(); const r = d && d.players[norm(name || "")]; return r && r.status ? { ...r, label: _SABER_LABEL[r.status] || r.status } : null; }
 // Cleared to play: still tagged Q / GTD / probable on the feed, but his own blurb says he is good to go (no restriction). That is not iffy, so he is
 // treated as off the report. Any doubt in the same text (game-time decision, minutes limit, ruled out, ...) keeps him on it; Out / doubtful never clears.
 const _INJ_CLEARED_RE = /good to go|will play|is playing|expected to play|cleared to (?:play|return)|shed (?:his|her|the) (?:questionable |probable |game-time )?(?:tag|designation)|(?:removed|dropped|taken) (?:off|from) the injury report|off the injury report|upgraded to (?:available|probable)|available to play|no (?:restrictions|limitations)|full go/i;
@@ -23781,6 +23809,7 @@ function _wmInjuryGate(playerRaw, team) {
     const selfNorm = norm(playerRaw);
     const own = (typeof getInjuryForPlayer === "function") ? getInjuryForPlayer(playerRaw, team) : null;
     const depth = (typeof getDepthChartStatusForPlayer === "function") ? getDepthChartStatusForPlayer(playerRaw) : null;
+    { const sb = saberStatusFor(playerRaw); if (sb && /^(O|D|Q)$/.test(sb.status) && !(own && _injCleared(own))) { out.both = `Saber has him ${sb.label}`; return out; } }
     if (own && !_injCleared(own)) { out.both = "on the injury report (" + (_injuryStatusLabel(own.status) || own.status || "listed") + (own._src ? " · " + own._src : "") + ")"; return out; }
     if (depth && depth.status) { out.both = "depth chart " + depth.status; return out; }
     const rgSelf = rgInjFor(playerRaw);   // RG says he is in question / out even though RW and OpticOdds are silent
@@ -23806,6 +23835,14 @@ function _wmInjuryGate(playerRaw, team) {
         mates.push({ name: rec.name, label: _injuryStatusLabel(rec.status), blurb: (rec.comment || "") + " " + (rec.longComment || "") });
       });
     }
+    try {   // Saber's own Q / D tags count as teammates in question too
+      const sd = getSaberStatus();
+      if (team && sd) Object.values(sd.players).forEach(r => {
+        if (!r || !/^(Q|D)$/.test(r.status) || norm(r.name) === selfNorm || teamKey(r.team) !== teamKey(team)) return;
+        if (mates.some(m => norm(m.name) === norm(r.name))) return;
+        mates.push({ name: r.name, label: r.status === "D" ? "DOUBTFUL" : "Q", blurb: "" });
+      });
+    } catch (e) {}
     try {   // RG-only absences count as teammates too (O stays out of the "uncertain" list; Q / D are uncertain)
       const rgd = getRgImpact();
       if (team && rgd && rgd.players) Object.values(rgd.players).forEach(r => {
@@ -23829,15 +23866,21 @@ function _wmInjuryGate(playerRaw, team) {
       if (!(ov >= 1)) return; // different position, or position unknown
       // Any uncertain teammate at her position (GTD, Questionable, Probable, Day-to-Day) blocks
       // the UNDER only. Overs are always allowed — an uncertain teammate is no reason to pass one.
-      if (!out.under && ["GTD", "Q", "P", "DTD", "PROBABLE", "QUESTIONABLE"].includes(String(m.label || "").toUpperCase())) {
+      if (!out.under && ["GTD", "Q", "P", "DTD", "PROBABLE", "QUESTIONABLE", "D", "DOUBTFUL"].includes(String(m.label || "").toUpperCase())) {
         const mi = _wmImportance(m.name, team);
         if (mi.tier !== "LOW" && !_wmLongTermOut(m.name, team)) out.under = m.name + " is " + m.label + " at his position (" + mi.note + ")";   // bench/fringe teammates are ignored; unknown stays cautious
       }
     });
+    // A KEY teammate in question (Q / GTD / doubtful, any position, HIGH importance): the sources may still project him, so if he sits the whole
+    // team's lines go up. That rules out the under (overs stay allowed), e.g. Portland unders with Lillard doubtful.
+    if (!out.under) {
+      const key = mates.find(m => ["GTD", "Q", "DTD", "QUESTIONABLE", "D", "DOUBTFUL"].includes(String(m.label || "").toUpperCase()) && _wmImportance(m.name, team).tier === "HIGH" && !_wmLongTermOut(m.name, team));
+      if (key) out.under = `key teammate ${key.name} is ${key.label} (his absence lifts this line)`;
+    }
     // Stacked uncertainty: two or more non-fringe teammates Q/GTD/DTD (any position) is a bigger red flag than one
     // moderate one — blocks the UNDER (overs stay allowed).
     if (!out.under) {
-      const unc = mates.filter(m => ["GTD", "Q", "DTD", "QUESTIONABLE"].includes(String(m.label || "").toUpperCase()) && _wmImportance(m.name, team).tier !== "LOW" && !_wmLongTermOut(m.name, team));
+      const unc = mates.filter(m => ["GTD", "Q", "DTD", "QUESTIONABLE", "D", "DOUBTFUL"].includes(String(m.label || "").toUpperCase()) && _wmImportance(m.name, team).tier !== "LOW" && !_wmLongTermOut(m.name, team));
       if (unc.length >= 2) out.under = unc.length + " rotation teammates in question (" + unc.slice(0, 3).map(m => m.name).join(", ") + ")";
     }
   } catch (e) { console.warn("[NBA MODEL] injury gate failed for", playerRaw, e && e.message); }
@@ -25332,6 +25375,22 @@ function _lineupViews() {
     views.push({ key, teams: m });
   };
   mk("RG", getRgLineups()); mk("Tabs", getTabsLineups());
+  try {   // Saber: its CSV marks projected starters (Role) and injury tags (Status), kept from today's Saber upload
+    const sd = getSaberStatus();
+    if (sd && sd.players) {
+      const m = {};
+      Object.values(sd.players).forEach(p => {
+        const t = p.team, k = resolveNorm(p.name || ""); if (!t || !k) return;
+        const e = m[t] = m[t] || { starters: new Set(), status: {}, names: {}, order: [], pos: {}, flag: {}, time: "" };
+        e.names[k] = p.name;
+        if (/starter/i.test(p.role || "")) { e.starters.add(k); e.order.push(k); if (p.status) e.flag[k] = { P: "PROB", Q: "Q", D: "D", O: "OUT" }[p.status] || ""; if (p.status === "O") e.status[k] = "OUT"; }
+        else if (p.status === "O") e.status[k] = "OUT";
+        else if (/^(Q|D)$/.test(p.status)) e.status[k] = "GTD";
+      });
+      Object.keys(m).forEach(t => { if (m[t].starters.size < 4) delete m[t]; });   // only a posted lineup counts
+      if (Object.keys(m).length) views.push({ key: "Saber", teams: m });
+    }
+  } catch (e) {}
   return views;
 }
 // → { byPlayer: Map(resolveNorm → reason), list: [{team, text, name}], compared: [teams], noOpinion: [teams], sources: [keys] }
