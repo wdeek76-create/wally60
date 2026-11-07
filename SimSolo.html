@@ -949,6 +949,15 @@ function toPs(inp, src) {
   });
 }
 const gameOver = x => { const today = localYMD(new Date()); if (x.gameDate < today) return true; if (x.gameDate > today) return false; const tip = _tsTipTs(x.gameDate, x.gameTime); return tip != null ? Date.now() > tip + 170 * 60000 : (new Date().getHours() >= 23); };
+// Only TODAY's (or later) open plays are live: nothing from yesterday carries into today's lists, copies or alignments (back-to-backs stay separate days).
+const today0 = () => localYMD(new Date());
+const isLive = x => x.result === "pending" && x.gameDate >= today0();
+// A play still open 2+ days after its game never will grade (DNP, line voided, name not matched): it is closed as VOID, which counts nowhere.
+function voidStale() {
+  const d = new Date(); d.setDate(d.getDate() - 1); const cut = localYMD(d);
+  let n = 0; rows.forEach(x => { if (x.result === "pending" && x.gameDate < cut) { x.result = "void"; x.actual = null; n++; } });
+  if (n) save(); return n;
+}
 let grading = false;
 async function gradeAll(auto) {
   if (grading) return; grading = true;
@@ -957,7 +966,9 @@ async function gradeAll(auto) {
   for (const x of rows.filter(y => y.result === "pending" && y.gameDate <= today && (!auto || gameOver(y)))) {
     try { const r = await gradeBet(x); if (r.ok) { x.result = r.result; x.actual = r.total != null ? r.total : null; n++; } } catch (e) {}
   }
-  if (n) save(); btn.disabled = false; btn.textContent = "GRADE PENDING"; grading = false;
+  const nv = voidStale();
+  if (n || nv) save(); btn.disabled = false; btn.textContent = "GRADE PENDING"; grading = false;
+  if (nv) toast(`${nv} old open play${nv === 1 ? "" : "s"} closed as void`);
   if (!auto || n) toast(n ? `Graded ${n}` : "Nothing final yet"); if (n || !auto) render();
 }
 const autoTick = () => { try { if (!document.hidden && rows.some(x => x.result === "pending" && gameOver(x))) gradeAll(true); } catch (e) {} };
@@ -994,7 +1005,7 @@ function view(src) { return baseRows(src || fSrc).filter(x => (fStat === "ALL" |
 function setCtx(c) { fCtx = c; render(); }
 function setThr(t) { fThr = t; render(); }
 function render() {
-  const set = view(), t = tally(set), open = set.filter(x => x.result === "pending").length;
+  const set = view(), t = tally(set), open = set.filter(isLive).length;
   const tile = (lab, v, cls) => { const n = v.w + v.l; return `<div class="tile"><b>${lab}</b><span class="${cls || ""}">${v.w}-${v.l}</span><i class="${v.pl >= 0 ? "g" : "r"}">${n ? (v.w / n * 100).toFixed(0) + "% \u00b7 " + fmtU(v.pl) : "\u2014"}</i></div>`; };
   const chip = (lab, on, fn) => `<button class="chip ${on ? "on" : ""}" onclick="${fn}">${lab}</button>`;
   const srcChips = ["ALL"].concat(SOURCES, ["AGREE"]).map(s => chip(s === "AGREE" ? "AGREE (Sharpr + Tabs 5%+)" : s, fSrc === s, `setSrc('${s}')`)).join(" ");
@@ -1018,7 +1029,7 @@ function render() {
   <div class="card"><h2>5%+ alignments \u00b7 open (${agreeOpen.length})</h2>${agreeOpen.length ? `<div class="scroll"><table><thead><tr>${th("Player")}${th("Pick")}${th("Best")}${th("Edges")}${th("Play to")}${th("Model gates")}</tr></thead><tbody>${agreeOpen.map(x => { const gt = gateFor(x); return `<tr><td>${x.player}<br><span class="m" style="font-weight:400;font-size:11px">${x.stat} \u00b7 ${x.gameDate.slice(5)} ${x.gameTime}</span></td><td class="${x.ou === "over" ? "o" : "u"}">${x.ou === "over" ? "O" : "U"} ${x.line}</td><td>${x.book} ${fo(x.odds)}</td><td style="white-space:normal;font-size:12px">${edgeTxt(x)}</td><td>${fo(x.playTo)}</td><td style="white-space:normal;font-size:11px;max-width:220px;color:${gt ? "#f87171" : "#4ade80"}">${gt ? "HELD \u2014 " + gt : "\u2713 clear"}</td></tr>`; }).join("")}</tbody></table></div>` : '<div class="m">No open play where both sources are 5%+ yet.</div>'}</div>
   <div class="card"><h2>By day</h2>${days.length ? tbl("Day", days.map(d => ({ label: d.slice(5), set: set.filter(x => x.gameDate === d) }))) : '<div class="m">Nothing yet.</div>'}</div>
   <div class="card"><h2>Plays (latest ${recent.length})</h2><div class="scroll"><table><thead><tr>${th("Player")}${th("Pick")}${th("Best")}${th("Play to")}${th("Result")}${th("")}</tr></thead><tbody>${recent.map(x => `<tr><td>${x.player}<br><span class="m" style="font-weight:400;font-size:11px">${x.src} \u00b7 ${x.stat} \u00b7 ${x.gameDate.slice(5)} ${x.gameTime}</span></td><td class="${x.ou === "over" ? "o" : "u"}">${x.ou === "over" ? "O" : "U"} ${x.line}</td><td>${x.book} ${fo(x.odds)}<br><span class="g" style="font-size:12px">${edgeTxt(x)}</span></td><td>${fo(x.playTo)}</td><td class="${resCls(x.result)}">${x.result === "pending" ? "\u2014" : x.result.toUpperCase() + (x.actual != null ? ` (${x.actual})` : "")}</td><td>${x.src === "AGREE" ? "" : `<button class="chip del" onclick="del('${x.key.replace(/'/g, "\\'")}')">\u00d7</button>`}</td></tr>`).join("")}</tbody></table></div></div>`;
-  const st = document.getElementById("srcstat"); if (st) st.innerHTML = SOURCES.map(s => { const m = meta[s]; const n = rows.filter(x => x.src === s && x.result === "pending").length; return `<div><b>${s}</b> ${m ? `loaded ${new Date(m.at).toLocaleString([], { month: "numeric", day: "numeric", hour: "numeric", minute: "2-digit" })} \u00b7 ${n} open` : "not loaded yet"}</div>`; }).join("");
+  const st = document.getElementById("srcstat"); if (st) st.innerHTML = SOURCES.map(s => { const m = meta[s]; const n = rows.filter(x => x.src === s && isLive(x)).length; return `<div><b>${s}</b> ${m ? `loaded ${new Date(m.at).toLocaleString([], { month: "numeric", day: "numeric", hour: "numeric", minute: "2-digit" })} \u00b7 ${n} open` : "not loaded yet"}</div>`; }).join("");
 }
 
 // Copy text in the same shape as the blender's "Copy Open Props": one row per bet (player, side, line, stat, price, book), the other books at that line
@@ -1050,11 +1061,11 @@ function fmtPlays(items, header) {
 }
 // Copy back: every open play, best book and price, the play-to, and the other books (alt lines marked)
 function playsText() {
-  const open = view().filter(x => x.result === "pending"); if (!open.length) return "";
+  const open = view().filter(isLive); if (!open.length) return "";
   return fmtPlays(open.map(x => ({ ...x, edges: `+${x.ev.toFixed(1)}%` })), `NBA ${fSrc === "ALL" ? "sim" : fSrc} props`);
 }
 function agreeList() {
-  return agreeRows().filter(x => x.result === "pending" && (fStat === "ALL" || x.stat === fStat)).map(x => ({ ...x, srcs: x.srcEvs, best: { book: x.book, odds: x.odds }, low: { ev: x.ev } })).sort((a, b) => b.ev - a.ev);
+  return agreeRows().filter(x => isLive(x) && (fStat === "ALL" || x.stat === fStat)).map(x => ({ ...x, srcs: x.srcEvs, best: { book: x.book, odds: x.odds }, low: { ev: x.ev } })).sort((a, b) => b.ev - a.ev);
 }
 function agreeText() {
   const all = agreeList(); if (!all.length) return "";
@@ -1089,12 +1100,13 @@ function exportCsv() {
 }
 async function retag() {
   say("Pulling RotoWire\u2026"); const r = await rwSync(true); _rw = null;
-  let n = 0; rows.filter(x => x.result === "pending").forEach(x => { const c = ctxFor(x.player, x.team, x.ou); x.ctx = c.cls; x.ctxWhy = c.why; n++; });
+  let n = 0; rows.filter(isLive).forEach(x => { const c = ctxFor(x.player, x.team, x.ou); x.ctx = c.cls; x.ctxWhy = c.why; n++; });
   save(); render(); say(`RotoWire: ${r && r.inj ? r.inj.length : 0} injury records, ${r && r.players ? Object.keys(r.players).length : 0} lineup players${r && r.err && r.err.length ? ` (problems: ${r.err.join("; ")})` : ""} \u00b7 re-tagged ${n} open plays`);
 }
 function clearAll() { if (!confirm(`Delete all ${rows.length} plays?`)) return; rows = []; save(); render(); }
 render();
 rwSync().then(() => { _rw = null; render(); }).catch(() => {});   // pull RotoWire when the page opens
+try { if (voidStale()) render(); } catch (e) {}
 
 </script>
 </body></html>
