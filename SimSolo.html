@@ -43,7 +43,7 @@ h2{font-size:12px;letter-spacing:1px;text-transform:uppercase;color:var(--mut);m
     <label class="filebtn alt" style="color:#f59e0b;border-color:#f59e0b"><input type="file" accept=".csv,text/csv" onchange="toPs(this,'TABS')" hidden>TABS &rarr; PS</label>
     <label class="filebtn alt" style="color:#eab308;border-color:#eab308"><input type="file" accept=".csv,text/csv" onchange="toPs(this,'DIMERS')" hidden>DIMERS &rarr; PS</label>
   </div>
-  <div class="row"><button onclick="copyAgree()" style="border-color:#a78bfa;color:#a78bfa">COPY 5%+ ALIGNMENTS</button><button onclick="copyPlays()">COPY PLAYS (filters)</button><button onclick="gradeAll()" id="gbtn">GRADE PENDING</button></div>
+  <div class="row"><button onclick="copyAgree()" style="border-color:#a78bfa;color:#a78bfa">COPY 5%+ ALIGNMENTS</button><button onclick="copyPlays()">COPY PLAYS (filters)</button><button onclick="gradeAll()" id="gbtn">GRADE PENDING</button><button onclick="retag()">↻ RW CONTEXT</button></div>
   <div class="row"><button onclick="copyReport()">COPY REPORT</button><button onclick="exportCsv()">EXPORT CSV</button><button class="del" onclick="clearAll()">CLEAR ALL</button></div>
   <div class="info" id="info"></div>
 </div>
@@ -466,6 +466,51 @@ function normTeamAbbr(abbr) {
 // Matched exactly first, then by substring in insertion order — so full names
 // win over cities, and "hornets" is listed before "nets". "Los Angeles" alone is
 // ambiguous (Lakers/Clippers) and deliberately has no city alias.
+const TEAM_NAME_ALIASES = {
+  "atlanta hawks":"ATL", "boston celtics":"BOS", "brooklyn nets":"BKN",
+  "charlotte hornets":"CHA", "chicago bulls":"CHI", "cleveland cavaliers":"CLE",
+  "dallas mavericks":"DAL", "denver nuggets":"DEN", "detroit pistons":"DET",
+  "golden state warriors":"GSW", "houston rockets":"HOU", "indiana pacers":"IND",
+  "la clippers":"LAC", "los angeles lakers":"LAL", "memphis grizzlies":"MEM",
+  "miami heat":"MIA", "milwaukee bucks":"MIL", "minnesota timberwolves":"MIN",
+  "new orleans pelicans":"NOP", "new york knicks":"NYK", "oklahoma city thunder":"OKC",
+  "orlando magic":"ORL", "philadelphia ers":"PHI", "phoenix suns":"PHX",
+  "portland trail blazers":"POR", "sacramento kings":"SAC", "san antonio spurs":"SAS",
+  "toronto raptors":"TOR", "utah jazz":"UTA", "washington wizards":"WAS",
+  "los angeles clippers":"LAC", "la lakers":"LAL",
+  "atlanta":"ATL", "boston":"BOS", "brooklyn":"BKN", "charlotte":"CHA",
+  "chicago":"CHI", "cleveland":"CLE", "dallas":"DAL", "denver":"DEN",
+  "detroit":"DET", "golden state":"GSW", "houston":"HOU", "indiana":"IND",
+  "memphis":"MEM", "miami":"MIA", "milwaukee":"MIL", "minnesota":"MIN",
+  "new orleans":"NOP", "new york":"NYK", "oklahoma city":"OKC", "orlando":"ORL",
+  "philadelphia":"PHI", "phoenix":"PHX", "portland":"POR", "sacramento":"SAC",
+  "san antonio":"SAS", "toronto":"TOR", "utah":"UTA", "washington":"WAS",
+  "hawks":"ATL", "celtics":"BOS", "hornets":"CHA", "nets":"BKN", "bulls":"CHI",
+  "cavaliers":"CLE", "cavs":"CLE", "mavericks":"DAL", "mavs":"DAL", "nuggets":"DEN",
+  "pistons":"DET", "warriors":"GSW", "rockets":"HOU", "pacers":"IND", "clippers":"LAC",
+  "lakers":"LAL", "grizzlies":"MEM", "heat":"MIA", "bucks":"MIL", "timberwolves":"MIN",
+  "wolves":"MIN", "pelicans":"NOP", "knicks":"NYK", "thunder":"OKC", "magic":"ORL",
+  "sixers":"PHI", "suns":"PHX", "trail blazers":"POR", "blazers":"POR", "kings":"SAC",
+  "spurs":"SAS", "raptors":"TOR", "jazz":"UTA", "wizards":"WAS"
+};
+function teamLineToAbbr(line) {
+  if (!line) return null;
+  // Strip parenthetical content first (handles NBA.com format like
+  // "MINNESOTA TIMBERWOLVES (https://www.nba.com/stats/team/...)" — the URL would
+  // otherwise dilute the cleaned string and miss the alias match).
+  const cleaned = line.toLowerCase()
+    .replace(/^@\s*/,"")
+    .replace(/\([^)]*\)/g, "")
+    .replace(/[^a-z\s]/g,"").trim();
+  if (TEAM_NAME_ALIASES[cleaned]) return TEAM_NAME_ALIASES[cleaned];
+  for (const k of Object.keys(TEAM_NAME_ALIASES)) {
+    if (cleaned.includes(k)) return TEAM_NAME_ALIASES[k];
+  }
+  const u = cleaned.toUpperCase().replace(/\s/g,"");
+  if (u.length >= 2 && u.length <= 4) return normTeamAbbr(u);
+  return null;
+}
+
 function _tsTipTs(dateIso, timeStr) {
   const m = String(timeStr || "").match(/(\d{1,2}):(\d{2})\s*([AP])M/i), d = String(dateIso || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (!m || !d) return null;
@@ -477,6 +522,244 @@ function _tsTipTs(dateIso, timeStr) {
 //   downside = a blurb or teammate situation works AGAINST this side (floor risk on an over, upside for someone else on an under, uncertain teammate)
 //   upside   = a blurb works FOR this side (ceiling on an over, floor risk on an under)
 //   clean    = none of the above
+const RW_API_STORAGE = "nba_rw_api_url";
+function rwApiDefault() {
+  // Hosted on Vercel together with api/rotowire.js → use that same-site helper (no setup).
+  try { if (/^https?:$/.test(location.protocol) && !/^(localhost|127\.)/.test(location.hostname)) return location.origin + "/api/rotowire"; } catch (e) {}
+  // Opened from a file / another host: use the helper that serves this blender (nbablender-3), not the old OpticOdds-backend project (it has no api/rotowire).
+  return "https://nbablender-3.vercel.app/api/rotowire";
+}
+function getRwApiUrl() { try { return localStorage.getItem(RW_API_STORAGE) || rwApiDefault(); } catch (e) { return rwApiDefault(); } }
+// Two ways in:
+//  • KEY   — paste just your RotoWire API key (or any RotoWire API link with
+//    key= in it — the key is pulled out). Saved only in this browser's
+//    storage: never in the HTML, GitHub, or the backup file. Calls go to
+//    https://api.rotowire.com/Basketball/NBA/<Feed>.php?key=…&format=json
+//  • PROXY — a Vercel /api/rotowire URL (vercel-rotowire/), key kept on Vercel.
+// The key route only works if RotoWire lets browsers call it (CORS); if it
+// doesn't, the sync says so and the proxy is the fallback.
+const RW_KEY_STORAGE = "nba_rw_api_key";
+// RotoWire's own keyless proxy — serves every feed name they list (NBACeilFloor, nba-DFS-dk, NBALineups …).
+const RW_PROXY_URL = "https://rotowire-secrets-ebgmaeh8ecc4huhf.canadaeast-01.azurewebsites.net/api/proxy";
+const RW_NBA_BASE = "https://api.rotowire.com/Basketball/NBA";
+// Logical feed → RotoWire NBA endpoints, tried in order (plans differ in what they include).
+const RW_NBA_PATHS = {
+  NBAInjuries:  ["Injuries.php"],
+  NBANews:      ["News.php?hours=48", "News/Injuries.php?hours=48"],
+  NBALineups:   ["Lineups.php", "ExpectedLineups.php", "DailyLineups.php"],
+  NBADailyProj: ["DailyProjections.php"],
+  NBADepth:     ["DepthCharts.php", "DepthChart.php"],
+  NBAPlayers:   ["Players.php", "PlayerList.php"],
+  NBACeilFloor: ["CeilFloor.php", "CeilingFloor.php", "DailyProjectionsCeilFloor.php"],
+};
+// Hosted on a web address (Vercel) → always go through that site's own /api/rotowire helper;
+// a key typed into ⚙ is for the saved-file version only and would be blocked by RotoWire here.
+function _rwHosted() { try { return /^https?:$/.test(location.protocol) && !/^(localhost|127\.)/.test(location.hostname); } catch (e) { return false; } }
+// RotoWire's proxy answers in XML for some feeds (DFS salaries, schedule-style feeds). Turn it into the same
+// nested objects the JSON feeds give, so every reader below works on either.
+function _rwXmlToObj(text) {
+  const doc = new DOMParser().parseFromString(text, "application/xml");
+  if (doc.querySelector("parsererror")) throw new Error("not valid XML");
+  const conv = el => {
+    const o = {};
+    for (const a of el.attributes) o[a.name] = a.value;
+    const kids = [...el.children];
+    if (!kids.length) { const t = (el.textContent || "").trim(); if (!Object.keys(o).length) return t === "" ? null : (isNaN(Number(t)) || /^0\d/.test(t) ? t : Number(t)); if (t) o["#text"] = t; return o; }
+    kids.forEach(k => { const v = conv(k); if (k.tagName in o) { if (!Array.isArray(o[k.tagName])) o[k.tagName] = [o[k.tagName]]; o[k.tagName].push(v); } else o[k.tagName] = v; });
+    return o;
+  };
+  const root = conv(doc.documentElement);
+  return root && typeof root === "object" ? root : { value: root };
+}
+function _rwParseBody(text, label, status) {
+  const t = String(text || "").trim();
+  if (t.startsWith("<")) { try { return _rwXmlToObj(t); } catch (e) { throw new Error(`${label}: XML couldn't be read (${status}) ${t.slice(0, 100)}`); } }
+  try { return JSON.parse(t); } catch (e) { throw new Error(`${label}: not JSON (${status}) ${_rwMask(t.slice(0, 120))}`); }
+}
+function getRwKey() { if (_rwHosted()) return ""; try { return localStorage.getItem(RW_KEY_STORAGE) || ""; } catch (e) { return ""; } }
+function _rwMask(u) { return String(u || "").replace(/([?&](?:key|apikey|api_key|token|k)=)[^&]+/ig, "$1••••••"); }
+const RW_LINK_STORAGE = "nba_rw_link";
+function getRwLink() { try { return localStorage.getItem(RW_LINK_STORAGE) || ""; } catch (e) { return ""; } }
+async function _rwGetJson(url, label) {
+  let r;
+  try { r = await fetch(url, { cache: "no-store" }); }
+  catch (e) {
+    // Tell "RotoWire won't let browsers read it (CORS)" apart from "can't reach it at all".
+    // A no-cors request succeeds (opaque) whenever the server answers, even without CORS headers.
+    let reachable = false;
+    try { await fetch(url, { mode: "no-cors", cache: "no-store" }); reachable = true; } catch (e2) {}
+    const why = reachable
+      ? "RotoWire answered but doesn't allow web pages to read it (CORS) — one file can't get around that; it needs the Vercel helper or the paste box"
+      : "couldn't reach api.rotowire.com at all — check your internet, turn off ad/tracker blockers for this page, and make sure you opened the file in Chrome (not inside another app)";
+    throw Object.assign(new Error(`${label}: ${why}`), { blocked: true });
+  }
+  const text = await r.text();
+  const data = _rwParseBody(text, label, r.status);
+  if (!r.ok || (data && !Array.isArray(data) && (data.error || data.Error) && Object.keys(data).length <= 3)) throw new Error(`${label}: ${r.status} ${_rwMask(String(data.error || data.Error || ""))}`);
+  return data;
+}
+async function rwApiFetch(feed, date) {
+  const key = getRwKey();
+  if (key) {
+    const paths = RW_NBA_PATHS[feed] || [];
+    let lastErr = null;
+    for (const path of paths) {
+      const url = `${RW_NBA_BASE}/${path}${path.includes("?") ? "&" : "?"}format=json&key=${encodeURIComponent(key)}${date ? "&date=" + date : ""}`;
+      try { return await _rwGetJson(url, `${feed} (${path.split("?")[0]})`); }
+      catch (e) { if (e.blocked) throw e; lastErr = e; }
+    }
+    try { return await _rwGetJson(`${RW_PROXY_URL}?feed=${encodeURIComponent(feed)}${date ? "&date=" + date : ""}`, `${feed} (RotoWire proxy)`); } catch (e) { if (e.blocked) throw lastErr || e; }
+    throw lastErr || new Error(`${feed}: no RotoWire endpoint for this feed`);
+  }
+  const base = getRwApiUrl();
+  if (/rotowire\.com/i.test(base) && !/\/api\/rotowire\b/i.test(base)) {
+    try { return await _rwGetJson(`${RW_PROXY_URL}?feed=${encodeURIComponent(feed)}`, `${feed} (RotoWire proxy)`); } catch (e) { throw new Error(`${feed}: click ⚙ and paste your RotoWire API key (${e.message})`); }
+  }
+  const url = base + (base.includes("?") ? "&" : "?") + "feed=" + encodeURIComponent(feed) + (date ? "&date=" + date : "");
+  let r;
+  const _lk = getRwLink();
+  const _viaBrowser = async () => { try { const rr = await fetch(`${RW_PROXY_URL}?feed=${encodeURIComponent(feed)}&format=json${date ? "&date=" + date : ""}`, { cache: "no-store" }); const dd = _rwParseBody(await rr.text(), feed, rr.status); if (rr.ok && !(dd && !Array.isArray(dd) && dd.error)) return dd; } catch (e) {} return null; };
+  try { r = await fetch(url, { cache: "no-store", headers: _lk ? { "x-rw-link": encodeURIComponent(_lk) } : {} }); }
+  catch (e) { throw new Error(`${feed}: couldn't reach the RotoWire proxy — click ⚙ and paste your RotoWire API key`); }
+  const text = await r.text();
+  let data;
+  try { data = _rwParseBody(text, feed, r.status); } catch (e) { if (/^(NBACeilFloor|nba-DFS-dk|nba-DFS-fd|NBALineups)$/.test(feed) || r.status === 404) {   // 404 = the helper isn't deployed there: ask RotoWire's own proxy straight from the browser, for every feed
+ const viaB0 = await _viaBrowser(); if (viaB0) return viaB0; } if (/\b404\b|not json/i.test(String(e && e.message))) e.message += " \u00b7 helper URL tried: " + base + " \u2014 HELPER MISSING FROM THIS DEPLOY: the Vercel project has the blender but not api/rotowire.js. Redeploy the WHOLE folder from nba-blender.zip (index.html + api/rotowire.js + package.json), never just the HTML"; throw e; }
+  if (!r.ok || (data && data.error && !Array.isArray(data))) {
+    // The helper couldn't get it (RotoWire's proxy may be blocking Vercel) — let the browser ask RotoWire's proxy itself.
+    if (/^(NBACeilFloor|nba-DFS-dk|nba-DFS-fd|NBALineups)$/.test(feed)) { const viaB = await _viaBrowser(); if (viaB) return viaB; }
+    const px = data && data.rotowireProxy ? ` · RotoWire proxy said: ${data.rotowireProxy.status || "no answer"} ${data.rotowireProxy.body || ""}` : "";
+    throw new Error(`${feed}: ${r.status} ${data && data.error ? data.error : ""}${px}`);
+  }
+  return data;
+}
+// First array of objects anywhere in the payload (feeds wrap rows differently).
+function _rwRows(data) {
+  if (Array.isArray(data)) {
+    if (data.length && typeof data[0] === "object" && !Array.isArray(data[0])) {
+      // An array of groups (e.g. teams/games each holding players) → flatten one level
+      const inner = data.map(d => Object.values(d).find(v => Array.isArray(v) && v.length && typeof v[0] === "object")).filter(Boolean);
+      const looksGrouped = inner.length === data.length && !_rwPick(data[0], ["Name", "PlayerName", "FirstName", "Player.Name", "Player.FirstName"]);
+      return looksGrouped ? data.flatMap((d, i) => inner[i].map(x => ({ __parent: d, ...x }))) : data;
+    }
+    return [];
+  }
+  if (data && typeof data === "object") {
+    for (const v of Object.values(data)) { const r = _rwRows(v); if (r.length) return r; }
+  }
+  return [];
+}
+// Case-insensitive dotted-path lookup: _rwPick(o, ["Injury.Status", "Status"])
+function _rwPick(o, paths) {
+  for (const p of paths) {
+    let cur = o;
+    for (const part of p.split(".")) {
+      if (cur == null || typeof cur !== "object") { cur = undefined; break; }
+      const k = Object.keys(cur).find(x => x.toLowerCase() === part.toLowerCase());
+      cur = k === undefined ? undefined : cur[k];
+    }
+    if (cur != null && cur !== "" && typeof cur !== "object") return cur;
+  }
+  return null;
+}
+function _rwName(o) {
+  const full = _rwPick(o, ["Name", "PlayerName", "FullName", "Player.Name", "Player.FullName", "Player"]);
+  if (full) return String(full).trim();
+  const f = _rwPick(o, ["FirstName", "Player.FirstName", "First"]), l = _rwPick(o, ["LastName", "Player.LastName", "Last"]);
+  return f && l ? `${f} ${l}`.trim() : null;
+}
+function _rwTeam(o) {
+  const t = _rwPick(o, ["Team.Code", "Team.Abbreviation", "Team.Abbr", "TeamCode", "TeamAbbr", "Team.Alias", "Team", "__parent.Team.Code", "__parent.TeamCode", "__parent.Team", "__parent.Code", "__parent.Abbreviation"]);
+  if (!t) return "";
+  const s = String(t).trim();
+  return s.length <= 4 ? (normTeamAbbr(s) || s.toUpperCase()) : (teamLineToAbbr(s) || s);
+}
+function _rwStatus(raw) {
+  const s = String(raw || "").trim().toLowerCase();
+  if (!s) return "Day-To-Day";
+  if (/out for (the )?season|^ofs$|season[- ]ending|^il$|injured reserve/.test(s)) return "Out";
+  if (/^out\b|^o$|suspend/.test(s)) return "Out";
+  if (/doubt/.test(s)) return "Doubtful";
+  if (/game[- ]?time|^gtd$|question|^q$/.test(s)) return "Questionable";
+  if (/probable|^p$/.test(s)) return "Probable";
+  if (/day[- ]to[- ]day|^dtd$/.test(s)) return "Day-To-Day";
+  return String(raw);
+}
+function _rwLineupTeams(data) {
+  const teams = [];
+  (function walk(n) {
+    if (Array.isArray(n)) { n.forEach(walk); return; }
+    if (!n || typeof n !== "object") return;
+    if (n.Players && typeof n.Players === "object" && (n.Code || n.Name) && !(n.FirstName || n.LastName)) { teams.push(n); return; }
+    Object.keys(n).forEach(k => { if (n[k] && typeof n[k] === "object") walk(n[k]); });
+  })(data);
+  return teams;
+}
+function _rwLineupPlayerStatus(o) {
+  const fl = _rwFlat(o);
+  for (const k of Object.keys(fl)) {
+    const kk = k.toLowerCase(), sv = String(fl[k] == null ? "" : fl[k]).trim();
+    if (/injur|status|designation/.test(kk) && /^(out|ques|questionable|gtd|doubt|doubtful|prob|probable|dtd|day-to-day)/i.test(sv)) {
+      const m = _rwStatus(sv); return m === "Out" ? "OUT" : /Prob/.test(m) ? "PROBABLE" : /Quest|Doubt/.test(m) ? "GTD" : "DTD";
+    }
+  }
+  return null;
+}
+function _rwBuildLineupPlayers(data) {
+  const teams = _rwLineupTeams(data), players = {}, parsedTeams = [];
+  teams.forEach(t => {
+    const team = normTeamAbbr(String(t.Code || "")) || teamLineToAbbr(String(t.Name || "")) || String(t.Code || "").toUpperCase();
+    const asList = a => Array.isArray(a) ? a : (a && typeof a === "object" ? Object.values(a).flatMap(v => Array.isArray(v) ? v : [v]) : []);
+    const list = (arr, starterList) => asList(arr).forEach((o, i) => {
+      const name = _rwName(o) || ((o.FirstName || "") + " " + (o.LastName || "")).trim(); if (!name) return;
+      const inj = _rwLineupPlayerStatus(o);
+      const pos = String(_rwPick(o, ["LineupPosition", "Position", "Pos", "Player.Position"]) || "").trim();
+      const key = norm(name);
+      if (starterList) players[key] = { name, displayedName: name, status: inj || "STARTING", starter: !inj, position: pos, team, alsoStarter: !!inj };
+      else if (inj) players[key] = players[key] || { name, displayedName: name, status: inj, starter: false, position: pos, team };   // healthy bench carries no signal
+    });
+    list(t.Players, true); list(t.Bench, false);
+    parsedTeams.push(team);
+  });
+  return { players, teams: parsedTeams };
+}
+function _rwFlat(o, pre, out) {
+  out = out || {}; pre = pre || "";
+  Object.keys(o || {}).forEach(k => {
+    if (k === "__parent") return;
+    const v = o[k], key = (pre ? pre + "." : "") + k;
+    if (v && typeof v === "object" && !Array.isArray(v)) _rwFlat(v, key, out);
+    else if (!Array.isArray(v)) out[key.toLowerCase()] = v;
+  });
+  return out;
+}
+function _rwDeepNamed(node, team, out) {
+  out = out || [];
+  if (Array.isArray(node)) { node.forEach(n => _rwDeepNamed(n, team, out)); return out; }
+  if (!node || typeof node !== "object") return out;
+  const t = _rwPick(node, ["Team.Code", "Team.Abbreviation", "TeamCode", "Code", "Abbreviation", "Team"]);
+  const tm = t && String(t).length <= 4 ? t : team;
+  if (_rwName(node) && _rwPick(node, ["FirstName", "Player.FirstName", "Name", "PlayerName"])) { out.push(Object.assign({ __parent: { Team: tm } }, node)); return out; }
+  Object.keys(node).forEach(k => { const v = node[k]; if (v && typeof v === "object") _rwDeepNamed(v, tm, out); });
+  return out;
+}
+async function _rwFetchLineups() {
+  // Today first; if nothing's posted yet, tomorrow and the day after. RotoWire's own page uses date=tomorrow, so that
+  // literal is tried too. `tried` records what each date answered, so a miss says whether the date was honoured.
+  let games = 0;
+  const tried = [];
+  const attempts = [null, localYMD(new Date(Date.now() + 864e5)), "tomorrow", localYMD(new Date(Date.now() + 2 * 864e5))];
+  for (const dt of attempts) {
+    let data;
+    try { data = await rwApiFetch("NBALineups", dt); } catch (e) { if (dt === null) throw e; tried.push(`${dt}: ${String(e.message || e).slice(0, 60)}`); continue; }
+    const g = Array.isArray(data && data.Games) ? data.Games.length : 0;
+    games = Math.max(games, g);
+    const rows = _rwDeepNamed(data);
+    tried.push(`${dt || "today"} \u2192 Date ${data && data.Date ? data.Date : "?"}, ${g} game${g === 1 ? "" : "s"}, ${rows.length} players`);
+    if (rows.length) return { rows, games, data, tried };
+  }
+  return { rows: [], games, data: null, tried };
+}
 </script>
 <script>
 // SIM SOLO: load a PropShop CSV export (one projection set, e.g. Sharpr or Tabs, filtered to our books), keep every play at 5%+ (or the edge you pick),
@@ -521,11 +804,40 @@ const asObjects = text => { const t = csvRows(text.replace(/^\uFEFF/, "")), h = 
 //   DOWNSIDE / UPSIDE = a teammate's injury blurb names him: more role (helps an over, hurts an under) or less role / he is returning (hurts an over)
 const TEAM_ALIAS = { PHO: "PHX", GS: "GSW", NO: "NOP", NOR: "NOP", SA: "SAS", NY: "NYK", WSH: "WAS", UTAH: "UTA", BK: "BKN", BRK: "BKN", CHO: "CHA", NJ: "BKN" };
 const tm = t => { const u = String(t || "").toUpperCase().trim(); return TEAM_ALIAS[u] || u; };
+// Its own RotoWire pull (same /api/rotowire helper the blender uses): injuries + the latest news blurb per player + RW lineups.
+// Falls back to whatever the blender stored on this site when the pull fails.
+const SIM_RW_KEY = "nba_sim_rw_v1";
+let simRw = null; try { simRw = JSON.parse(localStorage.getItem(SIM_RW_KEY) || "null"); } catch (e) { simRw = null; }
+let rwSyncing = null;
+async function rwSync(force) {
+  if (rwSyncing) return rwSyncing;
+  if (!force && simRw && Date.now() - simRw.at < 10 * 60000) return simRw;
+  rwSyncing = (async () => {
+    const out = { at: Date.now(), inj: [], players: null, err: [] };
+    try {
+      const latest = new Map();
+      try { _rwRows(await rwApiFetch("NBANews")).forEach(n => { const nm = _rwName(n); if (!nm) return; const at = Date.parse(_rwPick(n, ["DateTime", "LastEdited"]) || "") || 0, k = norm(nm), cur = latest.get(k); if (!cur || at > cur.at) latest.set(k, { n, at }); }); } catch (e) { out.err.push("news: " + e.message); }
+      _rwRows(await rwApiFetch("NBAInjuries")).forEach(o => {
+        const name = _rwName(o); if (!name) return;
+        const nw = latest.get(norm(name)), n = nw && nw.n;
+        out.inj.push({ name, team: _rwTeam(o), status: _rwStatus(_rwPick(o, ["Injury.Status", "InjuryStatus", "Status", "Injury.Designation", "Designation"])),
+          shortComment: String((n && (_rwPick(n, ["Notes"]) || _rwPick(n, ["Headline"]))) || _rwPick(o, ["Injury.Notes", "Notes", "Headline"]) || ""), longComment: String((n && _rwPick(n, ["Analysis"])) || _rwPick(o, ["Injury.Details", "Details", "Analysis"]) || "") });
+      });
+    } catch (e) { out.err.push("injuries: " + e.message); }
+    try { const lf = await _rwFetchLineups(); if (lf && lf.data) out.players = _rwBuildLineupPlayers(lf.data).players; } catch (e) { out.err.push("lineups: " + e.message); }
+    if (out.inj.length || out.players) { simRw = out; try { localStorage.setItem(SIM_RW_KEY, JSON.stringify(out)); } catch (e) {} _rw = null; }
+    rwSyncing = null; return out;
+  })();
+  return rwSyncing;
+}
 let _rw = null, _rwAt = 0;
 function rwData() {
   if (_rw && Date.now() - _rwAt < 30000) return _rw;
   const rd = k => { try { return JSON.parse(localStorage.getItem(k) || "null"); } catch (e) { return null; } };
-  const inj = rd("nba_injuries_cache"), rw = rd("nba_lineups_v1"), rg = rd("nba_lineups_rg_v1"), tabs = rd("nba_lineups_tabs_v1");
+  const blInj = rd("nba_injuries_cache"), blRw = rd("nba_lineups_v1"), rg = rd("nba_lineups_rg_v1"), tabs = rd("nba_lineups_tabs_v1");
+  const own = simRw && simRw.inj && simRw.inj.length && (!blInj || !blInj.fetchedAt || simRw.at >= blInj.fetchedAt);   // newest of: this page's own pull, the blender's
+  const inj = own ? { fetchedAt: simRw.at, records: simRw.inj.map(r => ({ athlete: { displayName: r.name, team: { abbreviation: r.team } }, status: r.status, shortComment: r.shortComment, longComment: r.longComment })) } : blInj;
+  const rw = simRw && simRw.players && (!blRw || own) ? { players: simRw.players } : blRw;
   const injBy = new Map(); ((inj && inj.records) || []).forEach(r => { const nm = r && r.athlete && r.athlete.displayName; if (nm) injBy.set(norm(nm), { name: nm, team: tm(r.athlete.team && r.athlete.team.abbreviation), status: String(r.status || ""), blurb: String(r.longComment || "") + " " + String(r.shortComment || ""), own: [r.comment, r.shortComment, r.longComment].filter(Boolean).join(" ") }); });
   _rw = { at: inj && inj.fetchedAt, day: inj && inj.day, injBy, rw: rw && rw.players ? rw.players : null, rg: rg && rg.teams ? rg.teams : null, tabs: tabs && tabs.teams ? tabs.teams : null };
   _rwAt = Date.now(); return _rw;
@@ -571,8 +883,9 @@ let fThr = 5;
 function loadPs(inp, src) {
   const file = inp.files && inp.files[0]; if (!file) return;
   const minEv = MIN_EV;
-  file.text().then(text => {
+  file.text().then(async text => {
     inp.value = "";
+    say("Pulling RotoWire (injuries, blurbs, lineups)\u2026"); try { await rwSync(); } catch (e) {} _rw = null;
     const recs = asObjects(text);
     if (!recs.length || !("ROI (%)" in recs[0]) || !("Market" in recs[0])) { say("That doesn't look like a PropShop CSV export (needs Player / Market / O/U / Line / Odds / ROI (%))."); return; }
     const groups = {};
@@ -684,7 +997,7 @@ function render() {
   const thrChips = [5, 10].map(v => chip(v + "%+", fThr === v, `setThr(${v})`)).join(" ");
   const mktChips = ["ALL"].concat(STATS).map(s => chip(s, fStat === s, `setStat('${s}')`)).join(" ");
   const ctxChips = [["ALL", "ALL"], ["clean", "CLEAN"], ["upside", "UPSIDE"], ["iffy", "IFFY"]].map(([k, l]) => chip(l, fCtx === k, `setCtx('${k}')`)).join(" ");
-  const rwd = rwData(), rwNote = rwd.at ? `RotoWire data from the blender: ${new Date(rwd.at).toLocaleString([], { month: "numeric", day: "numeric", hour: "numeric", minute: "2-digit" })}` : "No RotoWire data yet \u2014 open the blender (REFRESH RW) on this site first; until then every play reads CLEAN";
+  const rwd = rwData(), rwNote = rwd.at ? `RotoWire data: ${new Date(rwd.at).toLocaleString([], { month: "numeric", day: "numeric", hour: "numeric", minute: "2-digit" })}` : "No RotoWire data \u2014 press \u21bb RW CONTEXT; every play reads CLEAN until it loads";
   const days = [...new Set(set.map(x => x.gameDate))].sort().reverse();
   const recent = set.slice().sort((a, b) => (b.gameDate + b.player).localeCompare(a.gameDate + a.player)).slice(0, 80);
   const resCls = r => r === "hit" ? "g" : r === "miss" ? "r" : "m";
@@ -770,8 +1083,14 @@ function exportCsv() {
   const csv = [cols.join(",")].concat(rows.map(r => cols.map(c => JSON.stringify(r[c] == null ? "" : r[c])).join(","))).join("\n");
   const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" })); a.download = "sim-solo.csv"; document.body.appendChild(a); a.click(); a.remove();
 }
+async function retag() {
+  say("Pulling RotoWire\u2026"); const r = await rwSync(true); _rw = null;
+  let n = 0; rows.filter(x => x.result === "pending").forEach(x => { const c = ctxFor(x.player, x.team, x.ou); x.ctx = c.cls; x.ctxWhy = c.why; n++; });
+  save(); render(); say(`RotoWire: ${r && r.inj ? r.inj.length : 0} injury records, ${r && r.players ? Object.keys(r.players).length : 0} lineup players${r && r.err && r.err.length ? ` (problems: ${r.err.join("; ")})` : ""} \u00b7 re-tagged ${n} open plays`);
+}
 function clearAll() { if (!confirm(`Delete all ${rows.length} plays?`)) return; rows = []; save(); render(); }
 render();
+rwSync().then(() => { _rw = null; render(); }).catch(() => {});   // pull RotoWire when the page opens
 
 </script>
 </body></html>
