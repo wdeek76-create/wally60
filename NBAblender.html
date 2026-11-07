@@ -26201,8 +26201,15 @@ function computeMorningEnsemble() {
       gameDateIso: entry.gameDateIso, game: entry.game, gameTime: entry.gameTime || "", sourcePrices: entry.sources.map(x => ({ src: x.src, book: x.prop.book || "", odds: parseInt(x.prop.odds, 10), ev: Number(x.prop.ev), liq: x.prop.liq != null ? x.prop.liq : null, alt: !_mPlayable(x.prop) })), sourcesAgreed: uniq, qualCount, requiredQual, missingSrc, missingProj,
       odds: parseInt(best.odds, 10), book: best.book, ev: Number(best.ev), minEv, proj: pv.length ? pv.reduce((a, b) => a + b, 0) / pv.length : null,
       anchorEv: Number(anchor.prop.ev), fairProb, fairOdds: fairProb != null ? probToAmerican(fairProb) : null, sourceProjs, sourceEvs, sourceFairs,
+      altLine: entry.sources.some(x => x.prop.isMain === false),
     });
   });
+  { // the same player / market / side can clear on more than one line (CSV uploads carry alt lines): keep one, the main line when it clears, else the best alt
+    const pickOf = new Map();
+    cleared.forEach(c => { const k = resolveNorm(c.player) + "|" + c.stat + "|" + c.ou + "|" + (c.gameDateIso || ""); const cur = pickOf.get(k);
+      if (!cur || (cur.altLine && !c.altLine) || (cur.altLine === c.altLine && (c.minEv || 0) > (cur.minEv || 0))) pickOf.set(k, c); });
+    const keep = new Set(pickOf.values()); for (let i = cleared.length - 1; i >= 0; i--) if (!keep.has(cleared[i])) cleared.splice(i, 1);
+  }
   cleared.sort((a, b) => b.sourcesAgreed.length - a.sourcesAgreed.length || b.qualCount - a.qualCount || (b.ev || 0) - (a.ev || 0));
   const order = { cleared: 0, price: 0.5, news: 1, proj: 2, worst: 3, qual: 4, coverage: 5, oppo: 6 };
   misses.sort((a, b) => order[a.gate] - order[b.gate]);
@@ -26364,13 +26371,16 @@ function parsePropShopCsv(text) {
   Object.values(groups).forEach(list => {
     const byLine = {}; list.forEach(x => (byLine[x.line] = byLine[x.line] || []).push(x));
     const main = Object.keys(byLine).sort((a, b) => byLine[b].length - byLine[a].length || Number(a) - Number(b))[0];
-    const at = byLine[main], best = at.reduce((a, x) => x.odds > a.odds ? x : a, at[0]), r = best.r;
+    // every line the export carries becomes its own row (alt lines included), so the ensemble can clear an alt line all sources like
+    Object.keys(byLine).forEach(ln => {
+    const at = byLine[ln], best = at.reduce((a, x) => x.odds > a.odds ? x : a, at[0]), r = best.r;
     const t = Date.parse(`${r.Date}T${r.Start || "00:00:00"}Z`), d = isNaN(t) ? null : new Date(t);
     const away = _matchupKey(r.away_team) || "", home = _matchupKey(r.home_team) || "";
     const row = { player: String(r.Player).trim(), team: String(r.Team || "").trim(), game: away && home ? `${away} @ ${home}` : "", gameTime: d ? d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }) : "",
       gameDateIso: d ? localYMD(d) : String(r.Date || ""), ou: best.ou, line: best.line, odds: best.odds, book: _psCsvBook(r.Book), liq: null, ev: best.ev, proj: Number(r.Proj) || null, minutes: null, simFair: null,
-      csvBooks: at.map(x => ({ book: _psCsvBook(x.r.Book), odds: x.odds, ev: x.ev })) };
+      csvBooks: at.map(x => ({ book: _psCsvBook(x.r.Book), odds: x.odds, ev: x.ev })), isMain: String(ln) === String(main) };
     (out[best.stat] = out[best.stat] || []).push(row);
+    });
   });
   return { byStat: out, rows: rows.length, skipped: [...skipped].filter(Boolean) };
 }
@@ -26820,7 +26830,7 @@ function renderMorning() {
     viewBody = rows.length ? `<div style="display:flex;justify-content:flex-end;margin-bottom:6px;">${getNickWebhook() ? btn("➤ NICK", "morningPostNick()", true, "#00aaff") : ""}${btn("🖼 DISCORD", "morningPostDiscord()", !!getMorningWebhook(), "#5865f2")}${btn("LOG ALL TO MORNING", "morningLogAll()", true, "#c4b5fd")}</div>
       <div style="overflow-x:auto;"><table style="border-collapse:collapse;width:100%;"><thead><tr>${["PLAYER", "STAT", "SIDE", "LINE", "ANCHOR · MODEL", "AGREE · SOURCES (PROJ · EV)", "BEST", "BOOK", "FAIR", "PLAY TO", "WORST EV", ""].map(th).join("")}</tr></thead><tbody>
       ${rows.map(r => { const i = cleared.indexOf(r), logged = _mAlreadyLogged(r); return `<tr style="border-top:1px solid #1a1d22;">
-        ${td(_mPlayerCell(r.player, r.team))}${td(r.stat, "font-weight:800;color:#fff;")}${td(r.ou.toUpperCase(), `font-weight:800;color:${r.ou === "over" ? "#4ade80" : "#f87171"};`)}${td(r.line, "color:#fff;")}
+        ${td(_mPlayerCell(r.player, r.team))}${td(r.stat, "font-weight:800;color:#fff;")}${td(r.ou.toUpperCase(), `font-weight:800;color:${r.ou === "over" ? "#4ade80" : "#f87171"};`)}${td(r.line + (r.altLine ? ` <span style="font-size:10px;font-weight:800;color:#f472b6;border:1px solid #f472b666;border-radius:4px;padding:0 4px;" title="Alt line: not the line most books hang, but every source is +EV here">ALT</span>` : ""), "color:#fff;")}
         ${td(_mAnchorModelHtml(r))}
         ${td(`<span style="display:inline-flex;gap:5px;align-items:center;"><b style="color:#c4b5fd;">${r.sourcesAgreed.length}/${r.requiredQual}</b>${_mSrcPills(r.sourceProjs, r.sourceEvs, r.missingSrc, r.missingProj)}</span>`)}
         ${td(_mFmtOdds(r.odds), "color:#fff;font-weight:700;")}${td(_mEsc(r.book || "—"))}${td(_mFmtOdds(r.fairOdds))}${td(morningPlayTo(r) || "—", "color:#fff;font-weight:700;")}
