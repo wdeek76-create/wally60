@@ -5360,6 +5360,18 @@ function modelRecapResult(card, name) {
   return { status: 'pending' };
 }
 
+// Graded totals for a card's recap picks (sent picks at sent prices).
+function cardRecapStats(card) {
+  let w = 0, l = 0, units = 0, risked = 0;
+  modelRecapPicks(card).forEach(p => {
+    const st = modelRecapResult(card, p.name).status;
+    if (st !== 'win' && st !== 'loss') return;
+    units += unitProfit({ ml: p.odds, status: st }); risked += unitStake({ ml: p.odds });
+    if (st === 'win') w++; else l++;
+  });
+  return { w, l, units, risked };
+}
+
 // ── All-time ledger for recaps ────────────────────────────────────────────
 // { w, l, units, risked, through: 'YYYY-MM-DD', cards: { id: {w,l,units,risked} } }
 // The starting point is what was last posted; cards dated after `through`
@@ -5375,7 +5387,7 @@ function editAllTimeLedger(force) {
   const cur = STATE.allTimeLedger;
   const roi = cur && cur.risked ? (cur.units / cur.risked) * 100 : null;
   const def = cur ? `${cur.w}-${cur.l} ${cur.units >= 0 ? '+' : ''}${cur.units.toFixed(2)}u ${roi >= 0 ? '+' : ''}${roi.toFixed(1)}% through ${cur.through}`
-                  : '112-69 +52.36u +14.9% through 2026-11-07';
+                  : ALL_TIME_DEFAULT;
   const v = prompt('All-time starting point = the last all-time you posted, and the date of the last card it includes.\nCards dated after that add on top.\n\nFormat: W-L units ROI% through YYYY-MM-DD', def);
   if (v === null) return force ? null : undefined;
   const p = parseAllTimeStart(v);
@@ -5388,7 +5400,16 @@ function editAllTimeLedger(force) {
   toast(`All-time starts at ${p.w}-${p.l} ${p.units >= 0 ? '+' : ''}${p.units.toFixed(2)}u (through ${p.through})`);
   return STATE.allTimeLedger;
 }
+// Last correct posted all-time (after Moicano vs. Nolan, Oct 31). The
+// 112-69 +52.36u posted after Cortes Acosta didn't include that card's 0-6.
+const ALL_TIME_DEFAULT = '108-63 +52.12u +15.5% through 2026-10-31';
 async function ensureAllTimeLedger() {
+  const L = STATE.allTimeLedger;
+  if (L && L.w === 112 && L.l === 69 && L.through === '2026-11-07') {
+    // replace the earlier wrong start automatically
+    STATE.allTimeLedger = { ...parseAllTimeStart(ALL_TIME_DEFAULT), cards: {} };
+    saveState(STATE);
+  }
   if (STATE.allTimeLedger) return STATE.allTimeLedger;
   return editAllTimeLedger(true);
 }
@@ -5441,13 +5462,14 @@ async function copyModelRecap() {
   const ledger = await ensureAllTimeLedger();
   let allTime = '';
   if (ledger) {
-    const inLedger = !card.date || card.date > ledger.through;
-    if (inLedger) {
-      ledger.cards[card.id] = { label: card.label || '', date: card.date || '', w, l, units, risked };
-      saveState(STATE);
-    }
+    // Every card dated after the start adds its recap result (sent picks at
+    // sent prices) — whether or not its recap was copied.
     let aw = ledger.w, al = ledger.l, au = ledger.units, ar = ledger.risked;
-    Object.values(ledger.cards).forEach(e => { aw += e.w; al += e.l; au += e.units; ar += e.risked; });
+    (STATE.cards || []).forEach(c => {
+      if (!c.date || c.date <= ledger.through) return;
+      const st = cardRecapStats(c);
+      aw += st.w; al += st.l; au += st.units; ar += st.risked;
+    });
     const aroi = ar ? (au / ar) * 100 : 0;
     allTime = `All-time: ${aw}-${al}  ${au >= 0 ? '+' : ''}${au.toFixed(2)}u  ROI ${aroi >= 0 ? '+' : ''}${aroi.toFixed(1)}%`;
   }
