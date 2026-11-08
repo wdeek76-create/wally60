@@ -2616,11 +2616,37 @@ function smBackup(){
 // new copy of this page on a phone. Paste MERGES: bets already here stay, missing ones are added,
 // and a graded copy wins over an ungraded one of the same bet.
 const smTrackerJson = () => JSON.stringify({ tool:'sharp-money-tracker', at:new Date().toISOString(), tracked:tracked.filter(t=>t.src==='sharp' && (t.bookKey||'fanduel')==='fanduel'), record:smRec });
-const smExportName = () => `sharp-money-tracker-${etToday()}.json`;
+const smExportName = () => `sharp-money-tracker-${etToday()}.csv`;
+// The export as a spreadsheet: one row per breakdown line (all-time + every day) and one per open bet.
+// The last column carries the raw numbers / bet so "Import backup" can rebuild everything from it.
+const csvCell = v => { const t=String(v??''); return /[",\n]/.test(t) ? `"${t.replace(/"/g,'""')}"` : t; };
+function smTrackerCsv(){
+  const rows=[['type','book','day','section','label','bets','won','lost','push','units','roi','grade','data']];
+  Object.entries(smRec.books||{}).forEach(([bk,B])=>{
+    const put=(day,S)=>Object.entries(S||{}).forEach(([sec,o])=>{ if(!o || typeof o!=='object' || Array.isArray(o)) return;
+      Object.entries(o).forEach(([lab,r])=>{ if(!r || typeof r!=='object' || r.n==null) return;
+        rows.push(['record',bk,day,sec,lab,r.n,r.w,r.l,r.p,(+r.u).toFixed(2),r.s?`${(r.u/r.s*100).toFixed(1)}%`:'',smGrade(r).split(' ')[1],JSON.stringify(r)]); }); });
+    put('all', B.all); Object.keys(B.days||{}).sort().forEach(d=>put(d, B.days[d])); });
+  tracked.filter(t=>t.src==='sharp' && (t.bookKey||'fanduel')==='fanduel').forEach(t=>rows.push(['bet',t.bookKey||'fanduel',t.start?etDayOf(new Date(t.start).getTime()):'',
+    t.final?(t.result||'graded'):'open',`${titleCase(t.playerName||'')} ${sideTxt(t)} ${t.line??''} ${t.marketLabel||t.mkey} ${fmtAm(t.price)}`.replace(/\s+/g,' ').trim(),'','','','','','','',JSON.stringify(t)]));
+  return rows.map(r=>r.map(csvCell).join(',')).join('\n');
+}
+function smParseCsv(txt){
+  const rows=[]; let row=[], cell='', q=false;
+  for(let i=0;i<txt.length;i++){ const c=txt[i];
+    if(q){ if(c==='"'){ if(txt[i+1]==='"'){ cell+='"'; i++; } else q=false; } else cell+=c; }
+    else if(c==='"') q=true; else if(c===','){ row.push(cell); cell=''; } else if(c==='\n'){ row.push(cell); rows.push(row); row=[]; cell=''; } else if(c!=='\r') cell+=c; }
+  if(cell||row.length){ row.push(cell); rows.push(row); }
+  const record={ v:1, books:{} }, trackedIn=[];
+  rows.slice(1).forEach(r=>{ const [type,bk,day,sec,lab]=r, data=r[12]; if(!data) return; let o; try{ o=JSON.parse(data); }catch(e){ return; }
+    if(type==='record'){ const B=record.books[bk]=record.books[bk]||{ all:{}, days:{} }; const S=day==='all'?B.all:(B.days[day]=B.days[day]||{}); (S[sec]=S[sec]||{})[lab]=o; }
+    else if(type==='bet') trackedIn.push(o); });
+  return { tool:'sharp-money-tracker', tracked:trackedIn, record };
+}
 // sent with every recap (Telegram + Discord): the tracker + record as a file to save -- import it with
 // "Import backup". Holds no webhooks or bot token.
 async function smSendExport(hook){
-  const blob=new Blob([smTrackerJson()],{type:'application/json'}), cap=`💾 Tracker export · ${etToday()} — save it; restore with Import backup`;
+  const blob=new Blob([smTrackerCsv()],{type:'text/csv'}), cap=`💾 Tracker export · ${etToday()} — save it; restore with Import backup`;
   let ok=false;
   if(tgOn()){ try{ const fd=new FormData(); fd.append('chat_id', tgChat); fd.append('caption', cap); fd.append('document', blob, smExportName()); await tgApi('sendDocument', fd); ok=true; }catch(e){ console.warn('[tg] export', e.message); } }
   if(hook){ try{ ok = (await discordPost({ username:'FanDuel', avatar_url:httpsLogo('fanduel'), content:cap, allowed_mentions:{parse:[]}, files:[{ name:smExportName(), blob }] }, null, hook)) || ok; }catch(e){} }
@@ -2656,9 +2682,11 @@ function smMergeTracker(j){
     if(viewMode==='tracker') renderTracker(); else if(viewMode==='nbalive') renderNbaLive();
 }
 function smRestore(){
-  const inp=document.createElement('input'); inp.type='file'; inp.accept='application/json,.json';
+  const inp=document.createElement('input'); inp.type='file'; inp.accept='application/json,.json,text/csv,.csv';
   inp.onchange=async()=>{ const f=inp.files?.[0]; if(!f) return;
-    try{ const j=JSON.parse(await f.text());
+    try{ const txt=await f.text();
+      if(/^type,book,day,section/.test(txt.trim())){ smMergeTracker(smParseCsv(txt)); return; }   // the CSV export from a recap
+      const j=JSON.parse(txt);
       if(j?.tool==='sharp-money-tracker'){ smMergeTracker(j); return; }   // a tracker export (from a recap) merges in
       const data=j?.data; if(!data || typeof data!=='object') throw new Error('not a Sharp Money backup');
       if(!confirm(`Restore ${Object.keys(data).length} items from ${j.at?new Date(j.at).toLocaleString():'this file'}? This replaces what's here now.`)) return;
