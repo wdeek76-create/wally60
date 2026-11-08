@@ -4627,6 +4627,11 @@ async function importPropShopNhl() {
   const infoEl = document.getElementById('propshop-parse-info');
   if (!raw.trim()) { infoEl.textContent = 'Paste something first.'; return; }
   const { results, errors } = parsePropShopNhl(raw, minEdge);
+  _nhlPsIngest(results, errors, psSource, minEdge);
+}
+// Shared by the paste box and the PropShop CSV upload: replaces that source's list with these rows.
+function _nhlPsIngest(results, errors, psSource, minEdge) {
+  const infoEl = document.getElementById('propshop-parse-info');
   if (!results.length) {
     infoEl.textContent = `No qualifying picks found (min edge ${minEdge}%).` + (errors.length ? ` ${errors.length} parse error(s) — check console.` : '');
     if (errors.length) console.warn('[NHL PropShop]', errors);
@@ -4671,6 +4676,50 @@ async function importPropShopNhl() {
   // already been absorbed into this source's staging list, so leaving the
   // old text sitting there just invites a stale double-paste next time.
   document.getElementById('propshop-paste-area').value = '';
+}
+// PropShop's results file (simulation_results.csv): one row per player / side / line / book, for the projection
+// set picked in the dropdown. Same rows a paste gives — best price per player/side/line, min edge applied to ROI %.
+const _NHL_FULLNAME_ABBR = { "anaheim ducks": "ANA", "boston bruins": "BOS", "buffalo sabres": "BUF", "calgary flames": "CGY", "carolina hurricanes": "CAR",
+  "chicago blackhawks": "CHI", "colorado avalanche": "COL", "columbus blue jackets": "CBJ", "dallas stars": "DAL", "detroit red wings": "DET",
+  "edmonton oilers": "EDM", "florida panthers": "FLA", "los angeles kings": "LAK", "minnesota wild": "MIN", "montreal canadiens": "MTL",
+  "montréal canadiens": "MTL", "nashville predators": "NSH", "new jersey devils": "NJD", "new york islanders": "NYI", "new york rangers": "NYR",
+  "ottawa senators": "OTT", "philadelphia flyers": "PHI", "pittsburgh penguins": "PIT", "san jose sharks": "SJS", "seattle kraken": "SEA",
+  "st. louis blues": "STL", "st louis blues": "STL", "tampa bay lightning": "TBL", "toronto maple leafs": "TOR", "utah mammoth": "UTA",
+  "utah hockey club": "UTA", "vancouver canucks": "VAN", "vegas golden knights": "VGK", "washington capitals": "WSH", "winnipeg jets": "WPG" };
+function _nhlPsParseCsv(text, minEdge) {
+  const rows = parseCSV(text), results = [], errors = [];
+  if (rows.length < 2) return { results, errors: ["empty file"] };
+  const h = rows[0].map(x => String(x).replace(/^\uFEFF/, "").replace(/"/g, "").trim().toLowerCase());
+  const col = (...n) => { for (const k of n) { const i = h.indexOf(k); if (i >= 0) return i; } return -1; };
+  const iP = col("player"), iOU = col("o/u", "ou", "side"), iLine = col("line"), iOdds = col("odds"), iBook = col("book"), iProj = col("proj", "projection"),
+    iRoi = col("roi (%)", "roi", "ev"), iEdge = col("edge"), iMkt = col("market"), iTeam = col("team"), iHome = col("home_team"), iAway = col("away_team"),
+    iDate = col("date"), iStart = col("start");
+  if (iP < 0 || iOU < 0 || iLine < 0 || iOdds < 0) return { results, errors: ["missing Player / O/U / Line / Odds columns"] };
+  const abbr = n => _NHL_FULLNAME_ABBR[String(n || "").trim().toLowerCase()] || String(n || "").trim().toUpperCase();
+  rows.slice(1).forEach((r, i) => {
+    const clean = k => k >= 0 ? String(r[k] == null ? "" : r[k]).replace(/"/g, "").trim() : "";
+    if (iMkt >= 0 && !/shots?_on_goal|sog/i.test(clean(iMkt))) return;
+    const player = clean(iP), ou = clean(iOU).toLowerCase().startsWith("o") ? "over" : "under";
+    const line = parseFloat(clean(iLine)), odds = parseInt(clean(iOdds), 10);
+    if (!player || !isFinite(line) || !isFinite(odds)) { errors.push("row " + (i + 2)); return; }
+    const ev = iRoi >= 0 ? parseFloat(clean(iRoi)) : iEdge >= 0 ? parseFloat(clean(iEdge)) : null;
+    if (ev != null && isFinite(ev) && ev < minEdge) return;
+    // Date + Start are UTC (a 7pm ET game reads as the next day 00:00) → the local game day.
+    let gameDateIso = clean(iDate);
+    const t = new Date(clean(iDate) + "T" + (clean(iStart) || "12:00:00") + "Z");
+    if (!isNaN(t.getTime())) gameDateIso = _ymdLocal(t);
+    results.push({ player, ou, line, odds, book: _nhlBookLabel(clean(iBook)) || clean(iBook), ev: ev != null && isFinite(ev) ? Math.round(ev * 10) / 10 : null,
+      proj: iProj >= 0 ? parseFloat(clean(iProj)) : null, game: iAway >= 0 && iHome >= 0 ? abbr(clean(iAway)) + " @ " + abbr(clean(iHome)) : "", team: clean(iTeam), gameDateIso });
+  });
+  return { results, errors };
+}
+function importPropShopCsvNhl(inp) {
+  const file = inp.files && inp.files[0]; if (!file) return;
+  const minEdge = parseFloat(document.getElementById('ps-min-edge').value) || 0;
+  const psSource = document.getElementById('ps-source').value;
+  const r = new FileReader();
+  r.onload = e => { inp.value = ""; const { results, errors } = _nhlPsParseCsv(e.target.result, minEdge); _nhlPsIngest(results, errors, psSource, minEdge); };
+  r.readAsText(file);
 }
 function setNhlPsTab(tab) {
   nhlPsTab = tab;
@@ -6969,6 +7018,8 @@ function scheduleNextTickerRefresh() {
       </label>
     </div>
     <div style="font-size:11px;color:#4a6fa5;margin-bottom:8px;">PropShop's own "Projection Set" switcher decides whose numbers are on the board when you copy it — pick the matching one here so imported picks are tagged with which source they came from, not lumped together. Leave min edge at 1% — the real 3% gate is applied by the ensemble (3 of 4 sources ≥3%), so filtering this import any higher throws away the 1–2% rows the 4th-source rule needs.</div>
+    <label style="display:inline-block;margin-bottom:8px;background:#0a1628;border:1px solid #a78bfa;color:#c4b5fd;border-radius:6px;padding:6px 12px;font-size:12px;font-weight:700;cursor:pointer;">⬆ Upload PropShop CSV (results file)<input type="file" accept=".csv" style="display:none" onchange="importPropShopCsvNhl(this)"></label>
+    <span style="font-size:11px;color:#4a6fa5;margin-left:6px;">— or paste the board below</span>
     <textarea id="propshop-paste-area" placeholder="Paste here…" style="width:100%;height:260px;background:#060b14;border:1px solid #0d2035;border-radius:8px;color:#e2e8f0;padding:10px;font-family:'Inter',sans-serif;font-size:12px;resize:vertical;"></textarea>
     <div id="propshop-parse-info" style="font-size:12px;color:#4a6fa5;margin-top:8px;min-height:16px;"></div>
     <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:16px;">
