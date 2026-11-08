@@ -3143,11 +3143,15 @@ async function pasteLegHtml(pk, l){
     .map(ln=>{ const b=pasteBest(rows,l.side,ln)[0]; return b?`${l.side==='over'?'o':'u'}${ln} ${fmtAm(b.price)} ${bookShort(b.k)}`:''; }).filter(Boolean);
   // the price to post, in cents too (what the exchange's order screen asks for): -200 = 66.7¢
   const cts = am => `${(toImplied(Number(am))*100).toFixed(1)}¢`;
-  const post=(k,lbl)=>{ const pr = k==='prophet x' ? Number(calcPostPrice(l.playTo, QARB_PX_ADD)) : Math.round(l.playTo); return pkLink(k, ex.find(x=>x.k===k)?.url || opp.find(x=>x.k===k)?.url, `${pkBk(k)}<span class="sz">post ${l.side==='over'?'Over':'Under'} at <b style="width:auto;color:var(--green)">${cts(pr)}</b> (${fmtAm(pr)})${lbl}</span><span class="dim">›</span>`, 'pkrow'); };
+  // quick-arb posts off each book on this side, with your arb % (and PX +2¢) -- same chips as quick arb
+  const exk = qarbVenue==='px' ? 'prophet x' : 'novig';
+  const postRows = flat.slice(0,6).map(x=>{ const pr=qarbPostFor(x.price, qarbThresh); if(pr==null) return '';
+    const within = toDec(Number(pr))>=toDec(l.playTo)-1e-9;
+    return pkLink(exk, ex.find(y=>y.k===exk)?.url, `${pkBk(x.k)}<b>${fmtAm(x.price)}</b><span class="sz">→ post <b style="width:auto;color:${within?'var(--green)':'var(--sub)'}">${(qarbPostImp(x.price,qarbThresh)*100).toFixed(1)}¢</b> (${pr})${within?'':' · past play-to'}</span><span class="dim">›</span>`, 'pkrow'); }).join('');
   return `<div class="pkleg"><div class="pklt">${esc(title)} <button class="pkbtn" style="float:right;padding:3px 9px" data-pkopen="${esc(p.key)}|${l.mk}|${l.side}">Open</button></div><div class="pkls">${sub}</div>
     <div class="pksub">Books</div>${flat.map(row).join('')||'<div class="dim">No book hanging this line.</div>'}
     <div class="pksub">Novig / ProphetX</div>${ex.map(row).join('')||'<div class="dim">Nothing to take on the exchanges at this line.</div>'}
-    ${post('novig','')}${post('prophet x',' <span class="dim">(+2¢ for the PX fee)</span>')}
+    <div class="pksub">Post on ${qarbVenue==='px'?'ProphetX (+2¢ fee)':'Novig'} · ${esc(qarbCents(qarbThresh)!=null?qarbThresh:qarbThresh+'%')}</div>${postRows||'<div class="dim">No book to post off.</div>'}
     ${others.length?`<div class="pksub">Other lines</div><div class="dim" style="font-size:11.5px">${esc(others.slice(0,8).join(' · '))}</div>`:''}</div>`;
 }
 let pasteText = LS.get('props_paste','');
@@ -3164,10 +3168,17 @@ async function openPaste(){
   const ov=document.createElement('div'); ov.className='pkov'; ov.id='pkov';
   ov.innerHTML=`<div class="pkbox"><div class="pkhd"><b>Paste picks</b><button class="pkbtn" id="pkgo">Find</button><button class="ib" id="pkx">✕</button></div>
     <textarea id="pkta" placeholder="@everyone DET Duncan Robinson u1.5 stl -180, would play to -200 ...">${esc(pasteText)}</textarea>
-    <div class="dim" style="font-size:10.5px;margin-top:4px">✓ = at or better than the play-to · PX posts are +2¢ for its fee</div><div id="pkres"></div></div>`;
+    <div class="qarbrow qarbpresets" id="pkchips" style="margin-top:8px">${[['0.5','0.5%'],['1','Tight 1%'],['2','2%'],['3','Aggr 3%'],['5','5%']].map(([v,t])=>`<button class="qarbchip${String(qarbThresh)===v?' on':''}" data-pkedge="${v}">${t}</button>`).join('')}
+      <span class="qarbgrp"><button class="qarbvenue${qarbVenue==='nv'?' on':''}" data-pkven="nv">NV</button><button class="qarbvenue${qarbVenue==='px'?' on':''}" data-pkven="px">PX +2¢</button></span></div>
+    <div class="dim" style="font-size:10.5px;margin-top:4px">✓ = at or better than the play-to · posts = book price + your % (PX +2¢)</div><div id="pkres"></div></div>`;
   document.body.appendChild(ov);
   ov.addEventListener('click',ev=>{ if(ev.target===ov) closePaste(); });
   $('#pkx').onclick=closePaste;
+  $('#pkchips').addEventListener('click',ev=>{ const c=ev.target.closest('[data-pkedge]'), v=ev.target.closest('[data-pkven]'); if(!c && !v) return;
+    if(c){ qarbThresh=c.dataset.pkedge; LS.set('props_qarbthresh', qarbThresh); } if(v){ qarbVenue=v.dataset.pkven; LS.set('props_qarbvenue', qarbVenue); }
+    $('#pkchips').querySelectorAll('[data-pkedge]').forEach(b=>b.classList.toggle('on', b.dataset.pkedge===String(qarbThresh)));
+    $('#pkchips').querySelectorAll('[data-pkven]').forEach(b=>b.classList.toggle('on', b.dataset.pkven===qarbVenue));
+    pasteRun(); });
   $('#pkta').addEventListener('input',e=>{ pasteText=e.target.value; LS.set('props_paste', pasteText); });
   $('#pkgo').onclick=()=>{ pasteText=$('#pkta').value; LS.set('props_paste', pasteText); pasteRun(); };
   $('#pkres').addEventListener('click',ev=>{ const b=ev.target.closest('[data-pkopen]'); if(!b) return; const [key,mk,side]=b.dataset.pkopen.split('|'); const pl=players.find(x=>x.key===key); if(!pl) return;
