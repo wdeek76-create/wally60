@@ -598,7 +598,9 @@ function smDumpGraded(now0){
 }
 setTimeout(smDumpGraded, 3000); setInterval(smDumpGraded, 5*60e3);
 const smFmt=r=>`${r.w}-${r.l}${r.p?'-'+r.p:''} · ${r.u>=0?'+':''}${r.u.toFixed(2)}u${r.s?` · ${r.u/r.s>=0?'+':''}${(r.u/r.s*100).toFixed(1)}%`:''}`;
-const smRows=(sec, ord)=>Object.entries(sec||{}).sort(ord ? (a,b)=>ord(a[0])-ord(b[0]) : (a,b)=>b[1].n-a[1].n).map(([k,r])=>`${k} (${r.n}): ${smFmt(r)}`);
+// breakdown grade from profit: ROI A +8%+ · B +3% · C ±3% · D -8% · F worse
+const smGrade = r => { const roi=r.s ? r.u/r.s*100 : 0; return roi>=8?'🟢 A':roi>=3?'🟢 B':roi>-3?'🟡 C':roi>-8?'🔴 D':'🔴 F'; };
+const smRows=(sec, ord)=>Object.entries(sec||{}).sort(ord ? (a,b)=>ord(a[0])-ord(b[0]) : (a,b)=>b[1].u-a[1].u).map(([k,r])=>`${smGrade(r)} · ${k} (${r.n}): ${smFmt(r)}`);
 const smTipOrd=k=>{ const i=OUT_BUCKETS.findIndex(x=>k.startsWith(x)); return i*2+(/\(muted\)/.test(k)?0:1); };
 function sharpSummaryHtml(){
   const bk=tkBook==='all'?'fanduel':tkBook, R=smRec.books[bk]; const A=R?.all; if(!A || !A.head?.all?.n) return '';
@@ -917,7 +919,8 @@ function tgText(pl, e){ const em=pl.embeds?.[0]||{};
   const game=String(em.description||'').split('\n')[0].replace(/\*\*/g,'');
   const rw = e ? smRwFlag(e) : null;
   // "Scottie Barnes 22.5 Points -122 · $1.2k" in bold -- the money at arb/0% next to the odds; Unders go without the word
-  const bet = e && e.soft?.[0] ? `<b>${tgEsc([titleCase(e.player), e.side!=='under'?sharpSideLabel(e.side):'', e.line??'', marketLabel(e.sk,e.mk), fmtAm(e.soft[0].price)].filter(x=>x!=='').join(' '))}${e.L?.total?` · ${usd(e.L.total)}`:''}</b>` : tgEsc(em.title||'');
+  // "Ziaire Williams 2.5 Rebounds" (bold), then the price and the money under it: "+116 · $269" -- Unders go without the word
+  const bet = e && e.soft?.[0] ? `<b>${tgEsc([titleCase(e.player), e.side!=='under'?sharpSideLabel(e.side):'', e.line??'', marketLabel(e.sk,e.mk)].filter(x=>x!=='').join(' '))}</b>\n<b>${fmtAm(e.soft[0].price)}${e.L?.total?` · ${usd(e.L.total)}`:''}</b>` : tgEsc(em.title||'');
   // iffy plays: the RotoWire context itself (the blurb, who's out / questionable), not just a tag
   const rwTxt = rw?.iffy ? `⚠️ <b>Iffy</b>\n${tgMd(rw.txt)}` : '';
   return [tgEsc(game), bet, rwTxt, em.url?tgEsc(em.url):''].filter(Boolean).join('\n\n').slice(0,4000); }
@@ -2483,16 +2486,36 @@ const RECAP_BOOK = {
   bet105:{ book:'bet105', name:'bet105', title:'bet105 Sharp Money recap', flag:'sm_b105recap_', key:'sm_b105recap_hook', has:t=>smIsBook(t,'bet105') && !SHARP_MAINS.has(t.mkey), alert:()=>b105Hook },
   b105main:{ book:'bet105', name:'main lines', title:'Main lines recap (bet105 + BetOnline)', flag:'sm_b105mainrecap_', key:'sm_b105mainrecap_hook', has:t=>(smIsBook(t,'bet105')||smIsBook(t,'betonline')) && SHARP_MAINS.has(t.mkey), alert:()=>b105MainHook||b105Hook } };
 Object.values(RECAP_BOOK).forEach(B=>{ B.hook=()=>LS.get(B.key,'')||B.alert(); });
-async function smPostRecap(day, manual, book='fanduel'){
-  const B=RECAP_BOOK[book], hook=B.hook();
-  if(!hook){ if(manual) toast(`Set the ${B.name} recap channel first`); return false; }
-  smDumpGraded(true); const R=smRecapFields(day, book); if(!R.has){ if(manual) toast('Nothing graded for that day yet'); return false; }
-  const ok=await postRecapFields(hook, B.title, R.fields);
-  // same recap to the Telegram channel the FD plays go to
-  if(ok && book==='fanduel' && tgOn()){ const parts=[`📊 <b>${tgEsc(B.title)}</b>`, ...R.fields.map(f=>`<b>${tgMd(f.name)}</b>\n${tgMd(f.value)}`)], msgs=[''];
-    parts.forEach(x=>{ if((msgs[msgs.length-1]+'\n\n'+x).length>3900) msgs.push(''); msgs[msgs.length-1]+=(msgs[msgs.length-1]?'\n\n':'')+x; });
-    for(const m of msgs){ await tgSend(m); await new Promise(z=>setTimeout(z,800)); } }
-  if(ok) LS.set(B.flag+day,'1'); if(manual) toast(ok?'Recap posted':'Recap failed'); return ok;
+async function smTgRecap(title, fields, note){
+  if(!tgOn()) return false;
+  const parts=[`📊 <b>${tgEsc(title)}</b>`, ...(note?[tgEsc(note)]:[]), ...fields.map(f=>`<b>${tgMd(f.name)}</b>\n${tgMd(f.value)}`)], msgs=[''];
+  parts.forEach(x=>{ if((msgs[msgs.length-1]+'\n\n'+x).length>3900) msgs.push(''); msgs[msgs.length-1]+=(msgs[msgs.length-1]?'\n\n':'')+x; });
+  let ok=false; for(const m of msgs){ ok=(await tgSend(m))||ok; await new Promise(z=>setTimeout(z,800)); } return ok;
+}
+async function smPostRecap(day, manual, book='fanduel', note){
+  const B=RECAP_BOOK[book], hook=B.hook(), tg=book==='fanduel' && tgOn();
+  if(!hook && !tg){ if(manual) toast(`Set the ${B.name} recap channel (or Telegram) first`); return false; }
+  smDumpGraded(true); const R=smRecapFields(day, book);
+  const dayName=new Date(day+'T12:00:00').toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'});
+  if(!R.has){
+    // nothing graded: only a tap says so (Telegram, and Discord if it's set) -- the auto check never posts this
+    if(manual){ const msg=`No graded bets for ${dayName} yet.`;
+      if(tg) await tgSend(`📊 <b>${tgEsc(B.title)}</b>\n\n${tgEsc(msg)}`);
+      if(hook) await discordPost({ username:'FanDuel', avatar_url:httpsLogo('fanduel'), content:`**${B.title}** — ${msg}`, allowed_mentions:{parse:[]} }, null, hook);
+      toast(msg); }
+    return false; }
+  const dOk = hook ? await postRecapFields(hook, B.title, note?[{ name:note, value:'​' }, ...R.fields]:R.fields) : false;
+  const tOk = tg ? await smTgRecap(B.title, R.fields, note) : false;
+  const ok = dOk || tOk;
+  if(ok) LS.set(B.flag+day,'1'); if(manual) toast(ok?`Recap posted${tg?(tOk?' (Telegram ✓)':' (Telegram failed)'):''}`:'Recap failed'); return ok;
+}
+// the Post button: today if anything's graded today, else the latest graded day (and says so)
+function smPostRecapNow(){
+  smDumpGraded(true); const today=etToday();
+  if(smRecapFields(today).has) return smPostRecap(today, true);
+  const last=lastRecapDay('fanduel');
+  if(last && last!==today && smRecapFields(last).has) return smPostRecap(last, true, 'fanduel', 'No graded bets for today yet — latest graded day:');
+  return smPostRecap(today, true);
 }
 // one recap post at a time: the auto check fires from several places (tracker refresh, the minute
 // tick), and a multi-card post takes a few seconds -- without this two could post the same day
@@ -2603,7 +2626,7 @@ async function setRecapHook(book){
   if(viewMode==='tracker') renderTracker();
 }
 const bindBackup = v => { v.querySelectorAll('[data-rch]').forEach(b=>b.onclick=()=>setRecapHook(b.dataset.rch));
-  v.querySelectorAll('[data-bk]').forEach(b=>b.onclick=()=>b.dataset.bk==='bkch'?smSetBackupHook():b.dataset.bk==='bknow'?(async()=>{ if(!LS.get('sm_backup_hook','')){ smSetBackupHook(); return; } const ok=await smAutoBackup(true); toast(ok?'Backup posted to Discord':'Backup post failed'); })():b.dataset.bk==='recap105'?smPostRecap(lastRecapDay('bet105'), true, 'bet105'):b.dataset.bk==='recapmain'?smPostRecap(lastRecapDay('b105main'), true, 'b105main'):b.dataset.bk==='copy'?smCopyTracker():b.dataset.bk==='paste'?smPasteTracker():b.dataset.bk==='save'?smBackup():b.dataset.bk==='recap'?(()=>{ const days=[...new Set(tracked.filter(t=>t.src==='sharp'&&t.start&&t.final).map(t=>etDayOf(new Date(t.start).getTime())))].sort(); smPostRecap(days[days.length-1]||etToday(), true); })():smRestore()); };
+  v.querySelectorAll('[data-bk]').forEach(b=>b.onclick=()=>b.dataset.bk==='bkch'?smSetBackupHook():b.dataset.bk==='bknow'?(async()=>{ if(!LS.get('sm_backup_hook','')){ smSetBackupHook(); return; } const ok=await smAutoBackup(true); toast(ok?'Backup posted to Discord':'Backup post failed'); })():b.dataset.bk==='recap105'?smPostRecap(lastRecapDay('bet105'), true, 'bet105'):b.dataset.bk==='recapmain'?smPostRecap(lastRecapDay('b105main'), true, 'b105main'):b.dataset.bk==='copy'?smCopyTracker():b.dataset.bk==='paste'?smPasteTracker():b.dataset.bk==='save'?smBackup():b.dataset.bk==='recap'?smPostRecapNow():smRestore()); };
 let nlHist=false;
 function renderNbaLive(){
   const v=$('#view'), now=Date.now();
