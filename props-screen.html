@@ -2701,10 +2701,16 @@ function boardHtml(rows, p, mkey, ctxKey, mainLine, pt, ro){
   const qarbOn = (o)=>qarbLine==null || o.points==null || Number(o.points)===Number(qarbLine);
   const qarbBase = (!ro && mode5On()) ? qAll(()=>cardRows(p,mkey,ctxKey)).filter(qarbOn) : rows;
   const qarbExtraRows=qAll(()=>rowsFor(p,mkey,qarbExtraCache[qarbExtraKey]||[])).filter(qarbOn);
-  if(!qarbExtraCache[qarbExtraKey] || (qarbOpen && Date.now()-(qarbExtraAt[qarbExtraKey]||0)>QARB_EXTRA_TTL)) ensureQarbExtras(p,mkey).then(rows=>{ if(rows.length) rerenderCard(p,ctxKey); });
+  if(!qarbExtraCache[qarbExtraKey] || (qarbOpen && Date.now()-(qarbExtraAt[qarbExtraKey]||0)>QARB_EXTRA_TTL)) { const sig0=qarbSig(qarbExtraCache[qarbExtraKey]); ensureQarbExtras(p,mkey).then(rows=>{ if(rows.length && qarbSig(rows)!==sig0) rerenderCard(p,ctxKey); }); }
   const qarbList = (qarbExtraRows.length || qarbBase!==rows) ? qAll(()=>bookBoard([...qarbBase,...qarbExtraRows])) : list;
-  const qarbActiveSorted = (activeSide==='under'?qarbList.filter(b=>b.under).sort((a,b)=>toDec(b.under.price)-toDec(a.under.price))
+  const qarbActiveSorted = (activeSide==='under'?qarbList.filter(b=>b.under).sort((a,b)=>toDec(b.under.price)-toDec(a.under.price) || String(a.key).localeCompare(String(b.key)))
     : qarbList.filter(b=>b.over).sort((a,b)=>toDec(b.over.price)-toDec(a.over.price)));
+  // hold each book for 45s after it was last seen at this line + side: a refresh that briefly misses a
+  // book (fast pulls / a slow request) doesn't make its row pop out and back in
+  const qmk=`${ctxKey}|${activeSide}|${qarbLine??''}`, qmem=qarbMem[qmk]||(qarbMem[qmk]={}), qnow=Date.now();
+  qarbActiveSorted.filter(b=>!b.ex).forEach(b=>{ qmem[b.key]={ b, at:qnow }; });
+  Object.values(qmem).forEach(m=>{ if(qnow-m.at>45e3){ delete qmem[m.b.key]; return; } if(!qarbActiveSorted.some(b=>b.key===m.b.key)) qarbActiveSorted.push(m.b); });
+  qarbActiveSorted.sort((a,b)=>toDec(b[activeSide].price)-toDec(a[activeSide].price) || String(a.key).localeCompare(String(b.key)));
   const sameBooks=qarbActiveSorted.filter(b=>!b.ex);
   // Tight 1% · Aggressive 3 / 5% (plus 0.5 / 2% and a typed %)
   const QARB_GROUPS=[['',[['0.5','0.5%']]],['Tight',[['1','1%']]],['',[['2','2%']]],['Aggressive',[['3','3%'],['5','5%']]]];
@@ -3352,6 +3358,9 @@ const marketNamesFor = (p,mkey) => [...new Set(rowsFor(p,mkey,mainRows).map(o=>o
 const qarbExtraCache = {}, qarbExtraAt = {};
 const QARB_EXTRA_TTL = 10000; // refetch Caesars/HR/Kambi/MGM while quick arb is open, so their prices + liq stay live
 const qarbExtraPending = {};
+// what quick arb would show from the extra books -- only a real change re-draws the card
+const qarbMem = {};   // ctx|side|line -> book -> { b, at } (quick arb's 45s hold)
+const qarbSig = rows => (rows||[]).map(o=>`${canonBook(o.sportsbook)}|${o.name}|${o.points}|${o.price}`).sort().join(';');
 async function ensureQarbExtras(p, mkey){
   const marketNames=marketNamesFor(p,mkey);
   const ck=`${p.fixtureId}|${marketNames.join(',')}`;
@@ -3367,7 +3376,12 @@ async function ensureQarbExtras(p, mkey){
       try{ add(await oo('/fixtures/odds',{fixture_id:[p.fixtureId],sportsbook:bks,market:marketNames})); }
       catch(e){ await Promise.all(bks.map(async bk=>{ try{ add(await oo('/fixtures/odds',{fixture_id:[p.fixtureId],sportsbook:[bk],market:marketNames})); }catch(e2){ if(e2.status>=400&&e2.status<500) extraBad.add(bk); } })); }
     }));
-    qarbExtraCache[ck]=rows; qarbExtraAt[ck]=Date.now(); delete qarbExtraPending[ck]; return rows;
+    // a book that drops out of one refetch (a slow / refused request) keeps its last rows for a minute,
+    // so quick arb doesn't flicker rows in and out every 10s
+    const now=Date.now(), got=new Set(rows.map(o=>canonBook(o.sportsbook)));
+    rows.forEach(o=>{ o._qAt=now; });
+    (qarbExtraCache[ck]||[]).forEach(o=>{ if(!got.has(canonBook(o.sportsbook)) && now-(o._qAt||0)<60e3) rows.push(o); });
+    qarbExtraCache[ck]=rows; qarbExtraAt[ck]=now; delete qarbExtraPending[ck]; return rows;
   })();
   return qarbExtraPending[ck];
 }
