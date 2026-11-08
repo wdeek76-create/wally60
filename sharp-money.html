@@ -998,7 +998,7 @@ async function discordPost(payload, onErr, hook=discordHook){
   // payload.files ([{name, blob}]): sent as multipart so an embed can use attachment://name
   const files=payload.files||null; payload={...payload}; delete payload.files;
   const send = async body => { let init;
-    if(files && body.embeds?.some(em=>/^attachment:/.test(em.thumbnail?.url||''))){ const fd=new FormData(); fd.append('payload_json', JSON.stringify(body)); files.forEach((f,i)=>fd.append(`files[${i}]`, f.blob, f.name)); init={method:'POST',body:fd}; }
+    if(files && (!body.embeds?.length || body.embeds.some(em=>/^attachment:/.test(em.thumbnail?.url||'')))){ const fd=new FormData(); fd.append('payload_json', JSON.stringify(body)); files.forEach((f,i)=>fd.append(`files[${i}]`, f.blob, f.name)); init={method:'POST',body:fd}; }
     else init={method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)};
     const r=await fetch(hook,init); return r.ok ? '' : `${r.status} ${(await r.text().catch(()=>'')).slice(0,160)}`; };
   try{
@@ -2534,11 +2534,13 @@ async function smPostRecap(day, manual, book='fanduel', note){
     if(manual){ const msg=`No graded bets for ${dayName} yet.`;
       if(tg) await tgSend(`📊 <b>${tgEsc(B.title)}</b>\n\n${tgEsc(msg)}`);
       if(hook) await discordPost({ username:'FanDuel', avatar_url:httpsLogo('fanduel'), content:`**${B.title}** — ${msg}`, allowed_mentions:{parse:[]} }, null, hook);
+      if(book==='fanduel') await smSendExport(hook);
       toast(msg); }
     return false; }
   const dOk = hook ? await postRecapFields(hook, B.title, note?[{ name:note, value:'​' }, ...R.fields]:R.fields) : false;
   const tOk = tg ? await smTgRecap(B.title, R.fields, note) : false;
   const ok = dOk || tOk;
+  if(ok && book==='fanduel') await smSendExport(hook);
   if(ok) LS.set(B.flag+day,'1'); if(manual) toast(ok?`Recap posted${tg?(tOk?' (Telegram ✓)':' (Telegram failed)'):''}`:'Recap failed'); return ok;
 }
 // the Post button: today if anything's graded today, else the latest graded day (and says so)
@@ -2613,9 +2615,20 @@ function smBackup(){
 // Copy / paste the FanDuel Sharp Money tracker (pregame, FD bets only) as text -- easiest way to move them to a
 // new copy of this page on a phone. Paste MERGES: bets already here stay, missing ones are added,
 // and a graded copy wins over an ungraded one of the same bet.
+const smTrackerJson = () => JSON.stringify({ tool:'sharp-money-tracker', at:new Date().toISOString(), tracked:tracked.filter(t=>t.src==='sharp' && (t.bookKey||'fanduel')==='fanduel'), record:smRec });
+const smExportName = () => `sharp-money-tracker-${etToday()}.json`;
+// sent with every recap (Telegram + Discord): the tracker + record as a file to save -- import it with
+// "Import backup". Holds no webhooks or bot token.
+async function smSendExport(hook){
+  const blob=new Blob([smTrackerJson()],{type:'application/json'}), cap=`💾 Tracker export · ${etToday()} — save it; restore with Import backup`;
+  let ok=false;
+  if(tgOn()){ try{ const fd=new FormData(); fd.append('chat_id', tgChat); fd.append('caption', cap); fd.append('document', blob, smExportName()); await tgApi('sendDocument', fd); ok=true; }catch(e){ console.warn('[tg] export', e.message); } }
+  if(hook){ try{ ok = (await discordPost({ username:'FanDuel', avatar_url:httpsLogo('fanduel'), content:cap, allowed_mentions:{parse:[]}, files:[{ name:smExportName(), blob }] }, null, hook)) || ok; }catch(e){} }
+  return ok;
+}
 async function smCopyTracker(){
   const fd=tracked.filter(t=>t.src==='sharp' && (t.bookKey||'fanduel')==='fanduel');
-  const text=JSON.stringify({ tool:'sharp-money-tracker', at:new Date().toISOString(), tracked:fd, record:smRec });
+  const text=smTrackerJson();
   try{ await navigator.clipboard.writeText(text); }
   catch(e){ const ta=document.createElement('textarea'); ta.value=text; ta.style.cssText='position:fixed;opacity:0'; document.body.appendChild(ta); ta.select(); try{ document.execCommand('copy'); }catch(_){} ta.remove(); }
   toast(`FD tracker copied (${fd.length} bets)`);
@@ -2628,21 +2641,26 @@ function smPasteTracker(){
   el.querySelector('[data-go]').onclick=()=>{
     let j; try{ j=JSON.parse(ta.value.trim()); }catch(e){ toast('That isn\'t a copied tracker'); return; }
     if(j?.tool!=='sharp-money-tracker'){ toast('That isn\'t a copied tracker'); return; }
+    el.remove(); smMergeTracker(j);
+  };
+}
+function smMergeTracker(j){
     const merge=(mine, theirs)=>{ const by=new Map(mine.map(t=>[t.id,t])); let add=0;
       (theirs||[]).forEach(t=>{ if(!t?.id) return; const m=by.get(t.id); if(!m){ by.set(t.id,t); add++; } else if(!m.final && t.final) by.set(t.id,t); });
       return { list:[...by.values()].sort((a,b)=>(b.trackedAt||0)-(a.trackedAt||0)), add }; };
     const a=merge(tracked, (j.tracked||[]).filter(t=>t.src==='sharp' && (t.bookKey||'fanduel')==='fanduel'));
-    tracked=a.list; saveTracked(); el.remove();
+    tracked=a.list; saveTracked();
     // the record: take the pasted one when it holds more graded bets than this page's
     const nOf=r=>r?.books?.fanduel?.all?.head?.all?.n||0; const tookRec = j.record && nOf(j.record)>nOf(smRec); if(tookRec){ smRec=j.record; smRecSave(); }
     toast(`Imported ${a.add} FD bets${tookRec?' + the record':''}`);
     if(viewMode==='tracker') renderTracker(); else if(viewMode==='nbalive') renderNbaLive();
-  };
 }
 function smRestore(){
   const inp=document.createElement('input'); inp.type='file'; inp.accept='application/json,.json';
   inp.onchange=async()=>{ const f=inp.files?.[0]; if(!f) return;
-    try{ const j=JSON.parse(await f.text()); const data=j?.data; if(!data || typeof data!=='object') throw new Error('not a Sharp Money backup');
+    try{ const j=JSON.parse(await f.text());
+      if(j?.tool==='sharp-money-tracker'){ smMergeTracker(j); return; }   // a tracker export (from a recap) merges in
+      const data=j?.data; if(!data || typeof data!=='object') throw new Error('not a Sharp Money backup');
       if(!confirm(`Restore ${Object.keys(data).length} items from ${j.at?new Date(j.at).toLocaleString():'this file'}? This replaces what's here now.`)) return;
       Object.entries(data).forEach(([k,v])=>{ try{ localStorage.setItem(k, v); }catch(e){} }); toast('Restored — reloading'); setTimeout(()=>location.reload(),700);
     }catch(e){ toast('Import failed: '+e.message); } };
