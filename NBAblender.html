@@ -7978,7 +7978,8 @@ function decimalToAmerican(dec) {
 function playToOdds(fairOdds, evCutoff) {
   // Returns the worst (max) American odds where you still have evCutoff% EV
   // (fairProb * bookDecimal) - 1 = evCutoff/100  =>  bookDecimal = (1 + evCutoff/100) / fairProb
-  const fp = oddsToImplied(fairOdds);
+  const f = Number(fairOdds);
+  const fp = (f > 0 && f < 100) ? f / 100 : oddsToImplied(fairOdds);   // Morning bets store fair as a win % (0-100); American odds are never inside (-100,100)
   if (fp == null) return null;
   const bookDec = (1 + evCutoff/100) / fp;
   return decimalToAmerican(bookDec);
@@ -11196,8 +11197,13 @@ function _mCardBooksFor(b) {
 function _copyOpenFiltered(kind) {
   // Morning bets list every book the picture shows; book codes (PB, FD, ...) are named, and each book appears once (its best price)
   const _nmB = bk => BOOK_CODE_NAMES[String(bk || "").trim().toUpperCase()] || bk;
-  const _oneEach = (b, list) => { const by = new Map(); list.forEach(a => { if (!a || !a.book || a.odds == null) return; const k = _nmB(a.book) + "|" + (a.line != null ? Number(a.line) : Number(b.line)); const cur = by.get(k); if (!cur || Number(a.odds) > Number(cur.odds)) by.set(k, { ...a, book: _nmB(a.book) }); }); return [...by.values()].filter(a => !(a.book === _nmB(b.book) && (a.line == null || Number(a.line) === Number(b.line)))); };
-  const open = bets.filter(b => b.result === "pending").map(b => b.source === "morning" ? { ...b, book: _nmB(b.book), altBooks: _oneEach(b, (Array.isArray(b.altBooks) ? b.altBooks : []).concat(_mCardBooksFor(b))) } : b);
+  const _oneEach = (b, list) => { const by = new Map(); list.forEach(a => { if (!a || !a.book || a.odds == null) return; const k = _nmB(a.book) + "|" + (a.line != null ? Number(a.line) : Number(b.line)); const cur = by.get(k); if (!cur || Number(a.odds) > Number(cur.odds)) by.set(k, { ...a, book: _nmB(a.book) }); }); return [...by.values()].filter(a => !(a.book === _nmB(b.book) && (a.line == null || Number(a.line) === Number(b.line)))).sort((x, y) => Number(y.odds) - Number(x.odds)); };   // best price first, like the picture
+  const _cardOf = b => { try { return morningBets.find(x => String(x.id) === String(b.morningId) || String(x.trackerId) === String(b.id)); } catch (e) { return null; } };
+  const open = bets.filter(b => b.result === "pending").map(b => {
+    if (b.source !== "morning") return b;
+    const m = _cardOf(b), head = m ? { book: _nmB(m.book), odds: Number(m.odds), line: b.line, fair: b.fair } : null;   // the same headline book / price the picture shows
+    return { ...b, book: _nmB(b.book), _cardHead: head, _ptEv: MORNING_QUAL_EV, altBooks: _oneEach(head || b, (Array.isArray(b.altBooks) ? b.altBooks : []).concat(_mCardBooksFor(b), [{ book: _nmB(b.book), odds: b.odds, line: b.line, fair: b.fair }])) };
+  });
   if (!open.length) { showToast("No open plays to copy"); return; }
   const isTotal = b => (b.stat || "").toUpperCase() === "GAME_TOTAL";
   const filtered = open.filter(b => kind === "totals" ? isTotal(b) : !isTotal(b));
@@ -11206,6 +11212,7 @@ function _copyOpenFiltered(kind) {
   // For each bet, scan primary + alt books, pick the highest-EV price.
   // Each alt may carry its own fair (back-solved from a per-alt EV%) and its own line.
   const pickBest = (b) => {
+    if (b._cardHead) { const ev = calcEdge(b._cardHead.odds, b._cardHead.fair); return { ...b._cardHead, ev: ev == null ? 0 : ev }; }
     const candidates = [{ book: b.book, odds: b.odds, fair: b.fair, line: b.line }];
     if (Array.isArray(b.altBooks)) {
       b.altBooks.forEach(a => {
@@ -11315,7 +11322,7 @@ function _copyOpenFiltered(kind) {
     // If any alt is at the same line as the headline, the alts row will own the play-to.
     // Otherwise the headline shows its own.
     const altsAtBestLine = remaining.some(p => (p.line ?? bet.line) === bestLine);
-    const headlinePlayTo = altsAtBestLine ? null : playToOdds(best.fair, 5);
+    const headlinePlayTo = altsAtBestLine ? null : playToOdds(best.fair, bet._ptEv || 5);
     const headlinePlayToStr = headlinePlayTo != null ? ` play to ${headlinePlayTo > 0 ? "+" + headlinePlayTo : headlinePlayTo}` : "";
 
     // Decide grouping treatment (props mode only — totals stay flat)
@@ -11395,7 +11402,7 @@ function _copyOpenFiltered(kind) {
           const lineHint = (!isSameLine && p.line != null) ? `${ouLower[0]}${p.line} ` : "";
           return `${p.book} ${lineHint}${o}`;
         }).join("  ");
-        const playTo = g.fair != null ? playToOdds(g.fair, 5) : null;
+        const playTo = g.fair != null ? playToOdds(g.fair, bet._ptEv || 5) : null;
         const playToStr = playTo != null ? `  play to ${playTo > 0 ? "+" + playTo : playTo}` : "";
         const groupStr = `${items}${playToStr}`;
         if (isSameLine) sameLineParts.push(groupStr);
@@ -11621,7 +11628,7 @@ async function shareOpenPropsAsImage() {
 
       const sameLine = remaining.filter(p => (p.line ?? bet.line) === bestLine);
       const altsAtBestLine = sameLine.length > 0;
-      const headlinePlayTo = altsAtBestLine ? null : playToOdds(best.fair, 5);
+      const headlinePlayTo = altsAtBestLine ? null : playToOdds(best.fair, bet._ptEv || 5);
 
       const booksRow = [`${esc(best.book)} ${oddsStr}`].concat(sameLine.map(p => {
         const o = p.odds > 0 ? `+${p.odds}` : `${p.odds}`;
@@ -11656,7 +11663,7 @@ async function shareOpenPropsAsImage() {
           const lineHint = `${ouLower[0]}${g.line} `;
           return `${esc(p.book)} ${lineHint}${o}`;
         }).join("  ");
-        const altPt = g.fair != null ? playToOdds(g.fair, 5) : null;
+        const altPt = g.fair != null ? playToOdds(g.fair, bet._ptEv || 5) : null;
         const ptStr = altPt != null ? `  play to ${altPt > 0 ? "+" + altPt : altPt}` : "";
         return `${items}${ptStr}`;
       });
@@ -12048,7 +12055,7 @@ async function shareOpenPropsAsImageExclusive() {
       const booksRow = sameLine.map(p =>
         `<span style="display:inline-flex;align-items:center;gap:5px;margin-right:10px;">${bookLogoHtml(p.book, 16)}<span style="font-family:'JetBrains Mono','Menlo',monospace;">${fmtOdds(p.odds)}</span></span>`
       ).join("");
-      const headlinePlayTo = altsAtBestLine ? null : playToOdds(best.fair, 5);
+      const headlinePlayTo = altsAtBestLine ? null : playToOdds(best.fair, bet._ptEv || 5);
       let playToValue = headlinePlayTo;
       if (playToValue == null && altsAtBestLine) {
         const groupFair = sameLine.reduce((f, p) => (p.fair != null && (f == null || p.fair < f)) ? p.fair : f, best.fair);
@@ -12100,7 +12107,7 @@ async function shareOpenPropsAsImageExclusive() {
             <span style="font-family:'JetBrains Mono','Menlo',monospace;font-size:12px;font-weight:700;color:#fff;">${o}</span>
           </div>`;
         }).join("");
-        const altPt = g.fair != null ? playToOdds(g.fair, 5) : null;
+        const altPt = g.fair != null ? playToOdds(g.fair, bet._ptEv || 5) : null;
         const altPtStr = altPt != null ? (altPt > 0 ? `+${altPt}` : `−${Math.abs(altPt)}`) : null;
         const altPtRow = altPtStr ? `<div style="display:flex;align-items:center;justify-content:space-between;padding:4px 9px;border-radius:6px;background:rgba(255,255,255,0.02);border:1px solid #1a1d22;margin-bottom:3px;"><div style="display:flex;align-items:center;gap:6px;font-size:11px;color:#fff;">${stopSignSvg(14)} Play to</div><span style="font-family:'JetBrains Mono','Menlo',monospace;font-size:12px;font-weight:800;color:#fff;">${altPtStr}</span></div>` : ``;
         return dirLabel + rows + altPtRow;
@@ -12382,7 +12389,7 @@ async function shareOpenPropsAsImageDiscord(betList) {
     const seen = new Set();
     const remaining = allPrices.filter(p => { if (p.book === best.book && p.odds === best.odds && p.line === bestLine) return false; const k = `${p.book}|${p.odds}|${p.line}`; if (seen.has(k)) return false; seen.add(k); return true; });
     const sameLine = remaining.filter(p => (p.line ?? bet.line) === bestLine).sort((a, b) => b.odds - a.odds);
-    const headlinePlayTo = sameLine.length > 0 ? null : playToOdds(best.fair, 5);
+    const headlinePlayTo = sameLine.length > 0 ? null : playToOdds(best.fair, bet._ptEv || 5);
     let playToValue = headlinePlayTo;
     if (playToValue == null && sameLine.length > 0) { const gf = sameLine.reduce((f, p) => (p.fair != null && (f == null || p.fair < f)) ? p.fair : f, best.fair); playToValue = playToOdds(gf, 5); }
     const playToStr = playToValue != null ? (playToValue > 0 ? `+${playToValue}` : `−${Math.abs(playToValue)}`) : null;
@@ -12408,7 +12415,7 @@ async function shareOpenPropsAsImageDiscord(betList) {
     remaining.forEach(p => { if ((p.line ?? bet.line) === bestLine) return; const k = String(p.line); if (!diffLineGroups[k]) diffLineGroups[k] = { line: p.line, fair: p.fair, items: [] }; diffLineGroups[k].items.push(p); });
     const altHtml = Object.values(diffLineGroups).map(g => {
       g.items.sort((a, b) => b.odds - a.odds);
-      const altPt = g.fair != null ? playToOdds(g.fair, 5) : null;
+      const altPt = g.fair != null ? playToOdds(g.fair, bet._ptEv || 5) : null;
       const altPtStr = altPt != null ? (altPt > 0 ? `+${altPt}` : `−${Math.abs(altPt)}`) : '';
       const AL = _cardLiqAlt(bet, g.line);
       return `<div style="margin-top:5px;font:700 12px 'Plus Jakarta Sans';color:#fff;">${ouUpper.slice(0,1)}${g.line} ${g.items.map(p => `${fmtOdds(p.odds)} ${esc(p.book)}`).join(', ')}${altPtStr ? ` · stop ${altPtStr}` : ''}${AL ? ` · ${esc(_liqDisplayLine(AL.per))}` : ''}</div>`;
