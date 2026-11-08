@@ -764,6 +764,7 @@
         <button onclick="autoOptimizeModelWeights()" class="ghost" style="padding:8px 12px; font-size:13px; white-space:nowrap;" title="Sweep every Saber/Eye weight split and find combinations that maximize units, ROI, or win %">🔍 Auto-optimize</button>
         <button onclick="copyModelPicks()" class="ghost" style="padding:8px 12px; font-size:13px; white-space:nowrap;" title="Copy each fighter with their current-weight model win % to clipboard">📋 Copy picks</button>
         <button onclick="setModelRecapWebhook()" class="ghost" id="modelRecapWebhookBtn" style="padding:8px 12px; font-size:13px; white-space:nowrap;" title="Set the Discord webhook Copy recap posts to">🔗 Recap</button>
+        <button onclick="editAllTimeLedger()" class="ghost" style="padding:8px 12px; font-size:13px; white-space:nowrap;" title="Set the all-time starting point (last posted all-time + the date it runs through)">📒 All-time</button>
         <button onclick="copyModelRecap()" class="ghost" style="padding:8px 12px; font-size:13px; white-space:nowrap;" title="Copy a results recap of only the picks that were sent out for this card">🧾 Copy recap</button>
         <button onclick="setDiscordDest('model')" class="ghost" id="modelWebhookBtn" style="padding:8px 12px; font-size:13px; white-space:nowrap;" title="Webhook + role for your Discord — the card image posts there on export">🔗 Discord</button>
         <button onclick="setDiscordDest('modelNick')" class="ghost" id="modelNickWebhookBtn" style="padding:8px 12px; font-size:13px; white-space:nowrap;" title="Webhook + role for Nick's Discord — the card image posts there on export">🔗 Nick</button>
@@ -5359,6 +5360,39 @@ function modelRecapResult(card, name) {
   return { status: 'pending' };
 }
 
+// ── All-time ledger for recaps ────────────────────────────────────────────
+// { w, l, units, risked, through: 'YYYY-MM-DD', cards: { id: {w,l,units,risked} } }
+// The starting point is what was last posted; cards dated after `through`
+// add their recap result on top.
+function parseAllTimeStart(str) {
+  const m = String(str || '').match(/(\d+)\s*-\s*(\d+)\s+([+-]?[\d.]+)u?\s+(?:ROI\s*)?([+-]?[\d.]+)%?\s+(?:through\s+)?(\d{4}-\d{2}-\d{2})/i);
+  if (!m) return null;
+  const units = parseFloat(m[3]), roi = parseFloat(m[4]);
+  if (!roi) return null;
+  return { w: +m[1], l: +m[2], units, risked: Math.abs(units / (roi / 100)), through: m[5] };
+}
+function editAllTimeLedger(force) {
+  const cur = STATE.allTimeLedger;
+  const roi = cur && cur.risked ? (cur.units / cur.risked) * 100 : null;
+  const def = cur ? `${cur.w}-${cur.l} ${cur.units >= 0 ? '+' : ''}${cur.units.toFixed(2)}u ${roi >= 0 ? '+' : ''}${roi.toFixed(1)}% through ${cur.through}`
+                  : '112-69 +52.36u +14.9% through 2026-11-07';
+  const v = prompt('All-time starting point = the last all-time you posted, and the date of the last card it includes.\nCards dated after that add on top.\n\nFormat: W-L units ROI% through YYYY-MM-DD', def);
+  if (v === null) return force ? null : undefined;
+  const p = parseAllTimeStart(v);
+  if (!p) { toast('Couldn\'t read that — e.g. 112-69 +52.36u +14.9% through 2026-11-07', 'error'); return null; }
+  // Keep entries for cards still after the new date.
+  const keep = {};
+  Object.entries((cur && cur.cards) || {}).forEach(([id, e]) => { if (!e.date || e.date > p.through) keep[id] = e; });
+  STATE.allTimeLedger = { ...p, cards: keep };
+  saveState(STATE);
+  toast(`All-time starts at ${p.w}-${p.l} ${p.units >= 0 ? '+' : ''}${p.units.toFixed(2)}u (through ${p.through})`);
+  return STATE.allTimeLedger;
+}
+async function ensureAllTimeLedger() {
+  if (STATE.allTimeLedger) return STATE.allTimeLedger;
+  return editAllTimeLedger(true);
+}
+
 async function copyModelRecap() {
   const cardSel = document.getElementById('modelCardFilter');
   const card = STATE.cards.find(c => c.id === (cardSel ? cardSel.value : ''));
@@ -5399,44 +5433,24 @@ async function copyModelRecap() {
     ? `${w}-${l}  ${units >= 0 ? '+' : ''}${units.toFixed(2)}u  ROI ${roi >= 0 ? '+' : ''}${roi.toFixed(1)}%${fmtClv(clvSum, clvN)}`
     : `No results yet${fmtClv(clvSum, clvN)}`;
   const pending = picks.length - w - l;
-  // All-time model profit:
-  //   • cards with sent-pick tracking → exactly their recap picks (what was
-  //     sent, at the sent price), so each card's recap adds straight in;
-  //   • older cards → the Weight backtest's ≥1% plays at the current weights.
-  // ROI here is on what was actually risked (favs risk more than 1u).
-  let aw = 0, al = 0, au = 0, ar = 0;
-  const tracked = c => c && c.sentPicks && Object.keys(c.sentPicks).length > 0;
-  const trackedIds = new Set((STATE.cards || []).filter(tracked).map(c => c.id));
-  {
-    const wS = +document.getElementById('modelWSaber').value;
-    const wE = +document.getElementById('modelWEye').value;
-    buildBacktestPool().forEach(b => {
-      if (trackedIds.has(b._cardId)) return;   // counted from its recap below
-      const mkt = b.mlImpliedFair; if (mkt == null) return;
-      const parts = [];
-      if (b.saberProb != null) parts.push({ p: b.saberProb, w: wS });
-      if (b.eyeProb   != null) parts.push({ p: b.eyeProb,   w: wE });
-      if (b.stokProb  != null) parts.push({ p: b.stokProb,  w: 0 });
-      if (parts.length < 2) return;
-      const tw = parts.reduce((x, q) => x + q.w, 0); if (tw <= 0) return;
-      const blended = parts.reduce((x, q) => x + (q.w / tw) * q.p, 0);
-      if (blended - mkt < EDGE_THRESHOLD) return;
-      au += unitProfit(b); ar += unitStake(b);
-      if (b.status === 'win') aw++; else al++;
-    });
-    (STATE.cards || []).filter(tracked).forEach(c => {
-      modelRecapPicks(c).forEach(p => {
-        const st = modelRecapResult(c, p.name).status;
-        if (st !== 'win' && st !== 'loss') return;
-        au += unitProfit({ ml: p.odds, status: st }); ar += unitStake({ ml: p.odds });
-        if (st === 'win') aw++; else al++;
-      });
-    });
+  // All-time = a running ledger that only moves by each card's posted
+  // result: a frozen starting point (the last all-time posted) plus every
+  // card dated after it, at its recap picks / sent prices. Re-copying a
+  // card replaces its entry, so nothing double counts and nothing already
+  // posted gets recalculated by slider weights or refetched odds.
+  const ledger = await ensureAllTimeLedger();
+  let allTime = '';
+  if (ledger) {
+    const inLedger = !card.date || card.date > ledger.through;
+    if (inLedger) {
+      ledger.cards[card.id] = { label: card.label || '', date: card.date || '', w, l, units, risked };
+      saveState(STATE);
+    }
+    let aw = ledger.w, al = ledger.l, au = ledger.units, ar = ledger.risked;
+    Object.values(ledger.cards).forEach(e => { aw += e.w; al += e.l; au += e.units; ar += e.risked; });
+    const aroi = ar ? (au / ar) * 100 : 0;
+    allTime = `All-time: ${aw}-${al}  ${au >= 0 ? '+' : ''}${au.toFixed(2)}u  ROI ${aroi >= 0 ? '+' : ''}${aroi.toFixed(1)}%`;
   }
-  const aroi = ar ? (au / ar) * 100 : 0;
-  const allTime = (aw + al)
-    ? `All-time: ${aw}-${al}  ${au >= 0 ? '+' : ''}${au.toFixed(2)}u  ROI ${aroi >= 0 ? '+' : ''}${aroi.toFixed(1)}%`
-    : '';
   const text = `${title}\n${summary}${pending && (w + l) ? `  (${pending} pending)` : ''}\n\n${lines.join('\n')}${allTime ? `\n\n${allTime}` : ''}`;
   await copyText(text, 'recap');
   if (getModelRecapWebhook()) postRecapToDiscord(text);
