@@ -1669,13 +1669,20 @@ async function buildShareImageBlob(p, mkey){
   return new Promise(resolve=>cv.toBlob(b=>resolve(b),'image/png'));
 }
 // ── tracked-bet share: the side you bet and every book's CURRENT price at your line. Pre-game it re-pulls this one market first so the card isn't stale; once the game is
+// A tracked bet's rows: this player AND this exact market. The market-name fetch also brings back the
+// period / combo versions (1Q points, PRA...), which were showing up as fake "main line now" numbers.
+function tkFixMains(){ if(LS.get('props_mainsfix1','')) return; let ch=false;
+  (tracked||[]).forEach(t=>{ if(t.final) return; (t.snapshots||[]).forEach(s=>{ if(s.mains){ delete s.mains; ch=true; } delete s.mainLine; }); if(t.mainLineNow!=null){ t.mainLineNow=null; ch=true; } });
+  if(ch) saveTracked(); LS.set('props_mainsfix1','1'); }
+setTimeout(()=>{ try{ tkFixMains(); }catch(e){} }, 1500);
+function tkRowsOf(t, rows){ return rows.filter(o=>(t.isGame || normName(cleanSel(o.selection||o.name))===t.playerKey) && (!t.mkey || marketKeyFor(t.sportKey, o.market)===t.mkey)); }
 // live/final the books are gone, so it shows the last prices the tracker saw plus the live stat.
 async function freshTrackedSnap(t){
   const last=t.snapshots[t.snapshots.length-1]||null;
   if(t.live||t.final||!t.marketNames?.length) return last;
   const rows=[];
   for(const bk of chunk(BOOK_REQ,5)){ try{ const r=await oo('/fixtures/odds',{fixture_id:[t.fixtureId],sportsbook:bk,market:t.marketNames}); (r?.data?.[0]?.odds||[]).forEach(o=>rows.push(o)); }catch(e){} }
-  const mine=t.isGame ? rows : rows.filter(o=>normName(cleanSel(o.selection||o.name))===t.playerKey);
+  const mine=tkRowsOf(t, rows);
   if(!mine.length) return last;
   const snap=snapshotFrom(mine,t.side,t.line); snap.mainLine=mainLineOf(mine,t.side);
   t.mainLineNow=snap.mainLine;
@@ -4950,14 +4957,14 @@ async function refreshTracker(){
       if(st&&st!=='unplayed') return; // odds are gone once it starts
       const rows=[];
       await Promise.all(chunk(BOOK_REQ,5).map(async bk=>{ try{ const r=await oo('/fixtures/odds',{fixture_id:[g.fixtureId],sportsbook:bk,market:g.marketNames}); (r?.data?.[0]?.odds||[]).forEach(o=>rows.push(o)); }catch(e){} }));
-      g.items.forEach(t=>{ const mine=t.isGame ? rows : rows.filter(o=>normName(cleanSel(o.selection||o.name))===t.playerKey); const snap=snapshotFrom(mine,t.side,t.line); snap.mainLine=mainLineOf(mine,t.side);
+      g.items.forEach(t=>{ const mine=tkRowsOf(t, rows); const snap=snapshotFrom(mine,t.side,t.line); snap.mainLine=mainLineOf(mine,t.side);
         const last=t.snapshots[t.snapshots.length-1];
         // only add a new row when the value actually moved — a re-check that finds no
         // change just refreshes the "now" timestamp on the last row instead of duplicating it
         const changed = t.pinned && t.bookKey
           ? (!last || (last.byBook?.[t.bookKey]?.price??null)!==(snap.byBook[t.bookKey]?.price??null) || (last.byBook?.[t.bookKey]?.points??null)!==(snap.byBook[t.bookKey]?.points??null))
           : (!last || last.best!==snap.best || last.mainLine!==snap.mainLine);
-        if(changed){ t.snapshots.push(snap); if(t.snapshots.length>60) t.snapshots.splice(1,t.snapshots.length-60); } else { last.byBook=snap.byBook; last.at=snap.at; }
+        if(changed){ t.snapshots.push(snap); if(t.snapshots.length>60) t.snapshots.splice(1,t.snapshots.length-60); } else { last.byBook=snap.byBook; last.mains=snap.mains; last.mainLine=snap.mainLine; last.at=snap.at; }
         t.mainLineNow=snap.mainLine; });
     }), 4);
     // 4) open/close for each (pre-game: olv; started: clv). The history pull is the slow one, so it
@@ -5233,7 +5240,7 @@ function trackCardHtml(t){
   // ⋯ details: line + price moves as plain label / value rows (no tiles)
   const isML=(t.side==='ML'||t.side==='ML60');
   const mvRow=(l,v,tag)=>`<div class="tkmv"><span>${l}</span><b>${v}</b>${tag?`<small class="${tag.cls}">${tag.txt}</small>`:''}</div>`;
-  const tkMoves = `<div class="tkmvs">${isML?'':mvRow('Line', `${t.mainLineAtTrack??'—'} → ${t.mainLineNow??t.mainLineAtTrack??'—'}`, lm)}${mvRow(esc(t.pinned&&t.book?bookShort(t.bookKey||t.book):'Best')+(t.line!=null?' @ '+t.line:''), `${fmtAm(t.price)} → ${mine!=null?fmtAm(mine):'—'}`, pm)}${t.open!=null?mvRow('Open', fmtAm(t.open)):''}${t.close!=null?mvRow('Close', fmtAm(t.close)):''}</div>`;
+  const tkMoves = `<div class="tkmvs">${isML?'':mvRow('Line', `${t.mainLineAtTrack??t.line??'—'} → ${t.mainLineNow??t.mainLineAtTrack??t.line??'—'}`, lm)}${mvRow(esc(t.pinned&&t.book?bookShort(t.bookKey||t.book):'Best')+(t.line!=null?' @ '+t.line:''), `${fmtAm(t.price)} → ${mine!=null?fmtAm(mine):'—'}`, pm)}${t.open!=null?mvRow('Open', fmtAm(t.open)):''}${t.close!=null?mvRow('Close', fmtAm(t.close)):''}</div>`;
   return `<div class="tk tka ${t.result||''}${openMore?' more':''}">
     <div class="tkh"${t.final?'':` data-open="${t.id}"`}>${hs}<div class="who"><div class="nm">${teamLogo?`<img class="tl" src="${esc(teamLogo)}" alt="">`:''}${esc(t.playerName)} ${res}</div><div class="bet">${betA}${bk?` <span class="dim">· ${esc(bk)}</span>`:''}${favDogPill}</div></div>
       <div class="tkpr"><b>${fmtAm(t.price)}</b><div>${whenA} · ${(()=>{ const ff=f || (loadSportCache(t.sportKey)?.fixtures||[]).find(x=>x.id===t.fixtureId); const al=ff?.away?.logo, hl=ff?.home?.logo; return al&&hl ? `<span class="tkvs"><img src="${esc(al)}" alt="${esc(t.away)}"><i>vs</i><img src="${esc(hl)}" alt="${esc(t.home)}"></span>` : `${esc(t.away)} vs ${esc(t.home)}`; })()}</div></div></div>
