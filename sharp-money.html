@@ -589,8 +589,13 @@ const smLabels=(t,bk)=>({ sport:SPORTS[t.sportKey]?.label||t.sportKey, market:`$
 function smRecAdd(sec, label, t){ if(label==null) return; const r=sec[label]||(sec[label]=smR0()); const win=t.stakeUnits||1, risk=riskToWin(t.price,win); r.n++;
   if(t.result==='win'){ r.w++; r.u+=win; r.s+=risk; } else if(t.result==='loss'){ r.l++; r.u-=risk; r.s+=risk; } else if(t.result==='push'){ r.p++; r.s+=risk; } }
 const smBetDay=t=>etDayOf(new Date(t.start||t.trackedAt).getTime());
+// one graded bet as a recap line: "✅ Domantas Sabonis 12.5 Rebounds -104 · +1.00u"
+function smBetLine(t){ const win=t.stakeUnits||1, risk=riskToWin(t.price,win), u=t.result==='win'?win:t.result==='loss'?-risk:0;
+  return { r:t.result, u:+u.toFixed(2), x:`${titleCase(t.playerName||'')} ${t.side!=='under'?sideTxt(t)+' ':''}${t.line??''} ${t.marketLabel||t.mkey} ${fmtAm(t.price)}`.replace(/\s+/g,' ').trim() }; }
 function smRecordBet(t){
   const bk=t.bookKey||'fanduel', R=smBookRec(bk), day=smBetDay(t), D=R.days[day]=R.days[day]||smEmptySecs(), muted=smMuted(t), L=smLabels(t,bk);
+  const bl=smBetLine(t); (t.small ? (D.betsSmall=D.betsSmall||[]) : muted ? (D.betsMuted=D.betsMuted||[]) : (D.bets=D.bets||[])).push(bl);
+  Object.keys(R.days).sort().slice(0,-21).forEach(d=>{ delete R.days[d].bets; delete R.days[d].betsMuted; delete R.days[d].betsSmall; });
   // background $150 tier (under the minimum, never sent): its own section only, kept out of the real record
   if(t.small){ [R.all, D].forEach(S=>{ S.small=S.small||{}; smRecAdd(S.small,'All',t); smRecAdd(S.small,L.market,t); smRecAdd(S.small,L.side,t); }); return; }
   [R.all, D].forEach(S=>{ SM_SECS.forEach(k=>{ S[k]=S[k]||{}; }); smRecAdd(S.head,'all',t); smRecAdd(S.head, muted?'muted':'sent', t); smRecAdd(S.tip, smTipLab(t), t);
@@ -2466,24 +2471,27 @@ function smRecapFields(day, book='fanduel'){
   const B=RECAP_BOOK[book], R=smBookRec(B.book), A=R.all, D=R.days[day];
   const dayName=new Date(day+'T12:00:00').toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'});
   const has = !!(D && D.head?.all?.n);
-  // tighter: the day up top, then all-time; the overall lines are sent plays only -- muted windows and
-  // the background $150 tier are noted on their own lines, never in the overall
-  const notSent=(S)=>[ S.head.muted?.n ? `Muted windows: ${smFmt(S.head.muted)} (${S.head.muted.n})` : '',
+  // order: the day (its bets, then by market) -> all-time (sent windows only) -> everything muted / not sent, last
+  const sentOnly = sec => Object.fromEntries(Object.entries(sec||{}).filter(([k])=>!/\(muted\)/.test(k)));
+  const mutedOnly = sec => Object.fromEntries(Object.entries(sec||{}).filter(([k])=>/\(muted\)/.test(k)));
+  const betRows = list => (list||[]).slice().sort((a,b)=>b.u-a.u).map(b=>`${b.r==='win'?'✅':b.r==='loss'?'❌':'➖'} ${b.x} · ${b.u>=0?'+':''}${b.u.toFixed(2)}u`);
+  const mutedLines = S => [ S.head.muted?.n ? `Muted windows: ${smFmt(S.head.muted)} (${S.head.muted.n})` : '', S.head.muted?.n ? `With them: ${smFmt(S.head.all)}` : '',
     S.small?.All?.n ? `$${SM_SMALL}+ tier (background): ${smFmt(S.small.All)} (${S.small.All.n})` : '' ].filter(Boolean);
   const fields = !has ? [] : [
-    ...recapFields(`📅 ${dayName} — ${smFmt(D.head.sent||smR0())}`, smRows(D.market)),
-    ...recapFields('Time to tip', smRows(D.tip, smTipOrd), true),
-    ...recapFields('Side', smRows(D.side), true),
-    ...(notSent(D).length ? recapFields('Not sent (not in the record)', notSent(D)) : []),
+    ...recapFields(`📅 ${dayName} — ${smFmt(D.head.sent||smR0())}`, D.bets?.length ? betRows(D.bets) : (smRows(D.market).length ? smRows(D.market) : ['No sent bets graded (muted / background only — see the end)'])),
+    ...(D.bets?.length ? recapFields(`${dayName} by market`, smRows(D.market)) : []),
+    ...(Object.keys(sentOnly(D.tip)).length ? recapFields('Time to tip', smRows(sentOnly(D.tip), smTipOrd), true) : []),
     ...recapFields(`📈 All-time — ${smFmt(A.head.sent||smR0())}`, smRows(A.sport)),
     ...recapFields('By market', smRows(A.market)),
-    ...recapFields('Time to tip', smRows(A.tip, smTipOrd), true),
     ...recapFields('Side', smRows(A.side), true),
+    ...recapFields('Time to tip', smRows(sentOnly(A.tip), smTipOrd), true),
     ...recapFields('Source', smRows(A.source), true),
     ...recapFields('Hold / arb', smRows(A.hold, smHoldOrder), true),
     ...recapFields('Arb money', smRows(A.money), true),
     ...(Object.keys(A.news||{}).length ? recapFields('RotoWire (NBA)', smRows(A.news), true) : []),
-    ...(notSent(A).length ? recapFields('Not sent · all-time', notSent(A)) : []) ];
+    // ── muted / not sent, last ──
+    ...((D.betsMuted?.length||D.betsSmall?.length||mutedLines(D).length) ? recapFields(`🔇 ${dayName} · not sent (not in the record)`, [...mutedLines(D), ...betRows(D.betsMuted), ...betRows(D.betsSmall).map(x=>x+` · $${SM_SMALL} tier`)]) : []),
+    ...(mutedLines(A).length ? recapFields('🔇 All-time · not sent', [...mutedLines(A), ...smRows(mutedOnly(A.tip), smTipOrd)]) : []) ];
   return { has, fields };
 }
 // FD and b105 recaps: each to its own recap channel (falls back to that book's alert channel until set)
