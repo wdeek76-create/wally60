@@ -589,18 +589,33 @@ const smLabels=(t,bk)=>({ sport:SPORTS[t.sportKey]?.label||t.sportKey, market:`$
 function smRecAdd(sec, label, t){ if(label==null) return; const r=sec[label]||(sec[label]=smR0()); const win=t.stakeUnits||1, risk=riskToWin(t.price,win); r.n++;
   if(t.result==='win'){ r.w++; r.u+=win; r.s+=risk; } else if(t.result==='loss'){ r.l++; r.u-=risk; r.s+=risk; } else if(t.result==='push'){ r.p++; r.s+=risk; } }
 const smBetDay=t=>etDayOf(new Date(t.start||t.trackedAt).getTime());
-// one graded bet as a recap line: "✅ Domantas Sabonis 12.5 Rebounds -104 · +1.00u"
-function smBetLine(t){ const win=t.stakeUnits||1, risk=riskToWin(t.price,win), u=t.result==='win'?win:t.result==='loss'?-risk:0;
-  return { r:t.result, u:+u.toFixed(2), x:`${titleCase(t.playerName||'')} ${t.side!=='under'?sideTxt(t)+' ':''}${t.line??''} ${t.marketLabel||t.mkey} ${fmtAm(t.price)}`.replace(/\s+/g,' ').trim() }; }
 function smRecordBet(t){
   const bk=t.bookKey||'fanduel', R=smBookRec(bk), day=smBetDay(t), D=R.days[day]=R.days[day]||smEmptySecs(), muted=smMuted(t), L=smLabels(t,bk);
-  const bl=smBetLine(t); (t.small ? (D.betsSmall=D.betsSmall||[]) : muted ? (D.betsMuted=D.betsMuted||[]) : (D.bets=D.bets||[])).push(bl);
-  Object.keys(R.days).sort().slice(0,-21).forEach(d=>{ delete R.days[d].bets; delete R.days[d].betsMuted; delete R.days[d].betsSmall; });
+  Object.values(R.days).forEach(x=>{ delete x.bets; delete x.betsMuted; delete x.betsSmall; });
   // background $150 tier (under the minimum, never sent): its own section only, kept out of the real record
   if(t.small){ [R.all, D].forEach(S=>{ S.small=S.small||{}; smRecAdd(S.small,'All',t); smRecAdd(S.small,L.market,t); smRecAdd(S.small,L.side,t); }); return; }
   [R.all, D].forEach(S=>{ SM_SECS.forEach(k=>{ S[k]=S[k]||{}; }); smRecAdd(S.head,'all',t); smRecAdd(S.head, muted?'muted':'sent', t); smRecAdd(S.tip, smTipLab(t), t);
     if(!muted) ['sport','market','side','source','exch','exchHold','hold','money','news'].forEach(k=>smRecAdd(S[k], L[k], t)); });
 }
+// Play grade: how bets like this one have done -- its market, time to tip, source (direct / borrowing),
+// hold / arb bucket, exchange money bucket and exchange combo, each looked up in the all-time
+// breakdowns, ROI blended by sample size (a 10-bet bucket counts less than a 200-bet one). Same A-F
+// scale as the recap rows.
+function smPlayT(e){ const o=e.soft[0];
+  return { sportKey:e.sk, mkey:e.mk, marketLabel:marketLabel(e.sk,e.mk), side:e.side, price:Number(o.price), bookKey:canonBook(o.sportsbook), via:e.via||null,
+    sharpLiq:e.L.total, sharpEdge:o._edge, start:e.f?.start||null, trackedAt:Date.now(),
+    exBy:(()=>{ const m={}; (e.L.rows||[]).forEach(l=>Object.entries(l.by||{}).forEach(([k,v])=>{ m[k]=(m[k]||0)+v; })); return Object.keys(m).length?m:null; })() }; }
+function smPlayGrade(e){
+  try{ if(!e || e.kind==='10c' || !e.soft?.[0]) return null;
+    const t=smPlayT(e), bk=t.bookKey||'fanduel', A=smRec.books[bk]?.all; if(!A) return null;
+    const L=smLabels(t,bk), tip=smTipLab(t);
+    let u=0, st=0, w=0, n=0;
+    [['market',L.market],['tip',tip],['source',L.source],['hold',L.hold],['money',L.money],['exch',L.exch]].forEach(([sec,lab])=>{
+      const r=lab!=null && A[sec]?.[lab]; if(!r || !r.n || !r.s) return; const wt=Math.min(r.n,150);
+      u+=(r.u/r.s)*wt; w+=wt; n++; });
+    if(!n || !w) return null;
+    const roi=u/w*100; return { roi, n, g:smGrade({ u:roi, s:100 }) }; }catch(err){ return null; } }
+const smGradeTxt = g => g ? `${g.g} grade · ${g.roi>=0?'+':''}${g.roi.toFixed(1)}% on bets like this` : '';
 // graded bets -> the record, then out of the tracker (FD bets on games through Nov 2 are already in the restored record)
 function smDumpGraded(now0){
   let ch=false; const keep=[], now=Date.now(), wait=now0===true?0:10*60e3;
@@ -937,7 +952,8 @@ function tgText(pl, e){ const em=pl.embeds?.[0]||{};
   const bet = e && e.soft?.[0] ? `<b>${tgEsc([titleCase(e.player), e.side!=='under'?sharpSideLabel(e.side):'', e.line??'', marketLabel(e.sk,e.mk)].filter(x=>x!=='').join(' '))}</b>\n<b>${fmtAm(e.soft[0].price)}${e.L?.total?` · ${usd(e.L.total)}`:''}</b>` : tgEsc(em.title||'');
   // iffy plays: the RotoWire context itself (the blurb, who's out / questionable), not just a tag
   const rwTxt = rw?.iffy ? `⚠️ <b>Iffy</b>\n${tgMd(rw.txt)}` : '';
-  return [tgEsc(game), bet, rwTxt, em.url?tgEsc(em.url):''].filter(Boolean).join('\n\n').slice(0,4000); }
+  const gr = e ? smPlayGrade(e) : null;
+  return [tgEsc(game), bet+(gr?`\n${tgEsc(smGradeTxt(gr))}`:''), rwTxt, em.url?tgEsc(em.url):''].filter(Boolean).join('\n\n').slice(0,4000); }
 async function tgApi(method, fd){ const r=await fetch(`https://api.telegram.org/bot${tgToken}/${method}`, { method:'POST', body:fd }); const d=await r.json().catch(()=>({}));
   if(!d.ok) throw new Error(d.description||`HTTP ${r.status}`); return d.result; }
 async function tgSend(text, photo){
@@ -1123,6 +1139,7 @@ function sharpDiscordPayload(e, example){
       ...[['Pinnacle',e.pin],['BetOnline',e.bol],['Circa',e.circa],['BookMaker',e.bkm]].filter(([,r])=>r).map(([n,r])=>({ name:n, value:`${smRefLine(e, r)}**${fmtAm(r.price)}**${r.limit!=null?` · limit **${usd(r.limit)}**`:''}`, inline:true })),
       ...(e.via ? [{ name:`${bookShort(bk)} vs ${best?bookLabel(best[0]):'exchange'} - Borrowing ${bookShort(e.via.book)} ${fmtAm(e.via.price)} (${e.via.cents??0}c)`, value:`**${fmtAm(o.price)}** VS. **${best?fmtAm(-best[1].opp):'—'}**` }]
         : [{ name:`${bookShort(bk)} vs ${best?bookLabel(best[0]):'exchange'}`, value: best ? `**${fmtAm(o.price)}** VS. **${fmtAm(-best[1].opp)}**` : `**${fmtAm(o.price)}**` }]),
+      ...(()=>{ const g=example?null:smPlayGrade(e); return g ? [{ name:'Grade', value:smGradeTxt(g) }] : []; })(),
       ...(()=>{ const r=example?null:smRwFlag(e); return r ? [{ name: r.iffy ? '⚠️ IFFY · RotoWire' : '📰 RotoWire', value: r.txt.slice(0,1000) }] : []; })(),
       { name:`Exchange Depth (${usd(e.L.total)} at ${anyArb?'arb':'0% hold'})`, value: '```\n'+[`${'Book'.padEnd(6)} ${'Odds'.padStart(5)} ${'Liq'.padStart(6)} ${(anyArb?'Arb':'Hold').padStart(5)}`, ...depthLv.map(l=>`${[...l.books].map(k=>bookShort(k)).join('/').slice(0,6).padEnd(6)} ${fmtAm(l.opp).padStart(5)} ${usd(l.size).padStart(6)} ${(anyArb ? (-l.hold>=0?'+':'')+(-l.hold).toFixed(1)+'%' : Math.max(0,l.hold).toFixed(1)+'%').padStart(5)}`)].join('\n')+'\n```'+`Sent <t:${Math.floor(Date.now()/1000)}:R>` },
     ],
@@ -2474,12 +2491,10 @@ function smRecapFields(day, book='fanduel'){
   // order: the day (its bets, then by market) -> all-time (sent windows only) -> everything muted / not sent, last
   const sentOnly = sec => Object.fromEntries(Object.entries(sec||{}).filter(([k])=>!/\(muted\)/.test(k)));
   const mutedOnly = sec => Object.fromEntries(Object.entries(sec||{}).filter(([k])=>/\(muted\)/.test(k)));
-  const betRows = list => (list||[]).slice().sort((a,b)=>b.u-a.u).map(b=>`${b.r==='win'?'✅':b.r==='loss'?'❌':'➖'} ${b.x} · ${b.u>=0?'+':''}${b.u.toFixed(2)}u`);
   const mutedLines = S => [ S.head.muted?.n ? `Muted windows: ${smFmt(S.head.muted)} (${S.head.muted.n})` : '', S.head.muted?.n ? `With them: ${smFmt(S.head.all)}` : '',
     S.small?.All?.n ? `$${SM_SMALL}+ tier (background): ${smFmt(S.small.All)} (${S.small.All.n})` : '' ].filter(Boolean);
   const fields = !has ? [] : [
-    ...recapFields(`📅 ${dayName} — ${smFmt(D.head.sent||smR0())}`, D.bets?.length ? betRows(D.bets) : (smRows(D.market).length ? smRows(D.market) : ['No sent bets graded (muted / background only — see the end)'])),
-    ...(D.bets?.length ? recapFields(`${dayName} by market`, smRows(D.market)) : []),
+    ...recapFields(`📅 ${dayName} — ${smFmt(D.head.sent||smR0())}`, smRows(D.market).length ? smRows(D.market) : ['No sent bets graded (muted / background only — see the end)']),
     ...(Object.keys(sentOnly(D.tip)).length ? recapFields('Time to tip', smRows(sentOnly(D.tip), smTipOrd), true) : []),
     ...recapFields(`📈 All-time — ${smFmt(A.head.sent||smR0())}`, smRows(A.sport)),
     ...recapFields('By market', smRows(A.market)),
@@ -2490,7 +2505,7 @@ function smRecapFields(day, book='fanduel'){
     ...recapFields('Arb money', smRows(A.money), true),
     ...(Object.keys(A.news||{}).length ? recapFields('RotoWire (NBA)', smRows(A.news), true) : []),
     // ── muted / not sent, last ──
-    ...((D.betsMuted?.length||D.betsSmall?.length||mutedLines(D).length) ? recapFields(`🔇 ${dayName} · not sent (not in the record)`, [...mutedLines(D), ...betRows(D.betsMuted), ...betRows(D.betsSmall).map(x=>x+` · $${SM_SMALL} tier`)]) : []),
+    ...(mutedLines(D).length ? recapFields(`🔇 ${dayName} · not sent (not in the record)`, mutedLines(D)) : []),
     ...(mutedLines(A).length ? recapFields('🔇 All-time · not sent', [...mutedLines(A), ...smRows(mutedOnly(A.tip), smTipOrd)]) : []) ];
   return { has, fields };
 }
