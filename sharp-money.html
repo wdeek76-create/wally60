@@ -2387,6 +2387,19 @@ function nlAlert(){
 // Discord: laid out like the Sharp Money alerts -- bet first + role, title = FD price + bet (links to
 // FD), matchup, then one block per signal: FD VS. the other side (flipped to FD's side), the
 // Kalshi depth table, and links to every book in the play.
+// In-game grade, same idea as the pregame one: how bets like this did in the in-game record -- each
+// signal it came from, the prop, how many signals agree, the exchange money and the hold / arb size --
+// ROI blended by sample size, A-F on the same scale.
+const nlHoldB = h => h==null ? null : h>-0.05 ? '0% hold' : -h<1 ? 'arb under 1%' : -h<2 ? 'arb 1–2%' : 'arb 2%+';
+function nlRecOf(list){ let n=0,u=0,st=0; list.forEach(t=>{ if(!t.final||!t.result) return; const risk=riskToWin(t.price,1); n++; if(t.result==='win'){ u+=1; st+=risk; } else if(t.result==='loss'){ u-=risk; st+=risk; } else st+=risk; }); return { n, u, s:st }; }
+function nlPlayGrade(p, sigs){
+  try{ const done=nlTracked.filter(t=>t.final&&t.result); if(!done.length) return null; const U=nlUniq(done);
+    const best=sigs.reduce((a,x)=>Math.min(a, x.hold??0), 0), size=Math.max(0,...sigs.map(x=>x.size||0))||null, nk=sigs.length;
+    const mk=marketLabel(p.sk||'nba',p.mk), agree=nk>=3?'3+ signals agree':nk===2?'2 signals agree':'1 signal';
+    const groups=[ ...sigs.map(x=>done.filter(t=>t.kind===x.kind)), U.filter(t=>t.marketLabel===mk), U.filter(t=>nlAgree(t)===agree),
+      size!=null ? U.filter(t=>nlMoney(t)===nlMoney({size})) : [], U.filter(t=>nlHoldB(t.hold)===nlHoldB(best)) ];
+    let w=0, roi=0, n=0; groups.forEach(g=>{ const r=nlRecOf(g); if(!r.n||!r.s) return; const wt=Math.min(r.n,150); roi+=(r.u/r.s)*wt; w+=wt; n+=r.n; });
+    if(!w) return null; roi=roi/w*100; return { roi, n, g:smGrade({ u:roi, s:100 }) }; }catch(err){ return null; } }
 function nlPost(p, sigs){
   const lg=(SPORTS[p.sk]?.label||'NBA').toUpperCase(), mk=marketLabel(p.sk||'nba',p.mk), bet=`${titleCase(p.name)} ${nlSide(p.side)}${p.line!=null?' '+p.line:''} ${mk}`;
   const title=`${fmtAm(p.fd.price)} ${bet}`, opp=nlSide(NL_OPP[p.side]);
@@ -2408,6 +2421,7 @@ function nlPost(p, sigs){
   const links=[];   // FD is the title link; these are the other side to fade
   sigs.forEach(x=>x.books.forEach((b,i)=>{ const u=discordUrl(x.links?.[i])||BOOK_HOME[b];
     const t = b==='draftkings' ? `${[`[DK](${u})`, ...(x.dkAlt||[])].join(' | ')} ${opp} ${fmtAm(x.prices[i])}` : `[${NL_LBL[b]} ${opp} ${fmtAm(x.prices[i])}](${u})`; if(u && !links.some(l=>l.startsWith(`[${NL_LBL[b]}`))) links.push(t); }));
+  const gr=nlPlayGrade(p, sigs); if(gr) fields.unshift({ name:'Grade', value:`${gr.g} grade · ${gr.roi>=0?'+':''}${gr.roi.toFixed(1)}% ROI · ${gr.n.toLocaleString('en-US')} bets` });
   fields.push({ name:'Fade:', value:[...links, `Sent <t:${Math.floor(Date.now()/1000)}:R>`].join('\n') });
   discordPost({ username:'FanDuel', avatar_url:httpsLogo('fanduel'), content:[title, role?`<@&${role}>`:''].filter(Boolean).join(' '), allowed_mentions: role?{roles:[role]}:{parse:[]},
     embeds:[{ title, url:discordUrl(fdUrl)||undefined, color:sigs.some(x=>x.hold<-0.05)?0x22c55e:0xeab308, thumbnail:httpsLogo('fanduel')?{url:httpsLogo('fanduel')}:undefined,
