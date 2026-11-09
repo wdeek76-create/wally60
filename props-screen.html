@@ -279,7 +279,7 @@ main{flex:1;padding:12px calc(var(--sar) + 12px) max(160px, calc(var(--ftrh,76px
 .bbxodds{flex:0 0 58px;display:flex;flex-direction:column;align-items:flex-start;line-height:1.1}
 .bbxodds b{font-family:var(--pricefont);font-size:16px;font-weight:800;color:var(--text)}
 .bbxodds.empty{color:var(--dim);opacity:.5}
-.bbxc{font-family:var(--mono);font-size:9.5px;font-weight:700;color:var(--text);opacity:.85}
+.bbxc{font-family:var(--mono);font-size:12px;font-weight:700;color:var(--text);opacity:.9}
 .bbxbar{position:relative;flex:1 1 auto;min-width:0;height:28px;border-radius:7px;background:rgba(255,255,255,.04);overflow:hidden;display:flex;align-items:center;justify-content:space-between}
 .bbxbar i{position:absolute;left:0;top:0;bottom:0;background:linear-gradient(90deg,rgba(34,197,94,.30),rgba(34,197,94,.12));border-radius:7px}
 .bbxbt{position:relative;padding:0 8px;font-family:var(--mono);font-size:11px;font-weight:800;color:var(--text);white-space:nowrap;display:flex;align-items:center;gap:3px;overflow:hidden}
@@ -1821,6 +1821,8 @@ async function oo(endpoint, params, opts){
 }
 
 // order-book depth behind the top level, down to play-to
+// a price no one could really be quoting on a prop (95c+ / under 4c, e.g. PX's -26031): treated as no price
+const oddsJunk = am => { const a=Number(am); if(!isFinite(a)||Math.abs(a)<100) return false; const p=a>0?100/(a+100):-a/(-a+100); return p>0.95 || p<0.04; };
 function levelsOf(o){
   const top=Number(o.price);
   const ob=(Array.isArray(o.order_book)?o.order_book:[]).filter(l=>Array.isArray(l)&&l.length>=2);
@@ -1842,7 +1844,7 @@ function levelsOf(o){
     // anything else (an unconverted percentage, a raw value the decimal-odds heuristic's narrow
     // 1-50 window didn't catch, whatever) is garbage, not a real price, and showing it verbatim
     // (e.g. "+83.43", which isn't a price any book could ever quote) is worse than dropping it.
-    ob.forEach(l=>{ const price=pf?normP(l[0]):normP(l[1]); const size=pf?Number(l[1]):Number(l[0]); if(!isNaN(price)&&Math.abs(price)>=100&&!isNaN(size)&&size>0) out.push({price:Math.floor(price),size}); });
+    ob.forEach(l=>{ const price=pf?normP(l[0]):normP(l[1]); const size=pf?Number(l[1]):Number(l[0]); if(!isNaN(price)&&Math.abs(price)>=100&&!oddsJunk(price)&&!isNaN(size)&&size>0) out.push({price:Math.floor(price),size}); });
   } else if(o.limits?.max) out.push({price:top,size:Number(o.limits.max)});
   return out.sort((a,b)=>b.price-a.price);
 }
@@ -2482,7 +2484,7 @@ function sideCellHtml(b, sd, o, pt, ctxKey, ro){
   // when they're confident, so it's worth calling out harder than the usual brief flash.
   const pinLimitUp = b.key==='pinnacle' && liqFlashCls==='flash-up';
   const liq = showMax && atTop!=null ? `<span class="${liqFlashCls}">${usd(atTop)}</span>${liqDelta(base+'|liqd', atTop)}${pinLimitUp?'<span class="limitup">⚡ Limit up</span>':''}` : '';
-  const liqSummary = (cp.weighted && cp.size) ? `<div class="rliqsum${flashCls(base+'|liqsum', cp.size)}">${usd(cp.size)} at ${fmtAm(cp.price)}</div>` : '';
+  const liqSummary = (cp.weighted && cp.size) ? `<div class="rliqsum${flashCls(base+'|liqsum', cp.size)}">${usd(cp.size)} at ${fmtAm(cp.price)} (${(toImplied(cp.price)*100).toFixed(1)}¢)</div>` : '';
   const priceCls = flashCls(base+'|price', Number(displayPrice), true);
   const key=`${sd}|${b.key}`;
   // Weighted mode: the liq-depth pill stays put under the price like always (plain display, not
@@ -2545,21 +2547,22 @@ function bookBoxHtml(b, sd, o, pt, ctxKey, i, ro){
   const priceCls=flashCls(base+'|price', Number(cp.price), true);
   const liqFl = showMax && size!=null ? flashCls(base+'|liq', size).trim() : '';
   const pinLimitUp = b.key==='pinnacle' && liqFl==='flash-up';
-  const cpct = b.ex ? `<span class="bbxc">${(toImplied(cp.price)*100).toFixed(1)}${exPctMode==='cents'?'¢':'%'}</span>` : '';
+  const junk = oddsJunk(cp.price);
+  const cpct = b.ex && !junk ? `<span class="bbxc">${(toImplied(cp.price)*100).toFixed(1)}${exPctMode==='cents'?'¢':'%'}</span>` : '';
   const w = showMax && size!=null && bbxMaxLiq>0 ? Math.max(4, Math.round(size/bbxMaxLiq*100)) : 0;
-  const liqTxt = showMax && size!=null ? `<span class="${liqFl}">${usd(size)}${cp.weighted?` <i class="bbxw">@ ${fmtAm(cp.price)}</i>`:''}</span>${liqDelta(base+'|liqd', size)}${pinLimitUp?'<span class="limitup">⚡ Limit up</span>':''}` : '';
+  const liqTxt = showMax && size!=null ? `<span class="${liqFl}">${usd(size)}${cp.weighted?` <i class="bbxw">@ ${(toImplied(cp.price)*100).toFixed(1)}¢</i>`:''}</span>${liqDelta(base+'|liqd', size)}${pinLimitUp?'<span class="limitup">⚡ Limit up</span>':''}` : '';
   const pill = b.ex ? ` role="button" data-pill="${ctxKey}|${sd}|${b.key}"` : '';
   // Exchanges: the next level right behind the shown price (the closest number), so you can see
   // what's still there if the top gets taken.
   const nxt = b.ex ? levelsOf(o).find(l=>toDec(l.price) < toDec(cp.price)-1e-9) : null;
-  const nxtTxt = nxt ? `<span class="bbxnext">+${usd(nxt.size)} @ ${fmtAm(nxt.price)}</span>` : '';
+  const nxtTxt = nxt ? `<span class="bbxnext">+${usd(nxt.size)} @ ${(toImplied(nxt.price)*100).toFixed(1)}¢</span>` : '';
   // Track straight from the box, no tap-to-open first.
   const [pk, mk] = String(ctxKey).split('|'); const pp = players.find(x=>x.key===pk) || current;
   const on = !ro && pp && isTracked(pp, mk, sd, b.line, b.key);
   const trk = ro ? '' : `<button class="bbxtrk${on?' on':''}" data-qtrack="${ctxKey}|${sd}|${b.line??''}|${b.key}" title="Track ${esc(bookShort(b.key))}">${on?'✓':'Track'}</button>`;
   return `<div class="bbx tight${i%2===1?' alt':''}${playable(o.price,pt)?'':' bad'}"${rowPill}>
     ${logoEl}
-    <span class="bbxodds"><b class="rv${priceCls}">${fmtAm(cp.price)}</b>${cpct}</span>
+    <span class="bbxodds"><b class="rv${priceCls}">${junk?'&nbsp;':fmtAm(cp.price)}</b>${cpct}</span>
     <span class="bbxbar"${pill}>${w?`<i style="width:${w}%"></i>`:''}<span class="bbxbt">${liqTxt}${nxtTxt}</span>${b.line!=null?`<span class="bbxln">${b.line}</span>`:''}</span>
     ${trk}
   </div>`;
@@ -3053,7 +3056,7 @@ function marketCardHtml(p, mkey){
   const stp = isSingle ? '' : `<button class="stp" data-step="-1" data-ctx="${ctx}"${ls&&at===0?' disabled':''}>‹</button>`;
   const stpR = isSingle ? '' : `<button class="stp" data-step="1" data-ctx="${ctx}"${ls&&at===ls.length-1?' disabled':''}>›</button>`;
   const bookCount = new Set(nowRows.map(o=>canonBook(o.sportsbook))).size;
-  const tag = (isSingle || sel==null) ? '' : `<div class="lntag alt"><span class="dot"></span>Alt line${mainLine!=null?` · consensus ${mainLine}`:''}<span class="lnct">${bookCount}</span><button data-reset="${ctx}">Back</button></div>`;
+  const tag = (isSingle || sel==null || (mainLine!=null && Number(sel)===Number(mainLine))) ? '' : `<div class="lntag alt"><span class="dot"></span>Alt line${mainLine!=null?` · consensus ${mainLine}`:''}<span class="lnct">${bookCount}</span><button data-reset="${ctx}">Back</button></div>`;
   const was = opLine!=null && nowLine!=null && opLine!==nowLine ? `<span class="was">from ${opLine}</span>` : '';
   const note = isSingle ? '' : moveNote(nowRows, opRows, nowLine, opLine);
   const body = nowRows.length ? boardHtml(nowRows,p,mkey,ctx,nowLine,pt,false) : `<div class="bempty">No shop is posting ${nowLine}.</div>`;
@@ -3395,7 +3398,9 @@ async function stepLine(p, ctx, dir, render, store){
   // instead of an unmatched line falling through to the far end of the list.
   if(i<0){ let bestDiff=Infinity; lines.forEach((l,idx)=>{ const d=Math.abs(l-Number(cur)); if(d<bestDiff){ bestDiff=d; i=idx; } }); }
   i=Math.max(0,Math.min(lines.length-1,i+dir));
-  store.sel[ctx] = (main!=null && lines[i]===main) ? null : lines[i];
+  // the line you step to sticks, even when it's today's consensus -- otherwise a consensus flip
+  // (3.5 <-> 4.5) on the next refresh dragged the card off the line you picked
+  store.sel[ctx] = lines[i];
   render();
 }
 const marketNamesFor = (p,mkey) => [...new Set(rowsFor(p,mkey,mainRows).map(o=>o.market))];
