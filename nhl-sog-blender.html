@@ -81,7 +81,6 @@ tr:hover td{background:#0a1628;}
 #track-modal-box .sub{font-size:12px;color:#4a6fa5;margin-bottom:22px;}
 #propshop-modal{display:none;position:fixed;inset:0;background:#0008;z-index:1000;align-items:center;justify-content:center;}
 #propshop-modal.open{display:flex;}
-.pscsv{display:inline-block;background:#0a1628;border:1px solid #a78bfa;color:#c4b5fd;border-radius:6px;padding:5px 10px;font-size:12px;font-weight:700;cursor:pointer;}
 #propshop-modal-box{background:#0a1628;border:1px solid #0d2035;border-radius:14px;padding:28px 28px 24px;width:640px;max-width:95vw;}
 #propshop-modal-box h3{font-size:17px;font-weight:800;color:#fff;margin-bottom:4px;}
 #propshop-modal-box .sub{font-size:12px;color:#4a6fa5;margin-bottom:16px;}
@@ -4673,72 +4672,6 @@ async function importPropShopNhl() {
   // old text sitting there just invites a stale double-paste next time.
   document.getElementById('propshop-paste-area').value = '';
 }
-// PropShop CSV export (one file per source, same flow as the NBA blender): one row per book with Player, O/U,
-// Market, Line, Proj, Odds, ROI (%), Book, Date + Start (UTC), home/away team. ROI (%) is the EV% the board shows.
-// Every line in the file becomes its own row (alt lines too) at the best price across books; no min-edge filter —
-// the file only carries +EV rows and the 4th-source "not negative" rule needs the small ones.
-const _NHL_FULLNAME_ABBR = { "anaheim ducks": "ANA", "boston bruins": "BOS", "buffalo sabres": "BUF", "calgary flames": "CGY", "carolina hurricanes": "CAR",
-  "chicago blackhawks": "CHI", "colorado avalanche": "COL", "columbus blue jackets": "CBJ", "dallas stars": "DAL", "detroit red wings": "DET",
-  "edmonton oilers": "EDM", "florida panthers": "FLA", "los angeles kings": "LAK", "minnesota wild": "MIN", "montreal canadiens": "MTL",
-  "montréal canadiens": "MTL", "nashville predators": "NSH", "new jersey devils": "NJD", "new york islanders": "NYI", "new york rangers": "NYR",
-  "ottawa senators": "OTT", "philadelphia flyers": "PHI", "pittsburgh penguins": "PIT", "san jose sharks": "SJS", "seattle kraken": "SEA",
-  "st. louis blues": "STL", "st louis blues": "STL", "tampa bay lightning": "TBL", "toronto maple leafs": "TOR", "utah mammoth": "UTA",
-  "utah hockey club": "UTA", "vancouver canucks": "VAN", "vegas golden knights": "VGK", "washington capitals": "WSH", "winnipeg jets": "WPG" };
-function _nhlPsParseCsv(text) {
-  const rows = parseCSV(text);
-  if (rows.length < 2) return null;
-  const h = rows[0].map(x => String(x).replace(/^\uFEFF/, "").replace(/"/g, "").trim().toLowerCase());
-  const col = (...n) => { for (const k of n) { const i = h.indexOf(k); if (i >= 0) return i; } return -1; };
-  const iP = col("player"), iOU = col("o/u"), iLine = col("line"), iOdds = col("odds"), iBook = col("book"), iProj = col("proj"),
-    iRoi = col("roi (%)"), iMkt = col("market"), iTeam = col("team"), iHome = col("home_team"), iAway = col("away_team"), iDate = col("date"), iStart = col("start");
-  if (iP < 0 || iOU < 0 || iLine < 0 || iOdds < 0 || iRoi < 0) return null;
-  const abbr = n => _NHL_FULLNAME_ABBR[String(n || "").trim().toLowerCase()] || String(n || "").trim().toUpperCase();
-  const groups = {}; let skipped = 0;
-  rows.slice(1).forEach(r => {
-    const c = k => k >= 0 ? String(r[k] == null ? "" : r[k]).replace(/"/g, "").trim() : "";
-    if (iMkt >= 0 && !/shots?_on_goal/i.test(c(iMkt))) { skipped++; return; }
-    const ou = c(iOU).toLowerCase(); if (ou !== "over" && ou !== "under") return;
-    const line = Number(c(iLine)), odds = parseInt(c(iOdds), 10), ev = Number(c(iRoi));
-    if (!c(iP) || isNaN(line) || isNaN(odds) || isNaN(ev)) return;
-    const k = nn(c(iP)) + "|" + ou + "|" + line;
-    (groups[k] = groups[k] || []).push({ c, ou, line, odds, ev });
-  });
-  const results = Object.values(groups).map(list => {
-    const best = list.reduce((a, x) => x.odds > a.odds ? x : a, list[0]), c = best.c;
-    const t = Date.parse(c(iDate) + "T" + (c(iStart) || "00:00:00") + "Z"), d = isNaN(t) ? null : new Date(t);   // Date + Start are UTC
-    return { player: c(iP), team: _nhlTeamCanon(c(iTeam)), game: iAway >= 0 && iHome >= 0 ? abbr(c(iAway)) + " @ " + abbr(c(iHome)) : "",
-      gameDateIso: d ? _ymdLocal(d) : c(iDate), ou: best.ou, line: best.line, odds: best.odds, book: _nhlBookLabel(c(iBook)) || c(iBook),
-      ev: Math.round(best.ev * 10) / 10, proj: iProj >= 0 ? Number(c(iProj)) || null : null };
-  });
-  return { results, rows: rows.length - 1, skipped };
-}
-const NHL_PS_CSV_HASH_KEY = "nhl_ps_csv_hash";
-const _nhlTextHash = t => { const x = String(t || ""); let h = 5381; for (let i = 0; i < x.length; i++) h = ((h << 5) + h + x.charCodeAt(i)) | 0; return String(h) + ":" + x.length; };
-function importPropShopCsvNhl(src, inp) {
-  const file = inp.files && inp.files[0]; if (!file) return;
-  file.text().then(text => {
-    inp.value = "";
-    const info = document.getElementById("propshop-parse-info"), label = _psSourceLabelNhl[src];
-    const res = _nhlPsParseCsv(text);
-    if (!res) { const m = "That doesn't look like a PropShop CSV export (needs Player / O/U / Line / Odds / ROI (%) columns)."; showNhlToast(m); if (info) info.textContent = m; return; }
-    if (!res.results.length) { showNhlToast("No shots-on-goal rows in that file"); return; }
-    let hashes = {}; try { hashes = JSON.parse(localStorage.getItem(NHL_PS_CSV_HASH_KEY) || "{}") || {}; } catch (e) {}
-    const hh = _nhlTextHash(text), dupe = Object.keys(hashes).find(k => k !== src && hashes[k] === hh);
-    if (dupe && !confirm(`This is the exact same file you loaded for ${_psSourceLabelNhl[dupe]}. Load it for ${label} anyway?`)) return;
-    const today = _ymdLocal(new Date()), dates = [...new Set(res.results.map(r => r.gameDateIso))];
-    if (dates.length && !dates.includes(today) && !confirm(`This file is for ${dates.join(", ")}, not today (${today}). Load it anyway?`)) return;
-    // A source can come in more than one file (split by game): a file only replaces this source's rows for the games it covers.
-    const gk = p => (p.gameDateIso || "") + "|" + (p.game || ""), covered = new Set(res.results.map(gk)), players = new Set(res.results.map(p => nn(p.player)));
-    const list = res.results.map(r => ({ _rid: Date.now() + Math.floor(Math.random() * 1e6), ...r }));
-    nhlPsBySource[src] = (nhlPsBySource[src] || []).filter(p => !(p.game ? covered.has(gk(p)) : players.has(nn(p.player)))).concat(list);
-    saveNhlPsBySource();
-    hashes[src] = hh; try { localStorage.setItem(NHL_PS_CSV_HASH_KEY, JSON.stringify(hashes)); } catch (e) {}
-    const games = [...new Set(res.results.map(r => r.game).filter(Boolean))].length;
-    const msg = `${label} CSV: ${list.length} props · ${games} game${games === 1 ? "" : "s"} (from ${res.rows} rows)${res.skipped ? ` · skipped ${res.skipped} other-market rows` : ""} · ${label} now has ${nhlPsBySource[src].length}`;
-    showNhlToast(msg); if (info) info.textContent = msg;
-    if (currentTab === "res") renderNhlPsPanel();
-  });
-}
 function setNhlPsTab(tab) {
   nhlPsTab = tab;
   ['stok', 'rg', 'roto', 'saber', 'ensemble'].forEach(k => {
@@ -7036,14 +6969,6 @@ function scheduleNextTickerRefresh() {
       </label>
     </div>
     <div style="font-size:11px;color:#4a6fa5;margin-bottom:8px;">PropShop's own "Projection Set" switcher decides whose numbers are on the board when you copy it — pick the matching one here so imported picks are tagged with which source they came from, not lumped together. Leave min edge at 1% — the real 3% gate is applied by the ensemble (3 of 4 sources ≥3%), so filtering this import any higher throws away the 1–2% rows the 4th-source rule needs.</div>
-    <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:8px;">
-      <span style="font-size:11px;color:#c4b5fd;font-weight:800;">PropShop CSV:</span>
-      <label class="pscsv">⬆ STOK<input type="file" accept=".csv" style="display:none" onchange="importPropShopCsvNhl('stok', this)"></label>
-      <label class="pscsv">⬆ RG<input type="file" accept=".csv" style="display:none" onchange="importPropShopCsvNhl('rg', this)"></label>
-      <label class="pscsv">⬆ ROTOWIRE<input type="file" accept=".csv" style="display:none" onchange="importPropShopCsvNhl('roto', this)"></label>
-      <label class="pscsv">⬆ SABER<input type="file" accept=".csv" style="display:none" onchange="importPropShopCsvNhl('saber', this)"></label>
-      <span style="font-size:11px;color:#4a6fa5;">one file per source · or paste a board below</span>
-    </div>
     <textarea id="propshop-paste-area" placeholder="Paste here…" style="width:100%;height:260px;background:#060b14;border:1px solid #0d2035;border-radius:8px;color:#e2e8f0;padding:10px;font-family:'Inter',sans-serif;font-size:12px;resize:vertical;"></textarea>
     <div id="propshop-parse-info" style="font-size:12px;color:#4a6fa5;margin-top:8px;min-height:16px;"></div>
     <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:16px;">
