@@ -97,6 +97,7 @@ main{padding:10px 14px calc(var(--sab) + 40px);max-width:720px;margin:0 auto}
 .sh .t{font-size:11px;font-weight:800;letter-spacing:.5px;text-transform:uppercase;color:var(--text)}
 .sh.shback{position:sticky;top:var(--hdrh,64px);z-index:14;background:var(--bg);padding:8px 0;margin:0 0 8px}
 .shlist{display:flex;flex-direction:column;gap:10px;padding:4px 0 20px}
+.nlbd{margin-top:7px;padding-top:6px;border-top:1px solid var(--line2);font-size:11px;line-height:1.5;color:var(--sub,#b9b0d6)}.nlbd b{color:var(--text)}
 .shcard.good,.nlcard.good{border-color:#22c55e;box-shadow:0 0 0 1px rgba(34,197,94,.55),0 0 14px rgba(34,197,94,.25)}
 .shcard{border:1px solid var(--line2);border-radius:14px;background:var(--bg2);padding:10px 12px;cursor:pointer}
 .shhd{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
@@ -2394,7 +2395,14 @@ function nlAlert(){
 // signal it came from, the prop, how many signals agree, the exchange money and the hold / arb size --
 // ROI blended by sample size, A-F on the same scale.
 const nlHoldB = h => h==null ? null : h>-0.05 ? '0% hold' : -h<1 ? 'arb under 1%' : -h<2 ? 'arb 1–2%' : 'arb 2%+';
-function nlRecOf(list){ let n=0,u=0,st=0; list.forEach(t=>{ if(!t.final||!t.result) return; const risk=riskToWin(t.price,1); n++; if(t.result==='win'){ u+=1; st+=risk; } else if(t.result==='loss'){ u-=risk; st+=risk; } else st+=risk; }); return { n, u, s:st }; }
+function nlRecOf(list){ let n=0,u=0,st=0,w=0,l=0; list.forEach(t=>{ if(!t.final||!t.result) return; const risk=riskToWin(t.price,1); n++; if(t.result==='win'){ w++; u+=1; st+=risk; } else if(t.result==='loss'){ l++; u-=risk; st+=risk; } else st+=risk; }); return { n, u, s:st, w, l }; }
+// small breakdown under a live play: its combo (or single signal), its side, its prop -- record, units, sample
+function nlBreakdown(p, sigs){
+  try{ const done=nlTracked.filter(t=>t.final&&t.result); if(!done.length) return ''; const U=nlUniq(done);
+    const kinds=[...new Set(sigs.map(x=>x.kind))].sort(), mk=marketLabel(p.sk||'nba',p.mk), side=nlSide(p.side);
+    const rows=[ kinds.length>1 ? [`Combo ${kinds.join(' + ')}`, U.filter(t=>nlCombo(t)===kinds.join(' + '))] : [`${kinds[0]} alone`, done.filter(t=>t.kind===kinds[0])],
+      [side, U.filter(t=>nlSide(t.side)===side)], [mk, U.filter(t=>t.marketLabel===mk)] ];
+    return rows.map(([lab,l])=>{ const r=nlRecOf(l); return r.n ? `${lab}: ${r.w}-${r.l} · ${r.u>=0?'+':''}${r.u.toFixed(1)}u · ${r.n} bets` : `${lab}: no history yet`; }).join('\n'); }catch(e){ return ''; } }
 function nlPlayGrade(p, sigs){
   try{ const done=nlTracked.filter(t=>t.final&&t.result); if(!done.length) return null; const U=nlUniq(done);
     const best=sigs.reduce((a,x)=>Math.min(a, x.hold??0), 0), size=Math.max(0,...sigs.map(x=>x.size||0))||null, nk=sigs.length;
@@ -2424,7 +2432,7 @@ function nlPost(p, sigs){
   const links=[];   // FD is the title link; these are the other side to fade
   sigs.forEach(x=>x.books.forEach((b,i)=>{ const u=discordUrl(x.links?.[i])||BOOK_HOME[b];
     const t = b==='draftkings' ? `${[`[DK](${u})`, ...(x.dkAlt||[])].join(' | ')} ${opp} ${fmtAm(x.prices[i])}` : `[${NL_LBL[b]} ${opp} ${fmtAm(x.prices[i])}](${u})`; if(u && !links.some(l=>l.startsWith(`[${NL_LBL[b]}`))) links.push(t); }));
-  const gr=nlPlayGrade(p, sigs); if(gr) fields.unshift({ name:'Grade', value:`${gr.g} grade · ${gr.roi>=0?'+':''}${gr.roi.toFixed(1)}% ROI · ${gr.n.toLocaleString('en-US')} bets` });
+  const gr=nlPlayGrade(p, sigs), bd=nlBreakdown(p, sigs); if(gr||bd) fields.unshift({ name:'Grade', value:[gr?`${gr.g} grade · ${gr.roi>=0?'+':''}${gr.roi.toFixed(1)}% ROI · ${gr.n.toLocaleString('en-US')} bets`:'', bd].filter(Boolean).join('\n').slice(0,1000) });
   fields.push({ name:'Fade:', value:[...links, `Sent <t:${Math.floor(Date.now()/1000)}:R>`].join('\n') });
   discordPost({ username:'FanDuel', avatar_url:httpsLogo('fanduel'), content:[title, role?`<@&${role}>`:''].filter(Boolean).join(' '), allowed_mentions: role?{roles:[role]}:{parse:[]},
     embeds:[{ title, url:discordUrl(fdUrl)||undefined, color:gr ? (/^🟢/.test(gr.g)?0x22c55e:/^🔴/.test(gr.g)?0xef4444:0xeab308) : sigs.some(x=>x.hold<-0.05)?0x22c55e:0xeab308, thumbnail:httpsLogo('fanduel')?{url:httpsLogo('fanduel')}:undefined,
@@ -2760,7 +2768,7 @@ function renderNbaLive(){
     : nlPlays.map(p=>{ const f=p.f, lg=bookLogo('fanduel'), url=sharpLink(p.fd)||BOOK_HOME.fanduel;
       return `<div class="nlcard${nlFresh.has(p.key)?' new':''}${/^🟢/.test(nlPlayGrade(p,p.sigs)?.g||'')?' good':''}"><div class="nlh"><div><div class="nlnm">${esc(titleCase(p.name))} <span>${nlSide(p.side)}${p.line!=null?' '+p.line:''} ${esc(marketLabel(p.sk||'nba',p.mk))}</span></div><div class="nlmeta">${f?`${esc(SPORTS[p.sk]?.label||'')} · ${esc(f.away.ab||f.away.name)} @ ${esc(f.home.ab||f.home.name)} · LIVE`:''}</div></div>
         <a class="nlpr" href="${esc(url)}" target="_blank" rel="noopener" data-betlink>${lg?`<img src="${esc(lg)}" alt="">`:'FD'}${fmtAm(p.fd.price)}</a></div>
-        ${p.sigs.map(x=>`<div class="nlsig"><span class="nlk${x.exch?' kal':''}">${esc(x.exch?x.books.map(b=>NL_LBL[b]||b).join('/'):x.kind)}</span><span>${x.books.map((b,i)=>`${NL_LBL[b]} ${fmtAm(x.prices[i])}`).join(' · ')}${x.size?` · ${usd(x.size)}`:''} <span class="nltag${x.hold<-0.05?' arb':''}">${nlHold(x.hold)}</span></span></div>`).join('')}</div>`; }).join('');
+        ${p.sigs.map(x=>`<div class="nlsig"><span class="nlk${x.exch?' kal':''}">${esc(x.exch?x.books.map(b=>NL_LBL[b]||b).join('/'):x.kind)}</span><span>${x.books.map((b,i)=>`${NL_LBL[b]} ${fmtAm(x.prices[i])}`).join(' · ')}${x.size?` · ${usd(x.size)}`:''} <span class="nltag${x.hold<-0.05?' arb':''}">${nlHold(x.hold)}</span></span></div>`).join('')}${(()=>{ const g=nlPlayGrade(p,p.sigs), bd=nlBreakdown(p,p.sigs); return g||bd ? `<div class="nlbd">${g?`<b>${esc(g.g)} · ${g.roi>=0?'+':''}${g.roi.toFixed(1)}% ROI · ${g.n} bets</b><br>`:''}${esc(bd).replace(/\n/g,'<br>')}</div>` : ''; })()}</div>`; }).join('');
   const row=(l,list)=>{ const r=ttRecord(list.filter(t=>t.final)); return `<div class="ttrow"><span>${esc(l)} <span class="dim">(${r.n})</span></span><span>${r.w}-${r.l}-${r.p}</span><span class="${r.u>0?'pos':r.u<0?'neg':''}">${r.u>=0?'+':''}${r.u.toFixed(2)}u</span><span class="dim">${r.roi!=null?r.roi.toFixed(1)+'%':'—'}</span></div>`; };
   const sub=t=>`<div class="dim" style="font-size:9.5px;font-weight:800;letter-spacing:.5px;text-transform:uppercase;margin:8px 0 2px">${t}</div>`;
   const kinds=[...new Set(['Kalshi','Novig','PX',...NL_PAIRS.map(([a,b])=>`${NL_LBL[a]}+${NL_LBL[b]}`), ...nlTracked.map(t=>t.kind)])];
