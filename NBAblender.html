@@ -11248,10 +11248,15 @@ function _copyOpenFiltered(kind) {
   const _nmB = bk => BOOK_CODE_NAMES[String(bk || "").trim().toUpperCase()] || bk;
   const _oneEach = (b, list) => { const by = new Map(); list.forEach(a => { if (!a || !a.book || a.odds == null) return; const k = _nmB(a.book) + "|" + (a.line != null ? Number(a.line) : Number(b.line)); const cur = by.get(k); if (!cur || Number(a.odds) > Number(cur.odds)) by.set(k, { ...a, book: _nmB(a.book) }); }); return [...by.values()].filter(a => !(a.book === _nmB(b.book) && (a.line == null || Number(a.line) === Number(b.line)))).sort((x, y) => Number(y.odds) - Number(x.odds)); };   // best price first, like the picture
   const _cardOf = b => { try { return morningBets.find(x => String(x.id) === String(b.morningId) || String(x.trackerId) === String(b.id)); } catch (e) { return null; } };
+  // other lines that clear today (same as the picture): each book on them, carrying that line's own fair so its group gets its own play-to
+  let _altLn = {}; try { _altLn = computeMorningEnsemble().altLines || {}; } catch (e) {}
+  const _altLineBooks = (b, m) => { try { const k = resolveNorm(b.player || "") + "|" + String(b.stat || "").toUpperCase() + "|" + String(b.ou || "").toLowerCase() + "|" + ((m && m.gameDate) || b.gameDate || "");
+    return (_altLn[k] || []).filter(a => Number(a.line) === Number(b.line) ? b.fair != null : (!a.main && a.fairProb != null)).flatMap(a => (a.books || []).map(x => ({ book: _nmB(x.book), odds: Number(x.odds), line: Number(a.line), fair: Number(a.line) === Number(b.line) ? b.fair : a.fairProb * 100 })))
+      .filter(x => x.book && !isNaN(x.odds) && _mOurBook(x.book) && !_mIsExchange(x.book) && (playToOdds(x.fair, MORNING_QUAL_EV) == null || x.odds >= playToOdds(x.fair, MORNING_QUAL_EV))); } catch (e) { return []; } };
   const open = bets.filter(b => b.result === "pending").map(b => {
     if (b.source !== "morning") return b;
     const m = _cardOf(b), head = m ? { book: _nmB(m.book), odds: Number(m.odds), line: b.line, fair: b.fair } : null;   // the same headline book / price the picture shows
-    return { ...b, book: _nmB(b.book), _cardHead: head, _ptEv: MORNING_QUAL_EV, altBooks: _oneEach(head || b, (Array.isArray(b.altBooks) ? b.altBooks : []).concat(_mCardBooksFor(b), [{ book: _nmB(b.book), odds: b.odds, line: b.line, fair: b.fair }])) };
+    return { ...b, book: _nmB(b.book), _cardHead: head, _ptEv: MORNING_QUAL_EV, altBooks: _oneEach(head || b, (Array.isArray(b.altBooks) ? b.altBooks : []).concat(_mCardBooksFor(b), _altLineBooks(b, m), [{ book: _nmB(b.book), odds: b.odds, line: b.line, fair: b.fair }])) };
   });
   if (!open.length) { showToast("No open plays to copy"); return; }
   const isTotal = b => (b.stat || "").toUpperCase() === "GAME_TOTAL";
@@ -26359,7 +26364,7 @@ function computeMorningEnsemble(ps) {
       if (!cur || (cur.altLine && !c.altLine) || (cur.altLine === c.altLine && (c.minEv || 0) > (cur.minEv || 0))) pickOf.set(k, c); });
     const keep = new Set(pickOf.values());
     // the other lines that ALSO clear (same rules) are shown on the card as extra books with their line — display only, never logged or counted
-    cleared.forEach(c => { const k0 = resolveNorm(c.player) + "|" + c.stat + "|" + c.ou + "|" + (c.gameDateIso || ""); if (keep.has(c)) { altLines[k0] = (altLines[k0] || []).concat([{ line: c.line, books: c.lineBooks || [], main: true }]); return; } const k = resolveNorm(c.player) + "|" + c.stat + "|" + c.ou + "|" + (c.gameDateIso || ""); altLines[k] = (altLines[k] || []).concat([{ line: c.line, books: c.lineBooks || [], playTo: _mPlayToAm(c) }]); });
+    cleared.forEach(c => { const k0 = resolveNorm(c.player) + "|" + c.stat + "|" + c.ou + "|" + (c.gameDateIso || ""); if (keep.has(c)) { altLines[k0] = (altLines[k0] || []).concat([{ line: c.line, books: c.lineBooks || [], main: true }]); return; } const k = resolveNorm(c.player) + "|" + c.stat + "|" + c.ou + "|" + (c.gameDateIso || ""); altLines[k] = (altLines[k] || []).concat([{ line: c.line, books: c.lineBooks || [], playTo: _mPlayToAm(c), fairProb: c.fairProb }]); });
     for (let i = cleared.length - 1; i >= 0; i--) if (!keep.has(cleared[i])) cleared.splice(i, 1);
   }
   cleared.sort((a, b) => b.sourcesAgreed.length - a.sourcesAgreed.length || b.qualCount - a.qualCount || (b.ev || 0) - (a.ev || 0));
@@ -27111,18 +27116,32 @@ function morningSoloSave() {
   try { morningSoloRollup(); } catch (e) { console.warn("[MORNING solo] rollup failed", e); }
   try { localStorage.setItem(MORNING_SOLO_KEY, JSON.stringify(morningSolo, (k, v) => (k === "game" || k === "at" || v === null) ? undefined : v)); } catch (e) { console.warn("[MORNING solo] save failed", e); }
 }
+// ONE line per source / player / market / day. A CSV carries every line (u22.5 and u21.5 ...): only the best-EV one is taken, and once a
+// line is logged for the day it stays — a later upload only refreshes its price when it is the same line and side.
+const _mSoloDayKey = (src, player, stat, d) => [src, resolveNorm(player), stat, d].join("|");
 function morningSoloCapture(src, stat, results) {
+  const best = new Map();
   (results || []).forEach(r => {
     if (!(Number(r.ev) >= MORNING_SOLO_MIN_EV) || !r.gameDateIso || _mRejected(r.player)) return;
     const odds = parseInt(r.odds, 10); if (isNaN(odds)) return;
     if (morningSoloAgg.dates.includes(r.gameDateIso)) return;      // that day is already graded and rolled up
+    const dk = _mSoloDayKey(src, r.player, stat, r.gameDateIso), cur = best.get(dk);
+    if (!cur || Number(r.ev) > Number(cur.ev)) best.set(dk, { ...r, odds });
+  });
+  best.forEach((r, dk) => {
     const key = [src, resolveNorm(r.player), stat, r.gameDateIso, r.ou, Number(r.line)].join("|");
-    const cur = morningSolo.find(x => x.key === key);
-    if (cur) { if (cur.result === "pending") Object.assign(cur, { odds, book: r.book, ev: Number(r.ev), proj: r.proj }); return; }
-    morningSolo.push({ key, src, player: r.player, game: r.game || "", team: _mTeamFor(r.player), gameDate: r.gameDateIso, stat, ou: r.ou, line: Number(r.line), odds, book: r.book, ev: Number(r.ev), proj: r.proj, at: new Date().toISOString(), result: "pending", actual: null });
+    const have = morningSolo.find(x => _mSoloDayKey(x.src, x.player, x.stat, x.gameDate) === dk);
+    if (have) { if (have.key === key && have.result === "pending") Object.assign(have, { odds: r.odds, book: r.book, ev: Number(r.ev), proj: r.proj }); return; }
+    morningSolo.push({ key, src, player: r.player, game: r.game || "", team: _mTeamFor(r.player), gameDate: r.gameDateIso, stat, ou: r.ou, line: Number(r.line), odds: r.odds, book: r.book, ev: Number(r.ev), proj: r.proj, at: new Date().toISOString(), result: "pending", actual: null });
   });
   morningSoloSave();
 }
+// clean-up for days not rolled up yet: if a player has more than one line logged for the same source / market / day, keep the first one
+setTimeout(() => { try {
+  const seen = new Set(), n0 = morningSolo.length;
+  morningSolo = morningSolo.filter(x => { const k = _mSoloDayKey(x.src, x.player, x.stat, x.gameDate); if (seen.has(k)) return false; seen.add(k); return true; });
+  if (morningSolo.length !== n0) { morningSoloSave(); console.log(`[MORNING solo] dropped ${n0 - morningSolo.length} extra lines (one line per player / market / day)`); }
+} catch (e) {} }, 0);
 async function morningGradeSolo() {
   const today = localYMD(new Date());
   let graded = 0;
