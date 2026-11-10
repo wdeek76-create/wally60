@@ -1308,8 +1308,8 @@ function buildSlots() {
         ${slots[i]?`<button onclick="doExportUaSource('${s.key}')" title="Download THIS source's projections in the Unabated (UA) upload format" style="background:#0c0d10;border:1px solid #1e40af;color:#7dd3fc;border-radius:4px;padding:5px 10px;font-size:11px;font-weight:700;cursor:pointer;">EXPORT UA</button><button onclick="doExportPropShop('${s.key}')" title="Download THIS source's projections as a PropShop CSV" style="background:#0c0d10;border:1px solid #a78bfa;color:#c4b5fd;border-radius:4px;padding:5px 10px;font-size:11px;font-weight:700;cursor:pointer;">EXPORT PS</button>`:''}
         ${slots[i]?`<button onclick="clearSlot(${i})" title="Remove this source" style="background:#f8717122;border:1px solid #f8717155;color:#f87171;border-radius:4px;padding:5px 10px;font-size:11px;font-weight:700;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;letter-spacing:0.3px;">CLEAR</button>`:''}
         <label class="upload-label">
-          ${slots[i]?'CHANGE FILE':'UPLOAD CSV'}
-          <input type="file" accept=".csv" style="display:none;" onchange="loadFile(${i},this)"/>
+          ${s.key === "saber" ? (slots[i] ? 'ADD FILE(S)' : 'UPLOAD CSV(S)') : slots[i] ? 'CHANGE FILE' : 'UPLOAD CSV'}
+          <input type="file" accept=".csv" ${s.key === "saber" ? "multiple" : ""} style="display:none;" onchange="loadFile(${i},this)"/>
         </label>
       </div>
     </div>`;
@@ -1317,6 +1317,8 @@ function buildSlots() {
   updateMergeBtn();
 }
 function loadFile(idx, input, onDone) {
+  // SABER: several files (picked together or one after another) are combined into one slot; CLEAR starts over.
+  if (SOURCES[idx] && SOURCES[idx].key === "saber" && input.files && input.files.length) { _loadSaberFiles(idx, [...input.files], onDone); input.value = ""; return; }
   const file = input.files[0];
   if (!file) return;
   const reader = new FileReader();
@@ -1351,8 +1353,45 @@ function loadFile(idx, input, onDone) {
   reader.readAsText(file);
 }
 
+function _saberKey(pl) { return pl.norm || norm(pl.rawName || pl.name || ""); }
+function _loadSaberFiles(idx, files, onDone) {
+  Promise.all(files.map(f => f.text().then(text => ({ name: f.name, text })))).then(list => {
+    const cur = slots[idx], byKey = new Map(), names = cur && cur.files ? cur.files.slice() : cur ? [cur.label] : [];
+    (cur ? cur.players : []).forEach(pl => byKey.set(_saberKey(pl), pl));
+    let added = 0, updated = 0;
+    const tm = pl => { const t = String(pl.team || "").trim(); return normTeamAbbr(t) || t.toUpperCase(); };
+    list.forEach(({ name, text }) => {
+      const fresh = parseSource(text);
+      // a team that is in the new file is replaced as a whole by it (nobody left over from the older file); every other team is kept
+      const teams = new Set(fresh.map(tm).filter(Boolean));
+      [...byKey.entries()].forEach(([k, pl]) => { if (teams.has(tm(pl))) byKey.delete(k); });
+      fresh.forEach(pl => { const k = _saberKey(pl); if (!k) return; if (byKey.has(k)) updated++; else added++; byKey.set(k, pl); });
+      try { _mergeSaberStatus(text); } catch (err) { console.warn("[SABER status]", err); }
+      if (!names.includes(name)) names.push(name);
+    });
+    const players = [...byKey.values()];
+    slots[idx] = { label: names.length > 1 ? `${names.length} files combined` : names[0], files: names, players };
+    if (players.length && !players.some(pl => pl.pts > 0 || pl.reb > 0 || pl.ast > 0 || pl.threepm > 0)) showToast(`\u26a0 SABER: ${players.length} players but no projections in these files yet`);
+    setLog(`SABER loaded: ${players.length} players${cur ? ` (+${added} new, ${updated} updated)` : ""} from ${names.length} file${names.length === 1 ? "" : "s"}`);
+    if (cur) showToast(`SABER combined: ${names.length} files · ${players.length} players (+${added} new)`);
+    buildSlots(); updateBadges(); runMerge();
+    try { if (typeof window._capRefreshTemplate === "function") { const t = window.showToast; window.showToast = () => {}; window._capRefreshTemplate(); window.showToast = t; } } catch (err) {}
+    if (typeof onDone === "function") { try { onDone(); } catch (e) {} }
+  });
+}
+// Saber status (Status / Role columns): a second file adds to today's list instead of replacing it.
+function _mergeSaberStatus(text) {
+  const prev = getSaberStatus();
+  _saveSaberStatus(text);
+  if (!prev) return;
+  const now = getSaberStatus(); if (!now) { localStorage.setItem(SABER_STATUS_KEY, JSON.stringify(prev)); return; }   // this file had no Status column: keep what was there
+  const teams = new Set(Object.values(now.players).map(p => p.team).filter(Boolean));   // teams in the new file replace that team's old lineup; other teams stay
+  const keep = Object.fromEntries(Object.entries(prev.players).filter(([, p]) => !teams.has(p.team)));
+  localStorage.setItem(SABER_STATUS_KEY, JSON.stringify({ ...now, players: { ...keep, ...now.players } }));
+}
 function clearSlot(idx) {
   if (SOURCES[idx] && SOURCES[idx].key === "rotowire") { try { localStorage.setItem("nba_rw_slot_cleared", String(Date.now())); } catch (e) {} }
+  if (SOURCES[idx] && SOURCES[idx].key === "saber") { try { localStorage.removeItem(SABER_STATUS_KEY); } catch (e) {} }   // CLEAR on Saber starts the combined files over, lineups included
   slots[idx] = null;
   setLog(`${SOURCES[idx].label} cleared`);
   buildSlots();
