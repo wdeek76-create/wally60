@@ -1934,18 +1934,23 @@ const smRwFresh = x => x && (!x.t || Date.now()-x.t < 18*3600e3);
 // His own Q tag is just a note (Doubtful / Out still flag). On an Over it flips: his own minutes-limit /
 // bench / rest blurb is the iffy part, and teammates out are a ↑.
 const SM_RW_UPSIDE = /\b(start(s|ing)? (tonight|in place|for)|will start|enter(s)? the starting|in the starting lineup|expanded role|increased (role|minutes|usage|workload)|more minutes|bigger role|larger role|step(s)? into|pick up (the )?slack|absorb|minutes (restriction|limit) (lifted|removed)|no (longer|minutes) restrict)/i;
+// real news (status / injury / role / minutes) vs a game recap ("Efficient in victory", "Scores 28 in win")
+const SM_RW_REAL = /injur|questionable|doubtful|probable|game[- ]time|ruled out|\bout (for|tonight|indefinitely|again)|won't play|will not play|will play|available|cleared|return(s|ing)?\b|lineup|start(s|ing)? (tonight|in place|for|at)|will start|to the bench|off the bench|bench role|minutes (restriction|limit|cap)|restriction|\brest(ing|ed)?\b|load management|\bsore|illness|sick|ankle|knee|hamstring|groin|calf|wrist|concussion|suspend|expanded role|increased (role|minutes|usage)|more minutes/i;
+const SM_RW_RECAP = /\b(in (victory|win|loss|defeat)|efficient|scores?|scored|posts?|posted|delivers?|delivered|records?|recorded|tallies|tallied|double-double|triple-double|leads?|led|struggles?|explodes?|erupts?|dominates?|quiet|solid|strong)\b/i;
 function smRwFlag(e){
   if(!e || e.sk!=='nba' || SHARP_MAINS.has(e.mk) || TEAM_MKS.has(e.mk) || !e.player || !smRw.at || Date.now()-smRw.at>3*3600e3) return null;
-  const k=normName(e.player), me=smRw.inj[k], nw=smRwFresh(smRw.news[k]) ? smRw.news[k] : null, under=e.side!=='over';
+  // his own blurb only counts when it's real news (injury / status / role / minutes) -- not a game recap
+  const k=normName(e.player), me=smRw.inj[k], nw0=smRwFresh(smRw.news[k]) ? smRw.news[k] : null, under=e.side!=='over';
+  const nw = nw0 && SM_RW_REAL.test(`${nw0.h} ${nw0.a}`) && !(SM_RW_RECAP.test(nw0.h) && !SM_RW_REAL.test(nw0.h)) ? nw0 : null;
   const lines=[], short=[]; let iffy=false;
   // his own status: a note, unless he's Doubtful / Out
   if(me && SM_RW_ST[me.st]){ const bad=/^(OUT|DOUBTFUL)$/.test(me.st); if(bad) iffy=true; const t=`${SM_RW_ST[me.st]}${me.type?` (${me.type})`:''}`;
     lines.push(`${bad?'⚠️ ':''}${bad?`**${t}**`:`Himself: ${t}`}`); if(bad) short.push(t); }
   // his own blurb: upside news hurts an Under, a minutes cut / bench / rest hurts an Over
   if(nw){ const all=`${nw.h} ${nw.a}`, up=SM_RW_UPSIDE.test(all), down=SM_RW_RISK.test(all) && !SM_RW_OK.test(nw.h) && !up;
-    const bad = under ? up : down; if(bad) iffy=true;
+    const bad = under ? up : down; if(bad) iffy=true; if(bad || up){   // plain news, nothing for or against: left out
     const ago=nw.t ? (m=>m<60?`${m}m ago`:`${Math.round(m/60)}h ago`)(Math.max(0,Math.round((Date.now()-nw.t)/60000))) : '';
-    lines.push(`${bad?'⚠️ ':up?'↑ ':''}_${nw.h||nw.a.slice(0,140)}_${ago?` · ${ago}`:''}${nw.h&&nw.a&&nw.a.length>3?`\n${nw.a.length>220?nw.a.slice(0,220).replace(/\s+\S*$/,'')+'…':nw.a}`:''}`); if(bad) short.push(up?'upside news':(nw.h||nw.a.slice(0,80))); }
+    lines.push(`${bad?'⚠️ ':up?'↑ ':''}_${nw.h||nw.a.slice(0,140)}_${ago?` · ${ago}`:''}${nw.h&&nw.a&&nw.a.length>3?`\n${nw.a.length>220?nw.a.slice(0,220).replace(/\s+\S*$/,'')+'…':nw.a}`:''}`); if(bad) short.push(up?'upside news':(nw.h||nw.a.slice(0,80))); } }
   // teammates: questionable / doubtful, or ruled out with news in the last 18h (long-term outs are already in the line).
   // On an Under that's upside for him: iffy on a fresh out, a same-position Q, or 2+ teammates Q. On an Over it's a ↑.
   const R=smRwTeams.m[k], team = me?.team || nw?.team || R?.t || '', myPos = me?.pos || R?.p || e.info?.pos || '';
@@ -1955,10 +1960,10 @@ function smRwFlag(e){
       .sort((a,b)=>(b.st==='OUT')-(a.st==='OUT') || b.same-a.same);
     const qN=mates.filter(x=>x.st!=='OUT').length;
     if(qN>=2){ if(under) iffy=true; lines.push(`${under?'⚠️':'↑'} **${qN} teammates questionable** — ${under?'upside for him if they sit':'more minutes if they sit'}`); short.push(`${qN} teammates Q`); }
-    mates.slice(0,5).forEach(x=>{ const out=x.st==='OUT', bad = under && (out || x.same); if(bad) iffy=true;
+    mates.filter(x=>x.same || x.st!=='OUT').slice(0,4).forEach(x=>{ const out=x.st==='OUT', bad = under && x.same; if(bad) iffy=true;
       const tag = `${x.pos?` (${x.pos})`:''}${x.same?' · **same position**':''}`;
       lines.push(`${bad?'⚠️ ':'↑ '}Teammate **${x.name}**${tag} ${SM_RW_ST[x.st]}${out?' — more minutes for him':' — upside if he sits'}`);
-      short.push(`${x.name.split(' ').slice(-1)[0]}${x.same?' (same pos)':''} ${SM_RW_ST[x.st]}`); }); }
+      short.push(`${x.name.split(' ').filter(w=>!/^(jr|sr|ii|iii|iv)\.?$/i.test(w)).slice(-1)[0]}${x.same?' (same pos)':''} ${SM_RW_ST[x.st]}`); }); }
   if(!lines.length) return null;
   return { iffy, txt:lines.join('\n'), short:short.slice(0,3).join(' · ')+(short.length>3?` +${short.length-3}`:'') || (me&&SM_RW_ST[me.st]?`Himself ${SM_RW_ST[me.st]}`:'') || (nw?.h||'in the news') };
 }
