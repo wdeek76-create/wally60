@@ -4001,7 +4001,7 @@ async function autoGrade() {
   let lastLookupSample = null; // for diagnostics if everything misses
 
   // OpticOdds: pull the schedule window covering every pending date, then box scores for completed games
-  const minDate = dates[0];
+  const minDate = weekRange(isoWeek(dates[0])).start || dates[0]; // whole week of the oldest pending pick
   const daysBack = Math.min(45, Math.max(3, Math.ceil((new Date(today + 'T12:00:00') - new Date(minDate + 'T12:00:00')) / 86400000) + 1));
   status.textContent = 'Fetching OpticOdds schedule…';
   let fixtures = [], ooDown = null;
@@ -4014,90 +4014,84 @@ async function autoGrade() {
   const _shiftDay = (d, n) => { const x = new Date(d + 'T12:00:00'); x.setDate(x.getDate() + n); return x.getFullYear() + '-' + String(x.getMonth() + 1).padStart(2, '0') + '-' + String(x.getDate()).padStart(2, '0'); };
   const espTeams = new Set(); let espnGraded = 0;
 
-  for (const date of dates) {
-    const finals = fixtures.filter(f => f.date === date && f.status === 'completed');
-    console.log('[grade]', date, 'completed fixtures:', finals.map(f => f.away + '@' + f.home));
-    let lookup = {};
-    const teamCounts = {};
-    if (finals.length) {
-      status.textContent = `Fetching OpticOdds box scores for ${date}…`;
-      const prMap = await ooPlayerResults(finals.map(f => f.id));
-      lookup = ooBuildLookup(finals, prMap);
-      // Teams whose box score we actually loaded for this date — only count a team as "complete"
-      // if it has a reasonable number of players (ESPN posts partial box scores right at Final).
-      Object.values(lookup).forEach(v => { if (v && v.team) teamCounts[v.team] = (teamCounts[v.team]||0) + 1; });
-    }
-    let teamsLoaded = new Set(Object.keys(teamCounts).filter(t => teamCounts[t] >= 18));
-
-    // OpticOdds doesn't always carry old/stale fixtures — if it has nothing for this date, or
-    // only partial team coverage, fall back to ESPN's own scoreboard + box score for the games
-    // it's missing, matched by date/matchup. Same lookup shape as ooBuildLookup, so grading
-    // below doesn't need to know which source a given player's stats came from.
-    const dateProps = pending.filter(p => (p.date || today) === date);
-    const isMissing = p => { const t = _matchupTeams(p.game); return !(t && t.length === 2 && t.every(x => teamsLoaded.has(x))); };
-    // ESPN for the games OpticOdds didn't cover. The pick's own date first, then the day before and
-    // after: older picks were sometimes saved with the next day's date for night games (UTC), and
-    // ESPN files games under their Eastern date. Grading below still requires the pick's OWN two
-    // teams to be final, so an adjacent day can't grade it off a different game.
-    for (const d of [date, _shiftDay(date, -1), _shiftDay(date, 1)]) {
-      if (!dateProps.some(isMissing)) break;
-      status.textContent = `${ooDown ? 'OpticOdds unavailable' : 'OpticOdds missing box scores'} for ${date} — trying ESPN (${d})…`;
-      const esp = await _espFor(d);
-      Object.keys(esp.lookup).forEach(k => { if (!lookup[k]) lookup[k] = esp.lookup[k]; });
-      esp.teamsLoaded.forEach(t => { if (!teamsLoaded.has(t)) espTeams.add(t); teamsLoaded.add(t); });
-      console.log('[grade]', date, 'ESPN', d, 'teams loaded:', [...esp.teamsLoaded]);
-    }
-    lastLookupSample = lookup;
-    console.log('[grade]', date, 'team player counts:', teamCounts, '| teams loaded (incl. ESPN):', [...teamsLoaded]);
-    if (!teamsLoaded.size) continue; // nothing gradeable for this date from either source
-
-    // Grade each pending prop for this date
-    dateProps.forEach(p => {
-      // Gate on the PROP'S OWN game actually being final before attempting a
-      // stat lookup at all. Without this, a prop for a game still in
-      // progress could still get "graded" off a name-collision match in
-      // findPlayerStat's fuzzy last-name fallback (lookup is built from every
-      // completed game on the date, not just this player's game) — that's
-      // how a live game was showing WIN/LOSS before the game had even ended.
+  // ── Grade by NFL WEEK + MATCHUP, not by exact date. Each team plays once a week, so a pick's
+  // game is "the finished game between its two teams in its week" (± a day, for night games that
+  // were saved a day off). A wrong/odd date on a pick can't block grading anymore.
+  // Stat source per pick: OpticOdds first; ESPN if OpticOdds doesn't have that game OR has the
+  // player but not the stat. Only when the game is final in a source and the player isn't in either
+  // box score does it get flagged for review.
+  const reasons = [];                       // per-pick reason it stayed pending (diagnostic)
+  const pendWeeks = {};
+  pending.filter(p => (p.date || today) <= today).forEach(p => { const w = isoWeek(p.date || today); (pendWeeks[w] = pendWeeks[w] || []).push(p); });
+  const sameGame = (a, b, t) => t && [a, b].sort().join('@') === t.slice().sort().join('@');
+  const counted = lk => { const c = {}; Object.values(lk).forEach(v => { if (v && v.team) c[v.team] = (c[v.team] || 0) + 1; }); return c; };
+  const ooGameCache = {};
+  for (const wk of Object.keys(pendWeeks).sort()) {
+    const wr = weekRange(wk);
+    const ws = _shiftDay(wr.start, -1), we = _shiftDay(wr.end, 1);
+    const weekProps = pendWeeks[wk];
+    status.textContent = `Grading ${wr.label}…`;
+    // OpticOdds: every finished game in the week window (box scores fetched once for the week)
+    const finals = fixtures.filter(f => f.status === 'completed' && f.date >= ws && f.date <= we);
+    let prMap = {};
+    if (finals.length) { try { prMap = await ooPlayerResults(finals.map(f => f.id)); } catch (e) { console.warn('[grade] OpticOdds box scores failed for', wk, e.message); } }
+    console.log('[grade]', wk, 'OpticOdds finals:', finals.map(f => f.away + '@' + f.home).join(' '));
+    for (const p of weekProps) {
       const t = _matchupTeams(p.game);
-      const gameLoaded = t && t.length === 2 && t.every(x => teamsLoaded.has(x));
-      if (!gameLoaded) {
-        allMissed.push(p.player + ' (' + (MARKET_MAP[p.market]?.label || p.market) + ') ' + date + (t ? '' : ' — game/team unresolved'));
-        return;
+      const lbl = p.player + ' (' + (MARKET_MAP[p.market]?.label || p.market) + ') ' + (p.date || '') + ' ' + (p.game || '');
+      const why = w => reasons.push({ player: p.player, market: p.market, date: p.date, game: p.game, why: w });
+      if (!t || t.length !== 2) { allMissed.push(lbl + ' — game/teams not recognised'); why('game/teams not recognised'); continue; }
+      let stat = null, final = false, fromEspn = false;
+      // 1) OpticOdds: the finished game between these two teams, this week
+      const fx = finals.find(f => sameGame(f.home, f.away, t));
+      if (fx) {
+        const lk = ooGameCache[fx.id] || (ooGameCache[fx.id] = ooBuildLookup([fx], prMap));
+        const c = counted(lk);
+        if (t.every(x => (c[x] || 0) >= 18)) { final = true; stat = findPlayerStat(lk, p.player, p.market, t); lastLookupSample = lk; }
       }
-
-      const snapshot = { id: p.id, prev: { result: p.result, pnl: p.pnl, actual: p.actual } };
-      const stat = findPlayerStat(lookup, p.player, p.market, t);
+      // 2) ESPN: same game (pick's own date first, then the rest of the week window)
       if (stat === null || stat === undefined) {
-        // Game is confirmed final (gate above) but the player isn't in the box
-        // score (0 stats or inactive). Don't guess — flag for review.
-        p.needsReview = 'Not in box score — DNP or 0 stats';
-        allDnp.push(p.player);
-        return;
+        const days = [p.date || today, _shiftDay(p.date || today, -1), _shiftDay(p.date || today, 1)];
+        for (let d = ws; d <= we; d = _shiftDay(d, 1)) if (!days.includes(d)) days.push(d);
+        let ev = null;
+        for (const d of days) {
+          if (d < ws || d > we || d > today) continue;
+          status.textContent = `Grading ${wr.label} — ESPN ${d}…`;
+          const esp = await _espFor(d);
+          ev = (esp.byEvent || []).find(e => sameGame(e.home, e.away, t));
+          if (ev) break;
+        }
+        if (ev) {
+          const c = counted(ev.lookup);
+          if (t.every(x => (c[x] || 0) >= 10)) {
+            final = true;
+            const s2 = findPlayerStat(ev.lookup, p.player, p.market, t);
+            if (s2 !== null && s2 !== undefined) { stat = s2; fromEspn = true; }
+          }
+        }
       }
-      const line = parseFloat(p.line);
-      const actual = parseFloat(stat);
-      if (isNaN(actual)) { allMissed.push(p.player + ' (bad stat)'); return; }
-      p.actual = actual;
-      let result;
-      if (p.side === 'O') result = actual > line ? 'win' : (actual === line ? 'push' : 'loss');
-      else result = actual < line ? 'win' : (actual === line ? 'push' : 'loss');
+      if (!final) { allMissed.push(lbl); why('game not final yet (not in OpticOdds or ESPN this week)'); continue; }
+      if (stat === null || stat === undefined) {
+        p.needsReview = 'Not in box score — DNP or 0 stats';
+        allDnp.push(p.player); why('game final, but player/stat not in either box score (DNP?)');
+        continue;
+      }
+      const actual = parseFloat(stat), line = parseFloat(p.line);
+      if (isNaN(actual)) { allMissed.push(lbl + ' (bad stat)'); why('stat unreadable: ' + stat); continue; }
+      const snapshot = { id: p.id, prev: { result: p.result, pnl: p.pnl, actual: p.actual } };
+      p.actual = actual; delete p.needsReview;
+      const result = p.side === 'O' ? (actual > line ? 'win' : actual === line ? 'push' : 'loss') : (actual < line ? 'win' : actual === line ? 'push' : 'loss');
       p.result = result;
       const odds = parseFloat(p.odds);
       if (result === 'win') p.pnl = odds > 0 ? odds / 100 : 1.0;
       else if (result === 'loss') p.pnl = odds > 0 ? -1.0 : -(Math.abs(odds) / 100);
       else p.pnl = 0;
-      totalGraded++;
-      if (t.some(x => espTeams.has(x))) espnGraded++;
+      totalGraded++; if (fromEspn) espnGraded++;
       batch.push(snapshot);
-      // The manual quick-grade path (setResult) cascades a grade to matching
-      // pending props in every OTHER source — bulk auto-grade never did, so a
-      // pick graded here on one tab (e.g. Ensemble) sat pending forever on its
-      // own individual source tabs (FTN, 4for4, Rotowire, Stok, ...) until you
-      // separately ran auto-grade on each of those too. Cascade here as well.
       totalCascaded += _cascadeGrade(currentSource, p, result);
-    });
+    }
   }
+  window._lastGradeReasons = reasons;
 
   if (batch.length > 0) lastGradeBatch[currentSource] = batch;
 
@@ -4112,23 +4106,8 @@ async function autoGrade() {
     try { localStorage.setItem(storageKey('ensemble'), JSON.stringify(store)); } catch(e) {}
   }
 
-  // If NOTHING graded but we had a lookup, dump it so we can debug
-  const _teamsInLookup = new Set(Object.values(lastLookupSample || {}).map(v => v && v.team).filter(Boolean));
-  const _realMiss = allMissed.length > 0 && props.some(p => (!p.result || p.result === '') && (() => { const t = _matchupTeams(p.game); return t && t.length === 2 && t.every(x => _teamsInLookup.has(x)); })());
-  if (totalGraded === 0 && _realMiss && lastLookupSample && Object.keys(lastLookupSample).length > 0) {
-    const keys = Object.keys(lastLookupSample);
-    const sample = keys.slice(0, 3).map(k => ({ key: k, groups: Object.keys(lastLookupSample[k]).filter(g => g !== 'rawName' && g !== 'team'), data: lastLookupSample[k] }));
-    const missDetail = pending.filter(p => !p.result || p.result === '').slice(0, 15).map(p => {
-      const pn = normName(p.player);
-      const last = lastName(pn);
-      const near = keys.filter(k => lastName(k) === last).map(k => k + ' (' + (lastLookupSample[k].team||'?') + ')');
-      const t = _matchupTeams(p.game);
-      const teamsPresent = t ? t.map(x => x + ':' + (Object.values(lastLookupSample).some(v => v.team === x) ? 'in-boxscore' : 'NOT-in-boxscore')) : ['?'];
-      return { player: p.player, norm: pn, market: p.market, date: p.date, game: p.game, teams: teamsPresent, sameLastNameInLookup: near };
-    });
-    const diag = { lookupPlayerCount: keys.length, datesScanned: dates, misses: missDetail };
-    _showDiag(JSON.stringify(diag, null, 2));
-  }
+  // (the old "Grade Diagnostic" dump described only the LAST date's box score, not each pick's own
+  //  game — replaced by a per-pick reason list behind "why?" in the result line)
 
   if (currentSource === 'ensemble') {
     try { localStorage.setItem(storageKey('ensemble'), JSON.stringify(propsBySource.ensemble || [])); } catch (e) {}
@@ -4144,14 +4123,22 @@ async function autoGrade() {
   if (allDnp.length) parts.push(`⚠ ${allDnp.length} need review (${allDnp.slice(0,4).join(', ')}${allDnp.length>4?' +'+(allDnp.length-4):''}) — top of Pending`);
   if (allMissed.length) parts.push(`${allMissed.length} pending (game not final)`);
   if (lockedCount) parts.push(`${lockedCount} skipped (manually held pending)`);
-  status.textContent = parts.join(' · ');
+  status.innerHTML = escHtml(parts.join(' · ')) + (reasons.length ? ` · <a href="#" onclick="showGradeReasons();return false" style="color:var(--teal)">why ${reasons.length} not graded?</a>` : '');
   status.className = 'status ' + (totalGraded > 0 ? 'ok' : 'err');
 }
+function showGradeReasons() {
+  const r = window._lastGradeReasons || [];
+  const groups = {};
+  r.forEach(x => { (groups[x.why] = groups[x.why] || []).push(x); });
+  const txt = Object.entries(groups).map(([why, list]) => why.toUpperCase() + ' (' + list.length + ')\n' +
+    list.map(x => '  ' + x.player + ' — ' + ((MARKET_MAP[x.market] || {}).label || x.market) + ' — ' + (x.date || '?') + ' — ' + (x.game || '?')).join('\n')).join('\n\n');
+  _showDiag(txt || 'Everything graded.', "Why these didn't grade", '"Not final yet" grades itself once the game is over. Send this to Claude if something looks wrong.');
+}
 
-function _showDiag(text) {
+function _showDiag(text, title, sub) {
   const box = document.createElement('div');
   box.style = 'position:fixed;top:20px;left:20px;right:20px;background:#141414;border:2px solid var(--teal);border-radius:8px;padding:20px;z-index:9999;max-height:80vh;overflow:auto;';
-  box.innerHTML = '<h3 style="color:var(--teal);margin:0 0 10px">Grade Diagnostic</h3><p style="font-size:12px;color:var(--text2);margin:0 0 10px">Nothing matched. Copy this and send it back.</p><textarea readonly style="width:100%;height:50vh;background:var(--bg);color:var(--text);border:1px solid var(--border);padding:8px;font-family:var(--mono);font-size:11px;border-radius:4px">' + text.replace(/</g, '&lt;') + '</textarea><div style="text-align:right;margin-top:10px"><button onclick="this.parentElement.parentElement.remove()" style="background:var(--teal);color:#000;border:none;padding:8px 16px;border-radius:4px;font-weight:600;cursor:pointer">Close</button></div>';
+  box.innerHTML = '<h3 style="color:var(--teal);margin:0 0 10px">' + escHtml(title || 'Diagnostic') + '</h3><p style="font-size:12px;color:var(--text2);margin:0 0 10px">' + escHtml(sub || 'Copy this and send it back.') + '</p><textarea readonly style="width:100%;height:50vh;background:var(--bg);color:var(--text);border:1px solid var(--border);padding:8px;font-family:var(--mono);font-size:11px;border-radius:4px">' + text.replace(/</g, '&lt;') + '</textarea><div style="text-align:right;margin-top:10px"><button onclick="this.parentElement.parentElement.remove()" style="background:var(--teal);color:#000;border:none;padding:8px 16px;border-radius:4px;font-weight:600;cursor:pointer">Close</button></div>';
   document.body.appendChild(box);
 }
 
@@ -7052,11 +7039,12 @@ async function espnScoreboardForDate(dateStr) {
 async function espnBoxLookupForDate(dateStr) {
   const events = await espnScoreboardForDate(dateStr);
   const finals = events.filter(e => e.completed);
-  const lookup = {};
+  const lookup = {}, byEvent = [];
   for (const ev of finals) {
     try {
       const r = await fetch(`https://site.api.espn.com/apis/site/v2/sports/football/nfl/summary?event=${ev.id}`);
       const j = await r.json();
+      const evLookup = {}; byEvent.push({ id: ev.id, home: ev.home, away: ev.away, lookup: evLookup });
       (j?.boxscore?.players || []).forEach(tb => {
         const ab = _espnAbbrFix(tb.team?.abbreviation || '');
         (tb.statistics || []).forEach(sg => {
@@ -7076,6 +7064,8 @@ async function espnBoxLookupForDate(dateStr) {
             if (!stats || !Object.keys(stats).length) return;
             if (!lookup[norm]) lookup[norm] = { rawName: nm, team: ab };
             lookup[norm][gname] = Object.assign(lookup[norm][gname] || {}, stats);
+            if (!evLookup[norm]) evLookup[norm] = { rawName: nm, team: ab };
+            evLookup[norm][gname] = Object.assign(evLookup[norm][gname] || {}, stats);
           });
         });
       });
@@ -7084,7 +7074,7 @@ async function espnBoxLookupForDate(dateStr) {
   const teamCounts = {};
   Object.values(lookup).forEach(v => { if (v && v.team) teamCounts[v.team] = (teamCounts[v.team] || 0) + 1; });
   const teamsLoaded = new Set(Object.keys(teamCounts).filter(t => teamCounts[t] >= 10));
-  return { lookup, teamsLoaded };
+  return { lookup, teamsLoaded, byEvent };
 }
 
 // ===== SCHEDULE TICKER =====
