@@ -22486,7 +22486,51 @@ function renderScheduleExpandContent(summary) {
   return `<div style="padding:14px 18px;color:#8b93a0;font-size:12px;">No additional info available yet.</div>`;
 }
 
+// ── BACK-TO-BACKS (ESPN schedule, same feed as the ticker) ──────────────────
+// A team that played YESTERDAY is on the 2nd night of a back-to-back today ("B2B"); one that also plays TOMORROW is on the 1st night ("B2B 1st").
+// Pulled once per day (yesterday's + tomorrow's scoreboard) and kept with the day it is for.
+const B2B_KEY = "nba_b2b_v1";
+let _b2b = null;   // { day, yday: [abbr], tmrw: [abbr] }
+try { const d = JSON.parse(localStorage.getItem(B2B_KEY) || "null"); if (d && d.day === localYMD(new Date())) _b2b = d; } catch (e) {}
+function _b2bTeamsOn(d) {
+  const ymd = localYMD(d).replace(/-/g, "");
+  return fetch(`https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates=${ymd}`).then(r => r.ok ? r.json() : null).then(j => {
+    const out = new Set();
+    ((j && j.events) || []).forEach(ev => ((ev.competitions && ev.competitions[0] && ev.competitions[0].competitors) || []).forEach(c => { const a = c.team && c.team.abbreviation; if (a) out.add(normTeamAbbr(a)); }));
+    return [...out];
+  }).catch(() => null);
+}
+let _b2bLoading = false;
+async function loadBackToBacks() {
+  const today = localYMD(new Date());
+  if ((_b2b && _b2b.day === today) || _b2bLoading) return;
+  _b2bLoading = true;
+  try {
+    const y = new Date(); y.setDate(y.getDate() - 1); const t = new Date(); t.setDate(t.getDate() + 1);
+    const [yday, tmrw] = await Promise.all([_b2bTeamsOn(y), _b2bTeamsOn(t)]);
+    if (yday == null && tmrw == null) return;   // feed down: try again next time
+    _b2b = { day: today, yday: yday || [], tmrw: tmrw || [] };
+    try { localStorage.setItem(B2B_KEY, JSON.stringify(_b2b)); } catch (e) {}
+    try { if (currentTab === "morning") renderMorning(); } catch (e) {}
+  } finally { _b2bLoading = false; }
+}
+// "2nd" (played yesterday) | "1st" (plays tomorrow too) | null
+function b2bFor(team) {
+  if (!_b2b || _b2b.day !== localYMD(new Date()) || !team) return null;
+  const t = normTeamAbbr(team);
+  if (_b2b.yday.includes(t)) return "2nd";
+  if (_b2b.tmrw.includes(t)) return "1st";
+  return null;
+}
+function b2bBadge(team, big) {
+  const k = b2bFor(team); if (!k) return "";
+  const fs = big ? 11 : 9;
+  return k === "2nd"
+    ? ` <span title="2nd night of a back-to-back (played yesterday)" style="font:800 ${fs}px 'Plus Jakarta Sans',sans-serif;letter-spacing:.04em;color:#fbbf24;border:1px solid #fbbf2499;background:#fbbf241f;border-radius:999px;padding:0 6px;vertical-align:middle;white-space:nowrap;">B2B</span>`
+    : ` <span title="1st night of a back-to-back (plays again tomorrow)" style="font:700 ${fs}px 'Plus Jakarta Sans',sans-serif;color:#e6edf5;border:1px dashed #a8b0bb;border-radius:999px;padding:0 6px;vertical-align:middle;white-space:nowrap;">B2B 1st</span>`;
+}
 function startScoreboardTicker() {
+  try { loadBackToBacks(); } catch (e) {}
   initTickerPauseHandlers();
   fetchAndRenderScoreboard().then(scheduleNextTickerRefresh);
 }
@@ -26837,7 +26881,7 @@ function _mSrcPills(projs, evs, missingSrc, missingProj) {
 }
 function _mPlayerCell(name, team) {
   const logo = team && typeof teamLogoUrl === "function" ? `<img src="${teamLogoUrl(team)}" alt="" style="width:14px;height:14px;object-fit:contain;" onerror="this.remove()"/>` : "";
-  return `<span style="display:inline-flex;align-items:center;gap:7px;">${tableHeadshotHtml(name, 26)}<span style="color:#fff;font-weight:700;">${_mEsc(displayPlayerName(name))}</span>${logo}${team ? `<span style="color:#7dd3fc;font-size:11px;font-weight:700;">${_mEsc(displayTeamAbbr(team))}</span>` : ""}</span>`;
+  return `<span style="display:inline-flex;align-items:center;gap:7px;">${tableHeadshotHtml(name, 26)}<span style="color:#fff;font-weight:700;">${_mEsc(displayPlayerName(name))}</span>${logo}${team ? `<span style="color:#7dd3fc;font-size:11px;font-weight:700;">${_mEsc(displayTeamAbbr(team))}</span>${b2bBadge(team)}` : ""}</span>`;
 }
 function _mRecord(list) {
   let w = 0, l = 0, p = 0, units = 0, risked = 0;
@@ -26891,6 +26935,7 @@ function lineupPanelHtml(card, lc) {
   </div>`;
 }
 function renderMorning() {
+  try { loadBackToBacks(); } catch (e) {}
   try { if (localStorage.getItem("nba_dropped_pr_v1") !== "1") { localStorage.setItem("nba_dropped_pr_v1", "1"); const n = morningDropUnbooked(true); if (n) setTimeout(() => showToast(`Dropped ${n} existing bet${n === 1 ? "" : "s"} with no real book (PR / PropShop)`), 600); } } catch (e) {}
   try { morningCleanOrphans(); _mSyncResults(); } catch (e) {}
   const el = document.getElementById("morning-tab");
@@ -27840,7 +27885,7 @@ async function _morningCardHtml(picks, mode) {
     const exchTo = _mIsExchange(bookN) ? depthTo(b, bookN) : null;
     const gm = String(b.game || "").match(/^([A-Z]{2,3})\s*@\s*([A-Z]{2,3})$/);
     const myTeam = normTeamAbbr(b.team || "") || String(b.team || "").toUpperCase();
-    const tSpan = t => (normTeamAbbr(t) || t) === myTeam ? `<span style="font-weight:800;color:#fff;background:#2563eb2e;border:1px solid #2563eb99;border-radius:5px;padding:0 6px;">${t}</span>` : `<span style="opacity:.7;">${t}</span>`;   // the player's own team is highlighted
+    const tSpan = t => ((normTeamAbbr(t) || t) === myTeam ? `<span style="font-weight:800;color:#fff;background:#2563eb2e;border:1px solid #2563eb99;border-radius:5px;padding:0 6px;">${t}</span>` : `<span style="opacity:.7;">${t}</span>`) + b2bBadge(t, true);   // the player's own team is highlighted
     const gameLine = gm ? `${logo(gm[1], 20)} ${tSpan(gm[1])} <span style="color:#e6edf5;">@</span> ${logo(gm[2], 20)} ${tSpan(gm[2])}` : esc(b.game || b.team || "");
     const player = `<div style="display:flex;align-items:center;gap:14px;">${face(b.player, 46)}<div><div style="font:800 19px 'Plus Jakarta Sans';color:#fff;line-height:1.15;white-space:nowrap;">${esc(displayPlayerName(b.player))}${nick && b.expMin != null ? ` <span style="font:700 13px 'JetBrains Mono',monospace;color:#e6edf5;margin-left:6px;vertical-align:middle;">${Math.round(b.expMin)} min</span>` : ""}${multi ? ` <span style="font:800 12px 'JetBrains Mono',monospace;color:#c4b5fd;margin-left:6px;vertical-align:middle;">\u00d7${perPlayer[resolveNorm(b.player || "")]}</span>` : ""}</div><div style="font:700 13px 'Plus Jakarta Sans';color:#e6edf5;margin-top:4px;white-space:nowrap;display:flex;align-items:center;gap:6px;">${gameLine}<span style="margin-left:6px;color:#fff;">${esc(timeOf(b))}</span></div>${_mStatusPills(b, esc, nick)}</div></div>`;
     const line = `<div style="font:700 11px 'Plus Jakarta Sans';letter-spacing:.12em;color:#e6edf5;text-transform:uppercase;margin-bottom:2px;">${esc(String(stat).toUpperCase())}</div><div style="${mono}font-weight:800;font-size:26px;color:#fff;line-height:1;">${b.line}</div>`;
@@ -27876,7 +27921,7 @@ async function _morningCardHtml(picks, mode) {
         const hasP = b.sourceProjs && b.sourceProjs[k] != null, hasE = b.sourceEvs && b.sourceEvs[k] != null;
         if (!hasP && !hasE) return "";
         const evn = hasE ? Number(b.sourceEvs[k]) : null;
-        return `<span style="${mono}font-weight:700;font-size:12px;color:${_mSrc(k).color};border:1px solid ${_mSrc(k).color}66;background:${_mSrc(k).color}1a;border-radius:999px;padding:3px 12px;margin:2px 0;display:block;width:310px;box-sizing:border-box;white-space:nowrap;">${_mSrc(k).label} ${hasP ? Number(b.sourceProjs[k]).toFixed(1) : "—"}${fairTxt(k)} <b style="color:${evn >= MORNING_QUAL_EV ? "#4ade80" : evn >= 0 ? "#fbbf24" : "#f87171"};">${evn != null ? (evn >= 0 ? "+" : "") + evn.toFixed(1) + "%" : ""}</b></span>`;
+        return `<span style="${mono}font-weight:700;font-size:12px;color:${_mSrc(k).color};border:1px solid ${_mSrc(k).color}66;background:${_mSrc(k).color}1a;border-radius:999px;padding:3px 12px;margin:2px 0;display:block;width:310px;box-sizing:border-box;white-space:nowrap;">${_mSrc(k).label} <span style="color:#fff;">${hasP ? Number(b.sourceProjs[k]).toFixed(1) : "—"}</span>${fairTxt(k)} <b style="color:${evn >= MORNING_QUAL_EV ? "#4ade80" : evn >= 0 ? "#fbbf24" : "#f87171"};">${evn != null ? (evn >= 0 ? "+" : "") + evn.toFixed(1) + "%" : ""}</b></span>`;
       }).join("");
       const ev = b.ev != null ? `<div style="${mono}font-weight:800;font-size:15px;color:#4ade80;">+${Number(b.ev).toFixed(1)}%</div>` : "";
       // sim fair: the anchor source's, and the lowest (most conservative) across the sources that posted one
@@ -27885,14 +27930,14 @@ async function _morningCardHtml(picks, mode) {
       const anchorF = fprobs.find(x => x.k === b.anchorSrc), lowF = fprobs.length ? fprobs.reduce((a, x) => x.p < a.p ? x : a) : null;
       const fairBlock = fprobs.length ? `<div style="${mono}font-weight:700;font-size:11px;color:#e6edf5;margin-top:3px;white-space:nowrap;">${anchorF ? `anchor ${fmtF(anchorF)}` : ""}${anchorF && lowF && lowF.k !== anchorF.k ? "<br>" : ""}${lowF && (!anchorF || lowF.k !== anchorF.k) ? `low ${_mSrc(lowF.k).label} ${fmtF(lowF)}` : ""}</div>` : "";
       const worst = b.minEv != null ? `<div style="${mono}font-weight:700;font-size:11px;color:#e6edf5;margin-top:2px;">worst ${b.minEv >= 0 ? "+" : ""}${Number(b.minEv).toFixed(1)}%</div>` + fairBlock : fairBlock;
-      extra = td(`<span style="${mono}font-weight:800;font-size:17px;color:#c4b5fd;">${(b.sourcesAgreed || []).length}/${b.requiredQual || 4}</span>`, "center") + td(`<div style="display:flex;flex-direction:column;align-items:flex-start;width:310px;">${pills}</div>`) + td(ev + worst, "center");
+      extra = td(`<div style="display:flex;flex-direction:column;align-items:flex-start;width:310px;">${pills}</div>`) + td(ev + worst, "center");
     }
     return tile(`<tr>${td(player, "left", multi ? "border-left:5px solid #7c6bd6;background:#0f1330;" : "")}${td(line, "center", "background:#0b1a2e;")}${td(side, "center")}${td(best, "center", "white-space:nowrap;background:#0a2126;")}${td(books, "left", "width:520px;")}${extra}</tr>`);
   }).join("");
   const d = new Date(), days = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"], mo = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
   const date = `${days[d.getDay()]}, ${mo[d.getMonth()]} ${d.getDate()}`;
   const nGames = await _mSlateGames(picks.map(b => b.gameDate || b.gameDateIso).find(Boolean) || localYMD(new Date()), new Set(picks.map(b => b.game || b.team)).size);   // games on the SLATE, not just the ones we're betting
-  const head = [th("Player"), th("Prop", "center", "background:#0c1c31;"), th("Side", "center"), th("Best Price", "center", "background:#0d2b30;"), th("Books")].concat(nick ? [th("Agree", "center"), th("Sources · proj · EV"), th("Edge", "center")] : []).join("");
+  const head = [th("Player"), th("Prop", "center", "background:#0c1c31;"), th("Side", "center"), th("Best Price", "center", "background:#0d2b30;"), th("Books")].concat(nick ? [th("Sources · proj · EV"), th("Edge", "center")] : []).join("");
   return `<div class="mcard" style="font-family:'Plus Jakarta Sans','Helvetica Neue',sans-serif;background:#060b14;padding:26px 28px 30px;width:${nick ? 1760 : 1380}px;color:#fff;box-sizing:border-box;">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;gap:16px;">
       <div style="flex:1;font-size:15px;font-weight:800;letter-spacing:.14em;color:#e6edf5;align-self:flex-start;">NBA MODEL</div>
