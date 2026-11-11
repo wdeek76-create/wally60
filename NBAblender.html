@@ -4472,18 +4472,21 @@ async function grabClosingLines(isoDate) {
     console.log("[CLV] books in feed:", [...new Set(rows.map(r => r && r.bookmaker).filter(Boolean))].join(", "));
     console.log("[CLV] sample players:", [...new Set(rows.map(r => r && r.player).filter(Boolean))].slice(0, 10).join(", "));
 
-    let matched = 0;
+    let matched = 0; window._clvMiss = [];
     todays.forEach(b => {
       const market = PARLAY_MARKET_BY_STAT[(b.stat || "").toUpperCase()];
       if (!market) return;
-      const want = resolveNorm(b.player || "");
-      const mine = rows.filter(r => r && r.market_key === market &&
+      const want = resolveNorm(b.player || ""), isUnderB = (b.ou || "").toLowerCase() === "under";
+      const mineAll = rows.filter(r => r && r.market_key === market &&
         ooNameMatch(r.player || "", want));
+      // only lines that carry a price on YOUR side: once a book moves off your number the nearest line is often an alt that only hangs the over
+      const mine = mineAll.filter(r => { const px = isUnderB ? r.under_price : r.over_price; return px != null && !isNaN(px); });
       if (!mine.length) {
         // Say which half failed: wrong market key, or name didn't resolve.
         const byMarket = rows.filter(r => r && r.market_key === market).length;
         const byPlayer = rows.filter(r => r && ooNameMatch(r.player || "", want)).length;
-        console.log(`[CLV] no match: ${b.player} ${b.stat} (${market}) — market rows ${byMarket}, player rows ${byPlayer}`);
+        console.log(`[CLV] no match: ${b.player} ${b.stat} (${market}) — market rows ${byMarket}, player rows ${byPlayer}, this player+market ${mineAll.length} (none priced on the ${isUnderB ? "under" : "over"})`);
+        (window._clvMiss = window._clvMiss || []).push(`${displayPlayerName(b.player)} ${b.stat}: ${!byPlayer ? "name not in feed" : !mineAll.length ? "no " + market + " rows" : mineAll.length + " rows, none with an " + (isUnderB ? "under" : "over") + " price"}`);
         return;
       }
       // Prefer your books in order, then anything else, and among those the
@@ -4515,12 +4518,16 @@ async function grabClosingLines(isoDate) {
     });
     // 2nd pass: bets still without a close (FanDuel / Pinnacle / Prop Builder pulled the prop or moved off the number before tip) are asked again across
     // other books, at WHATEVER line they closed at — u22.5 that closed 20.5 is still worth seeing. A pulled prop's close is its last price before it came down.
+    window._clvFallback = null; window._clvFallbackErr = null;
     const stillOpen = todays.filter(b => !b.closing && PARLAY_MARKET_BY_STAT[(b.stat || "").toUpperCase()]);
     let matched2 = 0;
     if (stillOpen.length) {
-      const FALLBACK = ["DraftKings", "BetMGM", "Caesars", "Fanatics", "Hard Rock"], order = FALLBACK.map(x => x.toLowerCase().replace(/\s+/g, ""));
-      let rows2 = [];
-      try { rows2 = await fetchClosingFromOpticOdds(day, new Set(stillOpen.map(b => PARLAY_MARKET_BY_STAT[(b.stat || "").toUpperCase()]).filter(Boolean)), FALLBACK); } catch (e) { console.warn("[CLV] fallback books failed", e); }
+      const FALLBACK = ["DraftKings", "BetMGM", "Caesars", "Fanatics", "Hard Rock", "bet365", "BetRivers", "theScore Bet", "Fliff", "BookMaker"], order = FALLBACK.map(x => x.toLowerCase().replace(/\s+/g, ""));
+      let rows2 = []; const mk2 = new Set(stillOpen.map(b => PARLAY_MARKET_BY_STAT[(b.stat || "").toUpperCase()]).filter(Boolean));
+      for (const grp of [FALLBACK.slice(0, 5), FALLBACK.slice(5, 10)]) {   // OpticOdds takes 5 books per call
+        try { rows2 = rows2.concat(await fetchClosingFromOpticOdds(day, mk2, grp)); } catch (e) { window._clvFallbackErr = e && e.message; console.warn("[CLV] fallback books failed", grp, e); }
+      }
+      window._clvFallback = { asked: stillOpen.length, rows: rows2.length };
       console.log(`[CLV] fallback books: ${rows2.length} rows for ${stillOpen.length} bets without a close`);
       stillOpen.forEach(b => {
         const market = PARLAY_MARKET_BY_STAT[(b.stat || "").toUpperCase()], want = resolveNorm(b.player || ""), isUnder = (b.ou || "").toLowerCase() === "under";
@@ -4533,10 +4540,12 @@ async function grabClosingLines(isoDate) {
         matched2++;
       });
     }
-    matched += matched2;
+    matched += matched2; if (window._clvFallback) window._clvFallback.matched = matched2;
     if (matched) { saveBets(); renderTracker(); }
     const dg = window._clvDiag || {};
-    showToast(matched ? `Closing lines: ${matched} of ${todays.length} bets matched` : `Closing lines: 0 of ${todays.length} matched on ${day} \u2014 OpticOdds gave ${dg.fixtures} finished game(s) and ${dg.rows} closing rows${dg.rows ? " (markets: " + (dg.markets || "none") + "; books: " + (dg.books || "none") + ")" : " \u2014 the feed had no closing prices for that day yet"}`);
+    const fb = window._clvFallback, still = todays.filter(b => !b.closing).map(b => resolveNorm(b.player || "") + "|" + b.stat), missTxt = (window._clvMiss || []).filter(m => still.length).slice(0, 3);
+    const fbTxt = (fb ? ` \u00b7 2nd pass: ${fb.rows} rows from other books, ${fb.matched || 0} more matched${window._clvFallbackErr ? " (error: " + window._clvFallbackErr + ")" : ""}` : "") + (still.length && missTxt.length ? ` \u00b7 still missing \u2014 ${missTxt.join("; ")}` : "");
+    showToast(matched ? `Closing lines: ${matched} of ${todays.length} bets matched${fbTxt}` : `Closing lines: 0 of ${todays.length} matched on ${day} \u2014 OpticOdds gave ${dg.fixtures} finished game(s) and ${dg.rows} closing rows${dg.rows ? " (markets: " + (dg.markets || "none") + "; books: " + (dg.books || "none") + ")" : " \u2014 the feed had no closing prices for that day yet"}${fbTxt}`);
   } catch (e) {
     showToast("Closing lines failed — see console");
     console.error("grabClosingLines:", e);
