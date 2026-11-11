@@ -998,6 +998,7 @@ a.plbk{color:var(--cyan)}
 .tkdp{margin:0 0 14px}.tkdph{cursor:pointer;display:flex;justify-content:space-between;align-items:baseline;font-family:var(--mono);font-size:12px;margin:0 2px 2px}
 .tkdph .t3{font-family:'Orbitron',var(--sans);font-weight:900;font-size:13px;letter-spacing:.5px;text-transform:uppercase;background-image:linear-gradient(180deg,#bbf7d0 0%,#4ade80 45%,#16a34a 100%);background-clip:text;-webkit-background-clip:text;color:transparent;-webkit-text-fill-color:transparent;filter:drop-shadow(0 1px 0 #14532d) drop-shadow(0 2px 2px rgba(0,0,0,.5))}
 .tkdph b.pos{color:var(--green)}.tkdph b.neg{color:var(--red)}.tkdp .tkhistbox{max-height:34vh}
+.tksend{display:flex;justify-content:flex-end;margin:0 0 6px}.tksend .ed{margin-right:0;border-radius:999px;padding:6px 12px;font-weight:700}
 .tktools{margin-top:22px;padding-top:10px;border-top:1px solid var(--line2);opacity:.92}
 .tkhistbox{max-height:62vh;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;border:1px solid var(--line2);border-radius:12px;padding:2px 8px 8px;margin-top:6px}
 .tkday{display:grid;grid-template-columns:1fr auto auto auto;gap:4px 10px;align-items:center;width:100%;margin:8px 0 4px;padding:9px 12px;border-radius:10px;border:1px solid var(--line2);background:var(--bg2);color:var(--text);font-weight:700;font-size:12.5px;text-align:left}
@@ -1696,6 +1697,31 @@ async function freshTrackedSnap(t){
   const snap=snapshotFrom(mine,t.side,t.line); snap.mainLine=mainLineOf(mine,t.side);
   t.mainLineNow=snap.mainLine;
   return snap;
+}
+// "Send open bets": every open bet -- what you took -- plus which books still hang that same line within
+// 10c of your price (fresh pull, pregame only), as text to share / paste into Discord or Telegram.
+const TK_CLOSE_C = 10;
+async function tkSendOpen(btn){
+  const open=tracked.filter(t=>!t.final && t.src!=='sharp' && t.src!=='matrix'); if(!open.length){ toast('No open bets'); return; }
+  const lbl=btn?.textContent; if(btn){ btn.disabled=true; btn.textContent='Pulling odds…'; }
+  const snaps={}; await runPool(open.map(t=>async()=>{ try{ snaps[t.id]=await freshTrackedSnap(t); }catch(e){ snaps[t.id]=t.snapshots[t.snapshots.length-1]||null; } }), 3);
+  const lines=[`📋 Open bets · ${new Date().toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'})} (${open.length})`];
+  open.sort((a,b)=>new Date(a.start||0)-new Date(b.start||0)).forEach(t=>{
+    const bet=`${titleCase(t.playerName)} ${t.side==='over'?'o':t.side==='under'?'u':''}${t.line??''} ${t.marketLabel} ${fmtAm(t.price)}${t.book?' '+bookShort(t.bookKey||t.book):''}`.replace(/\s+/g,' ').trim();
+    const when=t.live?'LIVE':t.start?`${etDay(t.start)} ${etTime(t.start)}`:'';
+    lines.push('', `${bet}${when?` · ${t.away}@${t.home} ${when}`:''}`);
+    if(t.live){ lines.push('↳ live — books are off'); return; }
+    const sn=snaps[t.id], my=cents(t.price);
+    const close=Object.entries(sn?.byBook||{}).filter(([k,b])=>b && b.price!=null && my!=null && my-cents(b.price)<=TK_CLOSE_C && !oddsJunk(b.price))
+      .sort((a,b)=>Number(b[1].price)-Number(a[1].price)).map(([k,b])=>`${bookShort(k)} ${fmtAm(b.price)}${cents(b.price)>=my?' ✓':''}`);
+    lines.push(close.length ? `↳ Still close: ${close.join(' · ')}` : '↳ No book within 10¢ at this line');
+  });
+  lines.push('', '✓ = same or better than you took');
+  const text=lines.join('\n');
+  if(btn){ btn.disabled=false; btn.textContent=lbl; }
+  try{ if(navigator.share){ await navigator.share({ text }); return; } }catch(e){ if(e.name==='AbortError') return; }
+  try{ await navigator.clipboard.writeText(text); toast('Open bets copied'); }
+  catch(e){ const ta=document.createElement('textarea'); ta.value=text; ta.style.cssText='position:fixed;opacity:0'; document.body.appendChild(ta); ta.select(); try{ document.execCommand('copy'); toast('Open bets copied'); }catch(_){ toast('Copy failed'); } ta.remove(); }
 }
 function trackSideLabel(t){
   if(t.side==='ML'||t.side==='ML60') return `${t.side==='ML60'?'ML (Reg.)':'Moneyline'}`;
@@ -5448,7 +5474,7 @@ function renderTracker(){
   // Matrix tracking is off: Matrix bets aren't shown either.
   const openList=tracked.filter(t=>!t.final && t.src!=='sharp' && t.src!=='matrix');
   const historyList=tracked.filter(t=>t.final && t.src!=='sharp' && t.src!=='matrix');
-  const openHtml = openList.length ? bySport(openList) : '<div class="empty">No open bets.<br>Open a player and tap <b>Track</b> on a side.</div>';
+  const openHtml = openList.length ? `<div class="tksend"><button id="tksend" class="ed">📤 Send open bets</button></div>`+bySport(openList) : '<div class="empty">No open bets.<br>Open a player and tap <b>Track</b> on a side.</div>';
   // ONE daily profit tracker, at the top: all-time line, then a row per day (tap a day for its bets)
   const allRec=ttRecord(historyList.filter(t=>t.result));
   const historyHtml = historyList.length
@@ -5474,6 +5500,7 @@ function renderTracker(){
   view.querySelectorAll('.tked [name]').forEach(i=>i.addEventListener('blur',()=>setTimeout(()=>{ if(tkRenderPending && !(document.activeElement&&document.activeElement.closest&&document.activeElement.closest('#view .tked'))) renderTracker(); },300)));
   bindTkBackup();
   $('#tkdph')?.addEventListener('click',()=>{ tkDpOpen=!tkDpOpen; renderTracker(); });
+  $('#tksend')?.addEventListener('click',ev=>tkSendOpen(ev.currentTarget));
   view.querySelectorAll('[data-tkday]').forEach(b=>b.addEventListener('click',()=>{ const d=b.dataset.tkday; tkDayOpen.has(d)?tkDayOpen.delete(d):tkDayOpen.add(d); renderTracker(); }));
   view.querySelectorAll('[data-rm]').forEach(b=>b.addEventListener('click',()=>{ tracked=tracked.filter(t=>t.id!==b.dataset.rm); saveTracked(); renderTracker(); }));
   view.querySelectorAll('[data-share]').forEach(b=>b.addEventListener('click',()=>{ const t=tracked.find(x=>x.id===b.dataset.share); if(t) shareTracked(t); }));
