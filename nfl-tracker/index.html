@@ -4010,7 +4010,7 @@ async function autoGrade() {
   try { fixtures = await ooFixtures(daysBack, 7, true); }
   catch (e) { ooDown = e.message; console.warn('[grade] OpticOdds schedule failed — grading from ESPN only:', e.message); }
   const _espCache = {};
-  const _espFor = d => _espCache[d] || (_espCache[d] = espnBoxLookupForDate(d).catch(e => { console.warn('[grade] ESPN failed for', d, e.message); return { lookup: {}, teamsLoaded: new Set() }; }));
+  const _espFor = d => _espCache[d] || (_espCache[d] = espnBoxLookupForDate(d).catch(e => { console.warn('[grade] ESPN failed for', d, e.message); return { lookup: {}, teamsLoaded: new Set(), byEvent: [], error: e.message || String(e) }; }));
   const _shiftDay = (d, n) => { const x = new Date(d + 'T12:00:00'); x.setDate(x.getDate() + n); return x.getFullYear() + '-' + String(x.getMonth() + 1).padStart(2, '0') + '-' + String(x.getDate()).padStart(2, '0'); };
   const espTeams = new Set(); let espnGraded = 0;
 
@@ -4041,7 +4041,7 @@ async function autoGrade() {
       const lbl = p.player + ' (' + (MARKET_MAP[p.market]?.label || p.market) + ') ' + (p.date || '') + ' ' + (p.game || '');
       const why = w => reasons.push({ player: p.player, market: p.market, date: p.date, game: p.game, why: w });
       if (!t || t.length !== 2) { allMissed.push(lbl + ' — game/teams not recognised'); why('game/teams not recognised'); continue; }
-      let stat = null, final = false, fromEspn = false;
+      let stat = null, final = false, fromEspn = false, espNote = '';
       // 1) OpticOdds: the finished game between these two teams, this week
       const fx = finals.find(f => sameGame(f.home, f.away, t));
       if (fx) {
@@ -4053,24 +4053,30 @@ async function autoGrade() {
       if (stat === null || stat === undefined) {
         const days = [p.date || today, _shiftDay(p.date || today, -1), _shiftDay(p.date || today, 1)];
         for (let d = ws; d <= we; d = _shiftDay(d, 1)) if (!days.includes(d)) days.push(d);
-        let ev = null;
+        let ev = null; espNote = '';
         for (const d of days) {
           if (d < ws || d > we || d > today) continue;
           status.textContent = `Grading ${wr.label} — ESPN ${d}…`;
           const esp = await _espFor(d);
+          if (esp.error && !espNote) espNote = 'ESPN could not be reached (' + esp.error + ')';
           ev = (esp.byEvent || []).find(e => sameGame(e.home, e.away, t));
           if (ev) break;
         }
+        if (!ev && !espNote) espNote = 'no finished ' + t.join(' vs ') + ' game on ESPN ' + ws + '…' + we;
         if (ev) {
+          // ESPN's scoreboard already says this game is completed (only completed games get here).
+          // Just make sure the box score has posted — a few players per team, not 10: lots of teams
+          // only have 8-9 players with offensive stats, which kept finished games "not final".
           const c = counted(ev.lookup);
-          if (t.every(x => (c[x] || 0) >= 10)) {
+          if (!t.every(x => (c[x] || 0) >= 3)) espNote = ev.error ? 'ESPN box score could not be loaded (' + ev.error + ')' : 'ESPN box score not posted yet (' + t.map(x => x + ' ' + (c[x] || 0)).join(', ') + ' players)';
+          if (t.every(x => (c[x] || 0) >= 3)) {
             final = true;
             const s2 = findPlayerStat(ev.lookup, p.player, p.market, t);
             if (s2 !== null && s2 !== undefined) { stat = s2; fromEspn = true; }
           }
         }
       }
-      if (!final) { allMissed.push(lbl); why('game not final yet (not in OpticOdds or ESPN this week)'); continue; }
+      if (!final) { allMissed.push(lbl); why('not graded: ' + (espNote || 'game not final yet')); continue; }
       if (stat === null || stat === undefined) {
         p.needsReview = 'Not in box score — DNP or 0 stats';
         allDnp.push(p.player); why('game final, but player/stat not in either box score (DNP?)');
@@ -7055,10 +7061,11 @@ async function espnBoxLookupForDate(dateStr) {
   const finals = events.filter(e => e.completed);
   const lookup = {}, byEvent = [];
   for (const ev of finals) {
+    const evLookup = {}, evRec = { id: ev.id, home: ev.home, away: ev.away, lookup: evLookup };
+    byEvent.push(evRec);
     try {
       const r = await fetch(`https://site.api.espn.com/apis/site/v2/sports/football/nfl/summary?event=${ev.id}`);
       const j = await r.json();
-      const evLookup = {}; byEvent.push({ id: ev.id, home: ev.home, away: ev.away, lookup: evLookup });
       (j?.boxscore?.players || []).forEach(tb => {
         const ab = _espnAbbrFix(tb.team?.abbreviation || '');
         (tb.statistics || []).forEach(sg => {
@@ -7083,7 +7090,7 @@ async function espnBoxLookupForDate(dateStr) {
           });
         });
       });
-    } catch (e) { console.warn('[grade] ESPN summary failed for event', ev.id, e.message); }
+    } catch (e) { evRec.error = e.message || String(e); console.warn('[grade] ESPN summary failed for event', ev.id, e.message); }
   }
   const teamCounts = {};
   Object.values(lookup).forEach(v => { if (v && v.team) teamCounts[v.team] = (teamCounts[v.team] || 0) + 1; });
