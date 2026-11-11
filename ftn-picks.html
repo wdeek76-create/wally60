@@ -106,10 +106,9 @@ const BOOKS = [
   { k:'kalshi', name:'Kalshi', out:'Kalshi', ex:true }, { k:'prophet x', name:'Prophet X', out:'ProphetX', ex:true },
   { k:'bet105', name:'bet105', out:'BET105' }, { k:'pinnacle', name:'Pinnacle', out:'Pinnacle' },
   { k:'betonline', name:'BetOnline', out:'BetOnline' }, { k:'bookmaker', name:'BookMaker', out:'Bookmaker' }, { k:'prime sports', name:'Prime Sports', out:'Bookmaker' },
-  { k:'circa', name:'Circa', out:'Circa' }, { k:'fanduel', name:'FanDuel', out:'FanDuel', ftn:'Fan Duel' },
-  { k:'draftkings', name:'DraftKings', out:'DraftKings', ftn:'Draft Kings' }, { k:'betmgm', name:'BetMGM', out:'BetMGM', ftn:'BetMGM' },
-  { k:'caesars', name:'Caesars', out:'Caesars', ftn:'Caesars Sportbook' }, { k:'betrivers', name:'BetRivers', out:'BetRivers', ftn:'BetRivers' },
-  { k:'fanatics', name:'Fanatics', out:'Fanatics', ftn:'Fanatics' } ];
+  { k:'circa', name:'Circa', out:'Circa' }, { k:'circa sports', name:'Circa Sports', out:'Circa' }, { k:'fanduel', name:'FanDuel', out:'FanDuel', ftn:'Fan Duel' } ];
+// sharp books: always shown on each pick for comparison, whatever their edge
+const SHARP_K = new Set(['pinnacle','betonline','bookmaker','prime sports','circa','circa sports','bet105']);
 const bookOf = n => BOOKS.find(b=>b.k===String(n||'').toLowerCase());
 const OPEN_BOOKS = ['FanDuel','DraftKings','BetMGM','Caesars','BetRivers'];
 const MARKETS = ['Moneyline','Point Spread','Total Points'];
@@ -134,13 +133,18 @@ function parseFTN(text){
   const out=[];
   for(let i=0;i<lines.length;i++){
     if(!dateRx.test(lines[i])) continue;
-    const when=lines[i]; let team1='', bet1=false;
+    // FTN marks the pick's team either with its own "Bet" line or glued on: "BetOregon State"
+    const when=lines[i]; let team1='', bet1=false, bn1='';
     for(let k=i-1;k>=Math.max(0,i-10);k--){ const c=lines[k]; if(c==='Bet'){ bet1=true; continue; }
-      if(pctRx.test(c)||oddsRx.test(c)||numRx.test(c)||dateRx.test(c)||typeRx.test(c)) break; if(!team1) team1=c; }
-    let team2='', bet2=false, type='', edge=null, prob=null, book='', line=null, odds=null, j=i+1;
+      if(pctRx.test(c)||oddsRx.test(c)||numRx.test(c)||dateRx.test(c)||typeRx.test(c)) break;
+      if(/^Bet\S/.test(c) && lines.slice(Math.max(0,k-3),k+3).some(x=>x===c.slice(3))){ bn1=c.slice(3); continue; }
+      if(!team1) team1=c; }
+    if(bn1 && bn1===team1) bet1=true;
+    let team2='', bet2=false, type='', edge=null, prob=null, book='', line=null, odds=null, j=i+1, bn2='';
     for(; j<lines.length && j<i+22; j++){
       const c=lines[j];
       if(c==='Bet'){ if(!type) bet2=true; continue; }
+      if(!type && /^Bet\S/.test(c) && lines.slice(i+1,j+3).some(x=>x===c.slice(3))){ bn2=c.slice(3); continue; }
       if(typeRx.test(c) && !type){ type=c.replace(/\s+/g,' '); continue; }
       const pm=c.match(/^(-?\d+\.?\d*)%$/); if(pm){ if(edge===null) edge=+pm[1]; else if(prob===null) prob=+pm[1]; continue; }
       if(FTN_BOOKS.includes(c.toLowerCase()) && !book){ book=c; continue; }
@@ -150,7 +154,7 @@ function parseFTN(text){
       if(book && line!==null && oddsRx.test(c)){ odds=+c; break; }
       if(!team2 && !type && !dateRx.test(c) && !numRx.test(c)) team2=c;
     }
-    i=j;
+    i=j; if(bn2 && bn2===team2) bet2=true;
     if(edge===null || prob===null || !type || !team1 || !team2 || odds===null) continue;
     const ml=type==='Moneyline'||type==='ML', tot=type.startsWith('Total');
     out.push({ id:`${team1}|${team2}|${type}|${bet2?team2:bet1?team1:''}`.toLowerCase(), when, team1, team2, type:tot?(type.endsWith('O')?'over':'under'):ml?'ml':'spread',
@@ -224,7 +228,7 @@ async function price(){
       (byFx[f.id]||[]).forEach(o=>{ const b=bookOf(o.sportsbook); if(!b || o.price==null || Math.abs(+o.price)>=10000 || !rowFits(p,o,f)) return;
         const e=edgeOf(p.prob,+o.price), L=liqOf(o);
         const cur=p.books.find(x=>x.out===b.out); if(cur && cur.price>=+o.price) return; if(cur) p.books.splice(p.books.indexOf(cur),1);
-        p.books.push({ out:b.out, price:+o.price, edge:e, liq:L?L.v:null, max:L?L.max:false }); });
+        p.books.push({ out:b.out, price:+o.price, edge:e, liq:L?L.v:null, max:L?L.max:false, ex:!!b.ex, sharp:SHARP_K.has(b.k) }); });
       p.books.sort((a,b)=>b.price-a.price);
     });
     // where each line opened (FanDuel first), one history pull per game with a pick
@@ -241,11 +245,14 @@ async function price(){
 // ───────── list ─────────
 const betTxt = p => p.type==='over'||p.type==='under' ? `${p.type} ${p.line}` : p.type==='ml' ? `${p.betTeam||'(team?)'} ML` : `${p.betTeam||'(team?)'} ${p.line>0?'+':''}${p.line}`;
 // the books to show: at the min edge and min $ (unknown $ passes); none -> FTN's own book
+const FTN_MAX_PLUS = 200;   // long shots past +200 never show
 function showBooks(p){
   const me=minEdge(), ml=minLiq();
-  const b=(p.books||[]).filter(x=>x.edge>=me-1e-9 && (x.liq==null || x.liq>=ml || !x.liq));
+  const b=(p.books||[]).filter(x=>x.price<=FTN_MAX_PLUS && x.edge>=me-1e-9 && (x.ex ? (x.liq!=null && x.liq>=ml) : true));
   if(b.length) return b;
-  return p.ftnEdge>=me ? [{ out:{'fan duel':'FanDuel','draft kings':'DraftKings','caesars sportbook':'Caesars'}[p.ftnBook.toLowerCase()]||p.ftnBook, price:p.ftnOdds, edge:edgeOf(p.prob,p.ftnOdds), liq:null, ftn:true }] : [];
+  // nothing priced: FTN's own book only if it's one we play (FanDuel / the sharp books)
+  const fb={'fan duel':'FanDuel'}[String(p.ftnBook||'').toLowerCase()];
+  return fb && p.ftnEdge>=me && p.ftnOdds<=FTN_MAX_PLUS ? [{ out:fb, price:p.ftnOdds, edge:edgeOf(p.prob,p.ftnOdds), liq:null, ftn:true }] : [];
 }
 const visible = () => picks.filter(p=>showBooks(p).length).sort((a,b)=>(ftnTime(a.when)||0)-(ftnTime(b.when)||0) || b.ftnEdge-a.ftnEdge);
 function lineTxt(p, n){
@@ -265,6 +272,7 @@ function render(){
         <div class="ftn">FTN ${p.prob.toFixed(1)}% · ${esc(p.ftnBook)} ${fmtAm(p.ftnOdds)} (${p.ftnEdge.toFixed(1)}%)${p.fx?'':' · not matched to a game'}</div></div>
         <div style="text-align:right"><button class="x" data-rm="${esc(p.id)}">${off?'↺':'✕'}</button></div></div>
         <div class="bks">${bs.map(x=>`<span class="bk"><b>${fmtAm(x.price)}</b> ${esc(x.out)}${x.liq!=null?` <span class="l">${usd(x.liq)}${x.max?' max':''}</span>`:''} <span class="e">${x.edge.toFixed(1)}%</span></span>`).join('')}</div>
+        ${(()=>{ const sh=(p.books||[]).filter(x=>x.sharp); return sh.length ? `<div class="meta">Sharp: ${sh.map(x=>`${esc(x.out)} <b>${fmtAm(x.price)}</b> <span class="${x.edge>=0?'e':''}">${x.edge>=0?'+':''}${x.edge.toFixed(1)}%</span>`).join(' · ')}</div>` : ''; })()}
         <div class="meta">${p.open?`opened <b>${fmtAm(p.open.price)}</b> ${esc(p.open.book)} · `:''}${pt!=null?`play to <b>${fmtAm(pt)}</b>`:''}</div></div>`; }).join('');
   document.querySelectorAll('[data-rm]').forEach(b=>b.onclick=()=>{ const id=b.dataset.rm; removed.has(id)?removed.delete(id):removed.add(id); save(); render(); });
 }
