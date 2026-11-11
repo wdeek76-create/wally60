@@ -4472,7 +4472,7 @@ async function grabClosingLines(isoDate) {
     console.log("[CLV] books in feed:", [...new Set(rows.map(r => r && r.bookmaker).filter(Boolean))].join(", "));
     console.log("[CLV] sample players:", [...new Set(rows.map(r => r && r.player).filter(Boolean))].slice(0, 10).join(", "));
 
-    let matched = 0; window._clvMiss = [];
+    let matched = 0; window._clvMiss = []; window._clvWhy = {};
     todays.forEach(b => {
       const market = PARLAY_MARKET_BY_STAT[(b.stat || "").toUpperCase()];
       if (!market) return;
@@ -4486,7 +4486,9 @@ async function grabClosingLines(isoDate) {
         const byMarket = rows.filter(r => r && r.market_key === market).length;
         const byPlayer = rows.filter(r => r && ooNameMatch(r.player || "", want)).length;
         console.log(`[CLV] no match: ${b.player} ${b.stat} (${market}) — market rows ${byMarket}, player rows ${byPlayer}, this player+market ${mineAll.length} (none priced on the ${isUnderB ? "under" : "over"})`);
-        (window._clvMiss = window._clvMiss || []).push(`${displayPlayerName(b.player)} ${b.stat}: ${!byPlayer ? "name not in feed" : !mineAll.length ? "no " + market + " rows" : mineAll.length + " rows, none with an " + (isUnderB ? "under" : "over") + " price"}`);
+        const why = !byPlayer ? "name not in feed" : !mineAll.length ? "no " + market + " rows" : mineAll.length + " rows, none with an " + (isUnderB ? "under" : "over") + " price";
+        (window._clvMiss = window._clvMiss || []).push(`${displayPlayerName(b.player)} ${b.stat}: ${why}`);
+        (window._clvWhy = window._clvWhy || {})[String(b.id)] = why;
         return;
       }
       // Prefer your books in order, then anything else, and among those the
@@ -4531,8 +4533,9 @@ async function grabClosingLines(isoDate) {
       console.log(`[CLV] fallback books: ${rows2.length} rows for ${stillOpen.length} bets without a close`);
       stillOpen.forEach(b => {
         const market = PARLAY_MARKET_BY_STAT[(b.stat || "").toUpperCase()], want = resolveNorm(b.player || ""), isUnder = (b.ou || "").toLowerCase() === "under";
-        const mine = rows2.filter(r => r && r.market_key === market && ooNameMatch(r.player || "", want)).filter(r => { const px = isUnder ? r.under_price : r.over_price; return px != null && !isNaN(px); });
-        if (!mine.length) return;
+        const all2 = rows2.filter(r => r && r.market_key === market && ooNameMatch(r.player || "", want));
+        const mine = all2.filter(r => { const px = isUnder ? r.under_price : r.over_price; return px != null && !isNaN(px); });
+        if (!mine.length) { window._clvWhy[String(b.id)] = (window._clvWhy[String(b.id)] || "no rows at FD/PIN/PB") + " · other books: " + (all2.length ? all2.length + " rows, none priced on the " + (isUnder ? "under" : "over") : "nothing for this player/market"); return; }
         // closest line to yours first (the main market where the book moved to), then book order
         mine.sort((x, y) => Math.abs(Number(x.line) - Number(b.line)) - Math.abs(Number(y.line) - Number(b.line)) || (order.indexOf(x.bookmaker) + 99) % 100 - (order.indexOf(y.bookmaker) + 99) % 100);
         const best = mine[0];
@@ -4545,6 +4548,7 @@ async function grabClosingLines(isoDate) {
     const dg = window._clvDiag || {};
     const fb = window._clvFallback, still = todays.filter(b => !b.closing).map(b => resolveNorm(b.player || "") + "|" + b.stat), missTxt = (window._clvMiss || []).filter(m => still.length).slice(0, 3);
     const fbTxt = (fb ? ` \u00b7 2nd pass: ${fb.rows} rows from other books, ${fb.matched || 0} more matched${window._clvFallbackErr ? " (error: " + window._clvFallbackErr + ")" : ""}` : "") + (still.length && missTxt.length ? ` \u00b7 still missing \u2014 ${missTxt.join("; ")}` : "");
+    try { _clvShowReport(day, todays, matched); } catch (e) { console.warn("[CLV] report", e); }
     showToast(matched ? `Closing lines: ${matched} of ${todays.length} bets matched${fbTxt}` : `Closing lines: 0 of ${todays.length} matched on ${day} \u2014 OpticOdds gave ${dg.fixtures} finished game(s) and ${dg.rows} closing rows${dg.rows ? " (markets: " + (dg.markets || "none") + "; books: " + (dg.books || "none") + ")" : " \u2014 the feed had no closing prices for that day yet"}${fbTxt}`);
   } catch (e) {
     showToast("Closing lines failed — see console");
@@ -4552,6 +4556,25 @@ async function grabClosingLines(isoDate) {
   }
 }
 
+// Closing-lines report: stays on screen (the toast is gone in a second) — every bet on the day, its close or why there is none, with a COPY button.
+function _clvShowReport(day, list, matched) {
+  document.getElementById("clv-report")?.remove();
+  const dg = window._clvDiag || {}, fb = window._clvFallback, why = window._clvWhy || {};
+  const am = o => o == null ? "" : (o > 0 ? "+" : "") + o;
+  const lines = list.map(b => {
+    const side = (b.ou || "").toLowerCase().startsWith("u") ? "u" : "o", tag = `${displayPlayerName(b.player)} ${side}${b.line} ${b.stat} ${am(b.odds)} ${b.book || ""}`;
+    if (b.closing) { const c = computeCLV(b), moved = c && Math.abs(c.closeLine - Number(b.line)) > 1e-9; return { ok: true, text: `${tag}  \u2192 closed ${moved ? side + c.closeLine + " " : ""}${am(c.closePrice)} ${b.closing.book}${b.closing.fallback ? " (other book)" : ""}${c && c.pricePct != null ? `  CLV ${c.pricePct >= 0 ? "+" : ""}${c.pricePct.toFixed(1)}%` : ""}${moved ? `  line ${c.lineDelta > 0 ? "+" : ""}${c.lineDelta}` : ""}` }; }
+    return { ok: false, text: `${tag}  \u2192 NO CLOSE: ${why[String(b.id)] || "not matched"}` };
+  });
+  const head = `Closing lines ${day}: ${matched} of ${list.length} matched \u00b7 OpticOdds: ${dg.fixtures} game(s), ${dg.rows} rows${fb ? ` \u00b7 2nd pass ${fb.rows} rows, +${fb.matched || 0}` : ""}${window._clvFallbackErr ? ` \u00b7 2nd pass error: ${window._clvFallbackErr}` : ""}`;
+  const text = [head, ""].concat(lines.map(l => l.text)).join("\n");
+  const esc = _mEsc, box = document.createElement("div"); box.id = "clv-report";
+  box.style.cssText = "position:fixed;right:16px;bottom:16px;z-index:99998;width:min(680px,calc(100vw - 32px));max-height:60vh;overflow:auto;background:#0c0d10;border:1px solid #7c3aed99;border-radius:12px;padding:12px 14px;font:12px/1.5 'JetBrains Mono','Menlo',monospace;color:#e6edf5;box-shadow:0 20px 40px rgba(0,0,0,.6);";
+  box.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:8px;font-family:'Plus Jakarta Sans',sans-serif;"><b style="color:#c4b5fd;font-size:12px;letter-spacing:.5px;">CLOSING LINES \u00b7 ${esc(day)}</b><span style="display:flex;gap:6px;"><button id="clv-report-copy" style="background:#7c3aed;border:none;color:#fff;border-radius:6px;padding:4px 10px;font-size:11px;font-weight:800;cursor:pointer;">COPY</button><button onclick="document.getElementById('clv-report').remove()" style="background:transparent;border:1px solid #2a303a;color:#e6edf5;border-radius:6px;padding:4px 10px;font-size:11px;font-weight:800;cursor:pointer;">\u2715</button></span></div>
+    <div style="color:#a8b0bb;margin-bottom:6px;">${esc(head)}</div>${lines.map(l => `<div style="color:${l.ok ? "#e6edf5" : "#f87171"};white-space:pre-wrap;">${esc(l.text)}</div>`).join("")}`;
+  document.body.appendChild(box);
+  box.querySelector("#clv-report-copy").onclick = () => { try { navigator.clipboard.writeText(text).then(() => showToast("Closing report copied"), () => prompt("Copy:", text)); } catch (e) { prompt("Copy:", text); } };
+}
 // Shared fill: rows in Parlay shape {market_key, player, bookmaker|label, line, over_price, under_price}.
 // Writes only empty alt-book inputs, only at 5%+ EV vs `fair`. Returns the rows for this player+market.
 // Persisted "our name" -> "exact OpticOdds name" overrides, for players whose
