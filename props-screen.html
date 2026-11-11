@@ -1698,25 +1698,27 @@ async function freshTrackedSnap(t){
   t.mainLineNow=snap.mainLine;
   return snap;
 }
-// "Send open bets": every open bet -- what you took -- plus which books still hang that same line within
-// 10c of your price (fresh pull, pregame only), as text to share / paste into Discord or Telegram.
+// "Send open bets": every open bet as a Copy-summary line, with today's prices (fresh pull, pregame only).
 const TK_CLOSE_C = 10;
 async function tkSendOpen(btn){
   const open=tracked.filter(t=>!t.final && t.src!=='sharp' && t.src!=='matrix'); if(!open.length){ toast('No open bets'); return; }
   const lbl=btn?.textContent; if(btn){ btn.disabled=true; btn.textContent='Pulling odds…'; }
   const snaps={}; await runPool(open.map(t=>async()=>{ try{ snaps[t.id]=await freshTrackedSnap(t); }catch(e){ snaps[t.id]=t.snapshots[t.snapshots.length-1]||null; } }), 3);
-  const lines=[`📋 Open bets · ${new Date().toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'})} (${open.length})`];
+  // one line per bet, same as Copy summary: "D Robinson DET over 19.5 PRA -120 fd -121 dk -125 pb" --
+  // every book within 18c of the best sportsbook price at your line, best first
+  const amt=v=>{ const n=Math.round(Number(v)); return n>0?'+'+n:String(n); };
+  const nm=k=>SUM_NAME[k] || String(k).replace(/\s+/g,'').toLowerCase();
+  const lines=[];
   open.sort((a,b)=>new Date(a.start||0)-new Date(b.start||0)).forEach(t=>{
-    const bet=`${titleCase(t.playerName)} ${t.side==='over'?'o':t.side==='under'?'u':''}${t.line??''} ${t.marketLabel} ${fmtAm(t.price)}${t.book?' '+bookShort(t.bookKey||t.book):''}`.replace(/\s+/g,' ').trim();
-    const when=t.live?'LIVE':t.start?`${etDay(t.start)} ${etTime(t.start)}`:'';
-    lines.push('', `${bet}${when?` · ${t.away}@${t.home} ${when}`:''}`);
-    if(t.live){ lines.push('↳ live — books are off'); return; }
-    const sn=snaps[t.id], my=cents(t.price);
-    const close=Object.entries(sn?.byBook||{}).filter(([k,b])=>b && b.price!=null && my!=null && my-cents(b.price)<=TK_CLOSE_C && !oddsJunk(b.price))
-      .sort((a,b)=>Number(b[1].price)-Number(a[1].price)).map(([k,b])=>`${bookShort(k)} ${fmtAm(b.price)}${cents(b.price)>=my?' ✓':''}`);
-    lines.push(close.length ? `↳ Still close: ${close.join(' · ')}` : '↳ No book within 10¢ at this line');
+    const w=titleCase(t.playerName||'').split(/\s+/), ini=w.length>1?`${w[0][0]} ${w.slice(1).join(' ')}`:w[0];
+    const sideW=t.side==='over'||t.side==='under'?t.side:String(t.side||'').toLowerCase(), mk=t.mkey==='pra'?'PRA':t.marketLabel;
+    const head=`${ini}${t.teamAb?' '+t.teamAb:''} ${sideW}${t.line!=null?' '+t.line:''} ${mk}`;
+    if(t.live){ lines.push(`${head} ${amt(t.price)} ${nm(t.bookKey||'')} (live)`); return; }
+    const ranked=Object.entries(snaps[t.id]?.byBook||{}).filter(([,b])=>b && b.price!=null && !oddsJunk(b.price)).sort((a,b)=>toDec(b[1].price)-toDec(a[1].price));
+    const anchor=ranked.find(([k])=>!EXCH.has(k)) || ranked[0];
+    const books=anchor ? ranked.filter(([,b])=>centsOf(anchor[1].price)-centsOf(b.price)<=18).map(([k,b])=>`${amt(b.price)} ${nm(k)}`).join(' ') : '';
+    lines.push(`${head} ${books || `${amt(t.price)} ${nm(t.bookKey||'')}`}`);
   });
-  lines.push('', '✓ = same or better than you took');
   const text=lines.join('\n');
   if(btn){ btn.disabled=false; btn.textContent=lbl; }
   try{ if(navigator.share){ await navigator.share({ text }); return; } }catch(e){ if(e.name==='AbortError') return; }
