@@ -1,7 +1,7 @@
 # PropShop CSV Auto-Format (Chrome extension)
 
-Download a **Tabs** or **Sharpr** NBA projections CSV the normal way and a PropShop-ready copy
-(`TABSPS2026-11-13.csv` / `SHARPRPS2026-11-13.csv`) is written to the same folder. Upload that one to PropShop.
+Download an NBA projections CSV the normal way — **Tabs, Sharpr, STOK (Data Hub Stats), RG (projections-nba), Saber,
+RotoWire or Dimers** — and a PropShop-ready copy (`TABSPS2026-11-13.csv`, `SABERPS2026-11-13.csv`, ...) is written to the same folder. Upload that one to PropShop.
 Any other CSV is left alone. Output is the same as the blender's EXPORT PS button.
 
 ## Install (once)
@@ -12,6 +12,7 @@ Any other CSV is left alone. Output is the same as the blender's EXPORT PS butto
 That's it. The toolbar icon shows the last conversions and an on/off switch.
 
 ## Notes
-- Sharpr has no minutes column, so Minutes is blank in its PS file (PropShop accepts that).
+- Sharpr, RG and Dimers exports have no minutes column, so Minutes is blank in their PS files (PropShop accepts that).
+- An export with no numbers in it yet (RG before it publishes, a header-only Sharpr file) gets a "nothing to convert" notice instead of an empty file.
 - Players with no numbers (OUT) are dropped, same as the blender.
 - To update: replace the folder's files and hit the refresh arrow on the extension card.

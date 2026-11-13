@@ -17,7 +17,8 @@ chrome.downloads.onChanged.addListener(delta => {
       catch (e) { try { const r = await fetch(it.url); text = await r.text(); } catch (e2) { note("Couldn't read " + name, "Chrome blocked reading the file — turn on 'Allow access to file URLs' for this extension."); return; } }
       let out;
       try { out = toPropShop(text); } catch (e) { note("Convert failed: " + name, String(e && e.message || e)); return; }
-      if (!out) return;                                             // not Tabs / Sharpr: leave it alone
+      if (!out) return;                                             // not a projections source we know: leave it alone
+      if (!out.n) { note(`${out.src}: nothing to convert`, `${name} has no projections in it yet — re-download once ${out.src} publishes numbers.`); return; }
       const fname = `${out.src}PS${psDate()}.csv`;
       const dataUrl = "data:text/csv;charset=utf-8," + encodeURIComponent(out.csv);
       chrome.downloads.download({ url: dataUrl, filename: fname, conflictAction: "uniquify", saveAs: false }, () => {
