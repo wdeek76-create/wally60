@@ -37,7 +37,8 @@ function detectSource(headers) {
   if (has("player") && has("tabs min") && has("pts") && has("reb") && has("ast")) return "TABS";
   if (has("player") && has("tip-off") && has("points") && has("rebounds") && has("assists")) return "SHARPR";
   if (has("player") && has("proj min") && has("exp pts") && has("exp reb")) return "STOK";
-  if (has("id") && has("name") && has("first_name") && has("three_pointers_made") && has("points")) return "RG";
+  if (has("playerid") && has("player") && has("minutes") && has("pts") && has("reb") && has("ast") && has("3pm")) return "RG";   // RG projections export
+  if (has("id") && has("name") && has("first_name") && has("three_pointers_made") && has("points")) return "RG";                   // RG / UA-style player list
   if (has("dfs id") && has("name") && has("pts") && has("rb") && has("ast")) return "SABER";
   if (has("name") && has("opp") && has("min") && has("pts") && has("reb") && has("ast") && has("3pm") && has("fga")) return "RW";
   if (has("first name") && has("last name") && has("pts") && has("reb") && has("ast")) return "DIMERS";
