@@ -2529,12 +2529,17 @@ function nlRecapText(day){
     ...recapFields('FD before pulling', by(U,nlFdMove)) ].filter(f=>f.value.replace(/\s/g,''));
   return { today, done:uDone, fields };
 }
+const nlRecapDone=new Set();
 async function nlPostRecap(day, manual){
   const hook=LS.get('nbal_recap_hook','')||nlHook;   // its own recap channel once set, else the in-game channel
   if(!hook){ if(manual) toast('Set the in-game Discord first'); return false; }
   const R=nlRecapText(day); if(!R.done.length){ if(manual) toast('Nothing graded for that day yet'); return false; }
+  // auto recaps: once per day for real -- remembered in memory too (a full phone storage can drop the flag,
+  // which made it re-post every 2 min), and a short lock so two open tabs don't both post it
+  if(!manual){ if(nlRecapDone.has(day)) return false; const lk=Number(LS.get('nbal_recap_lock','0'));
+    if(Date.now()-lk<5*60e3) return false; LS.set('nbal_recap_lock', String(Date.now())); nlRecapDone.add(day); }
   const ok=await postRecapFields(hook, 'In-game recap · NBA live', R.fields);
-  if(ok) LS.set('nbal_recap_'+day, '1');
+  if(ok){ nlRecapDone.add(day); LS.set('nbal_recap_'+day, '1'); } else if(!manual) nlRecapDone.delete(day);
   if(manual) toast(ok?'Recap posted':'Recap failed');
   return ok;
 }
@@ -2545,7 +2550,7 @@ async function nlAutoRecap(){
 async function nlAutoRecap0(){
   if(nlGames.length) return;   // games still on
   const days=[...new Set(nlTracked.map(t=>nlDay(t)))].filter(d=>d>=RECAP_SINCE).sort().slice(-3);
-  for(const day of days){ if(LS.get('nbal_recap_'+day,'')) continue; const list=nlTracked.filter(t=>nlDay(t)===day);
+  for(const day of days){ if(LS.get('nbal_recap_'+day,'') || nlRecapDone.has(day)) continue; const list=nlTracked.filter(t=>nlDay(t)===day);
     if(list.length && list.every(t=>t.final)) await nlPostRecap(day); }
 }
 // FD Sharp Money recap: when every FanDuel bet on a game date is graded, post that date's results +
@@ -2607,7 +2612,7 @@ async function smPostRecap(day, manual, book='fanduel', note){
   const tOk = tg ? await smTgRecap(B.title, R.fields, note) : false;
   const ok = dOk || tOk;
   if(ok && book==='fanduel') await smSendExport(hook);
-  if(ok) LS.set(B.flag+day,'1'); if(manual) toast(ok?`Recap posted${tg?(tOk?' (Telegram ✓)':' (Telegram failed)'):''}`:'Recap failed'); return ok;
+  if(ok){ smRecapDone.add(B.flag+day); LS.set(B.flag+day,'1'); } if(manual) toast(ok?`Recap posted${tg?(tOk?' (Telegram ✓)':' (Telegram failed)'):''}`:'Recap failed'); return ok;
 }
 // the Post button: today if anything's graded today, else the latest graded day (and says so)
 function smPostRecapNow(){
@@ -2620,6 +2625,7 @@ function smPostRecapNow(){
 // one recap post at a time: the auto check fires from several places (tracker refresh, the minute
 // tick), and a multi-card post takes a few seconds -- without this two could post the same day
 let recapBusy=false;
+const smRecapDone=new Set();   // auto recaps posted this session (backs up the saved flag if storage is full)
 async function smAutoRecap(){
   if(recapBusy) return; recapBusy=true; try{ await smAutoRecap0(); } finally{ recapBusy=false; } }
 async function smAutoRecap0(){
@@ -2627,8 +2633,8 @@ async function smAutoRecap0(){
     // a day posts once its graded bets are all in the record and none of its bets are still in the tracker
     smDumpGraded(true); const today=etToday();
     const days=Object.keys(smBookRec(RECAP_BOOK[book].book).days).filter(d=>d<=today && d>=RECAP_SINCE && d>SM_BASE_UNTIL).sort().slice(-3);
-    for(const day of days){ if(LS.get(RECAP_BOOK[book].flag+day,'')) continue;
-      if(!tracked.some(t=>RECAP_BOOK[book].has(t) && smBetDay(t)===day)) await smPostRecap(day, false, book); }
+    for(const day of days){ const fk=RECAP_BOOK[book].flag+day; if(LS.get(fk,'') || smRecapDone.has(fk)) continue;
+      if(!tracked.some(t=>RECAP_BOOK[book].has(t) && smBetDay(t)===day)){ smRecapDone.add(fk); await smPostRecap(day, false, book); } }
   }
 }
 let nlTkBusy=false;
