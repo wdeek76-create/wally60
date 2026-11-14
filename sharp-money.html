@@ -2428,7 +2428,7 @@ function nlRecOf(list){ let n=0,u=0,st=0,w=0,l=0; list.forEach(t=>{ if(!t.final|
 function nlBreakdown(p, sigs){
   try{ const done=nlTracked.filter(t=>t.final&&t.result); if(!done.length) return ''; const U=nlUniq(done);
     const kinds=[...new Set(sigs.map(x=>x.kind))].sort(), mk=marketLabel(p.sk||'nba',p.mk), side=nlSide(p.side);
-    const rows=[ kinds.length>1 ? [`Combo ${kinds.join(' + ')}`, U.filter(t=>nlCombo(t)===kinds.join(' + '))] : [`${kinds[0]} alone`, done.filter(t=>t.kind===kinds[0])],
+    const rows=[ kinds.length>1 ? [`Combo ${nlComboKey(kinds)}`, U.filter(t=>nlCombo(t)===nlComboKey(kinds))] : [`${kinds[0]} alone`, done.filter(t=>t.kind===kinds[0])],
       [side, U.filter(t=>nlSide(t.side)===side)], [mk, U.filter(t=>t.marketLabel===mk)] ];
     return rows.map(([lab,l])=>{ const r=nlRecOf(l); return r.n ? `${lab}: ${r.w}-${r.l} · ${r.u>=0?'+':''}${r.u.toFixed(1)}u · ${r.n} bets` : `${lab}: no history yet`; }).join('\n'); }catch(e){ return ''; } }
 function nlPlayGrade(p, sigs){
@@ -2500,10 +2500,14 @@ function nlUniq(list){
   return [...m.values()];
 }
 const nlAgree = t => { const n=(t.kinds||[t.kind]).length; return n>=3?'3+ signals agree':n===2?'2 signals agree':'1 signal'; };
-const nlCombo = t => (t.kinds||[t.kind]).length>1 ? [...t.kinds].sort().join(' + ') : null;   // only bets 2+ signals hit
+// combo = the books behind the signals, each once (DK+CZR with DK+Fliff is DK + CZR + Fliff), same order every time
+const nlComboKey = kinds => [...new Set((kinds||[]).flatMap(k=>String(k).split('+').map(x=>x.trim())).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'en',{sensitivity:'base'})).join(' + ');
+const nlCombo = t => { const k=nlComboKey(t.kinds||[t.kind]); return k.includes(' + ') && (t.kinds||[]).length>1 ? k : null; };   // only bets 2+ signals hit
+// a bet's day = the game night: anything tracked before 6am ET counts as the night before
+const nlDay = t => etDayOf((t.trackedAt||0) - 6*3600e3);
 const nlMoney = t => t.size==null ? null : t.size<250?'Exch under $250':t.size<500?'Exch $250–500':t.size<1000?'Exch $500–1k':'Exch $1k+';
 function nlRecapText(day){
-  const today=nlTracked.filter(t=>etDayOf(t.trackedAt)===day), done=today.filter(t=>t.final), all=nlTracked;
+  const today=nlTracked.filter(t=>nlDay(t)===day), done=today.filter(t=>t.final), all=nlTracked;
   const U=nlUniq(all), uDone=nlUniq(today).filter(t=>t.final);   // one per bet
   const dayName=new Date(day+'T12:00:00').toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'});
   const sportOf=t=>SPORTS[t.sk||'nba']?.label||'NBA';
@@ -2540,8 +2544,8 @@ async function nlAutoRecap(){
   if(recapBusy) return; recapBusy=true; try{ await nlAutoRecap0(); } finally{ recapBusy=false; } }
 async function nlAutoRecap0(){
   if(nlGames.length) return;   // games still on
-  const days=[...new Set(nlTracked.map(t=>etDayOf(t.trackedAt)))].filter(d=>d>=RECAP_SINCE).sort().slice(-3);
-  for(const day of days){ if(LS.get('nbal_recap_'+day,'')) continue; const list=nlTracked.filter(t=>etDayOf(t.trackedAt)===day);
+  const days=[...new Set(nlTracked.map(t=>nlDay(t)))].filter(d=>d>=RECAP_SINCE).sort().slice(-3);
+  for(const day of days){ if(LS.get('nbal_recap_'+day,'')) continue; const list=nlTracked.filter(t=>nlDay(t)===day);
     if(list.length && list.every(t=>t.final)) await nlPostRecap(day); }
 }
 // FD Sharp Money recap: when every FanDuel bet on a game date is graded, post that date's results +
@@ -2838,7 +2842,7 @@ function renderNbaLive(){
     LS.set('nbal_recap_hook', v.trim()); renderNbaLive();
     if(v.trim()){ const ok=await discordPost({ username:'FanDuel', content:'✅ In-game recaps connected.', allowed_mentions:{parse:[]} }, null, v.trim()); toast(ok?'Recap channel connected':'Discord test failed — check the URL'); } });
   $('#nlOnOff')?.addEventListener('click',()=>{ NL_OFF=!NL_OFF; LS.set('sm_nl_on', NL_OFF?'':'1'); toast(NL_OFF?'In-game NBA off':'In-game NBA on — scans while games are live'); nlTick(); renderNbaLive(); });
-  $('#nlRecap')?.addEventListener('click',()=>{ const days=[...new Set(nlTracked.map(t=>etDayOf(t.trackedAt)))].sort(); nlPostRecap(days[days.length-1]||etToday(), true); });
+  $('#nlRecap')?.addEventListener('click',()=>{ const days=[...new Set(nlTracked.map(t=>nlDay(t)))].sort(); nlPostRecap(days[days.length-1]||etToday(), true); });
   $('#nlHistB')?.addEventListener('click',()=>{ nlHist=!nlHist; renderNbaLive(); });
   v.querySelectorAll('[data-nlg]').forEach(b=>b.onclick=()=>{ const [id,r]=b.dataset.nlg.split('|'); const t=nlTracked.find(x=>x.id===id); if(!t) return; if(r){ t.result=r; t.final=true; } else { t.result=null; t.final=false; } nlSave(); renderNbaLive(); });
   v.querySelectorAll('[data-nlrm]').forEach(b=>b.onclick=()=>{ if(!confirm('Remove this play?')) return; nlTracked=nlTracked.filter(x=>x.id!==b.dataset.nlrm); nlSave(); renderNbaLive(); });
