@@ -2512,21 +2512,29 @@ function nlRecapText(day){
   const dayName=new Date(day+'T12:00:00').toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'});
   const sportOf=t=>SPORTS[t.sk||'nba']?.label||'NBA';
   const playLine=t=>`${t.result==='win'?'✅':t.result==='loss'?'❌':'➖'} ${titleCase(t.playerName)} ${nlSide(t.side)}${t.line!=null?' '+t.line:''} ${t.marketLabel} ${fmtAm(t.price)}${t.size?` · ${usd(t.size)}`:''} · ${t.direct?'0%':(-t.hold).toFixed(1)+'% arb'}${t.actual!=null?` (${t.actual})`:''}${t.kinds?` · ${t.kinds.join(', ')}`:''}`;
-  // neat rows: 🟢/🔴 by profit, label bold, record · units · ROI (bets). Over vs Under always first.
-  const nrow=(lab,l)=>{ const r=ttRecord(l.filter(t=>t.final&&t.result)); if(!r.w&&!r.l&&!r.p) return null;
-    return `${r.u>0?'🟢':r.u<0?'🔴':'⚪'} **${lab}** ${r.w}-${r.l}${r.p?'-'+r.p:''} · ${r.u>=0?'+':''}${r.u.toFixed(2)}u${r.roi!=null?` · ${r.roi>=0?'+':''}${r.roi.toFixed(1)}%`:''} (${r.w+r.l+(r.p||0)})`; };
-  const sides=l=>['over','under'].map(sd=>nrow(nlSide(sd), l.filter(t=>t.side===sd))).filter(Boolean);
+  // Discord tables: one ``` block per section, columns line up on phone (label · W-L · units · ROI)
+  const rec=l=>ttRecord(l.filter(t=>t.final&&t.result));
+  const cell=(l)=>{ const r=rec(l); if(!r.w&&!r.l&&!r.p) return null; return [`${r.w}-${r.l}${r.p?'-'+r.p:''}`, `${r.u>=0?'+':''}${r.u.toFixed(1)}`, r.roi==null?'':`${r.roi>=0?'+':''}${Math.round(r.roi)}%`, r.u]; };
+  const short=k=>String(k).replace(/ \+ /g,'+').replace(/ Over$/,' O').replace(/ Under$/,' U').replace(/^FD (moved )?/,'FD ').replace(/^Exch /,'').replace(/never pulled it/,'never pulled');
+  const sides=l=>['over','under'].map(sd=>[nlSide(sd), l.filter(t=>t.side===sd)]);
   const by=(l,fn,min=0,cap=99)=>{ const m={}; l.filter(t=>t.final&&t.result).forEach(t=>{ const k=fn(t); if(k==null) return; (m[k]=m[k]||[]).push(t); });
-    return Object.entries(m).filter(([,x])=>x.length>=min).sort((a,b)=>ttRecord(b[1]).u-ttRecord(a[1]).u).slice(0,cap).map(([k,x])=>nrow(k,x)).filter(Boolean); };
-  const hd=(l)=>{ const r=ttRecord(l.filter(t=>t.final&&t.result)); const n=r.w+r.l+(r.p||0); return `${r.w}-${r.l}${r.p?'-'+r.p:''} · ${r.u>=0?'+':''}${r.u.toFixed(2)}u · ${n} bet${n===1?'':'s'}`; };
+    return Object.entries(m).filter(([,x])=>x.length>=min).sort((a,b)=>rec(b[1]).u-rec(a[1]).u).slice(0,cap).map(([k,x])=>[short(k),x]); };
+  const table=(name, groups)=>{ const rows=groups.map(g=>g==='-'?'-':(()=>{ const c=cell(g[1]); return c?[g[0].slice(0,13),...c]:null; })()).filter(Boolean);
+    if(!rows.some(r=>r!=='-')) return [];
+    const W=[Math.max(...rows.filter(r=>r!=='-').map(r=>r[0].length),4), Math.max(...rows.filter(r=>r!=='-').map(r=>r[1].length),3), Math.max(...rows.filter(r=>r!=='-').map(r=>r[2].length),5), Math.max(...rows.filter(r=>r!=='-').map(r=>r[3].length),3)];
+    const line=r=>r==='-'?'-'.repeat(W[0]+W[1]+W[2]+W[3]+3):`${r[0].padEnd(W[0])} ${r[1].padStart(W[1])} ${r[2].padStart(W[2])} ${r[3].padStart(W[3])}`;
+    const out=[], lines=[`${''.padEnd(W[0])} ${'W-L'.padStart(W[1])} ${'Units'.padStart(W[2])} ${'ROI'.padStart(W[3])}`, ...rows.filter((r,k,a)=>!(r==='-'&&(k===0||k===a.length-1))).map(line)];
+    let buf=[]; const push=()=>{ if(buf.length) out.push({ name: out.length?`${name} (cont.)`:name, value:'```\n'+buf.join('\n')+'\n```' }); buf=[]; };
+    lines.forEach(x=>{ if((buf.join('\n')+x).length>980) push(); buf.push(x); }); push(); return out; };
+  const hd=(l)=>{ const r=rec(l), n=r.w+r.l+(r.p||0); return `${r.u>0?'🟢':r.u<0?'🔴':'⚪'} ${r.w}-${r.l}${r.p?'-'+r.p:''} · ${r.u>=0?'+':''}${r.u.toFixed(2)}u${r.roi!=null?` · ${r.roi>=0?'+':''}${r.roi.toFixed(1)}%`:''} · ${n} bet${n===1?'':'s'}`; };
   const fields=[
-    ...recapFields(`📅 ${dayName} · ${hd(uDone)}`, [...sides(uDone), '', ...by(uDone,t=>t.marketLabel)]),
-    ...recapFields(`📈 All-time · ${hd(U)}`, [...sides(U), '', ...by(all,t=>t.kind)]),
-    ...recapFields('Prop + side', by(U,t=>`${t.marketLabel} ${nlSide(t.side)}`)),
-    ...recapFields('Arb size', by(U,t=>t.direct?'0% hold':-t.hold<1?'0–1% arb':-t.hold<2?'1–2% arb':'2%+ arb')),
-    ...recapFields('Exchange money', by(U,nlMoney)),
-    ...recapFields('Top combos (10+ bets)', by(U,nlCombo,10,8)),
-    ...recapFields('FD before pulling', by(U,nlFdMove)) ].filter(f=>f.value.replace(/\s/g,''));
+    ...table(`📅 ${dayName} · ${hd(uDone)}`, [...sides(uDone), '-', ...by(uDone,t=>t.marketLabel)]),
+    ...table(`📈 All-time · ${hd(U)}`, [...sides(U), '-', ...by(all,t=>t.kind)]),
+    ...table('Prop + side', by(U,t=>`${t.marketLabel} ${nlSide(t.side)}`)),
+    ...table('Arb size', by(U,t=>t.direct?'0% hold':-t.hold<1?'0–1% arb':-t.hold<2?'1–2% arb':'2%+ arb')),
+    ...table('Exchange money', by(U,nlMoney)),
+    ...table('Top combos (10+ bets)', by(U,nlCombo,10,8)),
+    ...table('FD before pulling', by(U,nlFdMove)) ];
   return { today, done:uDone, fields };
 }
 const nlRecapDone=new Set();
