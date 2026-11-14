@@ -991,6 +991,11 @@ a.plbk{color:var(--cyan)}
 .gsln{font-size:8px;color:var(--text)}
 .gspr{font-size:9px;font-weight:800;font-family:var(--mono);color:var(--green)}
 .injnote b{font-weight:800}
+.rwbox{margin-top:8px;padding:8px 10px;border-radius:10px;background:rgba(255,255,255,.04);border:1px solid var(--line2);font-size:12px;line-height:1.45}
+.rwh{font-size:10px;font-weight:900;letter-spacing:.6px;text-transform:uppercase;color:var(--sub);margin-bottom:4px}
+.rwnone{font-size:11px}.rwi{padding:5px 0;border-top:1px solid var(--line);cursor:pointer}.rwi:first-of-type{border-top:0}
+.rwt b{font-weight:800;color:var(--text)}.rwb{display:none;margin-top:4px;color:#d9d2f0}.rwi.on .rwb{display:block}
+.rwa{margin-top:4px;color:var(--sub)}.rwmore{margin-top:4px;background:none;border:0;color:#a78bfa;font-weight:800;font-size:11px;padding:2px 0}
 .ilist{display:flex;flex-direction:column;gap:8px;margin-top:10px}
 .inrow{padding:12px;border:1px solid var(--line2);border-radius:12px;background:var(--bg2)}
 .inrow .inhd{display:flex;align-items:center;gap:8px}
@@ -2988,6 +2993,79 @@ function renderGstripDock(p, mkey){
   warmHeadshots(dock,'.gsph[data-pid]');
   syncDockH();
 }
+// ───────── RotoWire blurbs on the player page (NBA): a quick read, fetched when you open a player ─────────
+// Same feed Smart Money used (NBA blender helper, then RotoWire's keyless proxy). Cached 5 min, one fetch at a time.
+const RW_PROXY_URL = 'https://rotowire-secrets-ebgmaeh8ecc4huhf.canadaeast-01.azurewebsites.net/api/proxy';
+const RW_URL = () => LS.get('sm_rw_url','') || 'https://nbablender-3.vercel.app/api/rotowire';
+function _rwXmlToObj(text){
+  const doc=new DOMParser().parseFromString(text,'application/xml'); if(doc.querySelector('parsererror')) throw new Error('not valid XML');
+  const conv=el=>{ const o={}; for(const a of el.attributes) o[a.name]=a.value; const kids=[...el.children];
+    if(!kids.length){ const t=(el.textContent||'').trim(); if(!Object.keys(o).length) return t===''?null:t; if(t) o['#text']=t; return o; }
+    kids.forEach(k=>{ const v=conv(k); if(k.tagName in o){ if(!Array.isArray(o[k.tagName])) o[k.tagName]=[o[k.tagName]]; o[k.tagName].push(v); } else o[k.tagName]=v; }); return o; };
+  return conv(doc.documentElement);
+}
+function _rwPick(o, paths){
+  for(const p of paths){ let cur=o;
+    for(const part of p.split('.')){ if(cur==null||typeof cur!=='object'){ cur=undefined; break; } const k=Object.keys(cur).find(x=>x.toLowerCase()===part.toLowerCase()); cur=k===undefined?undefined:cur[k]; }
+    if(cur!=null && cur!=='' && typeof cur!=='object') return cur; }
+  return null;
+}
+function _rwRows(data){
+  if(Array.isArray(data)){
+    if(data.length && typeof data[0]==='object' && !Array.isArray(data[0])){
+      const inner=data.map(d=>Object.values(d).find(v=>Array.isArray(v)&&v.length&&typeof v[0]==='object')).filter(Boolean);
+      const grouped=inner.length===data.length && !_rwPick(data[0],['Name','PlayerName','FirstName','Player.Name','Player.FirstName']);
+      return grouped ? data.flatMap((d,i)=>inner[i].map(x=>({ __parent:d, ...x }))) : data;
+    }
+    return [];
+  }
+  if(data && typeof data==='object'){ for(const v of Object.values(data)){ const r=_rwRows(v); if(r.length) return r; } }
+  return [];
+}
+const _rwName = o => { const full=_rwPick(o,['Name','PlayerName','FullName','Player.Name','Player.FullName','Player']); if(full) return String(full).trim();
+  const f=_rwPick(o,['FirstName','Player.FirstName','First']), l=_rwPick(o,['LastName','Player.LastName','Last']); return f&&l?`${f} ${l}`:''; };
+const rwTime = at => { if(!at) return NaN; let t=Date.parse(at); if(!isNaN(t)) return t;
+  const s=String(at).trim(); let m=s.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?/);
+  if(m) return new Date(+m[1], m[2]-1, +m[3], +m[4], +m[5], +(m[6]||0)).getTime();
+  m=s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2})(?::\d{2})?\s*([AP]M)?)?/i);
+  if(m){ let h=+(m[4]||0); if(m[6]){ h=h%12+(/p/i.test(m[6])?12:0); } return new Date(+m[3], m[1]-1, +m[2], h, +(m[5]||0)).getTime(); }
+  return NaN; };
+const rwWhen = at => { const t=rwTime(at); if(isNaN(t)) return at||''; const m=Math.round((Date.now()-t)/60000); return m<1?'just now':m<60?`${m}m ago`:m<1440?`${Math.round(m/60)}h ago`:new Date(t).toLocaleDateString([], {month:'short',day:'numeric'}); };
+let rwCache = { at:0, items:[] }, rwLoading = null, rwFail = '';
+async function rwNewsAll(){
+  if(Date.now()-rwCache.at < 5*60e3 && rwCache.items.length) return rwCache.items;
+  if(rwLoading) return rwLoading;
+  rwLoading = (async()=>{
+    const parse=t=>{ t=String(t||'').trim(); return t.startsWith('<') ? _rwXmlToObj(t) : JSON.parse(t); };
+    const link=LS.get('sm_rw_link','').trim(), f='NBANews';
+    const tries=[...(link?[[RW_URL()+'?feed='+f, { 'x-rw-link':encodeURIComponent(link) }]]:[]), [RW_URL()+'?feed='+f, null], [`${RW_PROXY_URL}?feed=${f}&format=json`, null]];
+    let last='';
+    for(const [u,hd] of tries){
+      try{ const r=await fetch(u,{cache:'no-store', headers:hd||{}}); const d=parse(await r.text()); if(!r.ok){ last=String(r.status); continue; }
+        const rows=_rwRows(d); if(!rows.length){ last='no rows'; continue; }
+        const items=rows.map(o=>({ name:_rwName(o), key:normName(_rwName(o)), headline:String(_rwPick(o,['Headline','Title','News.Headline'])||''), notes:String(_rwPick(o,['Notes','Body'])||''),
+          analysis:String(_rwPick(o,['Analysis','Impact','News.Analysis','Details'])||''), at:String(_rwPick(o,['DateTime','Date','Updated','LastUpdated','Published'])||'') }))
+          .filter(x=>x.key && (x.headline||x.notes)).sort((a,b)=>(rwTime(b.at)||0)-(rwTime(a.at)||0));
+        rwCache={ at:Date.now(), items }; rwFail=''; return items; }catch(e){ last=e.message; }
+    }
+    rwFail=last||'no answer'; return rwCache.items;
+  })().finally(()=>{ rwLoading=null; });
+  return rwLoading;
+}
+const rwOpen = new Set();   // blurbs you expanded
+async function rwFill(p){
+  const box=$('#rwbox'); if(!box) return;
+  const items=(await rwNewsAll()).filter(x=>x.key===normName(p.name));
+  if(current!==p || !document.contains(box)) return;
+  if(!items.length){ box.innerHTML=`<div class="rwh">📰 RotoWire</div><div class="dim rwnone">${rwFail&&!rwCache.items.length?'Couldn\'t reach RotoWire right now':'No recent blurbs'}</div>`; return; }
+  const all=box.dataset.all==='1', list=items.slice(0, all?6:2);
+  box.innerHTML=`<div class="rwh">📰 RotoWire</div>`+list.map((x,i)=>{ const id=x.headline+'|'+x.at, on=rwOpen.has(id)||i===0;
+    return `<div class="rwi${on?' on':''}" data-rwid="${esc(id)}"><div class="rwt"><b>${esc(x.headline||x.notes.slice(0,80))}</b><span class="dim"> · ${esc(rwWhen(x.at))}</span></div>
+      <div class="rwb">${x.notes?esc(x.notes):''}${x.analysis?`<div class="rwa">${esc(x.analysis)}</div>`:''}</div></div>`; }).join('')
+    + (items.length>2?`<button class="rwmore">${all?'Show less':`More (${Math.min(items.length,6)-2})`}</button>`:'');
+  box.querySelectorAll('.rwi').forEach(el=>el.onclick=()=>{ const id=el.dataset.rwid; el.classList.toggle('on'); el.classList.contains('on')?rwOpen.add(id):rwOpen.delete(id); });
+  box.querySelector('.rwmore')?.addEventListener('click',()=>{ box.dataset.all=all?'':'1'; rwFill(p); });
+}
 async function openPlayer(p, startAt, keepScroll){
   if(current?.key!==p.key){ qarbOpen=false; Object.keys(selLine).forEach(k=>{ if(k.startsWith(p.key+'|')) delete selLine[k]; }); }   // fresh player: lines re-pin to today's consensus
   current=p; const S=SPORTS[sportKey]; const f=fixtures.find(x=>x.id===p.fixtureId); const view=$('#view');
@@ -3015,6 +3093,7 @@ async function openPlayer(p, startAt, keepScroll){
       <div class="psub">${psub}</div>
     </div></div>
     ${(()=>{ const i=injuryFor(p); return i?`<div class="injnote"><b>${esc(i.status||'Injury')}</b>${i.note?' — '+esc(i.note):''}${i.updated?` <span class="dim">· ${esc(String(i.updated).slice(0,10))}</span>`:''}</div>`:''; })()}
+    ${sportKey==='nba' && !p.isTeam && !p.isGame ? `<div class="rwbox" id="rwbox"><div class="rwh">📰 RotoWire</div><div class="dim rwnone">Loading blurbs…</div></div>` : ''}
   </div>`;
   // a team's page: the whole game at a glance (spread / total / ML / team total, both teams) -- tap any to jump
   if((p.isTeam||p.isGame) && f){ const gb=gameOddsLine(f, p.key); if(gb) h+=`<div class="tmgame">${gb}</div>`; }
@@ -3030,6 +3109,7 @@ async function openPlayer(p, startAt, keepScroll){
     h+=`<div class="empty">No main lines found for ${esc(titleCase(p.name))} across your shops.</div>`;
   }
   view.innerHTML=h; if(!keepScroll) window.scrollTo({top:0});
+  if($('#rwbox')) rwFill(p);
   const bindGameBoard=()=>view.querySelectorAll('.tmgame .gmcell[data-fk]').forEach(el=>el.addEventListener('click',()=>{ const q=players.find(x=>x.key===el.dataset.fk); if(q) openPlayer(q, startIdxFor(q, el.dataset.fmk)); }));
   if((p.isTeam||p.isGame) && f && !gameOpen[f.id]) ensureGameOpen(f).then(()=>{ const box=view.querySelector('.tmgame'); if(current===p && box){ box.innerHTML=gameOddsLine(f, p.key); bindGameBoard(); } });
   view.querySelectorAll('.mchip[data-jump]').forEach(el=>el.addEventListener('click',()=>{ const q=players.find(x=>x.key===el.dataset.jump); if(q) openPlayer(q); }));
