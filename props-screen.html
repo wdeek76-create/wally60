@@ -998,7 +998,7 @@ a.plbk{color:var(--cyan)}
 .tkdp{margin:0 0 14px}.tkdph{cursor:pointer;display:flex;justify-content:space-between;align-items:baseline;font-family:var(--mono);font-size:12px;margin:0 2px 2px}
 .tkdph .t3{font-family:'Orbitron',var(--sans);font-weight:900;font-size:13px;letter-spacing:.5px;text-transform:uppercase;background-image:linear-gradient(180deg,#bbf7d0 0%,#4ade80 45%,#16a34a 100%);background-clip:text;-webkit-background-clip:text;color:transparent;-webkit-text-fill-color:transparent;filter:drop-shadow(0 1px 0 #14532d) drop-shadow(0 2px 2px rgba(0,0,0,.5))}
 .tkdph b.pos{color:var(--green)}.tkdph b.neg{color:var(--red)}.tkdp .tkhistbox{max-height:34vh}
-.tksend{display:flex;justify-content:flex-end;margin:0 0 6px}.tksend .ed{margin-right:0;border-radius:999px;padding:6px 12px;font-weight:700}
+.tksend{display:flex;justify-content:flex-end;gap:6px;margin:0 0 6px}.tksend .ed{margin-right:0;border-radius:999px;padding:6px 12px;font-weight:700}
 .tktools{margin-top:22px;padding-top:10px;border-top:1px solid var(--line2);opacity:.92}
 .tkhistbox{max-height:62vh;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;border:1px solid var(--line2);border-radius:12px;padding:2px 8px 8px;margin-top:6px}
 .tkday{display:grid;grid-template-columns:1fr auto auto auto;gap:4px 10px;align-items:center;width:100%;margin:8px 0 4px;padding:9px 12px;border-radius:10px;border:1px solid var(--line2);background:var(--bg2);color:var(--text);font-weight:700;font-size:12.5px;text-align:left}
@@ -5148,6 +5148,41 @@ function ttRecord(list){
   const roi=staked>0 ? (u/staked*100) : null;
   return { w,l,p,u,n:list.length,roi };
 }
+// ── Daily recap to Telegram (the Copy summary channel) ──
+// Once every bet on a game day is graded, that day posts: its record, by prop, by side, then the all-time
+// record the same way -- graded A-F on profit like Smart Money. Once per day; "Post recap" sends it any time.
+const ptGrade = r => { const roi=r.roi??0; return roi>=8?'🟢 A':roi>=3?'🟢 B':roi>-3?'🟡 C':roi>-8?'🔴 D':'🔴 F'; };
+const ptFmt = r => `${r.w}-${r.l}${r.p?'-'+r.p:''} · ${r.u>=0?'+':''}${r.u.toFixed(2)}u${r.roi!=null?` · ${r.roi>=0?'+':''}${r.roi.toFixed(1)}%`:''}`;
+const ptRows = (list, key) => { const g={}; list.forEach(t=>{ const k=key(t); if(k) (g[k]=g[k]||[]).push(t); });
+  return Object.entries(g).map(([k,l])=>[k,ttRecord(l)]).sort((a,b)=>b[1].u-a[1].u).map(([k,r])=>`${ptGrade(r)} · ${k} (${r.n}): ${ptFmt(r)}`); };
+const ptGraded = () => tracked.filter(t=>t.final && t.result && t.src!=='sharp' && t.src!=='matrix');
+function ptRecapText(day){
+  const all=ptGraded(), D=all.filter(t=>t.start && dayKeyOf(t.start)===day); if(!D.length) return null;
+  const nm=new Date(day+'T12:00:00').toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'});
+  const prop=t=>`${SPORTS[t.sportKey]?.label||t.sportKey||''} ${t.marketLabel||t.mkey}`.trim(), side=t=>t.side==='over'?'Over':t.side==='under'?'Under':null;
+  return [`📊 PocketMarket recap · ${nm}`, '', `📅 ${nm} — ${ptFmt(ttRecord(D))}`, ...ptRows(D,prop), '', 'Side', ...ptRows(D,side),
+    '', `📈 All-time · ${ttName()} — ${ptFmt(ttRecord(all))}`, ...ptRows(all,prop), '', 'Side', ...ptRows(all,side)].join('\n');
+}
+async function ptPostRecap(day, manual){
+  if(!ptgOn()){ if(manual) toast('Set up Telegram first (Backup & Restore → Telegram)'); return false; }
+  const txt=ptRecapText(day); if(!txt){ if(manual){ await ptgSend(`📊 PocketMarket recap — no graded bets for ${new Date(day+'T12:00:00').toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'})} yet.`); toast('No graded bets that day yet'); } return false; }
+  const ok=await ptgSend(txt.slice(0,4000)); if(ok) LS.set('props_recap_'+day,'1'); if(manual) toast(ok?'Recap posted':'Recap failed'); return ok;
+}
+// the Post button: today if anything's graded today, else the latest graded day
+function ptPostRecapNow(){ const days=[...new Set(ptGraded().filter(t=>t.start).map(t=>dayKeyOf(t.start)))].sort(); const today=dayKeyOf(new Date().toISOString());
+  return ptPostRecap(days.includes(today)?today:(days[days.length-1]||today), true); }
+let ptRecapBusy=false;
+async function ptAutoRecap(){
+  if(ptRecapBusy || !ptgOn()) return; ptRecapBusy=true;
+  try{ const today=dayKeyOf(new Date().toISOString());
+    // first run: start from today, so turning it on doesn't dump old days' recaps all at once
+    let since=LS.get('props_recap_since',''); if(!since){ since=today; LS.set('props_recap_since', since); }
+    const days=[...new Set(ptGraded().filter(t=>t.start).map(t=>dayKeyOf(t.start)))].filter(d=>d<=today && d>=since).sort().slice(-3);
+    for(const d of days){ if(LS.get('props_recap_'+d,'')) continue;
+      if(tracked.some(t=>!t.final && t.src!=='sharp' && t.src!=='matrix' && t.start && dayKeyOf(t.start)===d)) continue;   // still bets to grade that day
+      await ptPostRecap(d, false); } }
+  finally{ ptRecapBusy=false; } }
+setTimeout(()=>ptAutoRecap(), 30e3); setInterval(()=>ptAutoRecap(), 10*60e3);
 // Day key in ET, year-first so plain string sort puts the most recent day first -- etDateKey's
 // "Oct 10" display string isn't safe to sort on (no year, re-parsing it back to a Date is
 // fragile), so grouping uses this separate sortable key and only displays etDateKey's label.
@@ -5507,7 +5542,7 @@ function renderTracker(){
   // Matrix tracking is off: Matrix bets aren't shown either.
   const openList=tracked.filter(t=>!t.final && t.src!=='sharp' && t.src!=='matrix');
   const historyList=tracked.filter(t=>t.final && t.src!=='sharp' && t.src!=='matrix');
-  const openHtml = openList.length ? `<div class="tksend"><button id="tksend" class="ed">📤 Send open bets</button></div>`+bySport(openList) : '<div class="empty">No open bets.<br>Open a player and tap <b>Track</b> on a side.</div>';
+  const openHtml = (openList.length||historyList.length ? `<div class="tksend"><button id="tkrecap" class="ed">📊 Post recap</button>${openList.length?'<button id="tksend" class="ed">📤 Send open bets</button>':''}</div>` : '') + (openList.length ? bySport(openList) : '<div class="empty">No open bets.<br>Open a player and tap <b>Track</b> on a side.</div>');
   // ONE daily profit tracker, at the top: all-time line, then a row per day (tap a day for its bets)
   const allRec=ttRecord(historyList.filter(t=>t.result));
   const historyHtml = historyList.length
@@ -5534,6 +5569,7 @@ function renderTracker(){
   bindTkBackup();
   $('#tkdph')?.addEventListener('click',()=>{ tkDpOpen=!tkDpOpen; renderTracker(); });
   $('#tksend')?.addEventListener('click',ev=>tkSendOpen(ev.currentTarget));
+  $('#tkrecap')?.addEventListener('click',()=>ptPostRecapNow());
   view.querySelectorAll('[data-tkday]').forEach(b=>b.addEventListener('click',()=>{ const d=b.dataset.tkday; tkDayOpen.has(d)?tkDayOpen.delete(d):tkDayOpen.add(d); renderTracker(); }));
   view.querySelectorAll('[data-rm]').forEach(b=>b.addEventListener('click',()=>{ tracked=tracked.filter(t=>t.id!==b.dataset.rm); saveTracked(); renderTracker(); }));
   view.querySelectorAll('[data-share]').forEach(b=>b.addEventListener('click',()=>{ const t=tracked.find(x=>x.id===b.dataset.share); if(t) shareTracked(t); }));
