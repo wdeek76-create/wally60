@@ -6112,6 +6112,9 @@ const _CARD_BOOK_STYLE = {
   pinnacle:   { label: 'P',     bg: '#ff7a00', fg: '#000' },
   prophetx:   { label: 'PX',    bg: '#8b5cf6', fg: '#fff' },
   kalshi:     { label: 'Kalshi',bg: '#2f6bff', fg: '#fff' },
+  polymarket: { label: 'POLY',  bg: '#1652f0', fg: '#fff' },
+  polymarketus:{ label: 'POLY US', bg: '#1652f0', fg: '#fff' },
+  '4cx':      { label: '4CX',   bg: '#111827', fg: '#fff' },
   fliff:      { label: 'F',     bg: '#3b3bff', fg: '#fff' },
   betmgm:     { label: 'MGM',   bg: '#c9a227', fg: '#000' },
   caesars:    { label: 'CZR',   bg: '#0a7d4b', fg: '#fff' },
@@ -7494,7 +7497,34 @@ function _ooFmtPrice(p){ const n=Number(p); return isNaN(n)?String(p):(n>0?'+'+n
 // book simply wasn't in the card/copy, with nothing in the UI hinting odds were incomplete.
 // Now retries each failed chunk once after a short delay, and still-failed chunks are
 // surfaced (console + returned in `errs`, which the copy/card builders alert on).
+// ── Extra exchanges (Polymarket, Polymarket US, 4CX). Their exact OpticOdds names are read from
+// OpticOdds' own sportsbook list (never guessed: one unknown name can make OpticOdds reject a whole
+// 5-book chunk, FanDuel/DraftKings included). Found names are added to the target books AND the
+// exchange list, so they get the exchange depth (order book / max stake) like Novig/ProphetX/Kalshi.
+const OO_EXTRA_EXCH = [/polymarket/i, /(^|[^a-z0-9])4\s*cx([^a-z0-9]|$)/i];
+let _ooExtraDone = null;
+function _ooExtraBooks() {
+  if (_ooExtraDone) return _ooExtraDone;
+  return (_ooExtraDone = (async () => {
+    let names = null;
+    try { const c = JSON.parse(localStorage.getItem('oo_extra_exch') || 'null'); if (c && Date.now() - c.at < 3 * 86400000) names = c.names; } catch (e) {}
+    if (!names) {
+      let list = [];
+      for (const [ep, prm] of [['/sportsbooks/active', { sport: 'football', league: 'nfl' }], ['/sportsbooks', {}]]) {
+        try { const r = await opticodds.fetch(ep, prm); list = (r?.data || []).map(b => b && (b.name || b.id)).filter(Boolean); if (list.length) break; } catch (e) { console.warn('[OpticOdds] sportsbook list', ep, e.message); }
+      }
+      if (!list.length) return [];
+      names = [...new Set(list.filter(n => OO_EXTRA_EXCH.some(re => re.test(String(n)))))];
+      try { localStorage.setItem('oo_extra_exch', JSON.stringify({ at: Date.now(), names, of: list.length })); } catch (e) {}
+      console.log('[OpticOdds] extra exchanges found in OpticOdds\' list of', list.length, 'books:', names.join(', ') || 'none');
+    }
+    const has = (arr, n) => arr.some(b => String(b).toLowerCase() === String(n).toLowerCase());
+    names.forEach(n => { if (!has(opticodds.targetBooks, n)) opticodds.targetBooks.push(n); if (!has(opticodds.exchangeBooks, n)) opticodds.exchangeBooks.push(n); });
+    return names;
+  })().catch(e => { console.warn('[OpticOdds] extra exchanges', e); return []; }));
+}
 async function ooFetchFixtureOdds(fixtureId, extra={}){
+  await _ooExtraBooks();
   const all=[]; const errs=[];
   for (const books of _ooChunk(opticodds.targetBooks,5)) {
     let r = null, lastErr = null;
@@ -8003,6 +8033,7 @@ function showOpticOddsSettings() {
       <div style="margin-bottom:8px"><strong style="color:#4ade80">Target books</strong> <span style="color:#666">(comma-separated, as OpticOdds names them — check the "books seen" console line)</span></div>
       <input type="text" id="oddsTargetBooks" value="${escHtml(opticodds.targetBooks.join(', '))}" style="width:100%;padding:8px 12px;background:#141414;border:1px solid #333;border-radius:4px;color:#f0f0f0;font-size:12px;font-family:monospace;margin-bottom:10px;box-sizing:border-box">
       <div style="margin-bottom:8px"><strong style="color:#4ade80">Exchanges (Liq)</strong></div>
+      <div id="ooExtraExchNote" style="margin:-4px 0 8px;color:#999">${(() => { let c = null; try { c = JSON.parse(localStorage.getItem('oo_extra_exch') || 'null'); } catch (e) {} return c ? 'Polymarket / 4CX found in OpticOdds: <b style="color:#f0f0f0">' + escHtml((c.names || []).join(', ') || 'none of them') + '</b> <span style="color:#666">(checked ' + new Date(c.at).toLocaleString() + ')</span>' : 'Polymarket / 4CX: checked on the next odds pull'; })()} <a href="#" style="color:#4ade80" onclick="ooRecheckExtraBooks();return false">Look again</a></div>
       <input type="text" id="oddsExchBooks" value="${escHtml(opticodds.exchangeBooks.join(', '))}" style="width:100%;padding:8px 12px;background:#141414;border:1px solid #333;border-radius:4px;color:#f0f0f0;font-size:12px;font-family:monospace;margin-bottom:10px;box-sizing:border-box">
       <div style="margin-bottom:8px"><strong style="color:#4ade80">CLV reference book</strong> <span style="color:#666">(closing line pulled from this book)</span></div>
       <input type="text" id="oddsClvBook" value="${escHtml(opticodds.clvBook)}" style="width:100%;padding:8px 12px;background:#141414;border:1px solid #333;border-radius:4px;color:#f0f0f0;font-size:12px;font-family:monospace;margin-bottom:10px;box-sizing:border-box">
@@ -8025,7 +8056,17 @@ function saveOpticOddsBooks() {
   const r = document.getElementById('oddsBooksResult'); r.style.color = '#4ade80';
   r.textContent = `Saved ${opticodds.targetBooks.length} target books, ${opticodds.exchangeBooks.length} exchanges.`;
 }
+async function ooRecheckExtraBooks() {
+  const n = document.getElementById('ooExtraExchNote'); if (n) n.textContent = 'Asking OpticOdds…';
+  try { localStorage.removeItem('oo_extra_exch'); } catch (e) {}
+  _ooExtraDone = null;
+  const names = await _ooExtraBooks();
+  if (n) n.innerHTML = names.length ? 'Found and added (with exchange depth): <b style="color:#f0f0f0">' + escHtml(names.join(', ')) + '</b>' : 'OpticOdds\' book list has no Polymarket or 4CX for the NFL (or the list could not be read — see console).';
+  const t = document.getElementById('oddsTargetBooks'), x = document.getElementById('oddsExchBooks');
+  if (t) t.value = opticodds.targetBooks.join(', '); if (x) x.value = opticodds.exchangeBooks.join(', ');
+}
 function resetOpticOddsBooks() {
+  _ooExtraDone = null; // re-add Polymarket / 4CX on the next pull
   localStorage.removeItem('opticodds_target_books'); localStorage.removeItem('opticodds_exchange_books');
   opticodds.targetBooks = opticodds.DEFAULT_TARGET.slice(); opticodds.exchangeBooks = opticodds.DEFAULT_EXCH.slice();
   document.getElementById('oddsTargetBooks').value = opticodds.targetBooks.join(', ');
