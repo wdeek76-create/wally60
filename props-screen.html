@@ -1331,7 +1331,9 @@ async function copySummary(p, mkey){
   const mk=mkey==='pra'?'PRA':marketLabel(sportKey,mkey);
   const books=ranked.filter(x=>best-centsOf(x.c.price)<=18).map(({b,c})=>`${amt(c.price)} ${nm(b.key)}`).join(' ');
   const ini=(()=>{ const w=titleCase(p.name).split(/\s+/); return w.length>1 ? `${w[0][0]} ${w.slice(1).join(' ')}` : w[0]; })(); // L Doncic
-  await copyText(`${ini}${p._teamAb?' '+p._teamAb:''} ${sideTxt}${line!=null&&!single?' '+line:''} ${mk} ${books}`);
+  const sumTxt=`${ini}${p._teamAb?' '+p._teamAb:''} ${sideTxt}${line!=null&&!single?' '+line:''} ${mk} ${books}`;
+  await copyText(sumTxt);
+  if(ptgOn()) ptgSend(sumTxt);
   // ...and track it like a normal bet (NBA player props land in NBA Props 2026), at the best
   // sportsbook price -- once per player / market / side / line.
   const label=single?(singleSideLabel(mkey)||'Yes'):(sd==='under'?'Under':'Over'), ln=single?null:line;
@@ -1478,6 +1480,26 @@ async function runMatrix(p, mkey){
   showTrackPricePop(tracked[0]); toast(`Matrix copied · tracked${sent}`);
 }
 const centsOf = v => { v=Number(v); return v>0 ? v-100 : v+100; };
+// ── Telegram: Copy summary also posts the summary line to your Telegram channel ──
+const ptgToken = () => LS.get('props_tg_token','') || LS.get('sm_tg_token','');
+const ptgChat  = () => LS.get('props_tg_chat','')  || LS.get('sm_tg_chat','');
+// only once it's been set up on this page (so Copy summary never posts into the Smart Money channel by surprise)
+const ptgOn = () => !!(ptgToken() && LS.get('props_tg_chat','')) && LS.get('props_tg_off','')!=='1';
+async function ptgApi(method, fd){ const r=await fetch(`https://api.telegram.org/bot${ptgToken()}/${method}`, { method:'POST', body:fd }); const d=await r.json().catch(()=>({}));
+  if(!d.ok) throw new Error(d.description||`HTTP ${r.status}`); return d.result; }
+async function ptgSend(text){ if(!ptgOn()) return false;
+  try{ const fd=new FormData(); fd.append('chat_id', ptgChat()); fd.append('text', text); fd.append('link_preview_options', JSON.stringify({ is_disabled:true })); await ptgApi('sendMessage', fd); return true; }
+  catch(e){ toast('Telegram: '+e.message); return false; } }
+async function ptgSetup(){
+  const v=prompt('Telegram bot token (@BotFather → /newbot). Leave as is to use the Smart Money bot. Empty = Telegram off for Copy summary.', LS.get('props_tg_token','')||LS.get('sm_tg_token',''));
+  if(v==null) return; if(!v.trim()){ LS.set('props_tg_off','1'); toast('Telegram off for Copy summary'); renderTracker(); return; }
+  LS.set('props_tg_token', v.trim()); LS.set('props_tg_off','');
+  let found=null; try{ const fd=new FormData(); fd.append('allowed_updates', JSON.stringify(['message','channel_post','my_chat_member'])); const u=await ptgApi('getUpdates', fd);
+    for(let i=u.length-1;i>=0;i--){ const c=(u[i].channel_post||u[i].message||u[i].my_chat_member)?.chat; if(c){ found={ id:String(c.id), name:c.title||c.username||c.first_name||'' }; break; } } }catch(e){}
+  const c=prompt(`Channel to post in (@name or chat ID).${found?`\nFound: ${found.name} (${found.id})`:''}`, LS.get('props_tg_chat','')||found?.id||LS.get('sm_tg_chat',''));
+  if(c==null) return; LS.set('props_tg_chat', c.trim());
+  const ok=await ptgSend('✅ PocketMarket Copy summary connected.'); toast(ok?'Telegram connected':'Telegram failed — check token / channel'); renderTracker();
+}
 async function copyText(text){
   try{ if(navigator.clipboard?.writeText){ await navigator.clipboard.writeText(text); toast('Summary copied'); flashCopied(); return true; } }catch(e){}
   try{ const ta=document.createElement('textarea'); ta.value=text; ta.setAttribute('readonly',''); ta.style.cssText='position:fixed;opacity:0'; document.body.appendChild(ta); ta.select(); const ok=document.execCommand('copy'); ta.remove(); toast(ok?'Summary copied':'Copy failed'); if(ok) flashCopied(); return ok; }catch(e){ toast('Copy failed'); return false; }
@@ -5397,6 +5419,7 @@ function restoreTrackerBackupFile(file){
   reader.readAsText(file);
 }
 const tkBackupHtml = `<div class="ttsum"><div class="ttsumh"><span>Backup &amp; Restore</span></div>
+  <div class="tkbkrow" style="margin-bottom:6px"><button id="tktg" class="rm" style="background:var(--bg2)">Telegram (Copy summary)</button></div>
   <div class="tkbkrow" style="margin-bottom:6px"><button id="tkautobk" class="rm" style="background:var(--bg2)">Auto-backup to Discord</button><button id="tkbknow" class="rm" style="background:var(--bg2)">Back up now</button></div>
   <div class="tkbkrow"><button id="tkexport" class="rm" style="background:var(--bg2)">Download backup (.json)</button><button id="tkimport" class="rm" style="background:var(--bg2)">Import backup (.json)</button><input id="tkimportfile" type="file" accept="application/json,.json" style="display:none"></div>
 </div>`;
@@ -5454,6 +5477,7 @@ function bindTkBackup(){
   $('#tkaddtog')?.addEventListener('click',()=>{ tkAddShown=!tkAddShown; const f=$('#tkadd'); if(f) f.style.display=tkAddShown?'grid':'none'; const d=$('#tkaddtog .dim'); if(d) d.textContent=tkAddShown?'▴ hide':'▾ show'; });
   $('#tkexport')?.addEventListener('click',downloadTrackerBackup);
   $('#tkautobk')?.addEventListener('click',tkSetBackupHook);
+  { const b=$('#tktg'); if(b){ b.textContent = ptgOn() ? 'Telegram ✓ (Copy summary)' : 'Telegram (Copy summary)'; b.addEventListener('click', ptgSetup); } }
   $('#tkbknow')?.addEventListener('click',async()=>{ if(!LS.get('props_backup_hook','')){ tkSetBackupHook(); return; } const ok=await tkAutoBackup(true); toast(ok?'Backup posted to Discord':'Backup post failed'); });
   $('#tkimport')?.addEventListener('click',()=>$('#tkimportfile')?.click());
   $('#tkimportfile')?.addEventListener('change',e=>{ const f=e.target.files[0]; if(f) restoreTrackerBackupFile(f); e.target.value=''; });
