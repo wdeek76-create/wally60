@@ -5586,8 +5586,18 @@ const tkOpenSecs=new Set();
 // Lets the whole tracked list (every tracked bet, graded or not) travel as a real .json file --
 // so a freshly sent build (new origin, no carried-over localStorage) can pick the tracker back up
 // instead of starting over. Restoring reloads the page so every view picks up the restored data.
+// The backup carries your settings too (Telegram bot + channel, all-time record, tracker name, My books,
+// AM mode, O/U, quick-arb chips, backup webhook...) so Import on another device (your PC) is set up the same.
+// Only the odds caches are left out. Keep the file private -- it has your bot token and webhook in it.
+function tkBackupJson(pretty){
+  const settings={};
+  try{ Object.keys(localStorage).forEach(k=>{ if((/^props_/.test(k) && !/^props_(tracked|cache_.*|backup_last)$/.test(k)) || k==='oo_backend_url') settings[k]=localStorage.getItem(k); }); }catch(e){}
+  if(!settings.props_tg_token && ptgToken()) settings.props_tg_token=ptgToken();   // the bot it's actually using (may be Smart Money's)
+  if(!settings.props_tg_chat && LS.get('props_tg_chat','')) settings.props_tg_chat=LS.get('props_tg_chat','');
+  return JSON.stringify({ tool:'prop-screen', at:new Date().toISOString(), tracked, settings }, null, pretty?2:0);
+}
 function downloadTrackerBackup(){
-  const json=JSON.stringify(tracked, null, 2);
+  const json=tkBackupJson(true);
   const blob=new Blob([json], {type:'application/json'});
   const url=URL.createObjectURL(blob);
   const a=document.createElement('a');
@@ -5606,7 +5616,7 @@ async function tkAutoBackup(force){
   try{
     const fd=new FormData();
     fd.append('payload_json', JSON.stringify({ username:'Prop screen backup', content:`🗄️ Tracker backup · ${n} bets — to restore: download this file, then Tracker → Import backup`, allowed_mentions:{parse:[]} }));
-    fd.append('files[0]', new Blob([JSON.stringify(tracked)],{type:'application/json'}), `pocket-market-tracker-${day}.json`);
+    fd.append('files[0]', new Blob([tkBackupJson()],{type:'application/json'}), `pocket-market-tracker-${day}.json`);
     const r=await fetch(hook,{ method:'POST', body:fd }); if(!r.ok) throw new Error(String(r.status));
     LS.set('props_backup_last', JSON.stringify({ day, n, at:Date.now() })); return true;
   }catch(e){ console.warn('[props] auto-backup failed', e.message); return false; }
@@ -5620,9 +5630,13 @@ async function tkSetBackupHook(){
 function restoreTrackerBackupFile(file){
   const reader=new FileReader();
   reader.onload=()=>{
-    let list; try{ list=JSON.parse(reader.result); }catch(e){ toast('That doesn\'t look like a valid backup'); return; }
-    if(!Array.isArray(list)){ toast('That doesn\'t look like a valid backup'); return; }
-    tracked=list; saveTracked(); toast(`Restored ${list.length} tracked bet${list.length===1?'':'s'} — reloading…`);
+    let d; try{ d=JSON.parse(reader.result); }catch(e){ toast('That doesn\'t look like a valid backup'); return; }
+    // old backups are just the bet list; new ones are { tracked, settings }
+    const list = Array.isArray(d) ? d : Array.isArray(d?.tracked) ? d.tracked : null;
+    if(!list){ toast('That doesn\'t look like a valid backup'); return; }
+    let ns=0; if(d && !Array.isArray(d) && d.settings && typeof d.settings==='object')
+      Object.entries(d.settings).forEach(([k,v])=>{ if(typeof v==='string' && (/^props_/.test(k)||k==='oo_backend_url') && k!=='props_tracked' && LS.set(k,v)) ns++; });
+    tracked=list; saveTracked(); toast(`Restored ${list.length} tracked bet${list.length===1?'':'s'}${ns?` + settings (Telegram etc.)`:''} — reloading…`);
     setTimeout(()=>location.reload(), 700);
   };
   reader.onerror=()=>toast('Could not read that file');
