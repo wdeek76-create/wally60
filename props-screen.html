@@ -3503,18 +3503,26 @@ const savePaste = t => { pasteText=t; LS.set('props_paste', t); LS.set('props_pa
 const pkKey = pk => normName(pk.raw).slice(0,160);
 const pkSeen = () => { try{ const o=JSON.parse(LS.get('props_pk_seen','{}')); return o.day===new Date().toDateString() ? o.keys||[] : []; }catch(e){ return []; } };
 const pkMarkSeen = picks => { const k=[...new Set([...pkSeen(), ...picks.map(pkKey)])].slice(-200); LS.set('props_pk_seen', JSON.stringify({ day:new Date().toDateString(), keys:k })); };
-// ── Paste → Discord: each pick posts once to your webhook with the role tag (set with the Discord button) ──
-const pkHook = () => LS.get('props_pk_hook',''), pkRole = () => LS.get('props_pk_role','');
+// ── Paste → Telegram: each pick posts once to its OWN channel (not the Copy summary one). Same bot as
+// Copy summary unless you give this one its own token. Set with the Telegram button in the Paste box.
+const pkTgToken = () => LS.get('props_pk_tg_token','') || ptgToken();
+const pkTgChat = () => LS.get('props_pk_tg_chat','');
+const pkOn = () => !!(pkTgToken() && pkTgChat());
 let pkSent = (()=>{ try{ const o=JSON.parse(LS.get('props_pk_sent','{}')); return o.day===new Date().toDateString() ? o : { day:new Date().toDateString(), keys:[] }; }catch(e){ return { day:new Date().toDateString(), keys:[] }; } })();
-async function pkDiscordSetup(){
-  const h=prompt('Discord webhook URL for pasted picks (blank = off)', pkHook()); if(h==null) return;
-  LS.set('props_pk_hook', h.trim()); if(!h.trim()){ toast('Paste → Discord off'); pkSyncDc(); return; }
-  const r=prompt('Role ID to tag (Server Settings → Roles → right-click → Copy Role ID). Blank = no tag.', pkRole()); if(r!=null) LS.set('props_pk_role', (r.match(/\d{15,}/)||[''])[0]);
-  const ok=await pkPost({ content:`✅ Pasted picks connected${pkRole()?` <@&${pkRole()}>`:''}`, allowed_mentions: pkRole()?{roles:[pkRole()]}:{parse:[]} });
-  toast(ok?'Discord connected':'Discord test failed — check the URL'); pkSyncDc(); }
-async function pkPost(payload){ const h=pkHook(); if(!h) return false;
-  try{ const fd=new FormData(); fd.append('payload_json', JSON.stringify({ username:'Pocket Market', ...payload })); const r=await fetch(h,{ method:'POST', body:fd }); return r.ok; }catch(e){ return false; } }
-const pkSyncDc = () => { const b=$('#pkdc'); if(b){ b.textContent = pkHook() ? '✓ Discord' : 'Discord'; b.classList.toggle('on', !!pkHook()); } };
+async function pkTg(method, fd){ const r=await fetch(`https://api.telegram.org/bot${pkTgToken()}/${method}`, { method:'POST', body:fd }); const d=await r.json().catch(()=>({})); if(!d.ok) throw new Error(d.description||`HTTP ${r.status}`); return d.result; }
+async function pkPost(text){ if(!pkOn()) return false;
+  try{ const fd=new FormData(); fd.append('chat_id', pkTgChat()); fd.append('text', text.slice(0,4000)); fd.append('link_preview_options', JSON.stringify({ is_disabled:true })); await pkTg('sendMessage', fd); return true; }
+  catch(e){ toast('Telegram: '+e.message); return false; } }
+async function pkSetup(){
+  const tk=prompt('Bot token for pasted picks. Leave as is to use your Copy summary bot.', LS.get('props_pk_tg_token','')||ptgToken()); if(tk==null) return;
+  LS.set('props_pk_tg_token', tk.trim()===ptgToken() ? '' : tk.trim());
+  if(!pkTgToken()){ toast('No bot token'); pkSyncDc(); return; }
+  let found=null; try{ const fd=new FormData(); fd.append('allowed_updates', JSON.stringify(['message','channel_post','my_chat_member'])); const u=await pkTg('getUpdates', fd);
+    for(let i=u.length-1;i>=0;i--){ const c=(u[i].channel_post||u[i].message||u[i].my_chat_member)?.chat; if(c && String(c.id)!==String(ptgChat())){ found={ id:String(c.id), name:c.title||c.username||c.first_name||'' }; break; } } }catch(e){}
+  const c=prompt(`Telegram channel for pasted picks (@name or chat ID) -- a different one than Copy summary. Add the bot to it as an admin first. Blank = off.${found?`\nFound: ${found.name} (${found.id})`:''}`, pkTgChat()||found?.id||''); if(c==null) return;
+  LS.set('props_pk_tg_chat', c.trim()); if(!c.trim()){ toast('Paste → Telegram off'); pkSyncDc(); return; }
+  const ok=await pkPost('✅ Pasted picks connected'); toast(ok?'Telegram connected':'Telegram test failed — is the bot an admin in that channel?'); pkSyncDc(); }
+const pkSyncDc = () => { const b=$('#pkdc'); if(b){ b.textContent = pkOn() ? '✓ Telegram' : 'Telegram'; b.classList.toggle('on', pkOn()); } };
 // one post per pick: the pick as posted, play-to, then the books at that line (✓ = at or better than play-to)
 async function pkBookLines(pk){
     // under your message: a Copy summary line per leg -- "D Robinson DET under 1.5 Steals -175 fd -190 dk (54.5¢ $240)"
@@ -3541,18 +3549,17 @@ async function pkTextOut(){
   textOut(parts.join('\n\n———\n\n'));
 }
 async function pkSendDiscord(picks, manual){
-  if(!pkHook()){ if(manual) pkDiscordSetup(); return; }
+  if(!pkOn()){ if(manual) pkSetup(); return; }
   let n=0;
   for(const pk of picks){
     const key=pkKey(pk); if(!manual && pkSent.keys.includes(key)) continue;
     const lines=await pkBookLines(pk);
-    const role=pkRole();
-    const ok=await pkPost({ content:`${role?`<@&${role}>\n`:''}${pk.orig||pk.raw}\n\n${lines.join('\n')}`.slice(0,2000), allowed_mentions: role?{roles:[role]}:{parse:[]} });
+    const ok=await pkPost(`${pk.orig||pk.raw}\n\n${lines.join('\n')}`);
     if(ok){ n++; if(!pkSent.keys.includes(key)) pkSent.keys.push(key); }
     await new Promise(z=>setTimeout(z,700));
   }
   LS.set('props_pk_sent', JSON.stringify(pkSent));
-  if(n) toast(`Sent ${n} pick${n===1?'':'s'} to Discord`); else if(manual) toast('Nothing sent');
+  if(n) toast(`Sent ${n} pick${n===1?'':'s'} to Telegram`); else if(manual) toast('Nothing sent');
 }
 async function pasteRun(){
   const res=$('#pkres'); if(!res) return; const picks=parsePicks(pasteText);
@@ -3560,14 +3567,14 @@ async function pasteRun(){
   res.innerHTML='<div class="dim" style="margin-top:8px">Pulling every book…</div>';
   const parts=[]; for(const pk of picks) for(const l of pk.legs){ try{ parts.push(await pasteLegHtml(pk,l)); }catch(e){ parts.push(`<div class="pkleg">${esc(pk.name)}: ${esc(e.message)}</div>`); } }
   res.innerHTML=parts.join(''); pkMarkSeen(picks);
-  if(pkHook()) pkSendDiscord(picks, false);   // new picks only (each posts once a day)
+  if(pkOn()) pkSendDiscord(picks, false);   // new picks only (each posts once a day)
 }
 async function openPaste(){
   closePaste();
   if(Date.now()-Number(LS.get('props_paste_at','0'))>=30*60e3) pasteText='';
   if(!pasteText){ try{ const t=await navigator.clipboard?.readText?.(); if(t && /\b[ou]\s?\d+(\.\d+)?\s+\w+\s+[+-]\d{3}/i.test(t)){ const seen=pkSeen(); if(parsePicks(t).some(pk=>!seen.includes(pkKey(pk)))) pasteText=t; } }catch(e){} }
   const ov=document.createElement('div'); ov.className='pkov'; ov.id='pkov';
-  ov.innerHTML=`<div class="pkbox"><div class="pkhd"><b>Paste picks</b><button class="pkbtn" id="pkclr" style="color:var(--sub);border-color:var(--line2);background:var(--bg2)">Clear</button><button class="pkbtn" id="pktxt" style="border-color:var(--line2);background:var(--bg2)">💬 Text</button><button class="pkbtn" id="pkdc" style="border-color:var(--line2);background:var(--bg2)">Discord</button><button class="pkbtn" id="pkgo">Find</button><button class="ib" id="pkx">✕</button></div>
+  ov.innerHTML=`<div class="pkbox"><div class="pkhd"><b>Paste picks</b><button class="pkbtn" id="pkclr" style="color:var(--sub);border-color:var(--line2);background:var(--bg2)">Clear</button><button class="pkbtn" id="pktxt" style="border-color:var(--line2);background:var(--bg2)">💬 Text</button><button class="pkbtn" id="pkdc" style="border-color:var(--line2);background:var(--bg2)">Telegram</button><button class="pkbtn" id="pkgo">Find</button><button class="ib" id="pkx">✕</button></div>
     <textarea id="pkta" placeholder="@everyone DET Duncan Robinson u1.5 stl -180, would play to -200 ...">${esc(pasteText)}</textarea>
     <div class="qarbrow qarbpresets" id="pkchips" style="margin-top:8px"><span class="qarbglbl">Arb %</span>${[['0.5','0.5%'],['1','Tight 1%'],['2','2%'],['3','Aggr 3%'],['5','5%']].map(([v,t])=>`<button class="qarbchip${String(qarbThresh)===v?' on':''}" data-pkedge="${v}">${t}</button>`).join('')}
       <span class="qarbgrp"><button class="qarbvenue${qarbVenue==='nv'?' on':''}" data-pkven="nv">NV</button><button class="qarbvenue${qarbVenue==='px'?' on':''}" data-pkven="px">PX +2¢</button></span></div>
@@ -3575,9 +3582,9 @@ async function openPaste(){
   document.body.appendChild(ov);
   ov.addEventListener('click',ev=>{ if(ev.target===ov) closePaste(); });
   $('#pkx').onclick=closePaste; pkSyncDc(); $('#pktxt').onclick=pkTextOut;
-  // Discord: set up (tap) · long-press / once set: tap re-sends what's pasted now
-  $('#pkdc').onclick=()=>{ if(!pkHook()) return pkDiscordSetup(); const picks=parsePicks($('#pkta').value);
-    if(!picks.length){ pkDiscordSetup(); return; } if(confirm(`Send ${picks.length} pick${picks.length===1?'':'s'} to Discord now? (Cancel = change webhook / role)`)) pkSendDiscord(picks, true); else pkDiscordSetup(); };
+  // Telegram: set up (tap) · once set: tap re-sends what's pasted now (Cancel = change the channel)
+  $('#pkdc').onclick=()=>{ if(!pkOn()) return pkSetup(); const picks=parsePicks($('#pkta').value);
+    if(!picks.length){ pkSetup(); return; } if(confirm(`Send ${picks.length} pick${picks.length===1?'':'s'} to Telegram now? (Cancel = change bot / channel)`)) pkSendDiscord(picks, true); else pkSetup(); };
   $('#pkclr').onclick=()=>{ savePaste(''); $('#pkta').value=''; $('#pkres').innerHTML=''; $('#pkta').focus(); };
   $('#pkchips').addEventListener('click',ev=>{ const c=ev.target.closest('[data-pkedge]'), v=ev.target.closest('[data-pkven]'); if(!c && !v) return; ev.stopPropagation();
     if(c){ qarbThresh=c.dataset.pkedge; LS.set('props_qarbthresh', qarbThresh); } if(v){ qarbVenue=v.dataset.pkven; LS.set('props_qarbvenue', qarbVenue); }
