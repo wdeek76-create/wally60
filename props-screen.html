@@ -1353,7 +1353,10 @@ function sumBooksTxt(items, opt){
     const Kout = br && ba && Number(br.price)===Number(ba.price) ? [{ ...br, mergedName:'betrivers/bally' }, ...K.filter(x=>x!==br&&x!==ba)] : K;
     const RW=x=>/^rob ?waterhouse$/.test(x.key), front=[...Kout, ...P, ...R].filter(RW);
     inWin=[...front, ...[...Kout, ...P, ...R].filter(x=>!RW(x))]; }
-  return inWin.map(x=>`${amt(x.price)} ${x.mergedName||nm(x.key)}${x.ex?` (${(toImplied(x.price)*100).toFixed(1)}¢${x.size!=null?' '+usd(x.size):''})`:''}`).join(opt?.sep??' ');
+  const txt=x=>`${amt(x.price)} ${x.mergedName||nm(x.key)}${x.ex?` (${(toImplied(x.price)*100).toFixed(1)}¢${x.size!=null?' '+usd(x.size):''})`:''}`;
+  if(opt?.link){ const e=t=>String(t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    return inWin.map(x=>{ const u=opt.link(x); return u ? `<a href="${e(u)}">${e(txt(x))}</a>` : e(txt(x)); }).join(opt?.sep??' '); }
+  return inWin.map(txt).join(opt?.sep??' ');
 }
 async function copySummary(p, mkey, mode){
   if(!p || !mkey){ toast('Nothing to copy'); return; }
@@ -3475,7 +3478,7 @@ function pasteBest(rows, side, line){
     let c=ex ? cellPrice({ex:true}, o) : { price:Number(o.price), size:o.limits?.max!=null?Number(o.limits.max):null };
     // junk order-book level (e.g. PX -26031 / 99.6¢): skip to the first sane level, else the row's own quote
     if(ex && Math.abs(Number(c.price))>2000){ const lv=levelsOf(o).find(x=>Math.abs(Number(x.price))<=2000); c = lv ? { price:lv.price, size:lv.size } : { price:Number(o.price), size:null }; if(Math.abs(Number(c.price))>2000) return; }
-    if(c.price==null || isNaN(c.price)) return; if(!by[k] || toDec(c.price)>toDec(by[k].price)) by[k]={ k, ex, price:Number(c.price), size:c.size, url:deepLinkFor(o)||null }; });
+    if(c.price==null || isNaN(c.price)) return; if(!by[k] || toDec(c.price)>toDec(by[k].price)) by[k]={ k, ex, price:Number(c.price), size:c.size, url:deepLinkFor(o)||null, o }; });
   return Object.values(by).sort((a,b)=>toDec(b.price)-toDec(a.price));
 }
 // a paste row as a tap-to-open link: the bet's own deep link when the feed has one, else the book's site
@@ -3543,6 +3546,12 @@ async function pkSetup(){
   const ok=await pkPost('✅ Pasted picks connected'); toast(ok?'Telegram connected':'Telegram test failed — is the bot an admin in that channel?'); pkSyncDc(); }
 const pkSyncDc = () => { const b=$('#pkdc'); if(b){ b.textContent = pkOn() ? '✓ Telegram' : 'Telegram'; b.classList.toggle('on', pkOn()); } };
 // one post per pick: the pick as posted, play-to, then the books at that line (✓ = at or better than play-to)
+// a book's phone link for the Telegram post: its https bet link (FanDuel: the add-to-betslip link, phone version),
+// else the book's site. Telegram only opens https links, so app-only links fall back to the site.
+function pkMobileLink(x){ const o=x.o, k=x.key;
+  if(k==='fanduel' && o){ const u=fdMobile(()=>fdParlayLink([o])); if(u) return u; }
+  const d=o?.deep_link||{}; const h=[d.ios, d.android, d.desktop].find(u=>u && /^https:\/\//i.test(String(u)));
+  return h ? fdMobile(()=>fdState(h)) : (k==='fanduel' ? 'https://sportsbook.fanduel.com' : (BOOK_HOME[k] && /^https:/.test(BOOK_HOME[k]) ? BOOK_HOME[k] : null)); }
 const pkEsc = t => String(t??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 // your pasted message, with the player, each bet (o4.5 reb) and the play-to's in bold (Telegram HTML)
 function pkBoldMsg(pk){
@@ -3558,13 +3567,13 @@ async function pkBookLines(pk){
     for(const l of pk.legs){
       let books='', mine='';
       try{ if(p){ const rows=await pasteRows(p,l.mk), best=pasteBest(rows,l.side,l.line);
-        books=sumBooksTxt(best.map(x=>({ key:x.k, ex:x.ex, price:x.price, size:x.size })), { win:10, sep:'\n' });   // books within 10c of the best sportsbook, one per line
+        books=sumBooksTxt(best.map(x=>({ key:x.k, ex:x.ex, price:x.price, size:x.size, o:x.o })), { win:10, sep:'\n', link:x=>pkMobileLink(x) });   // books within 10c of the best sportsbook, one per line
         // FD / Novig / PX / Kalshi only when they're within 10c of the best sportsbook too (a far-off exchange quote is noise)
         const top=best.find(x=>!x.ex)||best[0], near=x=>top && centsOf(top.price)-centsOf(x.price)<=10;
         mine=['fanduel','novig','prophet x','kalshi'].map(k=>{ const x=best.find(y=>y.k===k); if(!x || !near(x)) return '';
           return `${bookShort(k)} ${fmtAm(x.price)}${x.ex?` (${(toImplied(x.price)*100).toFixed(1)}¢${x.size!=null?' '+usd(x.size):''})`:''}`; }).filter(Boolean).join(' · '); } }catch(err){}
       const lbl = pk.legs.length>1 ? `<b>${l.side==='over'?'o':'u'}${l.line} ${pkEsc(l.mk==='pra'?'PRA':marketLabel(sportKey,l.mk))}</b>${l.playTo!=null?` · to <b>${fmtAm(l.playTo)}</b>`:''}\n` : '';
-      out.push(lbl + (books ? pkEsc(books) : 'No books posting this line right now'));
+      out.push(lbl + (books || 'No books posting this line right now'));
     }
     return out;
 }
