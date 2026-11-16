@@ -1347,7 +1347,7 @@ function sumBooksTxt(items){
     inWin=[...front, ...[...Kout, ...P, ...R].filter(x=>!RW(x))]; }
   return inWin.map(x=>`${amt(x.price)} ${x.mergedName||nm(x.key)}${x.ex?` (${(toImplied(x.price)*100).toFixed(1)}¢${x.size!=null?' '+usd(x.size):''})`:''}`).join(' ');
 }
-async function copySummary(p, mkey){
+async function copySummary(p, mkey, mode){
   if(!p || !mkey){ toast('Nothing to copy'); return; }
   const ctx=`${p.key}|${mkey}`;
   let extra=[]; try{ extra=await ensureQarbExtras(p,mkey); }catch(e){}
@@ -1369,6 +1369,7 @@ async function copySummary(p, mkey){
   const amt=v=>{ const n=Math.round(Number(v)); return n>0?'+'+n:String(n); };
   const ini=(()=>{ const w=titleCase(p.name).split(/\s+/); return w.length>1 ? `${w[0][0]} ${w.slice(1).join(' ')}` : w[0]; })(); // L Doncic
   const sumTxt=`${ini}${p._teamAb?' '+p._teamAb:''} ${sideTxt}${line!=null&&!single?' '+line:''} ${mk} ${books}`;
+  if(mode==='text'){ textOut(sumTxt); return; }
   await copyText(sumTxt);
   if(ptgOn()) ptgSend(sumTxt);
   // ...and track it like a normal bet (NBA player props land in NBA Props 2026), at the best
@@ -3136,7 +3137,7 @@ async function openPlayer(p, startAt, keepScroll){
   const psub = S.ml
     ? (f?`<span class="mupill">vs <b>${esc(normName(f.home.name)===p.key?f.away.name:f.home.name)}</b></span><span>${esc(f.card)}</span>${whenHtml}`:'')
     : `${teamAb?`<span><b>${esc(teamAb)}</b></span>`:''}${f?`<span class="mupill">${f.away.logo?`<img class="mtl" src="${esc(f.away.logo)}" alt="">`:''}${esc(f.away.ab)}<span class="at">@</span>${f.home.logo?`<img class="mtl" src="${esc(f.home.logo)}" alt="">`:''}${esc(f.home.ab)}</span>${whenHtml}`:''}`;
-  let h=`<div class="sh shback"><span class="t">${esc(S.label)}</span><span class="shr"><button class="cpname" id="cpsum" title="Copy summary">⧉ Copy summary</button><button class="ib" id="shot" title="Share">⇧</button><button class="back" id="back">‹ Slate</button></span></div><div class="pcard">
+  let h=`<div class="sh shback"><span class="t">${esc(S.label)}</span><span class="shr"><button class="cpname" id="cptxt" title="Text the summary">💬</button><button class="cpname" id="cpsum" title="Copy summary">⧉ Copy summary</button><button class="ib" id="shot" title="Share">⇧</button><button class="back" id="back">‹ Slate</button></span></div><div class="pcard">
     <div class="ptop">${hsWrap}<div style="min-width:0;flex:1">
       <div class="pname">${teamLogo?`<img class="tl" src="${esc(teamLogo)}" alt="">`:''}<span class="pnm">${esc(titleCase(p.name))}</span>${injPill(p)}</div>
       <div class="psub">${psub}</div>
@@ -3166,6 +3167,7 @@ async function openPlayer(p, startAt, keepScroll){
   $('#back')?.addEventListener('click',()=>{ $('#q').value=''; renderSlate(); });
   $('#shot')?.addEventListener('click',shareBoard);
   p._teamAb=teamAb; // for Copy summary
+  $('#cptxt')?.addEventListener('click',()=>{ const i=Number(document.querySelector('#mnav .mchip.on')?.dataset.mi||startIdx); copySummary(p, mkeys[i], 'text'); });
   $('#cpsum')?.addEventListener('click',()=>{ copyBtn=$('#cpsum'); const i=Number(document.querySelector('#mnav .mchip.on')?.dataset.mi||startIdx); copySummary(p, mkeys[i]); });
   // Pinned above the search bar instead of inline in the scrolling card, so switching players
   // from here never yanks the screen back to the top of a new page.
@@ -3514,11 +3516,7 @@ async function pkPost(payload){ const h=pkHook(); if(!h) return false;
   try{ const fd=new FormData(); fd.append('payload_json', JSON.stringify({ username:'Pocket Market', ...payload })); const r=await fetch(h,{ method:'POST', body:fd }); return r.ok; }catch(e){ return false; } }
 const pkSyncDc = () => { const b=$('#pkdc'); if(b){ b.textContent = pkHook() ? '✓ Discord' : 'Discord'; b.classList.toggle('on', !!pkHook()); } };
 // one post per pick: the pick as posted, play-to, then the books at that line (✓ = at or better than play-to)
-async function pkSendDiscord(picks, manual){
-  if(!pkHook()){ if(manual) pkDiscordSetup(); return; }
-  let n=0;
-  for(const pk of picks){
-    const key=pkKey(pk); if(!manual && pkSent.keys.includes(key)) continue;
+async function pkBookLines(pk){
     // under your message: a Copy summary line per leg -- "D Robinson DET under 1.5 Steals -175 fd -190 dk (54.5¢ $240)"
     const lines=[];
     for(const l of pk.legs){
@@ -3528,6 +3526,26 @@ async function pkSendDiscord(picks, manual){
       try{ const p=pasteFind(pk); if(p){ const rows=await pasteRows(p,l.mk); books=sumBooksTxt(pasteBest(rows,l.side,l.line).map(x=>({ key:x.k, ex:x.ex, price:x.price, size:x.size }))); } }catch(err){}
       lines.push(`${head} ${books||'· no books posting this line right now'}`);
     }
+    return lines;
+}
+// open Messages with the text filled in (phone); elsewhere the share sheet, else copy
+async function textOut(text){
+  if(/iPhone|iPad|iPod/.test(navigator.userAgent)){ location.href='sms:&body='+encodeURIComponent(text); return; }
+  if(/Android/.test(navigator.userAgent)){ location.href='sms:?body='+encodeURIComponent(text); return; }
+  try{ if(navigator.share){ await navigator.share({ text }); return; } }catch(e){ if(e.name==='AbortError') return; }
+  await copyText(text); toast('Copied');
+}
+async function pkTextOut(){
+  const picks=parsePicks($('#pkta')?.value||pasteText); if(!picks.length){ toast('Paste a pick first'); return; }
+  const parts=[]; for(const pk of picks){ const lines=await pkBookLines(pk); parts.push(`${pk.orig||pk.raw}\n\n${lines.join('\n')}`); }
+  textOut(parts.join('\n\n———\n\n'));
+}
+async function pkSendDiscord(picks, manual){
+  if(!pkHook()){ if(manual) pkDiscordSetup(); return; }
+  let n=0;
+  for(const pk of picks){
+    const key=pkKey(pk); if(!manual && pkSent.keys.includes(key)) continue;
+    const lines=await pkBookLines(pk);
     const role=pkRole();
     const ok=await pkPost({ content:`${role?`<@&${role}>\n`:''}${pk.orig||pk.raw}\n\n${lines.join('\n')}`.slice(0,2000), allowed_mentions: role?{roles:[role]}:{parse:[]} });
     if(ok){ n++; if(!pkSent.keys.includes(key)) pkSent.keys.push(key); }
@@ -3549,14 +3567,14 @@ async function openPaste(){
   if(Date.now()-Number(LS.get('props_paste_at','0'))>=30*60e3) pasteText='';
   if(!pasteText){ try{ const t=await navigator.clipboard?.readText?.(); if(t && /\b[ou]\s?\d+(\.\d+)?\s+\w+\s+[+-]\d{3}/i.test(t)){ const seen=pkSeen(); if(parsePicks(t).some(pk=>!seen.includes(pkKey(pk)))) pasteText=t; } }catch(e){} }
   const ov=document.createElement('div'); ov.className='pkov'; ov.id='pkov';
-  ov.innerHTML=`<div class="pkbox"><div class="pkhd"><b>Paste picks</b><button class="pkbtn" id="pkclr" style="color:var(--sub);border-color:var(--line2);background:var(--bg2)">Clear</button><button class="pkbtn" id="pkdc" style="border-color:var(--line2);background:var(--bg2)">Discord</button><button class="pkbtn" id="pkgo">Find</button><button class="ib" id="pkx">✕</button></div>
+  ov.innerHTML=`<div class="pkbox"><div class="pkhd"><b>Paste picks</b><button class="pkbtn" id="pkclr" style="color:var(--sub);border-color:var(--line2);background:var(--bg2)">Clear</button><button class="pkbtn" id="pktxt" style="border-color:var(--line2);background:var(--bg2)">💬 Text</button><button class="pkbtn" id="pkdc" style="border-color:var(--line2);background:var(--bg2)">Discord</button><button class="pkbtn" id="pkgo">Find</button><button class="ib" id="pkx">✕</button></div>
     <textarea id="pkta" placeholder="@everyone DET Duncan Robinson u1.5 stl -180, would play to -200 ...">${esc(pasteText)}</textarea>
     <div class="qarbrow qarbpresets" id="pkchips" style="margin-top:8px"><span class="qarbglbl">Arb %</span>${[['0.5','0.5%'],['1','Tight 1%'],['2','2%'],['3','Aggr 3%'],['5','5%']].map(([v,t])=>`<button class="qarbchip${String(qarbThresh)===v?' on':''}" data-pkedge="${v}">${t}</button>`).join('')}
       <span class="qarbgrp"><button class="qarbvenue${qarbVenue==='nv'?' on':''}" data-pkven="nv">NV</button><button class="qarbvenue${qarbVenue==='px'?' on':''}" data-pkven="px">PX +2¢</button></span></div>
     <div class="dim" style="font-size:10.5px;margin-top:4px">✓ = at or better than the play-to · posts = book price + your % (PX +2¢)</div><div id="pkres"></div></div>`;
   document.body.appendChild(ov);
   ov.addEventListener('click',ev=>{ if(ev.target===ov) closePaste(); });
-  $('#pkx').onclick=closePaste; pkSyncDc();
+  $('#pkx').onclick=closePaste; pkSyncDc(); $('#pktxt').onclick=pkTextOut;
   // Discord: set up (tap) · long-press / once set: tap re-sends what's pasted now
   $('#pkdc').onclick=()=>{ if(!pkHook()) return pkDiscordSetup(); const picks=parsePicks($('#pkta').value);
     if(!picks.length){ pkDiscordSetup(); return; } if(confirm(`Send ${picks.length} pick${picks.length===1?'':'s'} to Discord now? (Cancel = change webhook / role)`)) pkSendDiscord(picks, true); else pkDiscordSetup(); };
