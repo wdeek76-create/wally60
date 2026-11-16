@@ -3402,12 +3402,12 @@ const PASTE_MKT_NAMES = { pts:['Player Points'], reb:['Player Rebounds'], ast:['
   pa:['Player Points + Assists'], ra:['Player Rebounds + Assists'], '3pm':['Player Made Threes','Player Threes Made'], stl:['Player Steals'], blk:['Player Blocks'] };
 const pasteMk = t => PASTE_MK[String(t||'').toLowerCase().replace(/[+\s]/g,'')] || null;
 function parsePicks(txt){
-  const blocks=String(txt||'').split(/(?=@everyone)|\n\s*\n/).map(x=>x.replace(/@everyone|@here/g,' ').replace(/\s+/g,' ').trim()).filter(Boolean);
+  const blocks0=String(txt||'').split(/(?=@everyone)|\n\s*\n/).map(x=>x.replace(/@everyone|@here/g,' ').replace(/[ \t]+/g,' ').replace(/^\s+|\s+$/g,'')).filter(Boolean);
   const out=[];
-  blocks.forEach(b=>{
+  blocks0.forEach(orig=>{ const b=orig.replace(/\s+/g,' ').trim();
     const head=b.split(',')[0];
     const m0=head.match(/^(?:([A-Z]{2,4})\s+)?(.+?)\s+[ou]\s?\d/i); if(!m0) return;
-    const pick={ team:(m0[1]||'').toUpperCase(), name:m0[2].trim(), legs:[], half:/\bhalf\b/i.test(b), raw:b };
+    const pick={ team:(m0[1]||'').toUpperCase(), name:m0[2].trim(), legs:[], half:/\bhalf\b/i.test(b), raw:b, orig };
     const legRe=/\b([ou])\s?(\d+(?:\.\d+)?)\s+([a-z0-9+]+)\s+([+-]\d{3,4})\b/ig; let m;
     while((m=legRe.exec(head))){ const mk=pasteMk(m[3]); if(mk) pick.legs.push({ side:m[1].toLowerCase()==='o'?'over':'under', line:+m[2], mk, price:+m[4], playTo:null }); }
     if(!pick.legs.length) return;
@@ -3513,18 +3513,18 @@ async function pkSendDiscord(picks, manual){
   let n=0;
   for(const pk of picks){
     const key=pkKey(pk); if(!manual && pkSent.keys.includes(key)) continue;
+    // books close to the pick: at or better than the play-to (✓), or within 10¢ of it -- best first
     const lines=[];
     for(const l of pk.legs){
-      const mkL=marketLabel(sportKey,l.mk), t=`**${titleCase(pk.name)} ${l.side==='over'?'o':'u'}${l.line} ${mkL}**${l.price!=null?` ${fmtAm(l.price)}`:''}`;
-      let books='';
-      try{ const p=pasteFind(pk); if(p){ const rows=await pasteRows(p,l.mk), best=pasteBest(rows,l.side,l.line), ok=x=>toDec(x.price)>=toDec(l.playTo)-1e-9;
-        const f=best.filter(x=>!x.ex).slice(0,5).map(x=>`${bookShort(x.k)} ${fmtAm(x.price)}${ok(x)?' ✓':''}`), e=best.filter(x=>x.ex).map(x=>`${bookShort(x.k)} ${fmtAm(x.price)}${x.size?` ${usd(x.size)}`:''}${ok(x)?' ✓':''}`);
-        books=[f.length?`Books: ${f.join(' · ')}`:'', e.length?`Exch: ${e.join(' · ')}`:''].filter(Boolean).join('\n'); } }catch(err){}
-      lines.push(`${t}\nPlay to **${fmtAm(l.playTo)}**${pk.half?' · half play':''}${l.alt?' · alt line':''}${books?'\n'+books:''}`);
+      let near=[];
+      try{ const p=pasteFind(pk); if(p){ const rows=await pasteRows(p,l.mk), cut=toImplied(l.playTo);
+        near=pasteBest(rows,l.side,l.line).filter(x=>toImplied(x.price)-cut<=0.10+1e-9).slice(0,8)
+          .map(x=>`${bookShort(x.k)} **${fmtAm(x.price)}**${x.ex&&x.size?` ${usd(x.size)}`:''}${toImplied(x.price)<=cut+1e-9?' ✓':''}`); } }catch(err){}
+      const lbl = pk.legs.length>1 ? `${l.side==='over'?'o':'u'}${l.line} ${marketLabel(sportKey,l.mk)}: ` : '';
+      lines.push(lbl + (near.length ? near.join(' · ') : 'no book close right now'));
     }
     const role=pkRole();
-    const ok=await pkPost({ content:`${pk.team?pk.team+' ':''}${titleCase(pk.name)}${role?` <@&${role}>`:''}`, allowed_mentions: role?{roles:[role]}:{parse:[]},
-      embeds:[{ color:0x8b5cf6, description:lines.join('\n\n').slice(0,4000) }] });
+    const ok=await pkPost({ content:`${role?`<@&${role}>\n`:''}${pk.orig||pk.raw}\n\n${lines.join('\n')}`.slice(0,2000), allowed_mentions: role?{roles:[role]}:{parse:[]} });
     if(ok){ n++; if(!pkSent.keys.includes(key)) pkSent.keys.push(key); }
     await new Promise(z=>setTimeout(z,700));
   }
