@@ -233,6 +233,7 @@ body.am .ftr .tabs .tab:not([data-k="__tracker"]):not([data-k="nba"]){display:no
 .qarbline .qarbvalwrap{align-items:flex-end;flex:0 0 54px;width:54px}
 .qarbline .qarbpostwrap{flex-direction:column;align-items:flex-start;gap:0;flex:0 0 60px;width:60px}
 .qarbline.cov .qarbvalwrap .qarbval{color:var(--green)}
+#pkdc.on{color:var(--green);border-color:rgba(34,197,94,.7)!important}
 .qarbshops{padding:4px 8px;border-radius:999px;border:1px solid var(--line2);background:var(--bg2);color:var(--text);font-size:11px;font-weight:800}
 .qarbshops.on{border-color:rgba(34,197,94,.9);background:rgba(34,197,94,.16);color:var(--green)}
 .qarbshop{margin:6px 0 2px;padding:8px 10px;border-radius:10px;background:rgba(255,255,255,.05);font-size:12px;font-weight:700}
@@ -3488,25 +3489,65 @@ async function pasteLegHtml(pk, l){
     ${others.length?`<div class="pksub">Other lines</div><div class="dim" style="font-size:11.5px">${esc(others.slice(0,8).join(' · '))}</div>`:''}</div>`;
 }
 let pasteText = LS.get('props_paste','');
+// ── Paste → Discord: each pick posts once to your webhook with the role tag (set with the Discord button) ──
+const pkHook = () => LS.get('props_pk_hook',''), pkRole = () => LS.get('props_pk_role','');
+let pkSent = (()=>{ try{ const o=JSON.parse(LS.get('props_pk_sent','{}')); return o.day===new Date().toDateString() ? o : { day:new Date().toDateString(), keys:[] }; }catch(e){ return { day:new Date().toDateString(), keys:[] }; } })();
+async function pkDiscordSetup(){
+  const h=prompt('Discord webhook URL for pasted picks (blank = off)', pkHook()); if(h==null) return;
+  LS.set('props_pk_hook', h.trim()); if(!h.trim()){ toast('Paste → Discord off'); pkSyncDc(); return; }
+  const r=prompt('Role ID to tag (Server Settings → Roles → right-click → Copy Role ID). Blank = no tag.', pkRole()); if(r!=null) LS.set('props_pk_role', (r.match(/\d{15,}/)||[''])[0]);
+  const ok=await pkPost({ content:`✅ Pasted picks connected${pkRole()?` <@&${pkRole()}>`:''}`, allowed_mentions: pkRole()?{roles:[pkRole()]}:{parse:[]} });
+  toast(ok?'Discord connected':'Discord test failed — check the URL'); pkSyncDc(); }
+async function pkPost(payload){ const h=pkHook(); if(!h) return false;
+  try{ const fd=new FormData(); fd.append('payload_json', JSON.stringify({ username:'Pocket Market', ...payload })); const r=await fetch(h,{ method:'POST', body:fd }); return r.ok; }catch(e){ return false; } }
+const pkSyncDc = () => { const b=$('#pkdc'); if(b){ b.textContent = pkHook() ? '✓ Discord' : 'Discord'; b.classList.toggle('on', !!pkHook()); } };
+// one post per pick: the pick as posted, play-to, then the books at that line (✓ = at or better than play-to)
+async function pkSendDiscord(picks, manual){
+  if(!pkHook()){ if(manual) pkDiscordSetup(); return; }
+  let n=0;
+  for(const pk of picks){
+    const key=normName(pk.raw).slice(0,160); if(!manual && pkSent.keys.includes(key)) continue;
+    const lines=[];
+    for(const l of pk.legs){
+      const mkL=marketLabel(sportKey,l.mk), t=`**${titleCase(pk.name)} ${l.side==='over'?'o':'u'}${l.line} ${mkL}**${l.price!=null?` ${fmtAm(l.price)}`:''}`;
+      let books='';
+      try{ const p=pasteFind(pk); if(p){ const rows=await pasteRows(p,l.mk), best=pasteBest(rows,l.side,l.line), ok=x=>toDec(x.price)>=toDec(l.playTo)-1e-9;
+        const f=best.filter(x=>!x.ex).slice(0,5).map(x=>`${bookShort(x.k)} ${fmtAm(x.price)}${ok(x)?' ✓':''}`), e=best.filter(x=>x.ex).map(x=>`${bookShort(x.k)} ${fmtAm(x.price)}${x.size?` ${usd(x.size)}`:''}${ok(x)?' ✓':''}`);
+        books=[f.length?`Books: ${f.join(' · ')}`:'', e.length?`Exch: ${e.join(' · ')}`:''].filter(Boolean).join('\n'); } }catch(err){}
+      lines.push(`${t}\nPlay to **${fmtAm(l.playTo)}**${pk.half?' · half play':''}${l.alt?' · alt line':''}${books?'\n'+books:''}`);
+    }
+    const role=pkRole();
+    const ok=await pkPost({ content:`${pk.team?pk.team+' ':''}${titleCase(pk.name)}${role?` <@&${role}>`:''}`, allowed_mentions: role?{roles:[role]}:{parse:[]},
+      embeds:[{ color:0x8b5cf6, description:lines.join('\n\n').slice(0,4000) }] });
+    if(ok){ n++; if(!pkSent.keys.includes(key)) pkSent.keys.push(key); }
+    await new Promise(z=>setTimeout(z,700));
+  }
+  LS.set('props_pk_sent', JSON.stringify(pkSent));
+  if(n) toast(`Sent ${n} pick${n===1?'':'s'} to Discord`); else if(manual) toast('Nothing sent');
+}
 async function pasteRun(){
   const res=$('#pkres'); if(!res) return; const picks=parsePicks(pasteText);
   if(!picks.length){ res.innerHTML='<div class="dim" style="margin-top:8px">Couldn\'t read any picks. Format like: DET Duncan Robinson u1.5 stl -180, would play to -200</div>'; return; }
   res.innerHTML='<div class="dim" style="margin-top:8px">Pulling every book…</div>';
   const parts=[]; for(const pk of picks) for(const l of pk.legs){ try{ parts.push(await pasteLegHtml(pk,l)); }catch(e){ parts.push(`<div class="pkleg">${esc(pk.name)}: ${esc(e.message)}</div>`); } }
   res.innerHTML=parts.join('');
+  if(pkHook()) pkSendDiscord(picks, false);   // new picks only (each posts once a day)
 }
 async function openPaste(){
   closePaste();
   if(!pasteText){ try{ const t=await navigator.clipboard?.readText?.(); if(t && /\b[ou]\s?\d+(\.\d+)?\s+\w+\s+[+-]\d{3}/i.test(t)) pasteText=t; }catch(e){} }
   const ov=document.createElement('div'); ov.className='pkov'; ov.id='pkov';
-  ov.innerHTML=`<div class="pkbox"><div class="pkhd"><b>Paste picks</b><button class="pkbtn" id="pkclr" style="color:var(--sub);border-color:var(--line2);background:var(--bg2)">Clear</button><button class="pkbtn" id="pkgo">Find</button><button class="ib" id="pkx">✕</button></div>
+  ov.innerHTML=`<div class="pkbox"><div class="pkhd"><b>Paste picks</b><button class="pkbtn" id="pkclr" style="color:var(--sub);border-color:var(--line2);background:var(--bg2)">Clear</button><button class="pkbtn" id="pkdc" style="border-color:var(--line2);background:var(--bg2)">Discord</button><button class="pkbtn" id="pkgo">Find</button><button class="ib" id="pkx">✕</button></div>
     <textarea id="pkta" placeholder="@everyone DET Duncan Robinson u1.5 stl -180, would play to -200 ...">${esc(pasteText)}</textarea>
     <div class="qarbrow qarbpresets" id="pkchips" style="margin-top:8px"><span class="qarbglbl">Arb %</span>${[['0.5','0.5%'],['1','Tight 1%'],['2','2%'],['3','Aggr 3%'],['5','5%']].map(([v,t])=>`<button class="qarbchip${String(qarbThresh)===v?' on':''}" data-pkedge="${v}">${t}</button>`).join('')}
       <span class="qarbgrp"><button class="qarbvenue${qarbVenue==='nv'?' on':''}" data-pkven="nv">NV</button><button class="qarbvenue${qarbVenue==='px'?' on':''}" data-pkven="px">PX +2¢</button></span></div>
     <div class="dim" style="font-size:10.5px;margin-top:4px">✓ = at or better than the play-to · posts = book price + your % (PX +2¢)</div><div id="pkres"></div></div>`;
   document.body.appendChild(ov);
   ov.addEventListener('click',ev=>{ if(ev.target===ov) closePaste(); });
-  $('#pkx').onclick=closePaste;
+  $('#pkx').onclick=closePaste; pkSyncDc();
+  // Discord: set up (tap) · long-press / once set: tap re-sends what's pasted now
+  $('#pkdc').onclick=()=>{ if(!pkHook()) return pkDiscordSetup(); const picks=parsePicks($('#pkta').value);
+    if(!picks.length){ pkDiscordSetup(); return; } if(confirm(`Send ${picks.length} pick${picks.length===1?'':'s'} to Discord now? (Cancel = change webhook / role)`)) pkSendDiscord(picks, true); else pkDiscordSetup(); };
   $('#pkclr').onclick=()=>{ pasteText=''; LS.set('props_paste',''); $('#pkta').value=''; $('#pkres').innerHTML=''; $('#pkta').focus(); };
   $('#pkchips').addEventListener('click',ev=>{ const c=ev.target.closest('[data-pkedge]'), v=ev.target.closest('[data-pkven]'); if(!c && !v) return; ev.stopPropagation();
     if(c){ qarbThresh=c.dataset.pkedge; LS.set('props_qarbthresh', qarbThresh); } if(v){ qarbVenue=v.dataset.pkven; LS.set('props_qarbvenue', qarbVenue); }
