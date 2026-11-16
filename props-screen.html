@@ -3534,7 +3534,12 @@ async function pkBookLines(pk){
       const w=titleCase(pk.name).split(/\s+/), ini=w.length>1?`${w[0][0]} ${w.slice(1).join(' ')}`:w[0];
       const head=`${ini}${pk.team?' '+pk.team:''} ${l.side} ${l.line} ${l.mk==='pra'?'PRA':marketLabel(sportKey,l.mk)}`;
       let books='';
-      try{ const p=pasteFind(pk); if(p){ const rows=await pasteRows(p,l.mk); books=sumBooksTxt(pasteBest(rows,l.side,l.line).map(x=>({ key:x.k, ex:x.ex, price:x.price, size:x.size })), { all:true, max:14 }); } }catch(err){}
+      let mine='';
+      try{ const p=pasteFind(pk); if(p){ const rows=await pasteRows(p,l.mk), best=pasteBest(rows,l.side,l.line);
+        books=sumBooksTxt(best.map(x=>({ key:x.k, ex:x.ex, price:x.price, size:x.size })), { all:true, max:14 });
+        mine=['fanduel','novig','prophet x','kalshi'].map(k=>{ const x=best.find(y=>y.k===k); if(!x) return k==='kalshi'?'':`${bookShort(k)} —`;
+          return `${bookShort(k)} ${fmtAm(x.price)}${x.ex?` (${(toImplied(x.price)*100).toFixed(1)}¢${x.size!=null?' '+usd(x.size):''})`:''}`; }).filter(Boolean).join(' · '); } }catch(err){}
+      if(mine) lines.push(mine);
       lines.push(`${head} ${books||'· no books posting this line right now'}`);
     }
     return lines;
@@ -3564,13 +3569,24 @@ async function pkSendDiscord(picks, manual){
   LS.set('props_pk_sent', JSON.stringify(pkSent));
   if(n) toast(`Sent ${n} pick${n===1?'':'s'} to Telegram`); else if(manual) toast('Nothing sent');
 }
-async function pasteRun(){
+// open a pasted pick on its player page, the way it looks with My books on: that market, that line, that side
+function pkOpenPick(pk, l){
+  const p=players.find(x=>!x.isTeam && x.key===pasteFind(pk)?.key);
+  if(!p){ toast(`${titleCase(pk.name)} isn't on the board right now`); return false; }
+  if(!bookMode){ bookMode=2; LS.set('props_nba5','2'); syncMode5Btn?.(); }
+  current=p; selLine[`${p.key}|${l.mk}`]=l.line;   // same player -> openPlayer keeps the line
+  if(oddsSide!==l.side) setOddsSide(l.side); syncQside();
+  closePaste(); openPlayer(p, startIdxFor(p, l.mk)); return true;
+}
+async function pasteRun(openFirst){
   const res=$('#pkres'); if(!res) return; const picks=parsePicks(pasteText);
   if(!picks.length){ res.innerHTML='<div class="dim" style="margin-top:8px">Couldn\'t read any picks. Format like: DET Duncan Robinson u1.5 stl -180, would play to -200</div>'; return; }
-  res.innerHTML='<div class="dim" style="margin-top:8px">Pulling every book…</div>';
-  const parts=[]; for(const pk of picks) for(const l of pk.legs){ try{ parts.push(await pasteLegHtml(pk,l)); }catch(e){ parts.push(`<div class="pkleg">${esc(pk.name)}: ${esc(e.message)}</div>`); } }
-  res.innerHTML=parts.join(''); pkMarkSeen(picks);
+  const legs=picks.flatMap(pk=>pk.legs.map(l=>({ pk, l })));
+  res.innerHTML=legs.map(({pk,l},i)=>`<div class="pkleg"><div class="pklt">${esc(titleCase(pk.name))} ${l.side==='over'?'o':'u'}${l.line} ${esc(marketLabel(sportKey,l.mk))} <button class="pkbtn" style="float:right;padding:3px 9px" data-pki="${i}">Open</button></div><div class="pkls">${l.price!=null?`Posted ${fmtAm(l.price)} · `:''}play to <b>${fmtAm(l.playTo)}</b>${pk.half?' · half play':''}${l.alt?' · alt line':''}</div></div>`).join('');
+  res.querySelectorAll('[data-pki]').forEach(b=>b.onclick=()=>{ const x=legs[+b.dataset.pki]; pkOpenPick(x.pk, x.l); });
+  pkMarkSeen(picks);
   if(pkOn()) pkSendDiscord(picks, false);   // new picks only (each posts once a day)
+  if(openFirst && legs[0]) pkOpenPick(legs[0].pk, legs[0].l);
 }
 async function openPaste(){
   closePaste();
@@ -3579,9 +3595,7 @@ async function openPaste(){
   const ov=document.createElement('div'); ov.className='pkov'; ov.id='pkov';
   ov.innerHTML=`<div class="pkbox"><div class="pkhd"><b>Paste picks</b><button class="pkbtn" id="pkclr" style="color:var(--sub);border-color:var(--line2);background:var(--bg2)">Clear</button><button class="pkbtn" id="pktxt" style="border-color:var(--line2);background:var(--bg2)">💬 Text</button><button class="pkbtn" id="pkdc" style="border-color:var(--line2);background:var(--bg2)">Telegram</button><button class="pkbtn" id="pkgo">Find</button><button class="ib" id="pkx">✕</button></div>
     <textarea id="pkta" placeholder="@everyone DET Duncan Robinson u1.5 stl -180, would play to -200 ...">${esc(pasteText)}</textarea>
-    <div class="qarbrow qarbpresets" id="pkchips" style="margin-top:8px"><span class="qarbglbl">Arb %</span>${[['0.5','0.5%'],['1','Tight 1%'],['2','2%'],['3','Aggr 3%'],['5','5%']].map(([v,t])=>`<button class="qarbchip${String(qarbThresh)===v?' on':''}" data-pkedge="${v}">${t}</button>`).join('')}
-      <span class="qarbgrp"><button class="qarbvenue${qarbVenue==='nv'?' on':''}" data-pkven="nv">NV</button><button class="qarbvenue${qarbVenue==='px'?' on':''}" data-pkven="px">PX +2¢</button></span></div>
-    <div class="dim" style="font-size:10.5px;margin-top:4px">✓ = at or better than the play-to · posts = book price + your % (PX +2¢)</div><div id="pkres"></div></div>`;
+    <div id="pkres"></div></div>`;
   document.body.appendChild(ov);
   ov.addEventListener('click',ev=>{ if(ev.target===ov) closePaste(); });
   $('#pkx').onclick=closePaste; pkSyncDc(); $('#pktxt').onclick=pkTextOut;
@@ -3589,13 +3603,8 @@ async function openPaste(){
   $('#pkdc').onclick=()=>{ if(!pkOn()) return pkSetup(); const picks=parsePicks($('#pkta').value);
     if(!picks.length){ pkSetup(); return; } if(confirm(`Send ${picks.length} pick${picks.length===1?'':'s'} to Telegram now? (Cancel = change bot / channel)`)) pkSendDiscord(picks, true); else pkSetup(); };
   $('#pkclr').onclick=()=>{ savePaste(''); $('#pkta').value=''; $('#pkres').innerHTML=''; $('#pkta').focus(); };
-  $('#pkchips').addEventListener('click',ev=>{ const c=ev.target.closest('[data-pkedge]'), v=ev.target.closest('[data-pkven]'); if(!c && !v) return; ev.stopPropagation();
-    if(c){ qarbThresh=c.dataset.pkedge; LS.set('props_qarbthresh', qarbThresh); } if(v){ qarbVenue=v.dataset.pkven; LS.set('props_qarbvenue', qarbVenue); }
-    $('#pkchips').querySelectorAll('[data-pkedge]').forEach(b=>b.classList.toggle('on', b.dataset.pkedge===String(qarbThresh)));
-    $('#pkchips').querySelectorAll('[data-pkven]').forEach(b=>b.classList.toggle('on', b.dataset.pkven===qarbVenue));
-    pasteRun(); });
   $('#pkta').addEventListener('input',e=>savePaste(e.target.value));
-  $('#pkgo').onclick=()=>{ savePaste($('#pkta').value); pasteRun(); };
+  $('#pkgo').onclick=()=>{ savePaste($('#pkta').value); pasteRun(true); };
   $('#pkres').addEventListener('click',ev=>{ const b=ev.target.closest('[data-pkopen]'); if(!b) return; const [key,mk,side]=b.dataset.pkopen.split('|'); const pl=players.find(x=>x.key===key); if(!pl) return;
     closePaste(); oddsSide=side; syncQside(); openPlayer(pl, startIdxFor(pl,mk)); });
   if(pasteText) pasteRun();
