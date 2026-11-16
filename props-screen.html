@@ -3488,7 +3488,13 @@ async function pasteLegHtml(pk, l){
     <div class="pksub">Post on ${qarbVenue==='px'?'ProphetX (+2¢ fee)':'Novig'} · ${esc(qarbCents(qarbThresh)!=null?qarbThresh:qarbThresh+'%')}</div>${postRows||'<div class="dim">No book to post off.</div>'}
     ${others.length?`<div class="pksub">Other lines</div><div class="dim" style="font-size:11.5px">${esc(others.slice(0,8).join(' · '))}</div>`:''}</div>`;
 }
-let pasteText = LS.get('props_paste','');
+// the paste box clears itself: saved text older than 30 min is dropped, and the clipboard only fills it
+// with picks you haven't run yet today
+let pasteText = (()=>{ const at=Number(LS.get('props_paste_at','0')); return Date.now()-at<30*60e3 ? LS.get('props_paste','') : ''; })();
+const savePaste = t => { pasteText=t; LS.set('props_paste', t); LS.set('props_paste_at', String(Date.now())); };
+const pkKey = pk => normName(pk.raw).slice(0,160);
+const pkSeen = () => { try{ const o=JSON.parse(LS.get('props_pk_seen','{}')); return o.day===new Date().toDateString() ? o.keys||[] : []; }catch(e){ return []; } };
+const pkMarkSeen = picks => { const k=[...new Set([...pkSeen(), ...picks.map(pkKey)])].slice(-200); LS.set('props_pk_seen', JSON.stringify({ day:new Date().toDateString(), keys:k })); };
 // ── Paste → Discord: each pick posts once to your webhook with the role tag (set with the Discord button) ──
 const pkHook = () => LS.get('props_pk_hook',''), pkRole = () => LS.get('props_pk_role','');
 let pkSent = (()=>{ try{ const o=JSON.parse(LS.get('props_pk_sent','{}')); return o.day===new Date().toDateString() ? o : { day:new Date().toDateString(), keys:[] }; }catch(e){ return { day:new Date().toDateString(), keys:[] }; } })();
@@ -3506,7 +3512,7 @@ async function pkSendDiscord(picks, manual){
   if(!pkHook()){ if(manual) pkDiscordSetup(); return; }
   let n=0;
   for(const pk of picks){
-    const key=normName(pk.raw).slice(0,160); if(!manual && pkSent.keys.includes(key)) continue;
+    const key=pkKey(pk); if(!manual && pkSent.keys.includes(key)) continue;
     const lines=[];
     for(const l of pk.legs){
       const mkL=marketLabel(sportKey,l.mk), t=`**${titleCase(pk.name)} ${l.side==='over'?'o':'u'}${l.line} ${mkL}**${l.price!=null?` ${fmtAm(l.price)}`:''}`;
@@ -3530,12 +3536,13 @@ async function pasteRun(){
   if(!picks.length){ res.innerHTML='<div class="dim" style="margin-top:8px">Couldn\'t read any picks. Format like: DET Duncan Robinson u1.5 stl -180, would play to -200</div>'; return; }
   res.innerHTML='<div class="dim" style="margin-top:8px">Pulling every book…</div>';
   const parts=[]; for(const pk of picks) for(const l of pk.legs){ try{ parts.push(await pasteLegHtml(pk,l)); }catch(e){ parts.push(`<div class="pkleg">${esc(pk.name)}: ${esc(e.message)}</div>`); } }
-  res.innerHTML=parts.join('');
+  res.innerHTML=parts.join(''); pkMarkSeen(picks);
   if(pkHook()) pkSendDiscord(picks, false);   // new picks only (each posts once a day)
 }
 async function openPaste(){
   closePaste();
-  if(!pasteText){ try{ const t=await navigator.clipboard?.readText?.(); if(t && /\b[ou]\s?\d+(\.\d+)?\s+\w+\s+[+-]\d{3}/i.test(t)) pasteText=t; }catch(e){} }
+  if(Date.now()-Number(LS.get('props_paste_at','0'))>=30*60e3) pasteText='';
+  if(!pasteText){ try{ const t=await navigator.clipboard?.readText?.(); if(t && /\b[ou]\s?\d+(\.\d+)?\s+\w+\s+[+-]\d{3}/i.test(t)){ const seen=pkSeen(); if(parsePicks(t).some(pk=>!seen.includes(pkKey(pk)))) pasteText=t; } }catch(e){} }
   const ov=document.createElement('div'); ov.className='pkov'; ov.id='pkov';
   ov.innerHTML=`<div class="pkbox"><div class="pkhd"><b>Paste picks</b><button class="pkbtn" id="pkclr" style="color:var(--sub);border-color:var(--line2);background:var(--bg2)">Clear</button><button class="pkbtn" id="pkdc" style="border-color:var(--line2);background:var(--bg2)">Discord</button><button class="pkbtn" id="pkgo">Find</button><button class="ib" id="pkx">✕</button></div>
     <textarea id="pkta" placeholder="@everyone DET Duncan Robinson u1.5 stl -180, would play to -200 ...">${esc(pasteText)}</textarea>
@@ -3548,14 +3555,14 @@ async function openPaste(){
   // Discord: set up (tap) · long-press / once set: tap re-sends what's pasted now
   $('#pkdc').onclick=()=>{ if(!pkHook()) return pkDiscordSetup(); const picks=parsePicks($('#pkta').value);
     if(!picks.length){ pkDiscordSetup(); return; } if(confirm(`Send ${picks.length} pick${picks.length===1?'':'s'} to Discord now? (Cancel = change webhook / role)`)) pkSendDiscord(picks, true); else pkDiscordSetup(); };
-  $('#pkclr').onclick=()=>{ pasteText=''; LS.set('props_paste',''); $('#pkta').value=''; $('#pkres').innerHTML=''; $('#pkta').focus(); };
+  $('#pkclr').onclick=()=>{ savePaste(''); $('#pkta').value=''; $('#pkres').innerHTML=''; $('#pkta').focus(); };
   $('#pkchips').addEventListener('click',ev=>{ const c=ev.target.closest('[data-pkedge]'), v=ev.target.closest('[data-pkven]'); if(!c && !v) return; ev.stopPropagation();
     if(c){ qarbThresh=c.dataset.pkedge; LS.set('props_qarbthresh', qarbThresh); } if(v){ qarbVenue=v.dataset.pkven; LS.set('props_qarbvenue', qarbVenue); }
     $('#pkchips').querySelectorAll('[data-pkedge]').forEach(b=>b.classList.toggle('on', b.dataset.pkedge===String(qarbThresh)));
     $('#pkchips').querySelectorAll('[data-pkven]').forEach(b=>b.classList.toggle('on', b.dataset.pkven===qarbVenue));
     pasteRun(); });
-  $('#pkta').addEventListener('input',e=>{ pasteText=e.target.value; LS.set('props_paste', pasteText); });
-  $('#pkgo').onclick=()=>{ pasteText=$('#pkta').value; LS.set('props_paste', pasteText); pasteRun(); };
+  $('#pkta').addEventListener('input',e=>savePaste(e.target.value));
+  $('#pkgo').onclick=()=>{ savePaste($('#pkta').value); pasteRun(); };
   $('#pkres').addEventListener('click',ev=>{ const b=ev.target.closest('[data-pkopen]'); if(!b) return; const [key,mk,side]=b.dataset.pkopen.split('|'); const pl=players.find(x=>x.key===key); if(!pl) return;
     closePaste(); oddsSide=side; syncQside(); openPlayer(pl, startIdxFor(pl,mk)); });
   if(pasteText) pasteRun();
@@ -5649,7 +5656,7 @@ const tkOpenSecs=new Set();
 // Only the odds caches are left out. Keep the file private -- it has your bot token and webhook in it.
 function tkBackupJson(pretty){
   const settings={};
-  try{ Object.keys(localStorage).forEach(k=>{ if((/^props_/.test(k) && !/^props_(tracked|cache_.*|backup_last)$/.test(k)) || k==='oo_backend_url') settings[k]=localStorage.getItem(k); }); }catch(e){}
+  try{ Object.keys(localStorage).forEach(k=>{ if((/^props_/.test(k) && !/^props_(tracked|cache_.*|backup_last|paste|paste_at|pk_sent|pk_seen)$/.test(k)) || k==='oo_backend_url') settings[k]=localStorage.getItem(k); }); }catch(e){}
   if(!settings.props_tg_token && ptgToken()) settings.props_tg_token=ptgToken();   // the bot it's actually using (may be Smart Money's)
   if(!settings.props_tg_chat && LS.get('props_tg_chat','')) settings.props_tg_chat=LS.get('props_tg_chat','');
   return JSON.stringify({ tool:'prop-screen', at:new Date().toISOString(), tracked, settings }, null, pretty?2:0);
