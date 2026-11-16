@@ -1307,7 +1307,11 @@ const cleanSel = n => String(n||'').replace(/\s*\([^)]*\)\s*$/,'').trim();
 const isCombo = n => /\s[+&\/]\s|\s\+|&/.test(String(n||''));
 const normName = n => String(n||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/['’.`]/g,'').replace(/[^a-z ]/g,' ').replace(/\s+/g,' ').trim();
 const compact = n => normName(n).replace(/ /g,'');
-const nameMatches = (name, q) => { const qn=normName(q); if(!qn) return false; const nw=normName(name).split(' '); if(qn.split(' ').every(qw=>nw.some(w=>w.startsWith(qw)))) return true; return compact(name).includes(compact(q)); };
+const nameMatches = (name, q) => { const qn=normName(q); if(!qn) return false; const nw=normName(name).split(' '); if(qn.split(' ').every(qw=>nw.some(w=>w.startsWith(qw)))) return true; // run-together typing ("kelelware", "tjones") only matches from the start of a name word -- so "t jones" /
+  // "tjones" finds Tre Jones but not HerberT Jones
+  const cq=compact(q); if(nw.some((w,i)=>nw.slice(i).join('').startsWith(cq))) return true;
+  // "tjones" = T + Jones: first letter is the first name's initial, the rest starts a later name word
+  return cq.length>2 && nw.length>1 && nw[0].startsWith(cq[0]) && nw.slice(1).some(w=>w.startsWith(cq.slice(1))); };
 const chunk = (a,n) => { const o=[]; for(let i=0;i<a.length;i+=n) o.push(a.slice(i,i+n)); return o; };
 const etTime = iso => { try{ return new Date(iso).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',timeZone:'America/New_York'}); }catch(e){ return ''; } };
 const etDateKey = iso => { try{ return new Date(iso).toLocaleDateString('en-US',{month:'short',day:'numeric',timeZone:'America/New_York'}); }catch(e){ return ''; } };
@@ -1993,6 +1997,8 @@ const altCache = {};        // fixtureId|marketName -> rows (every line, not jus
 const altPending = {};
 const playerInfo = {};      // pid -> {team, teamId, pos, headshot}
 let injuries = { byPid:{}, byName:{}, at:0 };   // from /injuries
+// OpticOdds injuries are off (RotoWire's box on the player page is the news source): no pills, notes or fetch
+const OPTIC_INJ_OFF = true;
 const injuriesBySport = {};                      // sportKey -> {list, at}
 async function fetchInjuriesList(S){
   const raw=[]; let ip=1;
@@ -2143,7 +2149,7 @@ async function fetchSportData(sk, status, onPartial){
   console.log(`[props] ${S.label} fixtures: ${raw.length} fetched, ${fx.length} in window`);
   if(!fx.length) return { fixtures:[], mainRows:[], players:[], injuries:null, at:Date.now() };
   // injuries (best-effort; schema read defensively) -- fetched alongside the lines, not before them
-  const injP = S.ml ? Promise.resolve(null) : fetchInjuriesList(S).catch(e=>{ console.warn('[props] injuries failed',e.message); return null; });
+  const injP = (S.ml || OPTIC_INJ_OFF) ? Promise.resolve(null) : fetchInjuriesList(S).catch(e=>{ console.warn('[props] injuries failed',e.message); return null; });
   // main lines, 5 fixtures × 5 books per call
   const rows=[]; let done=0; const fxChunks=chunk(fx,5), bkChunks=chunk(bookReqFor(sk),5); const total=fxChunks.length*bkChunks.length;
   const jobs=[]; for(const fc of fxChunks) for(const bk of bkChunks) jobs.push(async()=>{
@@ -2362,7 +2368,7 @@ function isSeasonEnding(i){
   if(/^(ir(-r)?|il|\d+.?day.?il|pup|nfi|injured reserve)$/i.test(status)) return true;
   return false;
 }
-function injuryFor(p){ const i=(p.pid && injuries.byPid[p.pid]) || injuries.byName[normName(p.name)] || null; return (i && !isSeasonEnding(i)) ? i : null; }
+function injuryFor(p){ if(OPTIC_INJ_OFF) return null; const i=(p.pid && injuries.byPid[p.pid]) || injuries.byName[normName(p.name)] || null; return (i && !isSeasonEnding(i)) ? i : null; }
 function injClass(st){ const s=String(st||'').toLowerCase(); if(/out|ir|suspend|inactive/.test(s)) return 'out'; if(/quest|doubt|gtd|game.?time|day.?to.?day|dtd/.test(s)) return 'q'; return 'p'; }
 function injShort(st){ const s=String(st||'').toLowerCase(); if(/^out\b|out\b/.test(s)) return 'OUT'; if(/injured reserve|\bir\b/.test(s)) return 'IR'; if(/doubt/.test(s)) return 'D'; if(/quest/.test(s)) return 'Q'; if(/game.?time|gtd/.test(s)) return 'GTD'; if(/day.?to.?day|dtd/.test(s)) return 'DTD'; if(/prob/.test(s)) return 'P'; if(/suspend/.test(s)) return 'SUSP'; return String(st||'').slice(0,6).toUpperCase()||'INJ'; }
 function injPill(p){ const i=injuryFor(p); return i?`<span class="inj ${injClass(i.status)}" title="${esc(i.note||'')}" data-injkey="${esc(p.key)}">${esc(injShort(i.status))}</span>`:''; }
