@@ -2304,10 +2304,11 @@ const MKT_ALIAS = { pts:'pts', pt:'pts', points:'pts', point:'pts', p:'pts',
   '3pm':'3pm', '3s':'3pm', threes:'3pm', '3pt':'3pm', '3':'3pm', '3pts':'3pm', tpm:'3pm',
   stl:'stl', stls:'stl', steals:'stl', steal:'stl', blk:'blk', blks:'blk', blocks:'blk', block:'blk' };
 // a player's market pills: every market he has -- with My books on, only markets those books are posting
-function pMkeys(p){ const all=SPORTS[sportKey].markets.map(m=>m[0]).filter(k=>p.marketKeys.has(k)); if(!mode5On() || p.isGame) return all;
+function pMkeys(p){ const all0=SPORTS[sportKey].markets.map(m=>m[0]).filter(k=>p.marketKeys.has(k)||(pkForce && pkForce.key===p.key && pkForce.mks.has(k)));
+  const all = pkForce && pkForce.key===p.key ? all0.filter(k=>pkForce.mks.has(k)) : all0; if(!mode5On() || p.isGame) return all;
   // a pasted pick's market always stays, even when your books aren't posting it
-  const mine=all.filter(k=>rowsFor(p,k,mainRows).length || (pkForce && pkForce.key===p.key && pkForce.mk===k)); return mine.length?mine:all; }
-let pkForce=null;   // { key, mk } of the pick opened from Paste
+  const mine=all.filter(k=>rowsFor(p,k,mainRows).length || (pkForce && pkForce.key===p.key && pkForce.mks.has(k))); return mine.length?mine:all; }
+let pkForce=null, pkOpening=false;   // { key, mks } of the pick pasted into search: its page shows just those markets
 const startIdxFor = (p, mkey) => { if(!mkey) return 0; const mkeys=pMkeys(p); const i=mkeys.indexOf(mkey); return i<0?0:i; };
 const teamLogoFor = p => { const info=p.pid?playerInfo[p.pid]:null; const f=fixtures.find(x=>x.id===p.fixtureId); if(!info?.teamId||!f) return ''; return f.home.id===info.teamId?f.home.logo:(f.away.id===info.teamId?f.away.logo:''); };
 // Once a game goes live, its props drop off every browsing surface (slate, search, game roster)
@@ -3130,6 +3131,7 @@ async function rwFill(p){
   box.querySelector('.rwmore')?.addEventListener('click',()=>{ box.dataset.all=all?'':'1'; rwFill(p); });
 }
 async function openPlayer(p, startAt, keepScroll){
+  if(!pkOpening && pkForce && !keepScroll) pkForce=null;   // opened any other way: all his markets again
   if(current?.key!==p.key){ qarbOpen=false; Object.keys(selLine).forEach(k=>{ if(k.startsWith(p.key+'|')) delete selLine[k]; }); }   // fresh player: lines re-pin to today's consensus
   current=p; const S=SPORTS[sportKey]; const f=fixtures.find(x=>x.id===p.fixtureId); const view=$('#view');
   let info = await fetchPlayerInfo(p);
@@ -3446,6 +3448,8 @@ function parsePicks(txt){
   });
   return out;
 }
+const pasteFindOrGame = pk => { const p=pasteFind(pk); if(p || !pk.team) return p;
+  const f=fixtures.find(x=>[x.home?.ab,x.away?.ab].some(a=>String(a||'').toUpperCase()===pk.team)); return f ? { key:normName(pk.name), name:pk.name, fixtureId:f.id, marketKeys:new Set(), _byGame:true } : null; };
 const pasteFind = pk => { const c=players.filter(p=>!p.isTeam && nameMatches(p.name, pk.name)); if(c.length<=1) return c[0]||null;
   return c.find(p=>normName(p.name)===normName(pk.name)) || c.find(p=>{ const f=fixtures.find(x=>x.id===p.fixtureId); return f && [f.home?.ab,f.away?.ab].some(a=>String(a||'').toUpperCase()===pk.team); }) || c[0]; };
 const pasteRowsCache = {};
@@ -3525,7 +3529,7 @@ const pkOn = () => !!(pkTgToken() && pkTgChat());
 let pkSent = (()=>{ try{ const o=JSON.parse(LS.get('props_pk_sent','{}')); return o.day===new Date().toDateString() ? o : { day:new Date().toDateString(), keys:[] }; }catch(e){ return { day:new Date().toDateString(), keys:[] }; } })();
 async function pkTg(method, fd){ const r=await fetch(`https://api.telegram.org/bot${pkTgToken()}/${method}`, { method:'POST', body:fd }); const d=await r.json().catch(()=>({})); if(!d.ok) throw new Error(d.description||`HTTP ${r.status}`); return d.result; }
 async function pkPost(text){ if(!pkOn()) return false;
-  try{ const fd=new FormData(); fd.append('chat_id', pkTgChat()); fd.append('text', text.slice(0,4000)); fd.append('link_preview_options', JSON.stringify({ is_disabled:true })); await pkTg('sendMessage', fd); return true; }
+  try{ const fd=new FormData(); fd.append('chat_id', pkTgChat()); fd.append('text', text.slice(0,4000)); fd.append('parse_mode','HTML'); fd.append('link_preview_options', JSON.stringify({ is_disabled:true })); await pkTg('sendMessage', fd); return true; }
   catch(e){ toast('Telegram: '+e.message); return false; } }
 async function pkSetup(){
   const tk=prompt('Bot token for pasted picks. Leave as is to use your Copy summary bot.', LS.get('props_pk_tg_token','')||ptgToken()); if(tk==null) return;
@@ -3538,22 +3542,28 @@ async function pkSetup(){
   const ok=await pkPost('✅ Pasted picks connected'); toast(ok?'Telegram connected':'Telegram test failed — is the bot an admin in that channel?'); pkSyncDc(); }
 const pkSyncDc = () => { const b=$('#pkdc'); if(b){ b.textContent = pkOn() ? '✓ Telegram' : 'Telegram'; b.classList.toggle('on', pkOn()); } };
 // one post per pick: the pick as posted, play-to, then the books at that line (✓ = at or better than play-to)
+const pkEsc = t => String(t??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+// your pasted message, with the player, each bet (o4.5 reb) and the play-to's in bold (Telegram HTML)
+function pkBoldMsg(pk){
+  let t=pkEsc(pk.orig||pk.raw);
+  const nm=pk.name.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'); t=t.replace(new RegExp(`(${nm})`,'i'),'<b>$1</b>');
+  t=t.replace(/\b([ou]\s?\d+(?:\.\d+)?\s*[a-z0-9+]*)(?=[\s,.;)]|$)/ig, m=>/\d/.test(m)&&/^[ou]/i.test(m)?`<b>${m}</b>`:m);
+  t=t.replace(/\b(to\s+(?:about\s+|around\s+|~\s*)?[+-]\d{3,4})\b/ig,'<b>$1</b>');
+  return t;
+}
+// under it, per bet (each alt too): FD / Novig / PX (+ Kalshi when it has it), then every book at that line
 async function pkBookLines(pk){
-    // under your message: a Copy summary line per leg -- "D Robinson DET under 1.5 Steals -175 fd -190 dk (54.5¢ $240)"
-    const lines=[];
+    const out=[]; const p=pasteFindOrGame(pk);
     for(const l of pk.legs){
-      const w=titleCase(pk.name).split(/\s+/), ini=w.length>1?`${w[0][0]} ${w.slice(1).join(' ')}`:w[0];
-      const head=`${ini}${pk.team?' '+pk.team:''} ${l.side} ${l.line} ${l.mk==='pra'?'PRA':marketLabel(sportKey,l.mk)}`;
-      let books='';
-      let mine='';
-      try{ const p=pasteFind(pk); if(p){ const rows=await pasteRows(p,l.mk), best=pasteBest(rows,l.side,l.line);
+      let books='', mine='';
+      try{ if(p){ const rows=await pasteRows(p,l.mk), best=pasteBest(rows,l.side,l.line);
         books=sumBooksTxt(best.map(x=>({ key:x.k, ex:x.ex, price:x.price, size:x.size })), { all:true, max:14 });
         mine=['fanduel','novig','prophet x','kalshi'].map(k=>{ const x=best.find(y=>y.k===k); if(!x) return k==='kalshi'?'':`${bookShort(k)} —`;
           return `${bookShort(k)} ${fmtAm(x.price)}${x.ex?` (${(toImplied(x.price)*100).toFixed(1)}¢${x.size!=null?' '+usd(x.size):''})`:''}`; }).filter(Boolean).join(' · '); } }catch(err){}
-      if(mine) lines.push(mine);
-      lines.push(`${head} ${books||'· no books posting this line right now'}`);
+      const lbl = pk.legs.length>1 ? `<b>${l.side==='over'?'o':'u'}${l.line} ${pkEsc(l.mk==='pra'?'PRA':marketLabel(sportKey,l.mk))}</b>${l.playTo!=null?` · to <b>${fmtAm(l.playTo)}</b>`:''}\n` : '';
+      out.push(lbl + (books ? [mine, books].filter(Boolean).map(pkEsc).join('\n') : 'No books posting this line right now'));
     }
-    return lines;
+    return out;
 }
 // open Messages with the text filled in (phone); elsewhere the share sheet, else copy
 async function textOut(text){
@@ -3572,9 +3582,10 @@ async function pkSendDiscord(picks, manual){
   let n=0;
   for(const pk of picks){
     const key=pkKey(pk); if(!manual && pkSent.keys.includes(key)) continue;
+    if(!pkSent.keys.includes(key)){ pkSent.keys.push(key); LS.set('props_pk_sent', JSON.stringify(pkSent)); }
     const lines=await pkBookLines(pk);
-    const ok=await pkPost(`${pk.orig||pk.raw}\n\n${lines.join('\n')}`);
-    if(ok){ n++; if(!pkSent.keys.includes(key)) pkSent.keys.push(key); }
+    const ok=await pkPost(`${pkBoldMsg(pk)}\n\n${lines.join('\n\n')}`);
+    if(ok) n++; else if(!manual){ pkSent.keys=pkSent.keys.filter(k=>k!==key); }
     await new Promise(z=>setTimeout(z,700));
   }
   LS.set('props_pk_sent', JSON.stringify(pkSent));
@@ -3587,8 +3598,8 @@ function pkFromSearch(txt){
   if(!PICK_RE.test(txt||'')) return false; const picks=parsePicks(txt); if(!picks.length) return false;
   const q=$('#q'); q.value=''; q.blur(); $('#sug')?.classList.remove('show'); collapseSearch?.();
   savePaste(txt); pkMarkSeen(picks); if(pkOn()) pkSendDiscord(picks, false);
-  const legs=picks.flatMap(pk=>pk.legs.map(l=>({ pk, l })));
-  if(legs.length===1) pkOpenPick(legs[0].pk, legs[0].l); else openPaste();
+  // one pick (alts included) opens straight on his page; several different picks -> the list to choose from
+  if(picks.length===1) pkOpenPick(picks[0], picks[0].legs[0]); else openPaste();
   return true;
 }
 // open a pasted pick on its player page, the way it looks with My books on: that market, that line, that side
@@ -3596,10 +3607,10 @@ function pkOpenPick(pk, l){
   const p=players.find(x=>!x.isTeam && x.key===pasteFind(pk)?.key);
   if(!p){ toast(`${titleCase(pk.name)} isn't on the board right now`); return false; }
   if(!bookMode){ bookMode=2; LS.set('props_nba5','2'); syncMode5Btn?.(); }
-  pkForce={ key:p.key, mk:l.mk }; current=p; selLine[`${p.key}|${l.mk}`]=l.line;
+  pkForce={ key:p.key, mks:new Set((pk.legs||[l]).map(x=>x.mk)) }; current=p; selLine[`${p.key}|${l.mk}`]=l.line;
   qarbOpen=true;   // quick arb open, like tapping it yourself (same player -> openPlayer keeps the line + this)
   if(oddsSide!==l.side) setOddsSide(l.side); syncQside();
-  closePaste(); openPlayer(p, startIdxFor(p, l.mk)); return true;
+  closePaste(); pkOpening=true; try{ openPlayer(p, startIdxFor(p, l.mk)); } finally{ pkOpening=false; } return true;
 }
 async function pasteRun(openFirst){
   const res=$('#pkres'); if(!res) return; const picks=parsePicks(pasteText);
