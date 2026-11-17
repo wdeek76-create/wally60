@@ -2341,7 +2341,7 @@ async function ufcTick(){
     const cur={};
     rows.forEach(o=>{ if(!UFC_ML.has(String(o.market||'').toLowerCase())) return; const bk=ufcBk(o.sportsbook); if(!bk) return;
       const who=cleanSel(o.selection||o.name||''); if(!who || /^(draw|tie|no contest)/i.test(who)) return; const pr=Number(o.price); if(!pr || isNaN(pr)) return;
-      const k=`${o._fx}|${normName(who)}`; (cur[k]=cur[k]||{ fx:o._fx, who, by:{} }).by[bk]={ price:pr, url:sharpLink(o), o };
+      const k=`${o._fx}|${normName(who)}`; (cur[k]=cur[k]||{ fx:o._fx, who, by:{} }).by[bk]={ price:pr, url:sharpLink(o), o, limit:o.limits?.max!=null?Number(o.limits.max):null };
       const hk=`${k}|${bk}`, h=(ufcHist[hk]=ufcHist[hk]||[]); if(!h.length || h[h.length-1].price!==pr) h.push({ price:pr, at:now }); else h[h.length-1].seen=now;
       while(h.length && now-h[0].at>UFC_WIN_MS*1.5) h.shift(); });
     // CLV: FD's latest price on each tracked fighter until the fight starts
@@ -2360,7 +2360,7 @@ async function ufcTick(){
         const win=h.filter(x=>now-x.at<=UFC_WIN_MS && x!==last); if(!win.length) return;
         const hi=win.reduce((a,x)=>centsOf(x.price)<centsOf(a.price)?x:a);   // longest price = lowest cents
         const dc=Math.round(centsOf(last.price)-centsOf(hi.price));
-        if(dc>=UFC_DROP_C && (!drop || dc>drop.c)) drop={ b, from:hi.price, to:last.price, c:dc, mins:Math.max(1,Math.round((last.at-hi.at)/60e3)) }; });
+        if(dc>=UFC_DROP_C && (!drop || dc>drop.c)) drop={ b, from:hi.price, to:last.price, c:dc, mins:Math.max(1,Math.round((last.at-hi.at)/60e3)), limit:c.by[b]?.limit??null }; });
       if(!drop || ev<UFC_MIN_EV) return;
       // FanDuel still hanging the old number (not already moved with it)
       if(centsOf(fd.price)>=centsOf(drop.to)) return;
@@ -2383,7 +2383,7 @@ const ufcClv = t => t.close==null ? null : Math.round(centsOf(t.close)-centsOf(t
 function ufcTrack(c, f, fd, drop, fair, ev){
   const id=`${c.fx}|${normName(c.who)}`; if(ufcTracked.some(t=>t.id===id)) return;
   ufcTracked.unshift({ id, fx:c.fx, who:titleCase(c.who), vs:normName(c.who)===normName(f.home)?f.away:f.home, start:f.start, price:Number(fd.price), book:drop.b, from:drop.from, to:drop.to, cents:drop.c,
-    fair:Math.round(fair*1000)/1000, ev:Math.round(ev*10)/10, at:Date.now(), close:null, result:null });
+    fair:Math.round(fair*1000)/1000, ev:Math.round(ev*10)/10, limit:drop.limit??null, at:Date.now(), close:null, result:null });
   ufcSave(); }
 async function ufcGrade(){
   const now=Date.now(), open=ufcTracked.filter(t=>!t.result && now>new Date(t.start).getTime()+20*60e3); if(!open.length) return;
@@ -2401,7 +2401,7 @@ function ufcTrackHtml(){
   if(!ufcTracked.length) return '';
   const r=ufcRec(ufcTracked), clv=ufcTracked.map(ufcClv).filter(x=>x!=null), avg=clv.length?Math.round(clv.reduce((a,b)=>a+b,0)/clv.length):null;
   const row=t=>{ const c=ufcClv(t);
-    return `<div class="ufct"><div><b>${esc(t.who)}</b> ML <b>${fmtAm(t.price)}</b> <span class="dim">vs ${esc(t.vs)} · ${esc(UFC_NAME[t.book]||t.book)} ${fmtAm(t.from)}→${fmtAm(t.to)} · +${t.ev}% EV${c!=null?` · CLV <span class="${c>0?'pos':c<0?'neg':''}">${c>0?'+':''}${c}¢</span>`:''}</span></div>
+    return `<div class="ufct"><div><b>${esc(t.who)}</b> ML <b>${fmtAm(t.price)}</b> <span class="dim">vs ${esc(t.vs)} · ${esc(UFC_NAME[t.book]||t.book)} ${fmtAm(t.from)}→${fmtAm(t.to)}${t.limit!=null?` (${usd(t.limit)})`:''} · +${t.ev}% EV${c!=null?` · CLV <span class="${c>0?'pos':c<0?'neg':''}">${c>0?'+':''}${c}¢</span>`:''}</span></div>
       <div class="ufca">${t.result?`<span class="tkres ${t.result}">${t.result.toUpperCase()}</span><button data-ufcg="${esc(t.id)}|">Reopen</button>`:`<button data-ufcg="${esc(t.id)}|win">W</button><button data-ufcg="${esc(t.id)}|loss">L</button><button data-ufcg="${esc(t.id)}|push">P</button>`}</div></div>`; };
   const open=ufcTracked.filter(t=>!t.result), done=ufcTracked.filter(t=>t.result).slice(0,8);
   // record by how big the move was, the odds we got, and the sharp book that moved
@@ -2421,7 +2421,7 @@ function ufcPost({ c, f, fd, drop, fair, ev, others }){
   const name=titleCase(c.who), vs=normName(c.who)===normName(f.home)?f.away:f.home;
   const when=new Date(f.start).toLocaleString('en-US',{weekday:'short',hour:'numeric',minute:'2-digit',timeZone:'America/New_York'});
   const fairAm=fair>=0.5?-Math.round(fair/(1-fair)*100):Math.round((1-fair)/fair*100);
-  const dropTxt=`${UFC_NAME[drop.b]} ${fmtAm(drop.from)} → ${fmtAm(drop.to)} (${drop.c}¢ in ${drop.mins}m)`;
+  const dropTxt=`${UFC_NAME[drop.b]} ${fmtAm(drop.from)} → ${fmtAm(drop.to)} (${drop.c}¢ in ${drop.mins}m)${drop.limit!=null?` · limit ${usd(drop.limit)}`:''}`;
   const url=fdMobile(()=>sharpLink(fd.o)), desk=isFdUrl(url)?fdDesk(url):null;
   if(discordHook) discordPost({ username:'FanDuel', avatar_url:httpsLogo('fanduel'), allowed_mentions:{parse:[]},
     embeds:[{ title:`${fmtAm(fd.price)} ${name} ML`.slice(0,256), url:discordUrl(url)||undefined, color:0x22c55e, thumbnail:httpsLogo('fanduel')?{url:httpsLogo('fanduel')}:undefined,
