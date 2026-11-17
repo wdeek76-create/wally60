@@ -649,7 +649,7 @@ table colgroup col.avg-col{width:16%;}
   try {
     const d = new Date(Date.now() - 5 * 3600 * 1000), day = d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
     if (localStorage.getItem("nba_daily_clear_day") === day) return;
-    ["nba_morning_ps_v1", "nba_morning_psx_v1", "nba_morning_paste_hash_v1", "nba_morning_skip_v1", "nba_saber_status_v1", "nba_lineups_v1", "nba_lineups_rg_v1", "nba_lineups_tabs_v1", "nba_lineup_games_v1", "nba_lineup_discord_msg", "nba_injuries_cache",
+    ["nba_morning_ps_v1", "nba_morning_psx_v1", "nba_sharpr_min_v1", "nba_morning_paste_hash_v1", "nba_morning_skip_v1", "nba_saber_status_v1", "nba_lineups_v1", "nba_lineups_rg_v1", "nba_lineups_tabs_v1", "nba_lineup_games_v1", "nba_lineup_discord_msg", "nba_injuries_cache",
      "nba_rw_depth_v1", "nba_rg_impact_v1", "nba_rw_lineups_raw", "nba_tabs_lineups_raw", "nba_rw_news_feed_v1", "captool_players"].forEach(k => localStorage.removeItem(k));
     localStorage.setItem("nba_daily_clear_day", day);
   } catch (e) {}
@@ -1313,7 +1313,7 @@ function buildSlots() {
         </label>
       </div>
     </div>`;
-  }).join("") + _tabsPasteHtml() + _uaIdsSlotHtml();
+  }).join("") + _sharprPasteHtml() + _tabsPasteHtml() + _uaIdsSlotHtml();
   updateMergeBtn();
 }
 function loadFile(idx, input, onDone) {
@@ -1325,6 +1325,7 @@ function loadFile(idx, input, onDone) {
   reader.onload = e => {
     const players = parseSource(e.target.result);
     slots[idx] = {label: file.name, players};
+    if (SOURCES[idx] && SOURCES[idx].key === "sharpr") { try { const n = _applySharprMinutes(); if (n) showToast(`Sharpr: minutes from today's page paste attached to ${n} players`); } catch (err) {} }
     if (SOURCES[idx] && SOURCES[idx].key === "saber") { try { _saveSaberStatus(e.target.result); } catch (err) { console.warn("[SABER status]", err); } }
     if (players.length && !players.some(pl => pl.pts > 0 || pl.reb > 0 || pl.ast > 0 || pl.threepm > 0)) showToast(`\u26a0 ${SOURCES[idx].label}: ${players.length} players but no projections in this file yet \u2014 re-download it once the source publishes numbers`);
     setLog(`${SOURCES[idx].label} loaded: ${players.length} players`);
@@ -2283,6 +2284,64 @@ function tabsFileImport(input) {
     _tabsLoad(players, tabs.name);
   });
   input.value = "";
+}
+// ── SHARPR PAGE PASTE: minutes ──────────────────────────────────────────────
+// Sharpr's CSV has no minutes column; its props page does ("Joel Embiid ... 23.46 PTS 32 mins"). Paste the page and each player's minutes are kept for
+// the day and merged into the Sharpr slot by name — so the blend, EXPORT PS / UA and the Sharpr solo tools all carry minutes. One value per player
+// (the page repeats it per prop row); if a player shows two different numbers the last one wins.
+const SHARPR_MIN_KEY = "nba_sharpr_min_v1";
+function parseSharprPageMinutes(text) {
+  const lines = String(text || "").split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  const out = {}, names = {}, seen = {}; let conflicts = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(/^(\d+(?:\.\d+)?)\s*mins?$/i); if (!m) continue;
+    // walk back past the stat label + projection to the player's name (the name is printed twice, then the position line)
+    let name = null;
+    for (let j = i - 1; j >= Math.max(0, i - 12); j--) {
+      const L = lines[j];
+      if (/^[A-Z]{2,3}$/.test(L) || /^(@|vs)$/i.test(L) || /^\d/.test(L) || /^(PTS|REB|AST|PRA|3PM|STL|BLK|PR|PA|RA)$/i.test(L) || /^[GFC](-[GFC])?$/.test(L)) continue;
+      if (/^[A-Z][A-Za-z.'\u2019-]+(?:\s+[A-Z][A-Za-z.'\u2019-]+)+(?:\s+(?:Jr\.?|Sr\.?|II|III|IV))?$/.test(L)) { name = L; break; }
+    }
+    if (!name) continue;
+    const k = resolveNorm(name), v = parseFloat(m[1]);
+    if (seen[k] != null && Math.abs(seen[k] - v) > 0.01) conflicts++;
+    seen[k] = v; out[k] = v; names[k] = name;
+  }
+  return { mins: out, names, n: Object.keys(out).length, conflicts };
+}
+function getSharprMinutes() { try { const d = JSON.parse(localStorage.getItem(SHARPR_MIN_KEY) || "null"); return d && d.day === localYMD(new Date()) ? d : null; } catch (e) { return null; } }
+// put the pasted minutes onto whatever is in the Sharpr slot (by name) → how many matched
+function _applySharprMinutes() {
+  const d = getSharprMinutes(), idx = SOURCES.findIndex(x => x.key === "sharpr"), sl = idx >= 0 ? slots[idx] : null;
+  if (!d || !sl || !sl.players) return 0;
+  let n = 0; sl.players.forEach(pl => { const v = d.mins[pl.norm || resolveNorm(pl.rawName)]; if (v != null) { pl.min = v; n++; } });
+  return n;
+}
+let _sharprPasteInfo = "";
+function sharprPasteImport() {
+  const ta = document.getElementById("sharpr-paste"), text = ta ? ta.value : "";
+  if (!text.trim()) { showToast("Paste the Sharpr props page first"); return; }
+  const r = parseSharprPageMinutes(text);
+  if (!r.n) { _sharprPasteInfo = "Couldn't find any \"NN mins\" lines \u2014 copy the whole Sharpr NBA props page (the Best Line list carries the minutes)."; buildSlots(); showToast("Sharpr paste: no minutes found"); return; }
+  try { localStorage.setItem(SHARPR_MIN_KEY, JSON.stringify({ day: localYMD(new Date()), at: Date.now(), mins: r.mins, names: r.names })); } catch (e) {}
+  const applied = _applySharprMinutes();
+  const idx = SOURCES.findIndex(x => x.key === "sharpr"), loaded = idx >= 0 && slots[idx] && slots[idx].players ? slots[idx].players.length : 0;
+  _sharprPasteInfo = `${r.n} players' minutes saved for today${r.conflicts ? ` (${r.conflicts} shown twice with different numbers \u2014 last one kept)` : ""}` + (loaded ? ` \u00b7 applied to ${applied} of ${loaded} in the Sharpr slot` : " \u00b7 load the Sharpr CSV and they attach automatically");
+  if (ta) ta.value = "";
+  if (applied) { runMerge(); }
+  buildSlots(); showToast(`Sharpr minutes: ${r.n} players${applied ? ` \u00b7 ${applied} applied` : ""}`);
+}
+function sharprMinutesClear() { try { localStorage.removeItem(SHARPR_MIN_KEY); } catch (e) {} _sharprPasteInfo = ""; buildSlots(); }
+function _sharprPasteHtml() {
+  const d = getSharprMinutes(), n = d ? Object.keys(d.mins).length : 0;
+  return `<div class="slot" style="display:block;border-color:#a78bfa55;">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:6px;">
+      <div><span style="color:#a78bfa;font-weight:800;font-size:13px;letter-spacing:.8px;">SHARPR MINUTES</span> <span style="color:#8b93a0;font-size:11px;">Sharpr's CSV has no minutes \u2014 paste its NBA props page and each player's minutes attach to the Sharpr slot by name (kept for today).</span></div>
+      <div style="display:flex;gap:6px;align-items:center;">${n ? `<span style="color:#4ade80;font-size:11px;font-weight:700;">${n} players\u2019 minutes loaded</span><button onclick="sharprMinutesClear()" style="background:#f8717122;border:1px solid #f8717155;color:#f87171;border-radius:4px;padding:5px 10px;font-size:11px;font-weight:700;cursor:pointer;">CLEAR</button>` : ""}<button onclick="sharprPasteImport()" style="background:#a78bfa;border:none;color:#050507;border-radius:6px;padding:7px 16px;font-size:12px;font-weight:800;cursor:pointer;">PARSE MINUTES</button></div>
+    </div>
+    <textarea id="sharpr-paste" placeholder="Paste the Sharpr NBA Player Props page here\u2026" spellcheck="false" style="width:100%;height:56px;background:#050507;border:1px solid #1a1d22;border-radius:6px;padding:8px 10px;color:#e2e8f0;font-family:'JetBrains Mono','Menlo',monospace;font-size:11px;resize:vertical;box-sizing:border-box;"></textarea>
+    ${_sharprPasteInfo ? `<div style="font-size:11px;color:${/^Couldn/.test(_sharprPasteInfo) ? "#fbbf24" : "#4ade80"};margin-top:6px;">${_mEsc(_sharprPasteInfo)}</div>` : ""}
+  </div>`;
 }
 function _tabsPasteHtml() {
   return `<div class="slot" style="display:block;border-color:#f59e0b55;">
