@@ -37,6 +37,9 @@ h2{font-size:12px;letter-spacing:1px;text-transform:uppercase;color:var(--mut);m
     <label class="filebtn" style="background:#eab308;border-color:#eab308"><input type="file" accept=".csv,text/csv" onchange="loadPs(this,'DIMERS')" hidden>&#8679; DIMERS CSV (solo)</label>
   </div>
   <div id="srcstat" class="info" style="display:grid;gap:2px"></div>
+  <h2 style="margin-top:12px">Or paste the Sharpr props page</h2>
+  <textarea id="sharpr-paste" placeholder="Paste the whole Sharpr NBA Player Props page here \u2014 loads as SHARPR straight from the page (projection, minutes, every book's price)\u2026" spellcheck="false" style="width:100%;height:56px;background:#090b10;color:#e8edf3;border:1px solid #2a303a;border-radius:8px;padding:8px 10px;font:11px/1.4 ui-monospace,Menlo,monospace;resize:vertical;box-sizing:border-box"></textarea>
+  <div class="row" style="margin-top:6px"><button onclick="sharprPasteLoad()" style="border-color:#a78bfa;color:#a78bfa">PARSE SHARPR PAGE</button></div>
   <h2 style="margin-top:12px">Projections &rarr; PropShop upload file</h2>
   <div class="row" style="margin-top:0">
     <label class="filebtn alt"><input type="file" accept=".csv,text/csv" onchange="toPs(this,'SHARPR')" hidden>SHARPR &rarr; PS</label>
@@ -886,27 +889,34 @@ let meta = {}; try { meta = JSON.parse(localStorage.getItem(META_KEY) || "{}") |
 let fThr = 5;
 function loadPs(inp, src) {
   const file = inp.files && inp.files[0]; if (!file) return;
-  const minEv = MIN_EV;
-  file.text().then(async text => {
+  file.text().then(text => {
     inp.value = "";
-    say("Pulling RotoWire (injuries, blurbs, lineups)\u2026"); try { await rwSync(); } catch (e) {} _rw = null;
     const recs = asObjects(text);
     if (!recs.length || !("ROI (%)" in recs[0]) || !("Market" in recs[0])) { say("That doesn't look like a PropShop CSV export (needs Player / Market / O/U / Line / Odds / ROI (%))."); return; }
-    const groups = {};
+    const plays = [];
     recs.forEach(r => {
       const stat = MARKET[String(r.Market || "").trim()]; if (!stat) return;
       const ou = String(r["O/U"] || "").toLowerCase(); if (ou !== "over" && ou !== "under") return;
       const odds = parseInt(r.Odds, 10), line = Number(r.Line), roi = Number(r["ROI (%)"]); if (isNaN(odds) || isNaN(line) || isNaN(roi)) return;
       const t = Date.parse(`${r.Date}T${r.Start || "00:00:00"}Z`), d = isNaN(t) ? null : new Date(t);
       const gameDate = d ? localYMD(d) : String(r.Date || ""), gameTime = d ? d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }) : "";
-      const k = [resolveNorm(r.Player), stat, ou, gameDate].join("|");
-      (groups[k] = groups[k] || []).push({ player: String(r.Player).trim(), team: r.Team || "", gameDate, gameTime, stat, ou, line, odds, roi, book: bookName(r.Book), proj: Number(r.Proj) || null });
+      plays.push({ player: String(r.Player).trim(), team: r.Team || "", gameDate, gameTime, stat, ou, line, odds, roi, book: bookName(r.Book), proj: Number(r.Proj) || null });
     });
+    loadPlays(plays, src, file.name);
+  });
+}
+// Core loader: a list of per-book plays {player, team, gameDate, gameTime, stat, ou, line, odds, roi, book, proj} from a PropShop CSV or a pasted Sharpr page.
+async function loadPlays(plays, src, label, opts) {
+  const minEv = MIN_EV, anyBook = !!(opts && opts.anyBook);   // page paste: the page's best price IS the play (usually an exchange), so no FD/PB/PIN rule
+  {
+    say("Pulling RotoWire (injuries, blurbs, lineups)\u2026"); try { await rwSync(); } catch (e) {} _rw = null;
+    const groups = {};
+    plays.forEach(x => { const k = [resolveNorm(x.player), x.stat, x.ou, x.gameDate].join("|"); (groups[k] = groups[k] || []).push(x); });
     const now = Date.now(), dates = new Set(); let added = 0, upd = 0, late = 0, under = 0, noHead = 0;
     Object.values(groups).forEach(list => {
       const byLine = {}; list.forEach(x => (byLine[x.line] = byLine[x.line] || []).push(x));
       const main = Object.keys(byLine).sort((a, b) => byLine[b].length - byLine[a].length || (list[0].ou === "over" ? Number(a) - Number(b) : Number(b) - Number(a)))[0];
-      const headMain = byLine[main].filter(x => HEAD_BOOKS.has(x.book)), headAny = list.filter(x => HEAD_BOOKS.has(x.book));
+      const headMain = byLine[main].filter(x => anyBook || HEAD_BOOKS.has(x.book)), headAny = list.filter(x => anyBook || HEAD_BOOKS.has(x.book));
       if (!headAny.length) { noHead++; return; }
       const best = headMain.length ? headMain.reduce((a, x) => x.odds > a.odds ? x : a) : headAny.reduce((a, x) => x.roi > a.roi ? x : a);
       if (best.roi < minEv) { under++; return; }
@@ -924,11 +934,69 @@ function loadPs(inp, src) {
     const keep = new Set(Object.values(groups).length ? rows.filter(x => x.src === src && dates.has(x.gameDate) && x.touched === now).map(x => x.key) : []);
     const before = rows.length; rows = rows.filter(x => !(x.src === src && x.result === "pending" && dates.has(x.gameDate) && !keep.has(x.key))); const gone = before - rows.length;
     rows.forEach(x => { delete x.touched; });
-    meta[src] = { at: now, n: added + upd, file: file.name }; try { localStorage.setItem(META_KEY, JSON.stringify(meta)); } catch (e) {}
+    meta[src] = { at: now, n: added + upd, file: label }; try { localStorage.setItem(META_KEY, JSON.stringify(meta)); } catch (e) {}
     save();
     say(`${src}${gone ? ` \u00b7 ${gone} old open plays replaced` : ""}: ${added} new${upd ? `, ${upd} updated` : ""}${under ? ` \u00b7 ${under} under ${minEv}%` : ""}${noHead ? ` \u00b7 ${noHead} with no FD / PB / PIN / Bet105 price` : ""}${late ? ` \u00b7 ${late} already tipped` : ""}${dates.size ? ` \u00b7 ${[...dates].join(", ")}` : ""}`);
     toast(`${src}: ${added + upd} plays loaded`); render();
-  });
+  }
+}
+// ── SHARPR PAGE PASTE ─────────────────────────────────────────────────────────
+// Paste Sharpr's NBA props page and it loads as the SHARPR source straight from the page — no CSV / PropShop round-trip. The "Best Line" list has, per
+// play: name, position, team @/vs opp, projection, stat, minutes, then a run of book quotes (edge%, side+line, price, book name when the page prints one).
+// A quote with a book name is a book's own price; the exchange ones carry the name too. Every quote on the play's side becomes a per-book row, so the
+// normal headline rule (FD / PB / PIN / Bet105, else the best exchange) picks the tracked price just like the CSV path.
+const SHARPR_STAT = { PTS: "PTS", REB: "REB", AST: "AST", PRA: "PRA", "3PM": "3PM" };
+const SHARPR_COLS = ["FanDuel", "Novig", "ProphetX", "Bet105", "Prop Builder"];   // the page's book columns, left to right, after Best Line
+function parseSharprPage(text) {
+  const L = String(text || "").split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  const start = L.findIndex(l => /^Best Line$/i.test(l)); const lines = start >= 0 ? L.slice(start + 1) : L;
+  const today = localYMD(new Date()), plays = [], names = new Set(); let minutes = {};
+  const isName = l => /^[A-Z][A-Za-z.'\u2019-]+(?:\s+[A-Z][A-Za-z.'\u2019-]+)+(?:\s+(?:Jr\.?|Sr\.?|II|III|IV))?$/.test(l) && !/^(Best Line|Novig|FanDuel|Prophet ?X|Prop Builder|Pinnacle|Kalshi|Polymarket|Fliff|DraftKings|Bet105)$/i.test(l);
+  const bookLine = l => /^(Novig|FanDuel|ProphetX|Prophet X|Prop Builder|Props Builder|Pinnacle|Kalshi|Polymarket|Fliff|DraftKings|Bet105|BetMGM|Caesars|Hard Rock|Fanatics|bet365)$/i.test(l);
+  let i = 0;
+  while (i < lines.length) {
+    // a play starts with the name twice
+    if (!(isName(lines[i]) && lines[i + 1] === lines[i])) { i++; continue; }
+    const player = lines[i]; i += 2;
+    if (/^[GFC](-[GFC])?$/.test(lines[i] || "")) i++;                                   // position
+    let team = "", opp = "", home = false;
+    if (/^[A-Z]{2,3}$/.test(lines[i] || "")) { team = lines[i]; i++; if (lines[i] === team) i++; }
+    if (/^(@|vs)$/i.test(lines[i] || "")) { home = /^vs$/i.test(lines[i]); i++; }
+    if (/^[A-Z]{2,3}$/.test(lines[i] || "")) { opp = lines[i]; i++; if (lines[i] === opp) i++; }
+    const proj = /^\d+(\.\d+)?$/.test(lines[i] || "") ? parseFloat(lines[i++]) : null;
+    const stat = SHARPR_STAT[(lines[i] || "").toUpperCase()]; if (stat) i++;
+    const mm = (lines[i] || "").match(/^(\d+(?:\.\d+)?)\s*mins?$/i); if (mm) { minutes[resolveNorm(player)] = parseFloat(mm[1]); i++; }
+    if (!stat) continue;
+    // Quotes come in pairs (over, under): first the Best Line pair, each with its book named on the next line; then one pair per book column in
+    // the page's column order (FanDuel, Novig, ProphetX, bet105, Props Builder, ...), unnamed; "—" = that book has no line for this prop.
+    const quotes = [];   // { roi, ou, line, odds, book }
+    const readQuote = () => { const e = (lines[i] || "").match(/^([+-]?\d+(?:\.\d+)?)%$/); if (!(e && /^[ou]\d+(\.\d+)?$/i.test(lines[i + 1] || "") && /^\([+-]?\d+\)$/.test(lines[i + 2] || ""))) return null;
+      const q = { roi: parseFloat(e[1]), ou: /^o/i.test(lines[i + 1]) ? "over" : "under", line: parseFloat(lines[i + 1].slice(1)), odds: parseInt(lines[i + 2].replace(/[()]/g, ""), 10), book: null }; i += 3; return q; };
+    const bestPair = []; for (let k = 0; k < 2; k++) { const q = readQuote(); if (!q) break; if (bookLine(lines[i] || "")) { q.book = bookName(lines[i]); i++; } bestPair.push(q); }
+    let col = 0;
+    while (i < lines.length && !(isName(lines[i]) && lines[i + 1] === lines[i])) {
+      if (lines[i] === "\u2014" || lines[i] === "-" ) { i++; col++; continue; }                       // no line at this book
+      const q1 = readQuote(); if (!q1) { i++; continue; }
+      q1.book = SHARPR_COLS[col] || null; quotes.push(q1);
+      const q2 = readQuote(); if (q2) { q2.book = SHARPR_COLS[col] || null; quotes.push(q2); }
+      col++;
+    }
+    // the play's side is the side of the page's best quote; every book on that side goes in (the headline rule then picks FD / PB / PIN / Bet105, else the exchange)
+    const best = bestPair.reduce((a, q) => (!a || q.roi > a.roi) ? q : a, null); if (!best) continue;
+    const gameTime = "";   // the Best Line block has no tip time; the day is what grading needs
+    const side = quotes.filter(q => q.ou === best.ou && q.book);
+    if (best.book && !side.some(q => q.book === best.book && q.odds === best.odds)) side.push(best);
+    side.forEach(q => { plays.push({ player, team, gameDate: today, gameTime, stat, ou: q.ou, line: q.line, odds: q.odds, roi: q.roi, book: q.book, proj }); names.add(player); });
+  }
+  return { plays, players: names.size, minutes };
+}
+function sharprPasteLoad() {
+  const ta = document.getElementById("sharpr-paste"), text = ta ? ta.value : "";
+  if (!text.trim()) { say("Paste the Sharpr NBA props page first (the whole page, Best Line list included)."); return; }
+  const r = parseSharprPage(text);
+  if (!r.plays.length) { say("Couldn't read any plays from that paste \u2014 copy the whole Sharpr props page; the Best Line list is what gets read."); toast("Sharpr paste: nothing found"); return; }
+  if (ta) ta.value = "";
+  loadPlays(r.plays, "SHARPR", `Sharpr page paste (${r.players} players)`);
 }
 // 2) Any projection CSV (Sharpr, Dimers, ...) -> the PropShop upload format
 function toPs(inp, src) {
