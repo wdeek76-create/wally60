@@ -1107,7 +1107,9 @@ const dcDayKey = e => `${e.tgt||'fanduel'}|${e.sk}|${e.fx}|${e.mk}|${e.key||norm
 function dcSentDay(){ try{ const o=JSON.parse(LS.get('sm_dc_day','null')); if(o && o.day===etToday()) return o; }catch(err){} return { day:etToday(), keys:[] }; }
 const dcAlreadySent = e => dcSentDay().keys.includes(dcDayKey(e));
 function dcMarkSent(e){ const o=dcSentDay(), k=dcDayKey(e); if(!o.keys.includes(k)){ o.keys.push(k); LS.set('sm_dc_day', JSON.stringify(o)); } }
-function sharpDiscord(e){ try{ if(dcAlreadySent(e) || sharpDcQ.some(x=>dcDayKey(x)===dcDayKey(e))) return; if(!sharpDcQ.some(x=>x.k===e.k)) sharpDcQ.push(e); sharpDcPump(); }catch(err){ console.warn('[sharp] discord payload failed', err); toast('Discord post failed: '+err.message); } }
+// NHL goalie saves are never sent
+const SM_NO_SEND = e => e && e.sk==='nhl' && e.mk==='sv';
+function sharpDiscord(e){ try{ if(SM_NO_SEND(e)) return; if(dcAlreadySent(e) || sharpDcQ.some(x=>dcDayKey(x)===dcDayKey(e))) return; if(!sharpDcQ.some(x=>x.k===e.k)) sharpDcQ.push(e); sharpDcPump(); }catch(err){ console.warn('[sharp] discord payload failed', err); toast('Discord post failed: '+err.message); } }
 // Full position name ("PF" -> "Power Forward"); combos like "G-F" -> "Guard-Forward"
 const POS_FULL = {
   nba:{ PG:'Point Guard', SG:'Shooting Guard', SF:'Small Forward', PF:'Power Forward', C:'Center', G:'Guard', F:'Forward' },
@@ -1227,7 +1229,7 @@ function sharpCheckPings(sk){
     const ob=e.f?.start ? outBucket({ start:e.f.start, trackedAt:Date.now() }) : null;
     if((hookFor(e) || (tgOn() && (e.tgt||'fanduel')==='fanduel')) && !smWindowMuted(e.sk, ob)) sharpDiscord(e);
     sharpAutoTrack(e);
-    if(sharpPingsOn) sharpPing(e);
+    if(sharpPingsOn && !SM_NO_SEND(e)) sharpPing(e);
   });
   // $150 tier: FanDuel props with $150+ but under the minimum -- tracked quietly, nothing sent or pinged
   Object.values(sharpTape).filter(e=>e.sk===sk && e.kind!=='10c' && (e.tgt||'fanduel')==='fanduel' && !SHARP_MAINS.has(e.mk) && !sharpLive(e) && !e.gone
@@ -2278,13 +2280,14 @@ function renderNews(){
 // (we saw the old price ourselves, the new one landed in the last few minutes) -- and FanDuel has to
 // still be +EV against the sharp books' no-vig fair. One alert per fighter per drop, same Discord + Telegram.
 let ufcOn = LS.get('sm_ufc_on','1')!=='0';
-const UFC_SHARP_REQ = ['Pinnacle','Circa Sports','Circa','BetOnline'];
+const UFC_SHARP_REQ = ['Pinnacle','Circa','Circa Sports','BetOnline','BookMaker'];
 const UFC_DROP_C = 15, UFC_WIN_MS = 60*60e3, UFC_FRESH_MS = 6*60e3, UFC_MIN_EV = 1.5;
 const UFC_ML = new Set(['moneyline','fight winner','to win fight','winner']);
 let ufcFx = { at:0, list:[] }, ufcHist = {}, ufcStat = 'starting…', ufcBusy = false;
 let ufcSent = (()=>{ try{ return JSON.parse(LS.get('sm_ufc_sent','{}'))||{}; }catch(e){ return {}; } })();
-const ufcBk = n => { const k=String(n||'').toLowerCase(); return /circa/.test(k)?'circa':k==='pinnacle'?'pinnacle':k==='betonline'?'betonline':k==='fanduel'?'fanduel':null; };
-const UFC_NAME = { circa:'Circa', pinnacle:'Pinnacle', betonline:'BetOnline', fanduel:'FanDuel' };
+const ufcBk = n => { const k=String(n||'').toLowerCase(); return /circa/.test(k)?'circa':k==='pinnacle'?'pinnacle':k==='betonline'?'betonline':k==='bookmaker'?'bookmaker':k==='fanduel'?'fanduel':null; };
+const UFC_SHARPS = ['circa','pinnacle','betonline','bookmaker'];
+const UFC_NAME = { circa:'Circa', pinnacle:'Pinnacle', betonline:'BetOnline', bookmaker:'BookMaker', fanduel:'FanDuel' };
 async function ufcFixtures(){
   if(Date.now()-ufcFx.at<10*60e3 && ufcFx.list.length) return ufcFx.list;
   const raw=await fetchFixturesRaw({ sport:'mma', league:'ufc', label:'UFC' });
@@ -2298,7 +2301,7 @@ async function ufcTick(){
   try{
     const fx=await ufcFixtures(); if(!fx.length){ ufcStat='no UFC fights in the next week'; return; }
     const now=Date.now(), rows=[];
-    for(const ids of chunk(fx.map(f=>f.id),5)) for(const bks of [['FanDuel',...UFC_SHARP_REQ.slice(0,2)], UFC_SHARP_REQ.slice(2)]){
+    for(const ids of chunk(fx.map(f=>f.id),5)) for(const bks of [['FanDuel',...UFC_SHARP_REQ.slice(0,4)], UFC_SHARP_REQ.slice(4)]){
       try{ const r=await oo('/fixtures/odds',{ fixture_id:ids, sportsbook:bks, is_main:true }); (r?.data||[]).forEach(d=>(d.odds||[]).forEach(o=>{ o._fx=d.id; rows.push(o); })); }
       catch(e){ try{ for(const b of bks){ const r=await oo('/fixtures/odds',{ fixture_id:ids, sportsbook:[b], is_main:true }); (r?.data||[]).forEach(d=>(d.odds||[]).forEach(o=>{ o._fx=d.id; rows.push(o); })); } }catch(e2){} }
     }
@@ -2315,11 +2318,11 @@ async function ufcTick(){
       const f=fx.find(x=>x.id===c.fx); if(!f) return;
       const oppName=normName(c.who)===normName(f.home)?f.away:f.home, opp=cur[`${c.fx}|${normName(oppName)}`];
       // fair: each sharp book's two-way price with the vig taken out, averaged
-      const fairs=['circa','pinnacle','betonline'].map(b=>{ const a=c.by[b]?.price, z=opp?.by[b]?.price; if(a==null||z==null) return null; const ia=toImplied(a), iz=toImplied(z); return ia/(ia+iz); }).filter(x=>x!=null);
+      const fairs=UFC_SHARPS.map(b=>{ const a=c.by[b]?.price, z=opp?.by[b]?.price; if(a==null||z==null) return null; const ia=toImplied(a), iz=toImplied(z); return ia/(ia+iz); }).filter(x=>x!=null);
       if(!fairs.length) return; const fair=fairs.reduce((a,b)=>a+b,0)/fairs.length, ev=(fair*toDec(fd.price)-1)*100;
       // the drop: a sharp book's price now vs its longest price in the last hour -- seen by us, and fresh
       let drop=null;
-      ['circa','pinnacle','betonline'].forEach(b=>{ const h=ufcHist[`${k}|${b}`]; if(!h || h.length<2) return; const last=h[h.length-1]; if(now-last.at>UFC_FRESH_MS) return;
+      UFC_SHARPS.forEach(b=>{ const h=ufcHist[`${k}|${b}`]; if(!h || h.length<2) return; const last=h[h.length-1]; if(now-last.at>UFC_FRESH_MS) return;
         const win=h.filter(x=>now-x.at<=UFC_WIN_MS && x!==last); if(!win.length) return;
         const hi=win.reduce((a,x)=>centsOf(x.price)<centsOf(a.price)?x:a);   // longest price = lowest cents
         const dc=Math.round(centsOf(last.price)-centsOf(hi.price));
@@ -2330,7 +2333,7 @@ async function ufcTick(){
       found++;
       const key=`${k}|${drop.b}|${drop.to}`; if(ufcSent[key]) return; ufcSent[key]=now;
       Object.keys(ufcSent).forEach(x=>{ if(now-ufcSent[x]>3*86400e3) delete ufcSent[x]; }); LS.set('sm_ufc_sent', JSON.stringify(ufcSent));
-      ufcPost({ c, f, fd, drop, fair, ev, others:['circa','pinnacle','betonline'].filter(b=>b!==drop.b && c.by[b]).map(b=>`${UFC_NAME[b]} ${fmtAm(c.by[b].price)}`) });
+      ufcPost({ c, f, fd, drop, fair, ev, others:UFC_SHARPS.filter(b=>b!==drop.b && c.by[b]).map(b=>`${UFC_NAME[b]} ${fmtAm(c.by[b].price)}`) });
     });
     ufcStat=`watching ${fx.length} fights · ${found} dropping now · ${new Date().toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'})}`;
   }catch(e){ ufcStat='error: '+e.message; }
