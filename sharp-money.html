@@ -1463,7 +1463,30 @@ let tracked = (()=>{ try{ return JSON.parse(LS.get('sm_tracked','[]'))||[]; }cat
 // FanDuel's tracker is player props only: drop any FD game total / ML / spread tracked before that rule
 tracked = tracked.filter(t=>!((t.bookKey||'fanduel')==='fanduel' && ['total','ml','spread'].includes(t.mkey)));
 // a save that still fails after clearing the odds caches: say so instead of losing it quietly
-let smWarnAt=0; const smStorageWarn = () => { if(Date.now()-smWarnAt<60e3) return; smWarnAt=Date.now(); try{ toast('⚠ Phone storage for this page is full — that didn\'t save. Tap Download backup now.'); }catch(e){} };
+// ── storage: this page shares ~5 MB of phone storage with the other tools opened from the same place (the prop
+// screen's odds caches can take most of it). smFreeSpace() clears what can be rebuilt and slims old in-game bets
+// (keeps every field the record / recap / breakdowns use) -- runs on its own when storage is tight or full. ──
+const smStorageMB = () => { let n=0; try{ for(let i=0;i<localStorage.length;i++){ const k=localStorage.key(i); n+=(k.length+(localStorage.getItem(k)||'').length)*2; } }catch(e){} return n/1048576; };
+function smFreeSpace(manual){
+  const before=smStorageMB(); let gone=[];
+  try{ Object.keys(localStorage).forEach(k=>{
+    // rebuilt automatically: the prop screen's odds caches, RotoWire leftovers (RotoWire is off here), old recap flags
+    if(/^props_cache_/.test(k) || /^sm_rw_(news|seen|day|proj|projlog|board|teamsig|lite)$/.test(k) || (manual && k==='oo_book_logos')) { localStorage.removeItem(k); gone.push(k); }
+    const m=/^nbal_recap_(\d{4}-\d{2}-\d{2})$/.exec(k); if(m && Date.now()-Date.parse(m[1])>7*86400e3){ localStorage.removeItem(k); }
+  }); }catch(e){}
+  // in-game bets graded 2+ days ago: keep only what the record uses
+  const keep=['id','key','kind','direct','hold','size','sk','mkey','marketLabel','side','line','price','trackedAt','result','final','fdPulled','fdLast','fdSeen','fixtureId','playerKey','playerName','away','home','score','actual'];
+  let slim=0; try{ nlTracked=nlTracked.map(t=>{ if(!t.final || Date.now()-(t.trackedAt||0)<2*86400e3 || t._slim) return t; const o={_slim:1}; keep.forEach(f=>{ if(t[f]!=null) o[f]=t[f]; }); if(o.fdPulled) o.fdPulled=1; slim++; return o; });
+  if(slim) LS.set('nbal_tracked', JSON.stringify(nlTracked)); }catch(e){}
+  const after=smStorageMB();
+  if(manual) toast(`Freed ${(before-after).toFixed(1)} MB · now ${after.toFixed(1)} MB`);
+  return before-after;
+}
+let smWarnAt=0; const smStorageWarn = () => { if(Date.now()-smWarnAt<60e3) return; smWarnAt=Date.now();
+  // full: free what can go and say so -- then the next save goes through
+  const freed=smFreeSpace(false);
+  try{ toast(freed>0.05 ? `Storage was full — freed ${freed.toFixed(1)} MB. Your bets and record are kept.` : '⚠ Phone storage for this page is full — tap Download backup, then Free up space.'); }catch(e){} };
+setTimeout(()=>{ if(smStorageMB()>3.5) smFreeSpace(false); }, 4000);
 const saveTracked = () => { if(!LS.set('sm_tracked', JSON.stringify(tracked))) smStorageWarn(); const n=$('#tkN'); if(n) n.textContent=tracked.filter(t=>!t.final).length||''; };
 // one-time: bring over Sharp Money bets that were tracked inside PocketMarket
 (()=>{ if(LS.get('sm_migrated','')) return; try{ const old=JSON.parse(LS.get('props_tracked','[]'))||[]; const mine=old.filter(t=>t.src==='sharp' && !tracked.some(x=>x.id===t.id)); if(mine.length){ tracked=mine.concat(tracked); saveTracked(); } }catch(e){} LS.set('sm_migrated','1'); })();
@@ -2933,7 +2956,7 @@ function smRestore(){
     }catch(e){ toast('Import failed: '+e.message); } };
   inp.click();
 }
-const backupHtml = () => `<div class="nlctl" style="margin:0 0 12px"><button data-bk="recap">Post FD recap</button>${Object.entries(RECAP_BOOK).filter(([k])=>k==='fanduel').map(([k,B])=>`<button data-rch="${k}" class="${LS.get(B.key,'')?'on':''}">${({fanduel:'FD',bet105:'b105',b105main:'b105 main lines'})[k]} recap channel${LS.get(B.key,'')?' ✓':''}</button>`).join('')}<span class="dim">Backup</span><button data-bk="bkch" class="${LS.get('sm_backup_hook','')?'on':''}">${LS.get('sm_backup_hook','')?'Auto-backup ✓':'Auto-backup to Discord'}</button><button data-bk="bknow">Back up now</button><button data-bk="save">⬇ Download backup</button><button data-bk="load">⬆ Import backup</button><button data-bk="copy">⧉ Copy FD tracker</button><button data-bk="paste">⎘ Paste FD tracker</button></div>`;
+const backupHtml = () => `<div class="nlctl" style="margin:0 0 12px"><button data-bk="recap">Post FD recap</button>${Object.entries(RECAP_BOOK).filter(([k])=>k==='fanduel').map(([k,B])=>`<button data-rch="${k}" class="${LS.get(B.key,'')?'on':''}">${({fanduel:'FD',bet105:'b105',b105main:'b105 main lines'})[k]} recap channel${LS.get(B.key,'')?' ✓':''}</button>`).join('')}<span class="dim">Backup</span><button data-bk="bkch" class="${LS.get('sm_backup_hook','')?'on':''}">${LS.get('sm_backup_hook','')?'Auto-backup ✓':'Auto-backup to Discord'}</button><button data-bk="free">Free up space · ${smStorageMB().toFixed(1)} MB</button><button data-bk="bknow">Back up now</button><button data-bk="save">⬇ Download backup</button><button data-bk="load">⬆ Import backup</button><button data-bk="copy">⧉ Copy FD tracker</button><button data-bk="paste">⎘ Paste FD tracker</button></div>`;
 const lastRecapDay = book => { const days=Object.keys(smBookRec(RECAP_BOOK[book].book).days).sort(); return days[days.length-1]||etToday(); };
 async function setRecapHook(book){
   const B=RECAP_BOOK[book];
@@ -2943,7 +2966,7 @@ async function setRecapHook(book){
   if(viewMode==='tracker') renderTracker();
 }
 const bindBackup = v => { v.querySelectorAll('[data-rch]').forEach(b=>b.onclick=()=>setRecapHook(b.dataset.rch));
-  v.querySelectorAll('[data-bk]').forEach(b=>b.onclick=()=>b.dataset.bk==='bkch'?smSetBackupHook():b.dataset.bk==='bknow'?(async()=>{ if(!LS.get('sm_backup_hook','')){ smSetBackupHook(); return; } const ok=await smAutoBackup(true); toast(ok?'Backup posted to Discord':'Backup post failed'); })():b.dataset.bk==='recap105'?smPostRecap(lastRecapDay('bet105'), true, 'bet105'):b.dataset.bk==='recapmain'?smPostRecap(lastRecapDay('b105main'), true, 'b105main'):b.dataset.bk==='copy'?smCopyTracker():b.dataset.bk==='paste'?smPasteTracker():b.dataset.bk==='save'?smBackup():b.dataset.bk==='recap'?smPostRecapNow():smRestore()); };
+  v.querySelectorAll('[data-bk]').forEach(b=>b.onclick=()=>b.dataset.bk==='free'?(()=>{ smFreeSpace(true); b.textContent=`Free up space · ${smStorageMB().toFixed(1)} MB`; })():b.dataset.bk==='bkch'?smSetBackupHook():b.dataset.bk==='bknow'?(async()=>{ if(!LS.get('sm_backup_hook','')){ smSetBackupHook(); return; } const ok=await smAutoBackup(true); toast(ok?'Backup posted to Discord':'Backup post failed'); })():b.dataset.bk==='recap105'?smPostRecap(lastRecapDay('bet105'), true, 'bet105'):b.dataset.bk==='recapmain'?smPostRecap(lastRecapDay('b105main'), true, 'b105main'):b.dataset.bk==='copy'?smCopyTracker():b.dataset.bk==='paste'?smPasteTracker():b.dataset.bk==='save'?smBackup():b.dataset.bk==='recap'?smPostRecapNow():smRestore()); };
 let nlHist=false;
 function renderNbaLive(){
   const v=$('#view'), now=Date.now();
