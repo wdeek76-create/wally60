@@ -1313,7 +1313,7 @@ function renderSharp(){
   const chips = `<div class="mnav" style="position:static"><button class="mchip${!sharpSportF.size?' on':''}" data-shs="all">All</button>${sports.map(k=>`<button class="mchip${sharpSportF.has(k)?' on':''}" data-shs="${k}">${esc(SPORTS[k].label)}${counts[k]?` <span class="tcount">${counts[k]}</span>`:''}</button>`).join('')}</div>
     <div class="mnav" style="position:static">${[250,350,500,1000,2500].map(v=>`<button class="mchip${sharpMin===v?' on':''}" data-shmin="${v}">${usd(v)}+</button>`).join('')}</div>
     <div class="mnav" style="position:static"><span class="dim" style="font-size:10.5px;align-self:center">Send <span title="NHL always sends">(NHL: all)</span></span>${OUT_BUCKETS.map(b=>`<button class="mchip${smMuteOut.has(b)?'':' on'}" data-shout="${esc(b)}">${esc(b.replace(' to tip','').replace(' out',''))}</button>`).join('')}</div>
-    <div class="mnav" style="position:static"><button class="mchip${smScanOn?' on':''}" data-shscan>${smScanOn?'▶ Scan on':'⏸ Scan off'}</button><button class="mchip${sharpPingsOn?' on':''}" data-shping>${sharpPingsOn?'🔔 Pings on':'🔕 Pings off'}</button><button class="mchip${discordHook?' on':''}" data-shdc>${discordHook?'FD Discord ✓':'FD Discord'}</button><button class="mchip${tgOn()?' on':''}" data-shtg>${tgOn()?'Telegram ✓':'Telegram'}</button></div>`;
+    <div class="mnav" style="position:static"><button class="mchip${smScanOn?' on':''}" data-shscan>${smScanOn?'▶ Scan on':'⏸ Scan off'}</button><button class="mchip${sharpPingsOn?' on':''}" data-shping>${sharpPingsOn?'🔔 Pings on':'🔕 Pings off'}</button><button class="mchip${discordHook?' on':''}" data-shdc>${discordHook?'FD Discord ✓':'FD Discord'}</button><button class="mchip${tgOn()?' on':''}" data-shtg>${tgOn()?'Telegram ✓':'Telegram'}</button><button class="mchip${ufcOn?' on':''}" data-shufc>${ufcOn?'🥊 UFC drops on':'🥊 UFC drops off'}</button></div>${ufcOn?`<div class="dim" style="font-size:11px;margin:4px 2px">🥊 UFC: ${esc(ufcStat)}</div>`:''}`;
   const scanned = sports.filter(k=>sharpLastScan[k]).length;
   // What each sport's last scan actually got back -- if a sport shows 0 for the exchanges, the
   // feed isn't returning their odds; if it shows props but 0 sides, nothing arbs FanDuel right now.
@@ -1355,6 +1355,7 @@ ${sharpDcLog.map(x=>`<div class="smdiag" style="color:${x.ok?'#86efac':'#fca5a5'
       if(ok){ await new Promise(r=>setTimeout(r,600)); const ex=sharpDiscordPayload(sharpExampleEntry(), true); const tag=roleTag(); discordPost({ ...ex, ...tag, content:[tag.content, ex.content].filter(Boolean).join(' ') }); }
     }
   });
+  view.querySelector('[data-shufc]')?.addEventListener('click',()=>{ ufcOn=!ufcOn; LS.set('sm_ufc_on', ufcOn?'1':'0'); toast(ufcOn?'UFC market drops on':'UFC market drops off'); if(ufcOn) ufcTick(); renderSharp(); });
   view.querySelector('[data-shscan]')?.addEventListener('click',()=>{ smScanOn=!smScanOn; LS.set('sm_scan_on', smScanOn?'1':'0'); toast(smScanOn?'Sharp Money scanning on':'Sharp Money scanning off'); if(smScanOn) sharpTick(); renderSharp(); });
   view.querySelectorAll('[data-shout]').forEach(b=>b.addEventListener('click',()=>{ const k=b.dataset.shout; smMuteOut.has(k)?smMuteOut.delete(k):smMuteOut.add(k); LS.set('sm_mute_out', JSON.stringify([...smMuteOut])); renderSharp(); }));
   view.querySelector('[data-shdckm]')?.addEventListener('click', async ()=>{
@@ -2271,6 +2272,84 @@ function renderNews(){
 }
 // ───────────────────────── page ─────────────────────────
 
+// ───────────────────────── UFC market drops (moneylines) ─────────────────────────
+// Not exchange money: a sharp book (Circa / Pinnacle / BetOnline) dropping a fighter's price 15c+ while
+// FanDuel still hangs the old number. Fresh only -- the drop has to happen while the page is watching
+// (we saw the old price ourselves, the new one landed in the last few minutes) -- and FanDuel has to
+// still be +EV against the sharp books' no-vig fair. One alert per fighter per drop, same Discord + Telegram.
+let ufcOn = LS.get('sm_ufc_on','1')!=='0';
+const UFC_SHARP_REQ = ['Pinnacle','Circa Sports','Circa','BetOnline'];
+const UFC_DROP_C = 15, UFC_WIN_MS = 60*60e3, UFC_FRESH_MS = 6*60e3, UFC_MIN_EV = 1.5;
+const UFC_ML = new Set(['moneyline','fight winner','to win fight','winner']);
+let ufcFx = { at:0, list:[] }, ufcHist = {}, ufcStat = 'starting…', ufcBusy = false;
+let ufcSent = (()=>{ try{ return JSON.parse(LS.get('sm_ufc_sent','{}'))||{}; }catch(e){ return {}; } })();
+const ufcBk = n => { const k=String(n||'').toLowerCase(); return /circa/.test(k)?'circa':k==='pinnacle'?'pinnacle':k==='betonline'?'betonline':k==='fanduel'?'fanduel':null; };
+const UFC_NAME = { circa:'Circa', pinnacle:'Pinnacle', betonline:'BetOnline', fanduel:'FanDuel' };
+async function ufcFixtures(){
+  if(Date.now()-ufcFx.at<10*60e3 && ufcFx.list.length) return ufcFx.list;
+  const raw=await fetchFixturesRaw({ sport:'mma', league:'ufc', label:'UFC' });
+  const now=Date.now();
+  ufcFx={ at:now, list:raw.filter(f=>{ const t=new Date(f.start_date).getTime(); return t>now && t<now+8*86400e3 && !f.is_live && f.status!=='completed' && f.status!=='cancelled'; })
+    .map(f=>({ id:f.id, start:f.start_date, home:f.home_competitors?.[0]?.name||'', away:f.away_competitors?.[0]?.name||'' })) };
+  return ufcFx.list;
+}
+async function ufcTick(){
+  if(!ufcOn || ufcBusy) return; ufcBusy=true;
+  try{
+    const fx=await ufcFixtures(); if(!fx.length){ ufcStat='no UFC fights in the next week'; return; }
+    const now=Date.now(), rows=[];
+    for(const ids of chunk(fx.map(f=>f.id),5)) for(const bks of [['FanDuel',...UFC_SHARP_REQ.slice(0,2)], UFC_SHARP_REQ.slice(2)]){
+      try{ const r=await oo('/fixtures/odds',{ fixture_id:ids, sportsbook:bks, is_main:true }); (r?.data||[]).forEach(d=>(d.odds||[]).forEach(o=>{ o._fx=d.id; rows.push(o); })); }
+      catch(e){ try{ for(const b of bks){ const r=await oo('/fixtures/odds',{ fixture_id:ids, sportsbook:[b], is_main:true }); (r?.data||[]).forEach(d=>(d.odds||[]).forEach(o=>{ o._fx=d.id; rows.push(o); })); } }catch(e2){} }
+    }
+    // latest price per fight / fighter / book, and its history over the last hour
+    const cur={};
+    rows.forEach(o=>{ if(!UFC_ML.has(String(o.market||'').toLowerCase())) return; const bk=ufcBk(o.sportsbook); if(!bk) return;
+      const who=cleanSel(o.selection||o.name||''); if(!who || /^(draw|tie|no contest)/i.test(who)) return; const pr=Number(o.price); if(!pr || isNaN(pr)) return;
+      const k=`${o._fx}|${normName(who)}`; (cur[k]=cur[k]||{ fx:o._fx, who, by:{} }).by[bk]={ price:pr, url:sharpLink(o), o };
+      const hk=`${k}|${bk}`, h=(ufcHist[hk]=ufcHist[hk]||[]); if(!h.length || h[h.length-1].price!==pr) h.push({ price:pr, at:now }); else h[h.length-1].seen=now;
+      while(h.length && now-h[0].at>UFC_WIN_MS*1.5) h.shift(); });
+    let found=0;
+    Object.entries(cur).forEach(([k,c])=>{
+      const fd=c.by.fanduel; if(!fd) return;
+      const f=fx.find(x=>x.id===c.fx); if(!f) return;
+      const oppName=normName(c.who)===normName(f.home)?f.away:f.home, opp=cur[`${c.fx}|${normName(oppName)}`];
+      // fair: each sharp book's two-way price with the vig taken out, averaged
+      const fairs=['circa','pinnacle','betonline'].map(b=>{ const a=c.by[b]?.price, z=opp?.by[b]?.price; if(a==null||z==null) return null; const ia=toImplied(a), iz=toImplied(z); return ia/(ia+iz); }).filter(x=>x!=null);
+      if(!fairs.length) return; const fair=fairs.reduce((a,b)=>a+b,0)/fairs.length, ev=(fair*toDec(fd.price)-1)*100;
+      // the drop: a sharp book's price now vs its longest price in the last hour -- seen by us, and fresh
+      let drop=null;
+      ['circa','pinnacle','betonline'].forEach(b=>{ const h=ufcHist[`${k}|${b}`]; if(!h || h.length<2) return; const last=h[h.length-1]; if(now-last.at>UFC_FRESH_MS) return;
+        const win=h.filter(x=>now-x.at<=UFC_WIN_MS && x!==last); if(!win.length) return;
+        const hi=win.reduce((a,x)=>centsOf(x.price)<centsOf(a.price)?x:a);   // longest price = lowest cents
+        const dc=Math.round(centsOf(last.price)-centsOf(hi.price));
+        if(dc>=UFC_DROP_C && (!drop || dc>drop.c)) drop={ b, from:hi.price, to:last.price, c:dc, mins:Math.max(1,Math.round((last.at-hi.at)/60e3)) }; });
+      if(!drop || ev<UFC_MIN_EV) return;
+      // FanDuel still hanging the old number (not already moved with it)
+      if(centsOf(fd.price)>=centsOf(drop.to)) return;
+      found++;
+      const key=`${k}|${drop.b}|${drop.to}`; if(ufcSent[key]) return; ufcSent[key]=now;
+      Object.keys(ufcSent).forEach(x=>{ if(now-ufcSent[x]>3*86400e3) delete ufcSent[x]; }); LS.set('sm_ufc_sent', JSON.stringify(ufcSent));
+      ufcPost({ c, f, fd, drop, fair, ev, others:['circa','pinnacle','betonline'].filter(b=>b!==drop.b && c.by[b]).map(b=>`${UFC_NAME[b]} ${fmtAm(c.by[b].price)}`) });
+    });
+    ufcStat=`watching ${fx.length} fights · ${found} dropping now · ${new Date().toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'})}`;
+  }catch(e){ ufcStat='error: '+e.message; }
+  finally{ ufcBusy=false; }
+}
+function ufcPost({ c, f, fd, drop, fair, ev, others }){
+  const name=titleCase(c.who), vs=normName(c.who)===normName(f.home)?f.away:f.home;
+  const when=new Date(f.start).toLocaleString('en-US',{weekday:'short',hour:'numeric',minute:'2-digit',timeZone:'America/New_York'});
+  const fairAm=fair>=0.5?-Math.round(fair/(1-fair)*100):Math.round((1-fair)/fair*100);
+  const dropTxt=`${UFC_NAME[drop.b]} ${fmtAm(drop.from)} → ${fmtAm(drop.to)} (${drop.c}¢ in ${drop.mins}m)`;
+  const url=fdMobile(()=>sharpLink(fd.o)), desk=isFdUrl(url)?fdDesk(url):null;
+  if(discordHook) discordPost({ username:'FanDuel', avatar_url:httpsLogo('fanduel'), allowed_mentions:{parse:[]},
+    embeds:[{ title:`${fmtAm(fd.price)} ${name} ML`.slice(0,256), url:discordUrl(url)||undefined, color:0x22c55e, thumbnail:httpsLogo('fanduel')?{url:httpsLogo('fanduel')}:undefined,
+      description:`🥊 UFC · vs ${vs} · ${when} ET${desk&&desk!==url?`\n[🖥 Desktop link](${desk})`:''}`,
+      fields:[ { name:'📉 Market dropping', value:dropTxt+(others.length?`\n${others.join(' · ')}`:'') },
+        { name:'Edge', value:`Fair **${fmtAm(fairAm)}** · **+${ev.toFixed(1)}% EV** at FD ${fmtAm(fd.price)}` } ], footer:{ text:'UFC market drop' } }] }, null, discordHook);
+  if(tgOn()) tgSend([`🥊 UFC · vs ${tgEsc(vs)} · ${tgEsc(when)} ET`, `<b>${tgEsc(name)} ML</b>\n<b>${fmtAm(fd.price)}</b> FanDuel`, `📉 ${tgEsc(dropTxt)}${others.length?`\n${tgEsc(others.join(' · '))}`:''}`, `Fair ${fmtAm(fairAm)} · +${ev.toFixed(1)}% EV`, url?tgEsc(url)+(desk&&desk!==url?`\n🖥 Desktop: ${tgEsc(desk)}`:''):''].filter(Boolean).join('\n\n'));
+}
+setTimeout(ufcTick, 15e3); setInterval(ufcTick, 45e3);
 // ───────────────────────── NBA Live (props, in-game only) ─────────────────────────
 // Runs on its own, only while an NBA game is on (tip to ~3h after) -- idle the rest of the day so it
 // never costs the FanDuel scanner anything. Live NBA player props, FanDuel's price against:
