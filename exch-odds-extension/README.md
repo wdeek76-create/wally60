@@ -1,13 +1,13 @@
 # Exchange American Odds (Brave / Chrome, desktop)
 
-On **Novig** and **ProphetX**, every price shown as a percent or cents (54%, 54¢, 54.5¢) gets its
-**American odds** tagged right next to it: `54¢ -117`, `40¢ +150`. Red tag = favorite, green = underdog.
-It only reads the page and adds the tags; it never clicks or changes anything.
+On **Novig** and **ProphetX**, every price shown as cents / percent (54¢, 54%) or a share price ($0.54)
+is shown as **American odds** instead: `54¢` -> `-117`, `40¢` -> `+150`. Live prices keep converting as they move.
+It only rewrites the text you see; it never clicks or changes anything on the site.
 
-## Install (Brave)
-1. Download this `exch-odds-extension` folder to your PC.
-2. Go to `brave://extensions` and turn on **Developer mode** (top right).
-3. Click **Load unpacked** and pick the folder.
-4. Open Novig or ProphetX: the American odds show next to the prices.
+## Install / update (Brave)
+1. Download this `exch-odds-extension` folder to your PC (replace the old one).
+2. `brave://extensions` -> **Developer mode** on -> **Load unpacked** (or hit the reload on it if it's already there).
+3. Refresh Novig / ProphetX.
 
-**Alt+A** hides / shows the tags (remembered). Prices are converted as shown (no fee added).
+**Alt+A** flips back to the site's own prices (remembered). The "AMX" pill bottom-left shows it's running; tap it to hide it.
+Prices are converted as shown (no fee added); anything under 3% or over 97% (fees etc.) is left alone.

@@ -1,15 +1,16 @@
 // Exchange American Odds: on Novig and ProphetX, every price shown as a % / ¢ ("54¢", "54%", "54.5¢") or as a
-// share price ("$0.54", "0.54") gets its American odds right next to it (54¢ -> -117). Only reads the page and
-// adds a small tag; it never clicks or changes anything. Alt+A hides / shows the tags (remembered).
-// A small "AMX" pill bottom-left shows it's running and how many prices it tagged (tap it to hide the pill).
+// share price ("$0.54", "0.54") is shown as American odds instead (54¢ -> -117). It rewrites only the text you
+// see -- the site's own numbers and buttons are untouched, and it never clicks anything. Live prices keep
+// converting as they move. Alt+A flips back to the site's own prices (remembered).
+// A small "AMX" pill bottom-left shows it's running and how many prices it converted (tap it to hide the pill).
 (() => {
   const store = { get:k=>{ try{ return localStorage.getItem(k); }catch(e){ return null; } }, set:(k,v)=>{ try{ localStorage.setItem(k,v); }catch(e){} } };
-  if (store.get('amxOff') === '1') document.documentElement.classList.add('amx-off');
+  let off = store.get('amxOff') === '1';
 
   // 3-97 cents / percent (skips fees like "2%"), not part of a bigger number
-  const RE_C = /(^|[^\d.])(\d{1,2}(?:\.\d{1,2})?)\s?(¢|%|c\b)/g;
+  const RE_C = /(^|[^\d.])(\d{1,2}(?:\.\d{1,2})?\s?(?:¢|%|c\b))/g;
   // share prices: "$0.54", "0.54", ".54"
-  const RE_S = /(^|[^\d.$])(\$?0?\.(\d{2,3}))(?![\d%¢.])/g;
+  const RE_S = /(^|[^\d.$])(\$?0?\.\d{2,3})(?![\d%¢.])/g;
   const ANY = /\d\s?(¢|%|c\b)|(^|[^\d])\$?0?\.\d{2}/;
   const SKIP = new Set(['SCRIPT','STYLE','NOSCRIPT','TEXTAREA','INPUT','SELECT','OPTION','CODE','PRE']);
 
@@ -18,39 +19,36 @@
     const a = p >= 0.5 ? -Math.round(p / (1 - p) * 100) : Math.round((1 - p) / p * 100);
     return a > 0 ? '+' + a : String(a);
   };
+  const probOf = s => { const x = s.replace(/[\s$¢%c]/g, ''); return x.startsWith('.') || x.startsWith('0.') ? parseFloat(x) : parseFloat(x) / 100; };
 
-  let tagged = 0;
-  const made = new WeakSet();   // text pieces this script created -- not re-tagged unless the site changes them
+  let converted = 0;
+  let mine = new WeakMap();    // text node -> the text this script put there (so its own edits aren't re-converted)
+  const orig = new WeakMap();  // text node -> the site's text before converting
+  const nodes = new Set();     // converted nodes, to flip back with Alt+A
+
   function convert(node){
-    const txt = node.nodeValue; if (!ANY.test(txt)) return;
+    const txt = node.nodeValue; if (mine.get(node) === txt) return;
+    if (!ANY.test(txt)) return;
     const hits = [];
-    RE_C.lastIndex = 0; let m;
-    while ((m = RE_C.exec(txt))) hits.push({ end: m.index + m[0].length, p: parseFloat(m[2]) / 100 });
-    RE_S.lastIndex = 0;
-    while ((m = RE_S.exec(txt))) hits.push({ end: m.index + m[0].length, p: parseFloat('0.' + m[3]) });
-    const ok = hits.map(h => ({ ...h, am: american(h.p) })).filter(h => h.am).sort((a, b) => a.end - b.end);
-    if (!ok.length) return;
-    const frag = document.createDocumentFragment(); let last = 0;
-    ok.forEach(h => {
-      if (h.end <= last) return;
-      const t = document.createTextNode(txt.slice(last, h.end)); made.add(t); frag.appendChild(t);
-      const fav = h.am.startsWith('-');
-      const tag = document.createElement('span'); tag.className = 'amx ' + (fav ? 'fav' : 'dog'); tag.textContent = h.am; tag.dataset.amx = '1';
-      // inline too, so it looks the same inside web components the page's stylesheet can't reach
-      tag.style.cssText = `display:${document.documentElement.classList.contains('amx-off')?'none':'inline-block'};margin-left:4px;padding:0 5px;border-radius:5px;font-weight:800;font-size:.85em;line-height:1.35;color:#fff;white-space:nowrap;font-variant-numeric:tabular-nums;vertical-align:baseline;background:${fav?'#3a0d0d':'#0d2a17'};border:1px solid ${fav?'#7f1d1d':'#166534'}`;
-      frag.appendChild(tag); last = h.end; tagged++;
-    });
-    const t = document.createTextNode(txt.slice(last)); made.add(t); frag.appendChild(t);
-    node.parentNode.replaceChild(frag, node);
+    for (const re of [RE_C, RE_S]) { re.lastIndex = 0; let m;
+      while ((m = re.exec(txt))) { const start = m.index + m[1].length, end = m.index + m[0].length, am = american(probOf(m[2])); if (am) hits.push({ start, end, am }); } }
+    if (!hits.length) return;
+    hits.sort((a, b) => a.start - b.start);
+    let out = '', last = 0;
+    hits.forEach(h => { if (h.start < last) return; out += txt.slice(last, h.start) + h.am; last = h.end; });
+    out += txt.slice(last);
+    if (out === txt) return;
+    orig.set(node, txt); nodes.add(node);
+    if (off) return;
+    mine.set(node, out); node.nodeValue = out; converted++;
   }
 
-  const okText = n => { const p = n.parentElement || n.parentNode?.host; if (!p || SKIP.has(p.tagName) || (p.closest && p.closest('.amx')) || p.isContentEditable) return false; return !made.has(n) && ANY.test(n.nodeValue); };
-  function retag(n){ const nx = n.nextSibling; if (nx && nx.nodeType === 1 && nx.dataset && nx.dataset.amx) nx.remove(); convert(n); }
+  const okText = n => { const p = n.parentElement || n.parentNode?.host; if (!p || SKIP.has(p.tagName) || p.isContentEditable) return false; return mine.get(n) !== n.nodeValue && ANY.test(n.nodeValue); };
   function scan(root){
     if (!root) return;
-    if (root.nodeType === 3) { if (okText(root)) retag(root); return; }
+    if (root.nodeType === 3) { if (okText(root)) convert(root); return; }
     if (root.nodeType !== 1 && root.nodeType !== 11) return;
-    if (root.nodeType === 1 && (SKIP.has(root.tagName) || root.classList?.contains('amx'))) return;
+    if (root.nodeType === 1 && SKIP.has(root.tagName)) return;
     const list = [];
     const w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT);
     let n = w.currentNode;
@@ -59,18 +57,18 @@
       else if (n.shadowRoot && !n.shadowRoot._amx) { n.shadowRoot._amx = 1; watch(n.shadowRoot); scan(n.shadowRoot); }   // prices inside web components
       n = w.nextNode();
     }
-    list.forEach(retag);
+    list.forEach(convert);
     paintPill();
   }
 
-  // live prices: re-tag whatever changes (batched once per frame)
+  // live prices: when the site rewrites a price, convert the new one (batched once per frame)
   let pending = new Set(), queued = false;
   const flush = () => { queued = false; const items = [...pending]; pending.clear(); items.forEach(n => n.isConnected && scan(n)); };
   function watch(root){
     new MutationObserver(muts => {
       muts.forEach(m => {
-        if (m.type === 'characterData') { made.delete(m.target); pending.add(m.target); }   // the site changed the price
-        m.addedNodes.forEach(n => { if (made.has(n) || (n.nodeType === 1 && n.dataset && n.dataset.amx) || n === pill) return; pending.add(n); });
+        if (m.type === 'characterData') { if (mine.get(m.target) !== m.target.nodeValue) pending.add(m.target); }
+        m.addedNodes.forEach(n => { if (n !== pill) pending.add(n); });
       });
       if (!queued && pending.size) { queued = true; requestAnimationFrame(flush); }
     }).observe(root, { childList: true, subtree: true, characterData: true });
@@ -80,15 +78,18 @@
   const pill = document.createElement('div');
   pill.style.cssText = 'position:fixed;left:8px;bottom:8px;z-index:2147483647;padding:3px 8px;border-radius:999px;background:#111;color:#fff;font:700 11px system-ui,sans-serif;opacity:.8;cursor:pointer';
   pill.onclick = () => { pill.remove(); store.set('amxPill','0'); };
-  function paintPill(){ if (store.get('amxPill') === '0' || window.top !== window) return; pill.textContent = `AMX · ${tagged} tagged${document.documentElement.classList.contains('amx-off') ? ' · hidden (Alt+A)' : ''}`; if (document.body && !pill.isConnected) document.body.appendChild(pill); }
+  function paintPill(){ if (store.get('amxPill') === '0' || window.top !== window) return; pill.textContent = off ? 'AMX · off (Alt+A)' : `AMX · ${converted} converted`; if (document.body && !pill.isConnected) document.body.appendChild(pill); }
 
   watch(document.documentElement);
   scan(document.body);
-  setInterval(() => scan(document.body), 4000);   // catch-all for prices drawn without a DOM change we saw
+  setInterval(() => { if (!off) scan(document.body); nodes.forEach(n => { if (!n.isConnected) nodes.delete(n); }); }, 4000);
 
+  // Alt+A: back to the site's own prices / American odds again
   document.addEventListener('keydown', e => {
-    if (e.altKey && (e.key === 'a' || e.key === 'A' || e.code === 'KeyA')) {
-      const off = document.documentElement.classList.toggle('amx-off'); store.set('amxOff', off ? '1' : '0'); document.querySelectorAll('[data-amx]').forEach(t=>t.style.display=off?'none':'inline-block'); paintPill(); e.preventDefault();
-    }
+    if (!(e.altKey && (e.key === 'a' || e.key === 'A' || e.code === 'KeyA'))) return;
+    off = !off; store.set('amxOff', off ? '1' : '0'); e.preventDefault();
+    if (off) { nodes.forEach(n => { if (n.isConnected && mine.get(n) === n.nodeValue && orig.has(n)) { const o = orig.get(n); mine.set(n, o); n.nodeValue = o; } }); }
+    else { mine = new WeakMap(); scan(document.body); }
+    paintPill();
   }, true);
 })();
