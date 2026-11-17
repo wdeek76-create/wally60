@@ -581,7 +581,7 @@ All-time by arb money
 Under $1k (560): 318-242 · +61.18u · +10.0%
 $1k–2.5k (81): 45-36 · +3.23u · +3.4%
 $2.5k+ (39): 23-16 · +5.80u · +14.0%`;
-const SM_SECS=['head','sport','market','side','tip','source','exch','exchHold','hold','money','news','small'];
+const SM_SECS=['head','sport','market','side','tip','source','exch','exchHold','hold','srcHold','money','news','small'];
 const smEmptySecs=()=>Object.fromEntries(SM_SECS.map(k=>[k,{}]));
 const smR0=()=>({w:0,l:0,p:0,u:0,s:0,n:0});
 function smParseBase(txt){
@@ -610,6 +610,8 @@ const smMoneyLab=t=>{ const v=t.sharpLiq||0; return v>=2500?'$2.5k+':v>=1000?'$1
 const smTipLab=t=>{ const b=outBucket(t); return b ? b+(smWindowMuted(t.sportKey,b)?' (muted)':'') : null; };
 const smLabels=(t,bk)=>({ sport:SPORTS[t.sportKey]?.label||t.sportKey, market:`${SPORTS[t.sportKey]?.label||t.sportKey} ${t.marketLabel||t.mkey}`, side:sideTxt(t),
   source:t.via?`Borrowing ${bookShort(t.via.book)}`:`${bookShort(bk)} direct`, exch:smSrc(t), exchHold:smSrcHold(t), hold:smHoldBucket(t), money:smMoneyLab(t),
+  // the arb size AND where it came from: "Borrowing Bovada · 0–0.5% arb" / "FD direct · 1–2% arb"
+  srcHold:`${t.via?`Borrowing ${bookShort(t.via.book)}`:`${bookShort(bk)} direct`} · ${smHoldBucket(t)}`,
   news: t.rw ? (t.rw.iffy?'⚠️ Iffy (RotoWire)':'Clean (RotoWire)') : null });
 function smRecAdd(sec, label, t){ if(label==null) return; const r=sec[label]||(sec[label]=smR0()); const win=t.stakeUnits||1, risk=riskToWin(t.price,win); r.n++;
   if(t.result==='win'){ r.w++; r.u+=win; r.s+=risk; } else if(t.result==='loss'){ r.l++; r.u-=risk; r.s+=risk; } else if(t.result==='push'){ r.p++; r.s+=risk; } }
@@ -620,7 +622,7 @@ function smRecordBet(t){
   // background $150 tier (under the minimum, never sent): its own section only, kept out of the real record
   if(t.small){ [R.all, D].forEach(S=>{ S.small=S.small||{}; smRecAdd(S.small,'All',t); smRecAdd(S.small,L.market,t); smRecAdd(S.small,L.side,t); }); return; }
   [R.all, D].forEach(S=>{ SM_SECS.forEach(k=>{ S[k]=S[k]||{}; }); smRecAdd(S.head,'all',t); smRecAdd(S.head, muted?'muted':'sent', t); smRecAdd(S.tip, smTipLab(t), t);
-    if(!muted) ['sport','market','side','source','exch','exchHold','hold','money','news'].forEach(k=>smRecAdd(S[k], L[k], t)); });
+    if(!muted) ['sport','market','side','source','exch','exchHold','hold','srcHold','money','news'].forEach(k=>smRecAdd(S[k], L[k], t)); });
 }
 // Play grade, worked out the moment the play comes in: how bets like this one have done -- its sport, side, market, time to tip, source (direct / borrowing),
 // hold / arb bucket, exchange money bucket and exchange combo, each looked up in the all-time
@@ -635,7 +637,7 @@ function smPlayGrade(e){
     const t=smPlayT(e), bk=t.bookKey||'fanduel', A=smRec.books[bk]?.all; if(!A) return null;
     const L=smLabels(t,bk), tip=smTipLab(t);
     let u=0, st=0, w=0, n=0; const parts=[];
-    [['sport',L.sport],['side',L.side],['market',L.market],['tip',tip],['source',L.source],['hold',L.hold],['money',L.money],['exch',L.exch]].forEach(([sec,lab])=>{
+    [['sport',L.sport],['side',L.side],['market',L.market],['tip',tip],['source',L.source],['hold',L.hold],['srcHold',L.srcHold],['money',L.money],['exch',L.exch]].forEach(([sec,lab])=>{
       const r=lab!=null && A[sec]?.[lab]; if(!r || !r.n || !r.s) return; const wt=Math.min(r.n,150);
       u+=(r.u/r.s)*wt; w+=wt; n++; if(sec!=='sport' && sec!=='side') parts.push({ sec, lab, r }); });
     if(!n || !w) return null;
@@ -645,7 +647,8 @@ function smPlayGrade(e){
 const smGoodPlay = e => /^🟢/.test(smPlayGrade(e)?.g||'');
 // the alert's record lines instead of a grade: how this prop type, this arb size and this exchange have done
 // "Rebounds +18.81u" / "1–2% arb +12.10u" / "Kalshi +20.26u" (green / red dot by profit)
-const smGradeTxt = g => !g ? '' : ['market','hold','exch'].map(sec=>g.parts.find(x=>x.sec===sec)).filter(Boolean)
+// arb line: its size from that source ("Borrowing Bovada · 0–0.5% arb") once that has a record, else the size alone
+const smGradeTxt = g => !g ? '' : ['market', g.parts.some(x=>x.sec==='srcHold')?'srcHold':'hold', 'exch'].map(sec=>g.parts.find(x=>x.sec===sec)).filter(Boolean)
   .map(x=>`${x.r.u>0?'🟢':x.r.u<0?'🔴':'⚪'} ${x.sec==='market'?String(x.lab).replace(/^(NBA|WNBA|NFL|NHL|MLB|NCAAF|NCAAB) /,''):x.lab} ${x.r.u>=0?'+':''}${x.r.u.toFixed(2)}u`).join('\n');
 // graded bets -> the record, then out of the tracker (FD bets on games through Nov 2 are already in the restored record)
 function smDumpGraded(now0){
@@ -672,7 +675,7 @@ function sharpSummaryHtml(){
   return `<div class="ttsum"><div class="ttsumh"><span>Sharp Money · ${esc(tkBookLabel(bk))}</span></div>${row(H.muted?.n?'Overall (sent windows)':'Overall', H.sent||smR0())}${H.muted?.n?row('Muted windows (not sent)',H.muted)+row('With muted',H.all):''}${openN?`<div class="ttrow dim" style="font-size:10.5px">${openN} open bets not graded yet</div>`:''}
     ${sub('By side')}${rows(A.side)}${sub('By sport')}${rows(A.sport)}${sub('By prop type')}${rows(A.market)}
     ${sub('By time to tip (all windows)')}${rows(A.tip,smTipOrd)}${sub('By exchange money')}${rows(A.money)}
-    ${sub('By source (direct vs borrowing)')}${rows(A.source)}${sub('By hold / arb')}${rows(A.hold,smHoldOrder)}
+    ${sub('By source (direct vs borrowing)')}${rows(A.source)}${sub('By hold / arb')}${rows(A.hold,smHoldOrder)}${Object.keys(A.srcHold||{}).length?sub('By source · hold / arb')+rows(A.srcHold):''}
     ${sub('By exchange')}${rows(A.exch)}${sub('By exchange · hold vs arb')}${rows(A.exchHold)}${SM_RW_ON&&Object.keys(A.news||{}).length?sub('NBA · RotoWire news (iffy vs clean)')+rows(A.news):''}${A.small?.All?.n?sub(`$${SM_SMALL}+ under your minimum (background only, not sent)`)+row('All',A.small.All)+rows(Object.fromEntries(Object.entries(A.small).filter(([k])=>k!=='All'))):''}</div>`;
 }
 
@@ -2876,7 +2879,7 @@ const csvCell = v => { const t=String(v??''); return /[",\n]/.test(t) ? `"${t.re
 // The export as a clean spreadsheet: all-time first (overall, then each breakdown), then every day.
 // Columns: Day, Breakdown, Label, Bets, W, L, P, Units, ROI, Grade, Staked. Open bets go in a short
 // block at the bottom (the last column there carries the bet itself so Import can bring it back).
-const SM_CSV_SEC = { head:'Overall', sport:'Sport', market:'Prop type', side:'Side', tip:'Time to tip', source:'Source', exch:'Exchange', exchHold:'Exchange · hold vs arb', hold:'Hold / arb', money:'Arb money', news:'RotoWire', small:'$150 tier (not sent)' };
+const SM_CSV_SEC = { head:'Overall', sport:'Sport', market:'Prop type', side:'Side', tip:'Time to tip', source:'Source', exch:'Exchange', exchHold:'Exchange · hold vs arb', hold:'Hold / arb', srcHold:'Source · hold / arb', money:'Arb money', news:'RotoWire', small:'$150 tier (not sent)' };
 const SM_CSV_HEAD = { sent:'Sent (the record)', muted:'Muted windows (not sent)', all:'With muted' };
 const SM_CSV_COLS = ['Day','Breakdown','Label','Bets','W','L','P','Units','ROI','Grade','Staked','Book'];
 function smTrackerCsv(){
