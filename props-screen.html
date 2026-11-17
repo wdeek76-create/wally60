@@ -3532,9 +3532,9 @@ const pkTgChat = () => LS.get('props_pk_tg_chat','');
 const pkOn = () => !!(pkTgToken() && pkTgChat());
 let pkSent = (()=>{ try{ const o=JSON.parse(LS.get('props_pk_sent','{}')); return o.day===new Date().toDateString() ? o : { day:new Date().toDateString(), keys:[] }; }catch(e){ return { day:new Date().toDateString(), keys:[] }; } })();
 async function pkTg(method, fd){ const r=await fetch(`https://api.telegram.org/bot${pkTgToken()}/${method}`, { method:'POST', body:fd }); const d=await r.json().catch(()=>({})); if(!d.ok) throw new Error(d.description||`HTTP ${r.status}`); return d.result; }
-async function pkPost(text){ if(!pkOn()) return false;
+async function pkPost(text, quiet){ if(!pkOn()) return false;
   try{ const fd=new FormData(); fd.append('chat_id', pkTgChat()); fd.append('text', text.slice(0,4000)); fd.append('parse_mode','HTML'); fd.append('link_preview_options', JSON.stringify({ is_disabled:true })); await pkTg('sendMessage', fd); return true; }
-  catch(e){ toast('Telegram: '+e.message); return false; } }
+  catch(e){ if(!quiet) toast('Telegram: '+e.message); return false; } }
 async function pkSetup(){
   const tk=prompt('Bot token for pasted picks. Leave as is to use your Copy summary bot.', LS.get('props_pk_tg_token','')||ptgToken()); if(tk==null) return;
   LS.set('props_pk_tg_token', tk.trim()===ptgToken() ? '' : tk.trim());
@@ -3548,11 +3548,16 @@ const pkSyncDc = () => { const b=$('#pkdc'); if(b){ b.textContent = pkOn() ? 'âœ
 // one post per pick: the pick as posted, play-to, then the books at that line (âœ“ = at or better than play-to)
 // a book's phone link for the Telegram post: its https bet link (FanDuel: the add-to-betslip link, phone version),
 // else the book's site. Telegram only opens https links, so app-only links fall back to the site.
+let pkAppLinks=false;
 function pkMobileLink(x, rows){ let o=x.o; const k=x.key;
   // DK's line can come from Courtside / Onyx (same odds): use DraftKings' own row for the dk link
   if(k==='draftkings' && rows && o){ const own=rows.find(r=>String(r.sportsbook||'').toLowerCase()==='draftkings' && Number(r.points)===Number(o.points) && sideOf(r)===sideOf(o)); if(own) o=own; }
   if(k==='fanduel' && o){ const u=fdMobile(()=>fdParlayLink([o])); if(u) return u; }
-  const d=o?.deep_link||{}; const h=[d.ios, d.android, d.desktop].find(u=>u && /^https:\/\//i.test(String(u)));
+  const d=o?.deep_link||{};
+  // first try: the same phone link the player page opens (Novig / PX / DK... app link) -- if Telegram won't take it, the
+  // post is re-sent with web links (pkAppLinks off)
+  if(pkAppLinks && EXCH.has(k)){ const m=(IS_IOS&&d.ios)||(IS_ANDROID&&d.android)||d.ios||d.android; if(m) return String(m); }   // exchanges only (books' web links already open their apps)
+  const h=[d.ios, d.android, d.desktop].find(u=>u && /^https:\/\//i.test(String(u)));
   return h ? fdMobile(()=>fdState(h)) : (k==='fanduel' ? 'https://sportsbook.fanduel.com' : (BOOK_HOME[k] && /^https:/.test(BOOK_HOME[k]) ? BOOK_HOME[k] : null)); }
 const pkEsc = t => String(t??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 // your pasted message, with the player, each bet (o4.5 reb) and the play-to's in bold (Telegram HTML)
@@ -3606,8 +3611,9 @@ async function pkSendDiscord(picks, manual){
   for(const pk of picks){
     const key=pkKey(pk); if(!manual && pkSent.keys.includes(key)) continue;
     if(!pkSent.keys.includes(key)){ pkSent.keys.push(key); LS.set('props_pk_sent', JSON.stringify(pkSent)); }
-    const lines=await pkBookLines(pk);
-    const ok=await pkPost(`${pkBoldMsg(pk)}\n\n${lines.join('\n\n')}`);
+    pkAppLinks=true; let ok=false;
+    try{ const lines=await pkBookLines(pk); ok=await pkPost(`${pkBoldMsg(pk)}\n\n${lines.join('\n\n')}`, true); } finally{ pkAppLinks=false; }
+    if(!ok){ const lines=await pkBookLines(pk); ok=await pkPost(`${pkBoldMsg(pk)}\n\n${lines.join('\n\n')}`); }
     if(ok) n++; else if(!manual){ pkSent.keys=pkSent.keys.filter(k=>k!==key); }
     await new Promise(z=>setTimeout(z,700));
   }
