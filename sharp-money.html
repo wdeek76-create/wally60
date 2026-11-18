@@ -581,7 +581,7 @@ All-time by arb money
 Under $1k (560): 318-242 · +61.18u · +10.0%
 $1k–2.5k (81): 45-36 · +3.23u · +3.4%
 $2.5k+ (39): 23-16 · +5.80u · +14.0%`;
-const SM_SECS=['head','sport','market','side','tip','source','exch','exchHold','hold','srcHold','money','news','small'];
+const SM_SECS=['head','sport','market','side','tip','source','exch','exchHold','hold','srcHold','react','money','news','small'];
 const smEmptySecs=()=>Object.fromEntries(SM_SECS.map(k=>[k,{}]));
 const smR0=()=>({w:0,l:0,p:0,u:0,s:0,n:0});
 function smParseBase(txt){
@@ -612,6 +612,8 @@ const smLabels=(t,bk)=>({ sport:SPORTS[t.sportKey]?.label||t.sportKey, market:`$
   source:t.via?`Borrowing ${bookShort(t.via.book)}`:`${bookShort(bk)} direct`, exch:smSrc(t), exchHold:smSrcHold(t), hold:smHoldBucket(t), money:smMoneyLab(t),
   // the arb size AND where it came from: "Borrowing Bovada · 0–0.5% arb" / "FD direct · 1–2% arb"
   srcHold:`${t.via?`Borrowing ${bookShort(t.via.book)}`:`${bookShort(bk)} direct`} · ${smHoldBucket(t)}`,
+  // your reaction on its Telegram post: 👍'd (bet it) vs left alone
+  react: t.tgMsg ? (t.reacted ? '👍 Reacted (bet)' : 'No reaction') : null,
   news: t.rw ? (t.rw.iffy?'⚠️ Iffy (RotoWire)':'Clean (RotoWire)') : null });
 function smRecAdd(sec, label, t){ if(label==null) return; const r=sec[label]||(sec[label]=smR0()); const win=t.stakeUnits||1, risk=riskToWin(t.price,win); r.n++;
   if(t.result==='win'){ r.w++; r.u+=win; r.s+=risk; } else if(t.result==='loss'){ r.l++; r.u-=risk; r.s+=risk; } else if(t.result==='push'){ r.p++; r.s+=risk; } }
@@ -622,7 +624,7 @@ function smRecordBet(t){
   // background $150 tier (under the minimum, never sent): its own section only, kept out of the real record
   if(t.small){ [R.all, D].forEach(S=>{ S.small=S.small||{}; smRecAdd(S.small,'All',t); smRecAdd(S.small,L.market,t); smRecAdd(S.small,L.side,t); }); return; }
   [R.all, D].forEach(S=>{ SM_SECS.forEach(k=>{ S[k]=S[k]||{}; }); smRecAdd(S.head,'all',t); smRecAdd(S.head, muted?'muted':'sent', t); smRecAdd(S.tip, smTipLab(t), t);
-    if(!muted) ['sport','market','side','source','exch','exchHold','hold','srcHold','money','news'].forEach(k=>smRecAdd(S[k], L[k], t)); });
+    if(!muted) ['sport','market','side','source','exch','exchHold','hold','srcHold','react','money','news'].forEach(k=>smRecAdd(S[k], L[k], t)); });
 }
 // Play grade, worked out the moment the play comes in: how bets like this one have done -- its sport, side, market, time to tip, source (direct / borrowing),
 // hold / arb bucket, exchange money bucket and exchange combo, each looked up in the all-time
@@ -675,7 +677,7 @@ function sharpSummaryHtml(){
   return `<div class="ttsum"><div class="ttsumh"><span>Sharp Money · ${esc(tkBookLabel(bk))}</span></div>${row(H.muted?.n?'Overall (sent windows)':'Overall', H.sent||smR0())}${H.muted?.n?row('Muted windows (not sent)',H.muted)+row('With muted',H.all):''}${openN?`<div class="ttrow dim" style="font-size:10.5px">${openN} open bets not graded yet</div>`:''}
     ${sub('By side')}${rows(A.side)}${sub('By sport')}${rows(A.sport)}${sub('By prop type')}${rows(A.market)}
     ${sub('By time to tip (all windows)')}${rows(A.tip,smTipOrd)}${sub('By exchange money')}${rows(A.money)}
-    ${sub('By source (direct vs borrowing)')}${rows(A.source)}${sub('By hold / arb')}${rows(A.hold,smHoldOrder)}${Object.keys(A.srcHold||{}).length?sub('By source · hold / arb')+rows(A.srcHold):''}
+    ${sub('By source (direct vs borrowing)')}${rows(A.source)}${sub('By hold / arb')}${rows(A.hold,smHoldOrder)}${Object.keys(A.srcHold||{}).length?sub('By source · hold / arb')+rows(A.srcHold):''}${Object.keys(A.react||{}).length?sub('Reacted 👍 vs not (Telegram)')+rows(A.react):''}
     ${sub('By exchange')}${rows(A.exch)}${sub('By exchange · hold vs arb')}${rows(A.exchHold)}${SM_RW_ON&&Object.keys(A.news||{}).length?sub('NBA · RotoWire news (iffy vs clean)')+rows(A.news):''}${A.small?.All?.n?sub(`$${SM_SMALL}+ under your minimum (background only, not sent)`)+row('All',A.small.All)+rows(Object.fromEntries(Object.entries(A.small).filter(([k])=>k!=='All'))):''}</div>`;
 }
 
@@ -1006,9 +1008,10 @@ async function tgApi(method, fd){ const r=await fetch(`https://api.telegram.org/
 async function tgSend(text, photo){
   if(!tgOn()) return false;
   try{ const fd=new FormData(); fd.append('chat_id', tgChat); fd.append('parse_mode','HTML');
-    if(photo && text.length<=1024){ fd.append('caption', text); fd.append('photo', photo, 'vs.png'); await tgApi('sendPhoto', fd); }
-    else { fd.append('text', text); fd.append('link_preview_options', JSON.stringify({ is_disabled:true })); await tgApi('sendMessage', fd); }
-    return true; }catch(err){ console.warn('[tg]', err.message); tgLastErr=err.message; return false; } }
+    let m;
+    if(photo && text.length<=1024){ fd.append('caption', text); fd.append('photo', photo, 'vs.png'); m=await tgApi('sendPhoto', fd); }
+    else { fd.append('text', text); fd.append('link_preview_options', JSON.stringify({ is_disabled:true })); m=await tgApi('sendMessage', fd); }
+    return m?.message_id || true; }catch(err){ console.warn('[tg]', err.message); tgLastErr=err.message; return false; } }
 let tgLastErr='';
 // the bot's newest chat (after it's added to a channel/group, or someone messages it)
 async function tgFindChat(){ try{ const fd=new FormData(); fd.append('allowed_updates', JSON.stringify(['message','channel_post','my_chat_member']));
@@ -1099,7 +1102,9 @@ async function sharpDcPump(){
         const tgP = tgOn() && (e.tgt||'fanduel')==='fanduel' ? tgSend(tgText(pl, e), vs) : null;   // Telegram: same play, same time
         if(vs && pl.embeds?.[0]){ pl.embeds[0].thumbnail={ url:'attachment://vs.png' }; pl.files=[{ name:'vs.png', blob:vs }]; }
         if(hookFor(e)) ok=await discordPost({ ...pl, ...rt, content:[head, rt.content].filter(Boolean).join(' ') }, m=>{ why=m; }, hookFor(e));
-        if(tgP){ const tok=await tgP; if(!tok) why=[why, `Telegram: ${tgLastErr}`].filter(Boolean).join(' · '); if(!hookFor(e)) ok=tok; } }catch(err){ why=err.message; }
+        if(tgP){ const tok=await tgP; if(!tok) why=[why, `Telegram: ${tgLastErr}`].filter(Boolean).join(' · '); if(!hookFor(e)) ok=!!tok;
+          // which Telegram post is this bet -- so a 👍 on it can be tracked (bet it) vs no reaction
+          if(typeof tok==='number'){ const tb=tracked.find(t=>t.src==='sharp' && !t.final && t.playerKey===e.key && t.fixtureId===e.fx && t.mkey===e.mk && !t.tgMsg); if(tb){ tb.tgMsg=tok; saveTracked(); } } } }catch(err){ why=err.message; }
       if(ok){ dcMarkSent(e); if(e.tgt!=='bet105') fdSentBump(); }
       if(e.sk==='nba'){ const tb=tracked.find(t=>t.src==='sharp' && !t.final && t.playerKey===e.key && t.fixtureId===e.fx && t.mkey===e.mk); const r=smRwFlag(e); if(tb && r && !tb.rw){ tb.rw=r; saveTracked(); } }
       sharpDcNote(ok, ok ? `sent ${tag}${name}` : `FAILED ${tag}${name}: ${why||'?'}`);
@@ -2429,10 +2434,17 @@ async function tgcButton(q){
 async function tgcPoll(){
   if(tgcBusy || !tgToken) return; tgcBusy=true;
   try{
-    const fd=new FormData(); fd.append('offset', String(tgcOff)); fd.append('timeout','0'); fd.append('allowed_updates', JSON.stringify(['message','callback_query','channel_post']));
+    const fd=new FormData(); fd.append('offset', String(tgcOff)); fd.append('timeout','0'); fd.append('allowed_updates', JSON.stringify(['message','callback_query','channel_post','message_reaction_count','message_reaction']));
     const ups=await tgApi('getUpdates', fd);
     for(const u of ups||[]){ tgcOff=u.update_id+1; LS.set('sm_tgc_off', String(tgcOff));
       if(u.callback_query){ await tgcButton(u.callback_query); continue; }
+      // a reaction on an alert in your channel (channels only send the count): any reaction = you bet it
+      const rc=u.message_reaction_count || u.message_reaction;
+      if(rc && tgcIsMyChannel(rc.chat)){ const n=u.message_reaction_count ? (rc.reactions||[]).reduce((a,x)=>a+(x.total_count||0),0) : (rc.new_reaction||[]).length;
+        const id=rc.message_id; let hit=false;
+        tracked.forEach(t=>{ if(t.tgMsg===id){ t.reacted=n>0; hit=true; } }); if(hit) saveTracked();
+        ufcTracked.forEach(t=>{ if(t.tgMsg===id){ t.reacted=n>0; hit=true; } }); if(hit){ ufcSave(); tgcRerender(); }
+        continue; }
       // typed in your alerts channel (only its admins can post there): run it, answer in the channel, tidy up the command
       const cp=u.channel_post;
       if(cp && cp.text && tgcIsMyChannel(cp.chat)){ const ch=String(cp.chat.id), t=cp.text.trim();
@@ -2560,7 +2572,8 @@ function ufcTrackHtml(){
   const MOVE=['15–19¢','20–29¢','30¢+'], ODDS=['-200 or shorter','-199 to -101','+100 to +149','+150 to +249','+250 or longer'];
   const brk = g.length ? sec('By cent move', t=>t.cents>=30?'30¢+':t.cents>=20?'20–29¢':'15–19¢', MOVE)
     + sec('By odds (FD price)', t=>t.price<=-200?ODDS[0]:t.price<0?ODDS[1]:t.price<150?ODDS[2]:t.price<250?ODDS[3]:ODDS[4], ODDS)
-    + sec('By book that moved', t=>UFC_NAME[t.book]||t.book) : '';
+    + sec('By book that moved', t=>UFC_NAME[t.book]||t.book)
+    + (g.some(t=>t.tgMsg) ? sec('Reacted 👍 vs not', t=>!t.tgMsg?'Not on Telegram':t.reacted?'👍 Reacted (bet)':'No reaction') : '') : '';
   return `<div class="ttsum" style="margin:8px 0"><div class="ttsumh"><span>🥊 UFC drops · ${r.w}-${r.l}${r.p?'-'+r.p:''} · <span class="${r.u>0?'pos':r.u<0?'neg':''}">${r.u>=0?'+':''}${r.u.toFixed(2)}u</span>${r.roi!=null?` · ${r.roi>=0?'+':''}${r.roi.toFixed(1)}%`:''}${avg!=null?` · CLV ${avg>0?'+':''}${avg}¢ avg`:''}</span></div>
     ${brk}${open.map(row).join('')}${done.length?`<div class="dim" style="font-size:10px;margin-top:6px">Graded</div>${done.map(row).join('')}`:''}</div>`;
 }
@@ -2576,7 +2589,7 @@ function ufcPost({ c, f, fd, drop, fair, ev, others }){
       description:`🥊 UFC · vs ${vs} · ${when} ET`,
       fields:[ { name:'📉 Market dropping', value:dropTxt+(others.length?`\n${others.join(' · ')}`:'') },
         { name:'Edge', value:`Fair **${fmtAm(fairAm)}** · **+${ev.toFixed(1)}% EV** at FD ${fmtAm(fd.price)}` } ], footer:{ text:'UFC market drop' } }] }, null, discordHook);
-  if(tgOn()) tgSend([`🥊 UFC · vs ${tgEsc(vs)} · ${tgEsc(when)} ET`, `<b>${tgEsc(name)} ML</b>\n<b>${fmtAm(fd.price)}</b> FanDuel`, `📉 ${tgEsc(dropTxt)}${others.length?`\n${tgEsc(others.join(' · '))}`:''}`, `Fair ${fmtAm(fairAm)} · +${ev.toFixed(1)}% EV`, url?tgEsc(url)+(desk&&desk!==url?`\n🖥 Desktop: ${tgEsc(desk)}`:''):''].filter(Boolean).join('\n\n'));
+  if(tgOn()) tgSend([`🥊 UFC · vs ${tgEsc(vs)} · ${tgEsc(when)} ET`, `<b>${tgEsc(name)} ML</b>\n<b>${fmtAm(fd.price)}</b> FanDuel`, `📉 ${tgEsc(dropTxt)}${others.length?`\n${tgEsc(others.join(' · '))}`:''}`, `Fair ${fmtAm(fairAm)} · +${ev.toFixed(1)}% EV`, url?tgEsc(url)+(desk&&desk!==url?`\n🖥 Desktop: ${tgEsc(desk)}`:''):''].filter(Boolean).join('\n\n')).then(mid=>{ const t=ufcTracked.find(x=>x.id===`${c.fx}|${normName(c.who)}`); if(t && typeof mid==='number'){ t.tgMsg=mid; ufcSave(); } });
 }
 setTimeout(ufcTick, 15e3); setInterval(ufcTick, 45e3);
 // ───────────────────────── NBA Live (props, in-game only) ─────────────────────────
@@ -3021,7 +3034,7 @@ const csvCell = v => { const t=String(v??''); return /[",\n]/.test(t) ? `"${t.re
 // The export as a clean spreadsheet: all-time first (overall, then each breakdown), then every day.
 // Columns: Day, Breakdown, Label, Bets, W, L, P, Units, ROI, Grade, Staked. Open bets go in a short
 // block at the bottom (the last column there carries the bet itself so Import can bring it back).
-const SM_CSV_SEC = { head:'Overall', sport:'Sport', market:'Prop type', side:'Side', tip:'Time to tip', source:'Source', exch:'Exchange', exchHold:'Exchange · hold vs arb', hold:'Hold / arb', srcHold:'Source · hold / arb', money:'Arb money', news:'RotoWire', small:'$150 tier (not sent)' };
+const SM_CSV_SEC = { head:'Overall', sport:'Sport', market:'Prop type', side:'Side', tip:'Time to tip', source:'Source', exch:'Exchange', exchHold:'Exchange · hold vs arb', hold:'Hold / arb', srcHold:'Source · hold / arb', react:'Telegram reaction', money:'Arb money', news:'RotoWire', small:'$150 tier (not sent)' };
 const SM_CSV_HEAD = { sent:'Sent (the record)', muted:'Muted windows (not sent)', all:'With muted' };
 const SM_CSV_COLS = ['Day','Breakdown','Label','Bets','W','L','P','Units','ROI','Grade','Staked','Book'];
 function smTrackerCsv(){
