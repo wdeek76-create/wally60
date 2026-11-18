@@ -815,7 +815,8 @@ const logoImg = (team, sz) => { const g = slateFor(team); return g && g.logo ? `
 function rollupDays() {
   const cut = new Date(); cut.setDate(cut.getDate() - 1); const stale = localYMD(cut);          // a day still with open picks that is 2+ days old is closed by voidStale first
   const open = new Set(rows.filter(x => x.result === "pending").map(x => x.gameDate));
-  const days = [...new Set(rows.map(x => x.gameDate))].filter(d => !open.has(d) && d < localYMD(new Date()));
+  const y = new Date(); y.setDate(y.getDate() - 1); const yday = localYMD(y);
+  const days = [...new Set(rows.map(x => x.gameDate))].filter(d => !open.has(d) && d < yday);   // yesterday keeps its picks (for the recap); older graded days roll up
   if (!days.length) return 0;
   let moved = 0;
   days.forEach(d => {
@@ -825,8 +826,9 @@ function rollupDays() {
       const b = bucketOf(Number(x.ev)); if (b < 0) return;
       const ctx = x.ctx === "downside" || x.ctx === "flagged" ? x.ctx : (x.ctx || "clean");
       let r = hist.recs.find(y => y.src === x.src && y.d === d && y.stat === x.stat && y.ou === x.ou && y.ctx === ctx && y.b === b);
-      if (!r) { r = { src: x.src, d, stat: x.stat, ou: x.ou, ctx, b, w: 0, l: 0, pl: 0, n: 0 }; hist.recs.push(r); }
-      if (x.result === "hit") { r.w++; r.pl = Math.round((r.pl + win(x)) * 1000) / 1000; } else { r.l++; r.pl = Math.round((r.pl - 1) * 1000) / 1000; }
+      if (!r) { r = { src: x.src, d, stat: x.stat, ou: x.ou, ctx, b, w: 0, l: 0, pl: 0, st: 0, n: 0 }; hist.recs.push(r); }
+      if (x.result === "hit") { r.w++; r.pl = Math.round((r.pl + win(x)) * 1000) / 1000; } else { r.l++; r.pl = Math.round((r.pl - risk(x)) * 1000) / 1000; }
+      r.st = Math.round((r.st + risk(x)) * 1000) / 1000;
       r.n++;
     };
     dayRows.forEach(fold);
@@ -838,10 +840,12 @@ function rollupDays() {
   return moved;
 }
 // A summed record read back as a play: tally() adds its w / l / pl straight in; ev sits at the bucket's floor so the 5%+ / 10%+ filters work.
-const histRows = src => hist.recs.filter(r => src === "ALL" ? r.src !== "AGREE" : r.src === src).map(r => ({ _hist: true, src: r.src, gameDate: r.d, stat: r.stat, ou: r.ou, ctx: r.ctx, ev: BUCKETS[r.b] ? Math.max(BUCKETS[r.b][1], 0) : 0, w: r.w, l: r.l, pl: r.pl, n: r.n, result: "graded" }));
+const histRows = src => hist.recs.filter(r => src === "ALL" ? r.src !== "AGREE" : r.src === src).map(r => ({ _hist: true, src: r.src, gameDate: r.d, stat: r.stat, ou: r.ou, ctx: r.ctx, ev: BUCKETS[r.b] ? Math.max(BUCKETS[r.b][1], 0) : 0, w: r.w, l: r.l, pl: r.pl, st: r.st, n: r.n, result: "graded" }));
 const toast = t => { try { showToast(t); } catch (e) {} };
 const say = t => { document.getElementById("info").textContent = t; };
-const win = x => x.odds > 0 ? x.odds / 100 : 100 / Math.abs(x.odds);
+// Staking: a favourite is bet TO WIN 1u (risk |odds|/100, e.g. -150 risks 1.50u to win 1u); a dog is bet 1u flat (wins odds/100).
+const risk = x => x.odds > 0 ? 1 : Math.abs(x.odds) / 100;
+const win = x => x.odds > 0 ? x.odds / 100 : 1;
 const dec = o => o > 0 ? 1 + o / 100 : 1 + 100 / Math.abs(o);
 const am = d => d >= 2 ? Math.round((d - 1) * 100) : Math.round(-100 / (d - 1));
 const fo = o => (o > 0 ? "+" : "") + o;
@@ -1104,8 +1108,8 @@ async function gradeAll(auto) {
 const autoTick = () => { try { if (!document.hidden && rows.some(x => x.result === "pending" && gameOver(x))) gradeAll(true); } catch (e) {} };
 setInterval(autoTick, 10 * 60000); setTimeout(autoTick, 20000);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) setTimeout(autoTick, 3000); });
-const zero = () => ({ w: 0, l: 0, pl: 0 });
-function tally(set) { const a = zero(), o = zero(), u = zero(); set.forEach(x => { const add = v => { if (x._hist) { v.w += x.w; v.l += x.l; v.pl += x.pl; } else if (x.result === "hit") { v.w++; v.pl += win(x); } else if (x.result === "miss") { v.l++; v.pl -= 1; } }; add(a); add(x.ou === "over" ? o : u); }); return { a, o, u }; }
+const zero = () => ({ w: 0, l: 0, pl: 0, st: 0 });   // st = units staked (for ROI)
+function tally(set) { const a = zero(), o = zero(), u = zero(); set.forEach(x => { const add = v => { if (x._hist) { v.w += x.w; v.l += x.l; v.pl += x.pl; v.st += (x.st != null ? x.st : x.w + x.l); } else if (x.result === "hit") { v.w++; v.pl += win(x); v.st += risk(x); } else if (x.result === "miss") { v.l++; v.pl -= risk(x); v.st += risk(x); } }; add(a); add(x.ou === "over" ? o : u); }); return { a, o, u }; }
 const fmtU = n => (n >= 0 ? "+" : "") + n.toFixed(2) + "u";
 function cell(v) { const n = v.w + v.l; if (!n) return `<td class="m">\u2014</td>`; return `<td>${v.w}-${v.l} <span class="m">${(v.w / n * 100).toFixed(0)}%</span><br><span class="${v.pl >= 0 ? "g" : "r"}" style="font-size:12px">${fmtU(v.pl)}</span></td>`; }
 const th = t => `<th>${t}</th>`;
@@ -1232,10 +1236,18 @@ function reportText() {
 function dayRecapText(src) {
   const base = baseRows(src || "ALL").filter(x => x._hist || x.result === "hit" || x.result === "miss");
   const days = [...new Set(base.map(x => x.gameDate))].sort(); if (!days.length) return "";
-  const u = n => (n >= 0 ? "+" : "") + n.toFixed(2) + "u", pct = t => { const n = t.w + t.l; return n ? ` ${(t.w / n * 100).toFixed(0)}%` : ""; };
-  const all = tally(base).a, n = all.w + all.l, last = days[days.length - 1], wk = tally(base.filter(x => (Date.parse(last) - Date.parse(x.gameDate)) / 864e5 < 7)).a, nw = wk.w + wk.l;
-  const roi = t => { const k = t.w + t.l; return k ? ` \u00b7 ROI ${(t.pl / k * 100 >= 0 ? "+" : "")}${(t.pl / k * 100).toFixed(1)}%` : ""; };
-  return [`SIM SOLO${src && src !== "ALL" ? " \u00b7 " + src : ""}`, `Last 7 days: ${wk.w}-${wk.l}${pct(wk)} ${u(wk.pl)}${roi(wk)}`, `All-time: ${all.w}-${all.l}${pct(all)} ${u(all.pl)}${roi(all)} \u00b7 ${days.length} days`, "_1u flat. Pushes / voids not counted._"].join("\n");
+  const u = n => (n >= 0 ? "+" : "") + n.toFixed(2) + "u", rec = t => `${t.w}-${t.l}`, roi = t => t.st ? ` \u00b7 ROI ${t.pl / t.st * 100 >= 0 ? "+" : ""}${(t.pl / t.st * 100).toFixed(1)}%` : "";
+  const d = days[days.length - 1], dayRows = base.filter(x => x.gameDate === d), live = dayRows.filter(x => !x._hist), t = tally(dayRows);
+  const open = (baseRows(src || "ALL")).filter(x => x.gameDate === d && x.result === "pending").length;
+  const nice = new Date(d + "T12:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+  const L = [`**SIM SOLO${src && src !== "ALL" ? " " + src : ""} \u2014 Recap ${nice}**`, `**${rec(t.a)}** (${u(t.a.pl)}${roi(t.a)})${open ? ` \u00b7 ${open} still open` : ""}`, ""];
+  if (live.length) live.slice().sort((a, b) => (a.gameTime || "").localeCompare(b.gameTime || "") || a.player.localeCompare(b.player)).forEach(x => {
+    const icon = x.result === "hit" ? "\u2705" : "\u274c", o = x.odds > 0 ? "+" + x.odds : String(x.odds);
+    L.push(`${icon} **${x.player}** ${x.ou === "over" ? "o" : "u"}${x.line} ${x.stat} ${o}${x.book ? " (" + x.book + ")" : ""}${x.actual != null ? ` \u2014 ${x.actual}` : ""}`); });
+  else L.push(`_(picks for this day are rolled up \u2014 totals only)_`);
+  const wk = tally(base.filter(x => (Date.parse(d) - Date.parse(x.gameDate)) / 864e5 < 7)), all = tally(base);
+  L.push("", `Last 7 days: ${rec(wk.a)} (${u(wk.a.pl)}) \u00b7 All-time: ${rec(all.a)} (${u(all.a.pl)}${roi(all.a)})`, "_Favourites to win 1u, dogs 1u flat. Pushes / voids not counted._");
+  return L.join("\n");
 }
 function copyDayRecap() { const t = dayRecapText(fSrc === "AGREE" ? "AGREE" : fSrc); if (!t) { toast("Nothing graded yet"); return; } (navigator.clipboard ? navigator.clipboard.writeText(t) : Promise.reject()).then(() => toast("Recap copied"), () => { prompt("Copy:", t); }); }
 function copyReport() { const t = reportText(); (navigator.clipboard ? navigator.clipboard.writeText(t) : Promise.reject()).then(() => toast("Report copied"), () => { prompt("Copy:", t); }); }
