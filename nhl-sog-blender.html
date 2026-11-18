@@ -6073,10 +6073,35 @@ function setNhlSaltTelegram() {
   const token = t.trim();
   if (!token) { try { localStorage.setItem(NHL_SALT_TG_KEY, "{}"); } catch (e) {} showNhlToast("SALT Telegram off — Send to SALT copies the text"); if (currentTab === "discord") renderNhlDiscordTab(); return; }
   if (!/^\d+:[\w-]{20,}$/.test(token)) { alert("That doesn't look like a Telegram bot token (numbers, a colon, then letters)."); return; }
-  const c = prompt("SALT chat ID (the group or channel the bot posts in — e.g. -1001234567890, or @channelname). The bot has to be a member of that chat.", cur ? cur.chat : "");
-  if (c == null || !c.trim()) return;
-  try { localStorage.setItem(NHL_SALT_TG_KEY, JSON.stringify({ token, chat: c.trim() })); } catch (e) {}
-  showNhlToast("SALT Telegram saved");
+  const c = prompt("SALT chat ID — leave this BLANK and it's found for you:\n1) add the bot to the SALT group/channel (in a channel, make it an admin)\n2) send any message there (e.g. \"hi\")\n3) press OK here with this box empty.\n\nOr type it yourself (e.g. -1001234567890 or @channelname).", cur ? cur.chat : "");
+  if (c == null) return;
+  _nhlSaltFinishSetup(token, c.trim());
+}
+// Chat ID left blank → ask the bot which chats it has seen (getUpdates) and use that one.
+async function _nhlSaltFinishSetup(token, chat) {
+  if (!chat) {
+    let chats = [];
+    try {
+      const r = await fetch(`https://api.telegram.org/bot${token}/getUpdates?limit=100`);
+      const j = await r.json();
+      if (!j.ok) throw new Error(j.description || r.status);
+      const seen = new Map();
+      (j.result || []).forEach(u => {
+        const m = u.message || u.channel_post || u.edited_message || u.edited_channel_post || (u.my_chat_member) || null;
+        const ch = m && m.chat; if (ch && ch.type !== "private") seen.set(String(ch.id), ch.title || ch.username || String(ch.id));
+      });
+      chats = [...seen.entries()];
+    } catch (e) { alert("Couldn't reach Telegram with that bot token (" + e.message + "). Check the token and try again."); return; }
+    if (!chats.length) { alert("The bot hasn't seen any group or channel yet. Add it to the SALT chat, send a message there, then do Set SALT Telegram again and leave the chat ID blank."); return; }
+    if (chats.length === 1) chat = chats[0][0];
+    else {
+      const pick = prompt("The bot is in these chats — type the number for SALT:\n" + chats.map(([id, t], i) => `${i + 1}) ${t}  (${id})`).join("\n"), "1");
+      const ch = chats[(parseInt(pick, 10) || 0) - 1]; if (!ch) return;
+      chat = ch[0];
+    }
+  }
+  try { localStorage.setItem(NHL_SALT_TG_KEY, JSON.stringify({ token, chat })); } catch (e) {}
+  showNhlToast("SALT Telegram saved · chat " + chat);
   if (currentTab === "discord") renderNhlDiscordTab();
 }
 async function _nhlSaltSend(html) {
@@ -6085,7 +6110,13 @@ async function _nhlSaltSend(html) {
   fd.append("chat_id", tg.chat); fd.append("text", html); fd.append("parse_mode", "HTML"); fd.append("disable_web_page_preview", "true");
   const r = await fetch(`https://api.telegram.org/bot${tg.token}/sendMessage`, { method: "POST", body: fd });
   let j = null; try { j = await r.json(); } catch (e) {}
-  if (!r.ok || !j || !j.ok) throw new Error("Telegram said " + (j && j.description ? j.description : r.status));
+  if (!r.ok || !j || !j.ok) {
+    const why = j && j.description ? j.description : String(r.status);
+    // A group that became a supergroup gets a new id — Telegram tells us which one; save it and retry once.
+    const moved = j && j.parameters && j.parameters.migrate_to_chat_id;
+    if (moved) { try { localStorage.setItem(NHL_SALT_TG_KEY, JSON.stringify({ token: tg.token, chat: String(moved) })); } catch (e) {} return _nhlSaltSend(html); }
+    throw new Error("Telegram said " + why + (/chat not found|not a member|kicked/i.test(why) ? " — add the bot to the SALT chat, send a message there, then Set SALT Telegram with the chat ID left blank" : ""));
+  }
 }
 async function _nhlSaltText(picks, newOnly) {
   const esc = t => String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
