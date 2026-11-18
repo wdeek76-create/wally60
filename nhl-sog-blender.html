@@ -6235,22 +6235,43 @@ function _nhlBetClvCents(b) {
   const v = NHL_CLV_BOOKS.map(k => b.clvCents && b.clvCents[k]).filter(x => x != null && isFinite(x));
   return v.length ? v.reduce((a, c) => a + c, 0) / v.length : null;
 }
+// Also goes to SALT on Telegram when it's set up (same recap, plain text). Each destination keeps its own list of
+// days already posted, so neither repeats and SALT doesn't get back-filled with older days.
+const NHL_RECAP_POSTED_SALT_KEY = "nhl_recap_posted_days_salt";
 async function _nhlMaybePostDailyRecap() {
-  if (!_nhlRecapHook()) return;
-  let done = []; try { done = JSON.parse(localStorage.getItem(NHL_RECAP_POSTED_KEY) || "[]"); } catch (e) {}
+  const toDiscord = !!_nhlRecapHook(), toSalt = typeof _nhlSaltTg === "function" && !!_nhlSaltTg();
+  if (!toDiscord && !toSalt) return;
+  const load = k => { try { return JSON.parse(localStorage.getItem(k) || "null"); } catch (e) { return null; } };
+  const store = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v.slice(-90))); } catch (e) {} };
+  let done = load(NHL_RECAP_POSTED_KEY) || [];
+  let doneSalt = load(NHL_RECAP_POSTED_SALT_KEY);
+  if (!doneSalt) { doneSalt = done.slice(); store(NHL_RECAP_POSTED_SALT_KEY, doneSalt); }   // start SALT from now on
   const dayMsList = [...new Set(bets.map(_nhlBetDayMs).filter(ms => !isNaN(ms)))].sort((a, b) => a - b);
   for (const ms of dayMsList) {
     const day = _ymdLocal(new Date(ms));
-    if (done.includes(day) || day >= _ymdLocal(new Date(Date.now() + 86400000))) continue;
+    if (day >= _ymdLocal(new Date(Date.now() + 86400000))) continue;
+    const needDiscord = toDiscord && !done.includes(day), needSalt = toSalt && !doneSalt.includes(day);
+    if (!needDiscord && !needSalt) continue;
     const list = bets.filter(b => _nhlBetDayMs(b) === ms);
     if (!list.length || list.some(b => b.result === "pending")) continue;   // wait until every bet that day is graded
     const r = buildNhlRecapText({ dayMs: ms, clv: true }); if (!r) continue;
-    try {
-      const res = await fetch(_nhlRecapHook(), { method: "POST", body: _nhlHookForm({ content: r.text.slice(0, 1990), allowed_mentions: { parse: [] } }) });
-      if (!res.ok) throw new Error(res.status + "");
-      done.push(day); try { localStorage.setItem(NHL_RECAP_POSTED_KEY, JSON.stringify(done.slice(-90))); } catch (e) {}
-      showNhlToast(`Recap for ${r.label} posted to Discord ✓`);
-    } catch (e) { console.warn("[NHL] recap post failed", day, e && e.message); }
+    if (needDiscord) {
+      try {
+        const res = await fetch(_nhlRecapHook(), { method: "POST", body: _nhlHookForm({ content: r.text.slice(0, 1990), allowed_mentions: { parse: [] } }) });
+        if (!res.ok) throw new Error(res.status + "");
+        done.push(day); store(NHL_RECAP_POSTED_KEY, done);
+        showNhlToast(`Recap for ${r.label} posted to Discord ✓`);
+      } catch (e) { console.warn("[NHL] recap post failed", day, e && e.message); }
+    }
+    if (needSalt) {
+      try {
+        const tg = _nhlSaltTg();
+        const j = await _nhlTgCall(tg.token, "sendMessage", { chat_id: tg.chat, text: r.text.slice(0, 4000), disable_web_page_preview: "true" });
+        if (!j || !j.ok) throw new Error(j && j.description || "failed");
+        doneSalt.push(day); store(NHL_RECAP_POSTED_SALT_KEY, doneSalt);
+        showNhlToast(`Recap for ${r.label} posted to SALT ✓`);
+      } catch (e) { console.warn("[NHL] SALT recap failed", day, e && e.message); }
+    }
   }
 }
 async function _nhlPostToDiscord(blob, text, to) {
