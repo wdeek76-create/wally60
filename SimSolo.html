@@ -47,7 +47,7 @@ h2{font-size:12px;letter-spacing:1px;text-transform:uppercase;color:var(--mut);m
     <label class="filebtn alt" style="color:#eab308;border-color:#eab308"><input type="file" accept=".csv,text/csv" onchange="toPs(this,'DIMERS')" hidden>DIMERS &rarr; PS</label>
   </div>
   <div class="row"><button onclick="copyAgree()" style="border-color:#a78bfa;color:#a78bfa">COPY 5%+ ALIGNMENTS</button><button onclick="copyPlays()">COPY PLAYS (filters)</button><button onclick="gradeAll()" id="gbtn">GRADE PENDING</button><button onclick="retag()">↻ RW CONTEXT</button></div>
-  <div class="row"><button onclick="copyReport()">COPY REPORT</button><button onclick="copyDayRecap()" style="border-color:#4ade80;color:#4ade80">COPY DAY RECAP</button><button onclick="exportCsv()">EXPORT CSV</button><button class="del" onclick="clearAll()">CLEAR ALL</button></div>
+  <div class="row"><button onclick="copyReport()">COPY REPORT</button><button onclick="copyDayRecap()" style="border-color:#4ade80;color:#4ade80">COPY RECAP</button><button onclick="exportCsv()">EXPORT CSV</button><button class="del" onclick="clearAll()">CLEAR ALL</button></div>
   <div class="info" id="info"></div>
 </div>
 <div id="out"></div>
@@ -789,6 +789,29 @@ let hist = { days: [], recs: [] };   // recs: { src, d, stat, ou, ctx, b, w, l, 
 try { const h = JSON.parse(localStorage.getItem(HIST_KEY) || "null"); if (h && Array.isArray(h.recs)) hist = { days: h.days || [], recs: h.recs }; } catch (e) {}
 const saveHist = () => { try { localStorage.setItem(HIST_KEY, JSON.stringify(hist)); } catch (e) {} };
 const bucketOf = ev => BUCKETS.findIndex(([, lo, hi]) => ev >= lo && ev < hi);
+// ── ESPN SLATE (logos + tip times) ───────────────────────────────────────────
+// One scoreboard call per day → team: { opp, home, time, logo }. Fills game times the Sharpr paste has none of, and the logo next to each play.
+const SLATE_KEY = "nba_sim_solo_slate_v1";
+let slate = null; try { const z = JSON.parse(localStorage.getItem(SLATE_KEY) || "null"); if (z && z.day === localYMD(new Date())) slate = z; } catch (e) {}
+async function loadSlate(day) {
+  day = day || localYMD(new Date());
+  if (slate && slate.day === day) return slate;
+  try {
+    const r = await fetch(`https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates=${day.replace(/-/g, "")}`); if (!r.ok) throw new Error(r.status);
+    const j = await r.json(), teams = {};
+    (j.events || []).forEach(ev => { const c = ev.competitions && ev.competitions[0]; if (!c) return;
+      const h = c.competitors.find(x => x.homeAway === "home"), a = c.competitors.find(x => x.homeAway === "away"); if (!h || !a) return;
+      const t = new Date(ev.date), time = isNaN(t) ? "" : t.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+      const ha = normTeamAbbr(h.team.abbreviation), aa = normTeamAbbr(a.team.abbreviation);
+      teams[ha] = { opp: aa, home: true, time, logo: h.team.logo || "" }; teams[aa] = { opp: ha, home: false, time, logo: a.team.logo || "" }; });
+    slate = { day, at: Date.now(), teams }; try { localStorage.setItem(SLATE_KEY, JSON.stringify(slate)); } catch (e) {}
+  } catch (e) { console.warn("[slate]", e); }
+  return slate;
+}
+const slateFor = team => (slate && slate.teams && slate.teams[normTeamAbbr(team || "")]) || null;
+// plays with no tip time (page pastes) take ESPN's; nothing else is touched
+function fillTimes() { if (!slate) return 0; let n = 0; rows.forEach(x => { if (!x.gameTime && x.gameDate === slate.day) { const g = slateFor(x.team); if (g && g.time) { x.gameTime = g.time; n++; } } }); if (n) save(); return n; }
+const logoImg = (team, sz) => { const g = slateFor(team); return g && g.logo ? `<img src="${g.logo}" alt="" style="width:${sz || 18}px;height:${sz || 18}px;vertical-align:middle;object-fit:contain;margin-right:4px">` : ""; };
 function rollupDays() {
   const cut = new Date(); cut.setDate(cut.getDate() - 1); const stale = localYMD(cut);          // a day still with open picks that is 2+ days old is closed by voidStale first
   const open = new Set(rows.filter(x => x.result === "pending").map(x => x.gameDate));
@@ -975,6 +998,7 @@ async function loadPlays(plays, src, label, opts) {
     save();
     say(`${src}${gone ? ` \u00b7 ${gone} old open plays replaced` : ""}: ${added} new${upd ? `, ${upd} updated` : ""}${under ? ` \u00b7 ${under} under ${minEv}%` : ""}${noHead ? ` \u00b7 ${noHead} with no FD / PB / PIN / Bet105 price` : ""}${late ? ` \u00b7 ${late} already tipped` : ""}${dates.size ? ` \u00b7 ${[...dates].join(", ")}` : ""}`);
     toast(`${src}: ${added + upd} plays loaded`); render();
+    try { await loadSlate(); if (fillTimes()) render(); } catch (e) {}
   }
 }
 // ── SHARPR PAGE PASTE ─────────────────────────────────────────────────────────
@@ -1105,7 +1129,7 @@ function agreeRows() {
   }).filter(Boolean);
 }
 const baseRows = src => (src === "AGREE" ? agreeRows() : src === "ALL" ? rows : rows.filter(x => x.src === src)).concat(histRows(src));
-let fCtx = "ALL";   // ALL | clean | upside | iffy (downside + flagged)
+let fCtx = "clean";   // ALL | clean | upside | iffy (downside + flagged) — opens on CLEAN
 const ctxOk = x => fCtx === "ALL" || (fCtx === "iffy" ? (x.ctx === "downside" || x.ctx === "flagged") : (x.ctx || "clean") === fCtx);
 function view(src) { return baseRows(src || fSrc).filter(x => (fStat === "ALL" || x.stat === fStat) && x.ev >= fThr && ctxOk(x)); }
 function setCtx(c) { fCtx = c; render(); }
@@ -1133,8 +1157,9 @@ function render() {
   <div class="card"><h2>Clean vs iffy \u00b7 ${fSrc === "AGREE" ? "agree" : fSrc} \u00b7 ${fThr}%+</h2>${tbl("RW context", [["clean", "CLEAN"], ["upside", "UPSIDE"], ["downside", "DOWNSIDE"], ["flagged", "FLAGGED"]].map(([k, l]) => ({ label: `<span style="color:${CTX_COL[k]}">${l}</span>`, set: baseRows(fSrc).filter(x => (x.ctx || "clean") === k && x.ev >= fThr && (fStat === "ALL" || x.stat === fStat)) })).filter(l => l.set.length))}</div>
   <div class="card"><h2>By market \u00b7 ${fSrc === "AGREE" ? "agree" : fSrc} \u00b7 ${fThr}%+</h2>${tbl("Market", STATS.map(s => ({ label: s, set: baseRows(fSrc).filter(x => x.stat === s && x.ev >= fThr) })).filter(l => l.set.length).concat([{ label: "All", set: baseRows(fSrc).filter(x => x.ev >= fThr), total: true }]))}</div>
   <div class="card"><h2>5%+ alignments \u00b7 open (${agreeOpen.length})</h2>${agreeOpen.length ? `<div class="scroll"><table><thead><tr>${th("Player")}${th("Pick")}${th("Best")}${th("Edges")}${th("Play to")}${th("Model gates")}</tr></thead><tbody>${agreeOpen.map(x => { const gt = gateFor(x); return `<tr><td>${x.player}<br><span class="m" style="font-weight:400;font-size:11px">${x.stat} \u00b7 ${x.gameDate.slice(5)} ${x.gameTime}</span></td><td class="${x.ou === "over" ? "o" : "u"}">${x.ou === "over" ? "O" : "U"} ${x.line}</td><td>${x.book} ${fo(x.odds)}</td><td style="white-space:normal;font-size:12px">${edgeTxt(x)}</td><td>${fo(x.playTo)}</td><td style="white-space:normal;font-size:11px;max-width:220px;color:${gt ? "#f87171" : "#4ade80"}">${gt ? "HELD \u2014 " + gt : "\u2713 clear"}</td></tr>`; }).join("")}</tbody></table></div>` : '<div class="m">No open play where both sources are 5%+ yet.</div>'}</div>
-  <div class="card"><h2>By day</h2>${days.length ? tbl("Day", days.map(d => ({ label: d.slice(5), set: set.filter(x => x.gameDate === d) }))) : '<div class="m">Nothing yet.</div>'}</div>
-  <div class="card"><h2>Plays (latest ${recent.length})</h2><div class="scroll"><table><thead><tr>${th("Player")}${th("Pick")}${th("Best")}${th("Play to")}${th("Result")}${th("")}</tr></thead><tbody>${recent.map(x => `<tr><td>${x.player}<br><span class="m" style="font-weight:400;font-size:11px">${x.src} \u00b7 ${x.stat} \u00b7 ${x.gameDate.slice(5)} ${x.gameTime}</span></td><td class="${x.ou === "over" ? "o" : "u"}">${x.ou === "over" ? "O" : "U"} ${x.line}</td><td>${x.book} ${fo(x.odds)}<br><span class="g" style="font-size:12px">${edgeTxt(x)}</span></td><td>${fo(x.playTo)}</td><td class="${resCls(x.result)}">${x.result === "pending" ? "\u2014" : x.result.toUpperCase() + (x.actual != null ? ` (${x.actual})` : "")}</td><td>${x.src === "AGREE" ? "" : `<button class="chip del" onclick="del('${x.key.replace(/'/g, "\\'")}')">\u00d7</button>`}</td></tr>`).join("")}</tbody></table></div></div>`;
+  <div class="card"><h2>By day \u00b7 ${fSrc === "AGREE" ? "agree" : fSrc} \u00b7 ${fThr}%+</h2>${days.length ? (() => { const asc = days.slice().sort(); let run = 0; const runBy = {}; asc.forEach(d => { run += tally(set.filter(x => x.gameDate === d)).a.pl; runBy[d] = run; });
+    return `<div class="scroll"><table><thead><tr>${th("Day")}${th("All")}${th('<span class="o">Over</span>')}${th('<span class="u">Under</span>')}${th("Running")}</tr></thead><tbody>${days.map(d => { const t = tally(set.filter(x => x.gameDate === d)); const dd = new Date(d + "T12:00:00"); return `<tr><td>${dd.toLocaleDateString("en-US", { weekday: "short", month: "numeric", day: "numeric" })}</td>${cell(t.a)}${cell(t.o)}${cell(t.u)}<td class="${runBy[d] >= 0 ? "g" : "r"}" style="font-weight:800">${fmtU(runBy[d])}</td></tr>`; }).join("")}</tbody></table></div>`; })() : '<div class="m">Nothing yet.</div>'}</div>
+  <div class="card"><h2>Plays (latest ${recent.length})</h2><div class="scroll"><table><thead><tr>${th("Player")}${th("Pick")}${th("Best")}${th("Play to")}${th("Result")}${th("")}</tr></thead><tbody>${recent.map(x => { const g = slateFor(x.team); return `<tr><td>${logoImg(x.team, 18)}${x.player}<br><span class="m" style="font-weight:400;font-size:11px">${x.src} \u00b7 ${x.stat} \u00b7 ${x.gameDate.slice(5)}${g ? ` \u00b7 ${tm(x.team)} ${g.home ? "vs" : "@"} ${g.opp}` : ""} ${x.gameTime || (g ? g.time : "")}</span></td><td class="${x.ou === "over" ? "o" : "u"}">${x.ou === "over" ? "O" : "U"} ${x.line}</td><td>${x.book} ${fo(x.odds)}<br><span class="g" style="font-size:12px">${edgeTxt(x)}</span></td><td>${fo(x.playTo)}</td><td class="${resCls(x.result)}">${x.result === "pending" ? "\u2014" : x.result.toUpperCase() + (x.actual != null ? ` (${x.actual})` : "")}</td><td>${x.src === "AGREE" ? "" : `<button class="chip del" onclick="del('${x.key.replace(/'/g, "\\'")}')">\u00d7</button>`}</td></tr>`; }).join("")}</tbody></table></div></div>`;
   const st = document.getElementById("srcstat"); if (st) st.innerHTML = SOURCES.map(s => { const m = meta[s]; const n = rows.filter(x => x.src === s && isLive(x)).length; return `<div><b>${s}</b> ${m ? `loaded ${new Date(m.at).toLocaleString([], { month: "numeric", day: "numeric", hour: "numeric", minute: "2-digit" })} \u00b7 ${n} open` : "not loaded yet"}</div>`; }).join("");
 }
 
@@ -1208,13 +1233,11 @@ function dayRecapText(src) {
   const base = baseRows(src || "ALL").filter(x => x._hist || x.result === "hit" || x.result === "miss");
   const days = [...new Set(base.map(x => x.gameDate))].sort(); if (!days.length) return "";
   const u = n => (n >= 0 ? "+" : "") + n.toFixed(2) + "u", pct = t => { const n = t.w + t.l; return n ? ` ${(t.w / n * 100).toFixed(0)}%` : ""; };
-  const L = [`SIM SOLO${src && src !== "ALL" ? " \u00b7 " + src : ""} \u00b7 day by day`, ""]; let run = 0;
-  days.forEach(d => { const t = tally(base.filter(x => x.gameDate === d)).a; run += t.pl; const dd = new Date(d + "T12:00:00"); L.push(`${dd.toLocaleDateString("en-US", { weekday: "short", month: "numeric", day: "numeric" })}  ${t.w}-${t.l}${pct(t)}  ${u(t.pl)}   (${u(run)})`); });
-  const all = tally(base).a, n = all.w + all.l, wk = tally(base.filter(x => (Date.parse(days[days.length - 1]) - Date.parse(x.gameDate)) / 864e5 < 7)).a;
-  L.push("", `Last 7 days: ${wk.w}-${wk.l} ${u(wk.pl)}`, `All-time: ${all.w}-${all.l}${pct(all)} ${u(all.pl)}${n ? ` \u00b7 ROI ${(all.pl / n * 100 >= 0 ? "+" : "")}${(all.pl / n * 100).toFixed(1)}%` : ""} \u00b7 ${days.length} days`, "_1u flat. Pushes / voids not counted._");
-  return L.join("\n");
+  const all = tally(base).a, n = all.w + all.l, last = days[days.length - 1], wk = tally(base.filter(x => (Date.parse(last) - Date.parse(x.gameDate)) / 864e5 < 7)).a, nw = wk.w + wk.l;
+  const roi = t => { const k = t.w + t.l; return k ? ` \u00b7 ROI ${(t.pl / k * 100 >= 0 ? "+" : "")}${(t.pl / k * 100).toFixed(1)}%` : ""; };
+  return [`SIM SOLO${src && src !== "ALL" ? " \u00b7 " + src : ""}`, `Last 7 days: ${wk.w}-${wk.l}${pct(wk)} ${u(wk.pl)}${roi(wk)}`, `All-time: ${all.w}-${all.l}${pct(all)} ${u(all.pl)}${roi(all)} \u00b7 ${days.length} days`, "_1u flat. Pushes / voids not counted._"].join("\n");
 }
-function copyDayRecap() { const t = dayRecapText(fSrc === "AGREE" ? "AGREE" : fSrc); if (!t) { toast("Nothing graded yet"); return; } (navigator.clipboard ? navigator.clipboard.writeText(t) : Promise.reject()).then(() => toast("Day recap copied"), () => { prompt("Copy:", t); }); }
+function copyDayRecap() { const t = dayRecapText(fSrc === "AGREE" ? "AGREE" : fSrc); if (!t) { toast("Nothing graded yet"); return; } (navigator.clipboard ? navigator.clipboard.writeText(t) : Promise.reject()).then(() => toast("Recap copied"), () => { prompt("Copy:", t); }); }
 function copyReport() { const t = reportText(); (navigator.clipboard ? navigator.clipboard.writeText(t) : Promise.reject()).then(() => toast("Report copied"), () => { prompt("Copy:", t); }); }
 function exportCsv() {
   const cols = ["src", "gameDate", "gameTime", "player", "stat", "ou", "line", "odds", "book", "ev", "playTo", "proj", "result", "actual"];
@@ -1229,6 +1252,7 @@ async function retag() {
 function clearAll() { if (!confirm(`Delete all ${rows.length} plays?`)) return; rows = []; save(); render(); }
 try { if (rollupDays()) toast("Graded days rolled up into history"); } catch (e) {}
 render();
+loadSlate().then(() => { fillTimes(); render(); }).catch(() => {});   // ESPN: team logos + tip times for today
 rwSync().then(() => { _rw = null; render(); }).catch(() => {});   // pull RotoWire when the page opens
 try { if (voidStale()) render(); } catch (e) {}
 
