@@ -28063,10 +28063,39 @@ function morningSetSalt() {
   const token = prompt("Telegram bot token (from @BotFather, looks like 123456789:ABC-...). Saved only in this browser. Leave empty to remove.", cur.token || ""); if (token === null) return;
   if (!token.trim()) { try { localStorage.removeItem(SALT_KEY); } catch (e) {} showToast("SALT removed"); renderMorning(); return; }
   if (!/^\d+:[\w-]{20,}$/.test(token.trim())) { showToast("That doesn't look like a Telegram bot token"); return; }
-  const chat = prompt("Telegram channel: @channelname (public) or its -100... id (private). The bot must be an admin of the channel.", cur.chat || ""); if (chat === null) return;
-  if (!/^(@[\w]{4,}|-?\d{6,})$/.test(chat.trim())) { showToast("That doesn't look like a channel username or id"); return; }
-  try { localStorage.setItem(SALT_KEY, JSON.stringify({ token: token.trim(), chat: chat.trim() })); } catch (e) {}
-  showToast("SALT saved"); renderMorning();
+  _saltPickChannel(token.trim(), cur.chat || "");
+}
+// Find the channel for the user: ask Telegram which chats the bot has seen (getUpdates). Needs the bot added to the channel as admin and one post made
+// after that. Lists what it finds; falls back to typing @name or the -100... id by hand.
+async function _saltPickChannel(token, prev) {
+  showToast("Asking Telegram which channels the bot can see\u2026");
+  let found = [];
+  try {
+    const r = await fetch(`https://api.telegram.org/bot${token}/getUpdates?limit=100`), j = await r.json();
+    if (!j.ok) throw new Error(j.description || "getUpdates failed");
+    const seen = new Map();
+    (j.result || []).forEach(u => { const m = u.channel_post || u.message || u.edited_channel_post || u.my_chat_member && u.my_chat_member.chat && { chat: u.my_chat_member.chat }; const c = m && m.chat; if (c && c.id) seen.set(String(c.id), { id: String(c.id), title: c.title || c.username || c.first_name || String(c.id), type: c.type }); });
+    found = [...seen.values()];
+  } catch (e) { showToast("Telegram: " + (e && e.message || e)); }
+  let chat;
+  if (found.length) {
+    const list = found.map((c, i) => `${i + 1}. ${c.title} (${c.type}) \u2014 ${c.id}`).join("\n");
+    const pick = prompt(`Channels the bot can see:\n\n${list}\n\nType the number to use it, or type @channelname / a -100... id by hand.`, found.length === 1 ? "1" : (prev || ""));
+    if (pick === null) return;
+    const n = parseInt(pick, 10); chat = (n >= 1 && n <= found.length && String(n) === pick.trim()) ? found[n - 1].id : pick.trim();
+  } else {
+    chat = prompt("Telegram found no channel for this bot yet. Add the bot to the channel as an ADMIN, post anything in the channel, then run ⚙ again \u2014 or type @channelname (public) / the -100... id (private) now.", prev || ""); if (chat === null) return;
+    chat = chat.trim();
+  }
+  if (!/^(@[\w]{4,}|-?\d{6,})$/.test(chat)) { showToast("That doesn't look like a channel username or id"); return; }
+  try { localStorage.setItem(SALT_KEY, JSON.stringify({ token, chat })); } catch (e) {}
+  // prove it: one test post, so a wrong channel shows up now rather than on the first real send
+  try {
+    const r = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ chat_id: chat, text: "SALT connected \u2713 (NBA Model)" }) });
+    const j = await r.json().catch(() => ({})); if (!r.ok || !j.ok) throw new Error(j.description || `Telegram said ${r.status}`);
+    showToast("SALT saved \u2014 test post sent to the channel");
+  } catch (e) { showToast("Saved, but the test post failed: " + (e && e.message || e) + " \u2014 is the bot an admin of that channel?"); }
+  renderMorning();
 }
 async function morningPostSalt() {
   const cfg = getSalt(); if (!cfg) { morningSetSalt(); return; }
