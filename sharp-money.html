@@ -2344,7 +2344,7 @@ function tgcStatus(){
     `All-time FD: ${aS&&aS.n?tgEsc(smFmt(aS)):'—'}`,
     nr?`Live tonight: ${nr.w}-${nr.l} · ${nr.u>=0?'+':''}${nr.u.toFixed(2)}u`:'' ].filter(x=>x!=='').join('\n');
 }
-const TGC_HELP = `📱 <b>Smart Money commands</b>
+const TGC_HELP = `📱 <b>Smart Money commands</b> (or /menu for buttons)
 /status · everything at a glance
 /scan on|off · /pings on|off
 /min 500 · money minimum ($250 / 350 / 500 / 1000 / 2500 or any)
@@ -2356,11 +2356,12 @@ const TGC_HELP = `📱 <b>Smart Money commands</b>
 /recap · post the FD recap · /liverecap · post the in-game recap
 /open · open bets · /record · today + all-time
 /backup · post a backup now`;
-async function tgcRun(chat, txt){
+async function tgcRun(chat, txt, quiet){
   const [cmd0, ...args]=String(txt||'').trim().split(/\s+/); const cmd=cmd0.toLowerCase().replace(/^\//,'').replace(/@.*$/,''), a=(args[0]||'').toLowerCase();
   let r='';
   switch(cmd){
-    case 'help': case 'start': r=TGC_HELP; break;
+    case 'menu': case 'start': case 'm': if(!quiet) await tgcMenu(chat); return '';
+    case 'help': r=TGC_HELP; break;
     case 'status': case 's': r=tgcStatus(); break;
     case 'scan': smScanOn=onOff(a, smScanOn); LS.set('sm_scan_on', smScanOn?'1':'0'); if(smScanOn) sharpTick(); r=`Scan ${smScanOn?'▶ on':'⏸ off'}`; break;
     case 'pings': sharpPingsOn=onOff(a, sharpPingsOn); LS.set('props_sharppings', sharpPingsOn?'1':'0'); sharpSchedule(); r=`Pings ${sharpPingsOn?'on':'off'}`; break;
@@ -2384,16 +2385,47 @@ async function tgcRun(chat, txt){
     case 'backup': { const h=LS.get('sm_backup_hook',''); if(!h){ r='No backup channel set on the page'; break; } try{ await smAutoBackup?.(true); r='Backup posted'; }catch(e){ r='Backup failed'; } break; }
     default: r=`Didn't get "${tgEsc(cmd0)}". /help for the list.`;
   }
-  tgcRerender(); if(r) tgcReply(chat, r);
+  tgcRerender(); if(r && !quiet) tgcReply(chat, r);
+  return r;
+}
+// ── the button menu: every option on the page as a tap, the menu re-draws with the new state ──
+function tgcKeyboard(){
+  const b=(text, cmd)=>({ text, callback_data:cmd }), ck=on=>on?'✅':'▫️';
+  const sports=SHARP_SPORTS(), mins=[250,350,500,1000,2500], ex=[0,100,250,500,1000], wl=['1h','1-3h','3-6h','6-10h','10-24h','1d+'], wk=['1h','1-3','3-6','6-10','10-24','1d'];
+  return { inline_keyboard:[
+    [b(smScanOn?'▶ Scan ON':'⏸ Scan OFF','scan'), b(sharpPingsOn?'🔔 Pings ON':'🔕 Pings OFF','pings')],
+    mins.map(v=>b(`${sharpMin===v?'✅':''}${usd(v)}+`, `min ${v}`)),
+    [b(`${!sharpSportF.size?'✅':''}All`,'sport all'), ...sports.map(k=>b(`${sharpSportF.has(k)?'✅':''}${SPORTS[k]?.label||k}`, `sport ${k}`))],
+    OUT_BUCKETS.slice(0,3).map((x,i)=>b(`${ck(!smMuteOut.has(x))} ${wl[i]}`, `window ${wk[i]}`)),
+    OUT_BUCKETS.slice(3).map((x,i)=>b(`${ck(!smMuteOut.has(x))} ${wl[i+3]}`, `window ${wk[i+3]}`)),
+    [b(NL_OFF?'🏀 Live OFF':'🏀 Live ON','live'), b(ufcOn?'🥊 UFC ON':'🥊 UFC OFF','ufc')],
+    ex.map(v=>b(`${nlKalMin===v?'✅':''}Live ${v?usd(v):'any'}`, `exmin ${v}`)),
+    [b(smDcPaused?'Discord ⏸':'Discord ON','discord'), b(smTgPaused?'Telegram ⏸':'Telegram ON','telegram')],
+    [b('📊 FD recap','recap'), b('📊 Live recap','liverecap'), b('📋 Open bets','open')],
+    [b('🔄 Refresh','menu'), b('💾 Backup','backup')],
+  ]};
+}
+const tgcMenuText = () => tgcStatus()+'\n\n<i>Rows: scan · money min · sports · send windows · live / UFC · live exchange min · alerts · actions</i>';
+async function tgcMenu(chat, msgId){
+  const fd=new FormData(); fd.append('chat_id', chat); fd.append('text', tgcMenuText()); fd.append('parse_mode','HTML'); fd.append('reply_markup', JSON.stringify(tgcKeyboard()));
+  try{ if(msgId){ fd.append('message_id', String(msgId)); await tgApi('editMessageText', fd); } else await tgApi('sendMessage', fd); }catch(e){ /* "message is not modified" etc. */ }
+}
+async function tgcButton(q){
+  const chat=String(q.message?.chat?.id||''), cmd=q.data||''; if(chat!==tgcOwner) return;
+  const say=['open','recap','liverecap','backup'].includes(cmd.split(' ')[0]);
+  const r=cmd==='menu' ? 'Updated' : await tgcRun(chat, cmd, !say);
+  try{ const fd=new FormData(); fd.append('callback_query_id', q.id); fd.append('text', String(r||'').replace(/<[^>]+>/g,'').split('\n')[0].slice(0,190)); await tgApi('answerCallbackQuery', fd); }catch(e){}
+  await tgcMenu(chat, q.message?.message_id);
 }
 async function tgcPoll(){
   if(tgcBusy || !tgToken) return; tgcBusy=true;
   try{
-    const fd=new FormData(); fd.append('offset', String(tgcOff)); fd.append('timeout','0'); fd.append('allowed_updates', JSON.stringify(['message']));
+    const fd=new FormData(); fd.append('offset', String(tgcOff)); fd.append('timeout','0'); fd.append('allowed_updates', JSON.stringify(['message','callback_query']));
     const ups=await tgApi('getUpdates', fd);
     for(const u of ups||[]){ tgcOff=u.update_id+1; LS.set('sm_tgc_off', String(tgcOff));
+      if(u.callback_query){ if(tgcOwner) await tgcButton(u.callback_query); continue; }
       const m=u.message; if(!m || m.chat?.type!=='private' || !m.text) continue; const chat=String(m.chat.id), t=m.text.trim();
-      if(!tgcOwner){ if(new RegExp(`^/?link\\s+${tgcCode}$`,'i').test(t)){ tgcOwner=chat; LS.set('sm_tgc_owner', chat); tgcReply(chat, '✅ <b>Linked</b> — this chat now controls Smart Money.\n\n'+TGC_HELP); tgcRerender(); } else tgcReply(chat, 'Not linked yet: send /link and the code shown on the Smart Money page (📱 Phone control).'); continue; }
+      if(!tgcOwner){ if(new RegExp(`^/?link\\s+${tgcCode}$`,'i').test(t)){ tgcOwner=chat; LS.set('sm_tgc_owner', chat); tgcReply(chat, '✅ <b>Linked</b> — this chat now controls Smart Money. Tap the buttons below (send /menu anytime to bring them back, /help for typed commands).'); setTimeout(()=>tgcMenu(chat), 500); tgcRerender(); } else tgcReply(chat, 'Not linked yet: send /link and the code shown on the Smart Money page (📱 Phone control).'); continue; }
       if(chat!==tgcOwner) continue;   // only your chat
       await tgcRun(chat, t);
     }
