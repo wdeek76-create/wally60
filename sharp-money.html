@@ -2318,13 +2318,17 @@ function renderNews(){
 // /status, /scan on|off, /min 500, /sport nba ... Linked once with a code shown on the page (only your chat is obeyed).
 let tgcOwner = LS.get('sm_tgc_owner',''), tgcCode = LS.get('sm_tgc_code','') || String(Math.floor(1000+Math.random()*9000));
 LS.set('sm_tgc_code', tgcCode);
-let tgcOff = Number(LS.get('sm_tgc_off','0'))||0, tgcBusy=false;
+let tgcOff = Number(LS.get('sm_tgc_off','0'))||0, tgcBusy=false, tgcStat={ ok:null, at:0, err:'' };
 const tgcRerender = () => { try{ if(viewMode==='sharp') renderSharp(); else if(viewMode==='nbalive') renderNbaLive(); }catch(e){} };
 async function tgcReply(chat, text){ try{ const fd=new FormData(); fd.append('chat_id', chat); fd.append('text', text.slice(0,4000)); fd.append('parse_mode','HTML'); fd.append('link_preview_options', JSON.stringify({ is_disabled:true })); await tgApi('sendMessage', fd); }catch(e){ console.warn('[tgc]', e.message); } }
 function tgcSetup(){
   if(!tgToken){ toast('Set up Telegram first (the Telegram button)'); return; }
   if(tgcOwner){ if(confirm('Phone control is linked. Unlink it? (Then text the bot /link with the new code to link again.)')){ tgcOwner=''; LS.set('sm_tgc_owner',''); tgcCode=String(Math.floor(1000+Math.random()*9000)); LS.set('sm_tgc_code', tgcCode); renderSharp(); } return; }
-  alert(`Phone control: open a private chat with your Smart Money bot in Telegram and send:\n\n/link ${tgcCode}\n\nIt answers "Linked" -- then send /help for everything you can do. Keep this page open on your PC.`);
+  const st = !tgcStat.at ? 'Checking for messages…' : tgcStat.ok ? `Reading your bot's messages ✓ (${Math.round((Date.now()-tgcStat.at)/1000)}s ago)` : `Can't read the bot's messages: ${tgcStat.err}`;
+  if(!tgcStat.ok && /webhook/i.test(tgcStat.err||'')){
+    if(confirm(`${st}\n\nSomething else (a webhook) is connected to this bot, so this page can't read your texts. Disconnect it so phone control works?`)){ tgApi('deleteWebhook', new FormData()).then(()=>toast('Webhook removed -- send the code again'), e=>toast('Failed: '+e.message)); }
+    return; }
+  alert(`Phone control: open a PRIVATE chat with your Smart Money bot (search its @name in Telegram, not the channel) and send:\n\n${tgcCode}\n\nIt answers "Linked" with the buttons. Keep this page open on your PC.\n\nStatus: ${st}`);
 }
 const TGC_WIN = { '1h':0, 'under1h':0, '<1h':0, '1-3':1, '1-3h':1, '3-6':2, '3-6h':2, '6-10':3, '6-10h':3, '10-24':4, '10-24h':4, '1d':5, '1day':5, 'day':5, '1d+':5 };
 const onOff = (v, cur) => /^(on|1|yes|start|resume)$/i.test(v||'') ? true : /^(off|0|no|stop|pause)$/i.test(v||'') ? false : !cur;
@@ -2425,11 +2429,14 @@ async function tgcPoll(){
     for(const u of ups||[]){ tgcOff=u.update_id+1; LS.set('sm_tgc_off', String(tgcOff));
       if(u.callback_query){ if(tgcOwner) await tgcButton(u.callback_query); continue; }
       const m=u.message; if(!m || m.chat?.type!=='private' || !m.text) continue; const chat=String(m.chat.id), t=m.text.trim();
-      if(!tgcOwner){ if(new RegExp(`^/?link\\s+${tgcCode}$`,'i').test(t)){ tgcOwner=chat; LS.set('sm_tgc_owner', chat); tgcReply(chat, '✅ <b>Linked</b> — this chat now controls Smart Money. Tap the buttons below (send /menu anytime to bring them back, /help for typed commands).'); setTimeout(()=>tgcMenu(chat), 500); tgcRerender(); } else tgcReply(chat, 'Not linked yet: send /link and the code shown on the Smart Money page (📱 Phone control).'); continue; }
+      if(!tgcOwner){ if(new RegExp(`(^|\\D)${tgcCode}(\\D|$)`).test(t)){ tgcOwner=chat; LS.set('sm_tgc_owner', chat); tgcReply(chat, '✅ <b>Linked</b> — this chat now controls Smart Money. Tap the buttons below (send /menu anytime to bring them back, /help for typed commands).'); setTimeout(()=>tgcMenu(chat), 500); tgcRerender(); } else tgcReply(chat, 'Not linked yet: send /link and the code shown on the Smart Money page (📱 Phone control).'); continue; }
       if(chat!==tgcOwner) continue;   // only your chat
       await tgcRun(chat, t);
     }
-  }catch(e){ /* offline / token missing: try again next round */ }
+    tgcStat={ ok:true, at:Date.now(), err:'' };
+  }catch(e){ tgcStat={ ok:false, at:Date.now(), err:e.message };
+    // a webhook on the bot blocks reading messages -- only clear it when you say so (page button)
+  }
   finally{ tgcBusy=false; }
 }
 setTimeout(tgcPoll, 6000); setInterval(tgcPoll, 5000);
