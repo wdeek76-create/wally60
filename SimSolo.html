@@ -35,7 +35,7 @@ h2{font-size:12px;letter-spacing:1px;text-transform:uppercase;color:var(--mut);m
   <div class="row" style="margin-top:6px"><button onclick="sharprPasteLoad()" style="background:#a78bfa;border-color:#a78bfa;color:#111">PARSE SHARPR</button>
     <label class="filebtn" style="background:#f59e0b;border-color:#f59e0b"><input type="file" accept=".csv,text/csv" onchange="loadPs(this,'TABS')" hidden>&#8679; TABS SIM CSV</label></div>
   <div id="srcstat" class="info" style="display:grid;gap:2px"></div>
-  <div class="row"><button onclick="copyAgree()" style="border-color:#a78bfa;color:#a78bfa">COPY AGREE</button><button onclick="copyPlays()">COPY PLAYS</button><button onclick="copyDayRecap()" style="border-color:#4ade80;color:#4ade80">COPY RECAP</button><button onclick="gradeAll()" id="gbtn">GRADE</button><button onclick="retag()">↻ RW</button>
+  <div class="row"><button onclick="copyAgree()" style="border-color:#a78bfa;color:#a78bfa">COPY AGREE</button><button onclick="copyPlays()">COPY PLAYS</button><button onclick="copyDayRecap()" style="border-color:#4ade80;color:#4ade80">COPY RECAP</button><button onclick="gradeAll()" id="gbtn">GRADE</button><button onclick="retag()">↻ RW</button><button onclick="ooDepth()" title="Pull exchange order books from OpticOdds: size at the price and dollars to the play-to">$ DEPTH</button>
     <button class="chip" onclick="document.getElementById('more').style.display = document.getElementById('more').style.display === 'none' ? 'block' : 'none'" style="margin-left:auto">more…</button></div>
   <div id="more" style="display:none;border-top:1px solid var(--line);margin-top:8px;padding-top:8px">
     <div class="row" style="margin-top:0">
@@ -46,7 +46,7 @@ h2{font-size:12px;letter-spacing:1px;text-transform:uppercase;color:var(--mut);m
       <label class="filebtn alt" style="color:#f59e0b;border-color:#f59e0b"><input type="file" accept=".csv,text/csv" onchange="toPs(this,'TABS')" hidden>TABS</label>
       <label class="filebtn alt" style="color:#eab308;border-color:#eab308"><input type="file" accept=".csv,text/csv" onchange="toPs(this,'DIMERS')" hidden>DIMERS</label>
     </div>
-    <div class="row"><button onclick="copyReport()">COPY FULL REPORT</button><button onclick="exportCsv()">EXPORT CSV</button><button class="del" onclick="clearAll()">CLEAR ALL</button></div>
+    <div class="row"><button onclick="copyReport()">COPY FULL REPORT</button><button onclick="exportCsv()">EXPORT CSV</button><button class="del" onclick="clearAll()">CLEAR ALL</button><button onclick="ooSetBackend()" title="OpticOdds backend URL">⚙ OO</button></div>
   </div>
   <div class="info" id="info"></div>
 </div>
@@ -477,7 +477,7 @@ const TEAM_NAME_ALIASES = {
   "la clippers":"LAC", "los angeles lakers":"LAL", "memphis grizzlies":"MEM",
   "miami heat":"MIA", "milwaukee bucks":"MIL", "minnesota timberwolves":"MIN",
   "new orleans pelicans":"NOP", "new york knicks":"NYK", "oklahoma city thunder":"OKC",
-  "orlando magic":"ORL", "philadelphia ers":"PHI", "phoenix suns":"PHX",
+  "orlando magic":"ORL", "philadelphia 76ers":"PHI", "phoenix suns":"PHX",
   "portland trail blazers":"POR", "sacramento kings":"SAC", "san antonio spurs":"SAS",
   "toronto raptors":"TOR", "utah jazz":"UTA", "washington wizards":"WAS",
   "los angeles clippers":"LAC", "la lakers":"LAL",
@@ -810,7 +810,7 @@ async function loadSlate(day) {
 }
 const slateFor = team => (slate && slate.teams && slate.teams[normTeamAbbr(team || "")]) || null;
 // plays with no tip time (page pastes) take ESPN's; nothing else is touched
-function fillTimes() { if (!slate) return 0; let n = 0; rows.forEach(x => { if (!x.gameTime && x.gameDate === slate.day) { const g = slateFor(x.team); if (g && g.time) { x.gameTime = g.time; n++; } } }); if (n) save(); return n; }
+function fillTimes() { rows.forEach(x => { if (!x.team) { const t = teamOf(x); if (t) x.team = tm(t); } }); if (!slate) return 0; let n = 0; rows.forEach(x => { if (!x.gameTime && x.gameDate === slate.day) { const g = slateFor(teamOf(x)); if (g && g.time) { x.gameTime = g.time; n++; } } }); if (n) save(); return n; }
 const logoImg = (team, sz) => { const g = slateFor(team); return g && g.logo ? `<img src="${g.logo}" alt="" style="width:${sz || 18}px;height:${sz || 18}px;vertical-align:middle;object-fit:contain;margin-right:4px">` : ""; };
 function rollupDays() {
   const cut = new Date(); cut.setDate(cut.getDate() - 1); const stale = localYMD(cut);          // a day still with open picks that is 2+ days old is closed by voidStale first
@@ -1003,6 +1003,7 @@ async function loadPlays(plays, src, label, opts) {
     say(`${src}${gone ? ` \u00b7 ${gone} old open plays replaced` : ""}: ${added} new${upd ? `, ${upd} updated` : ""}${under ? ` \u00b7 ${under} under ${minEv}%` : ""}${noHead ? ` \u00b7 ${noHead} with no FD / PB / PIN / Bet105 price` : ""}${late ? ` \u00b7 ${late} already tipped` : ""}${dates.size ? ` \u00b7 ${[...dates].join(", ")}` : ""}`);
     toast(`${src}: ${added + upd} plays loaded`); render();
     try { await loadSlate(); if (fillTimes()) render(); } catch (e) {}
+    try { await ooDepth(true); } catch (e) {}   // exchange depth for the new plays
   }
 }
 // ── SHARPR PAGE PASTE ─────────────────────────────────────────────────────────
@@ -1010,6 +1011,69 @@ async function loadPlays(plays, src, label, opts) {
 // play: name, position, team @/vs opp, projection, stat, minutes, then a run of book quotes (edge%, side+line, price, book name when the page prints one).
 // A quote with a book name is a book's own price; the exchange ones carry the name too. Every quote on the play's side becomes a per-book row, so the
 // normal headline rule (FD / PB / PIN / Bet105, else the best exchange) picks the tracked price just like the CSV path.
+// ── OPTICODDS: exchange depth to the play-to ────────────────────────────────
+// For a play whose best book is an exchange (Novig / ProphetX / Kalshi), pull that market's order book from OpticOdds (same backend the blender uses)
+// and show the size at the price plus every dollar at or better than the play-to: "$310 @ -108 · $1,240 to -121". Which book is the play does not
+// change; this is information. Set the backend once with ⚙ OO under "more" (kept in this browser).
+const OO_KEY = "nba_opticodds_backend", OO_DEFAULT = "https://nfl-props-tracker-1.vercel.app/api/odds";
+const ooBackend = () => { try { return localStorage.getItem(OO_KEY) || OO_DEFAULT; } catch (e) { return OO_DEFAULT; } };
+function ooSetBackend() { const u = prompt("OpticOdds backend URL (the blender's /api/odds):", ooBackend()); if (u != null) { try { localStorage.setItem(OO_KEY, u.trim() || OO_DEFAULT); } catch (e) {} toast("OpticOdds backend saved"); } }
+async function ooCall(endpoint, params) {
+  const res = await fetch(ooBackend(), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ endpoint, params: params || {} }) });
+  const text = await res.text(); if (!res.ok) throw new Error(`backend ${res.status}: ${text.slice(0, 120)}`); return JSON.parse(text);
+}
+const OO_EXCH_NAMES = { Novig: "Novig", ProphetX: "Prophet X", Kalshi: "Kalshi" };            // our label -> OpticOdds sportsbook name
+const OO_MARKET = { PTS: /^player points$/i, REB: /^player rebounds$/i, AST: /^player assists$/i, "3PM": /^player (threes|3[- ]?pointers?( made)?)$/i, PRA: /^player (pts ?\+ ?rebs? ?\+ ?asts?|points ?\+ ?rebounds ?\+ ?assists)$/i };
+const OO_FEE = { "Prophet X": 0.02 };   // ProphetX takes 2% of winnings: prices shown net of it, like the blender
+const feeAdj = (amOdds, fee) => { if (!fee) return amOdds; const d = dec(amOdds); return am(1 + (d - 1) * (1 - fee)); };
+let _ooFix = { at: 0, list: [] };
+async function ooFixturesToday() {
+  if (_ooFix.list.length && Date.now() - _ooFix.at < 120000) return _ooFix.list;
+  const raw = []; let page = 1;
+  for (let i = 0; i < 20; i++) { const r = await ooCall("/fixtures", { sport: "basketball", league: "nba", page }); (r?.data || []).forEach(f => raw.push(f)); if (!r?.has_more) break; page++; }
+  const t0 = Date.now() - 6 * 3600e3, t1 = Date.now() + 30 * 3600e3;
+  const key = n => { const lc = String(n || "").toLowerCase().trim(); if (!lc) return null; if (TEAM_NAME_ALIASES[lc]) return TEAM_NAME_ALIASES[lc];
+    const bare = lc.replace(/[^a-z ]/g, "").replace(/\s+/g, " ").trim(); if (TEAM_NAME_ALIASES[bare]) return TEAM_NAME_ALIASES[bare];
+    const w = bare.split(" "); return TEAM_NAME_ALIASES[w[w.length - 1]] || TEAM_NAME_ALIASES[w.slice(0, -1).join(" ")] || TEAM_NAME_ALIASES[w[0]] || null; };
+  _ooFix = { at: Date.now(), list: raw.filter(f => { const t = new Date(f.start_date).getTime(); return t >= t0 && t <= t1 && f.status !== "completed"; })
+    .map(f => ({ id: f.id, home: key(f.home_competitors?.[0]?.name || f.home_team_display), away: key(f.away_competitors?.[0]?.name || f.away_team_display) })) };
+  return _ooFix.list;
+}
+// order book -> [{price, size}] best price first (OpticOdds prints [price, size] pairs, decimal or American)
+function ooLevels(top, orderBook, topLiq) {
+  const normP = v => { v = Number(v); if (isNaN(v)) return NaN; return (v > 1 && v < 50) ? am(v) : v; };
+  const ob = (Array.isArray(orderBook) ? orderBook : []).filter(l => Array.isArray(l) && l.length >= 2), out = [];
+  if (ob.length) { const a0 = normP(ob[0][0]), b0 = normP(ob[0][1]), pf = Math.abs(a0 - Number(top)) <= Math.abs(b0 - Number(top));
+    ob.forEach(l => { const price = pf ? normP(l[0]) : normP(l[1]), size = pf ? Number(l[1]) : Number(l[0]); if (!isNaN(price) && !isNaN(size) && size > 0) out.push({ price, size }); }); }
+  else if (topLiq != null) out.push({ price: Number(top), size: Number(topLiq) });
+  return out.sort((a, b) => b.price - a.price);
+}
+// a play's team: its own, else RotoWire's team for the player (PropShop's Tabs export often leaves Team blank)
+function teamOf(x) { if (x.team) return x.team; try { const d = rwData(), k = norm(x.player); const me = d.rw && d.rw[k]; if (me && me.team) return me.team; const inj = d.injBy && d.injBy.get(k); if (inj && inj.team) return inj.team; } catch (e) {} return ""; }
+// Fill x.depth = { top: size at the price, live, to: dollars at or better than the play-to, worst, at } for every live exchange play
+async function ooDepth(quiet) {
+  const plays = rows.filter(x => isLive(x) && EXCH.has(x.book) && OO_EXCH_NAMES[x.book]);
+  if (!plays.length) { if (!quiet) toast("No open plays at an exchange"); return 0; }
+  let fixtures; try { fixtures = await ooFixturesToday(); } catch (e) { if (!quiet) toast("OpticOdds: " + e.message); return 0; }
+  const byFix = {}; plays.forEach(x => { const t = tm(teamOf(x)), f = fixtures.find(f => f.home === t || f.away === t); if (f) (byFix[f.id] = byFix[f.id] || []).push(x); });
+  let n = 0;
+  for (const [fid, list] of Object.entries(byFix)) {
+    const books = [...new Set(list.map(x => OO_EXCH_NAMES[x.book]))];
+    let odds = []; try { const r = await ooCall("/fixtures/odds", { fixture_id: [fid], sportsbook: books }); odds = r?.data?.[0]?.odds || []; } catch (e) { continue; }
+    list.forEach(x => {
+      const re = OO_MARKET[x.stat]; if (!re) return;
+      const o = odds.find(o => re.test(String(o.market || "")) && String(o.selection_line || "").toLowerCase() === x.ou && Number(o.points) === Number(x.line)
+        && String(o.sportsbook || "").toLowerCase() === OO_EXCH_NAMES[x.book].toLowerCase() && resolveNorm(o.selection || o.name || "") === resolveNorm(x.player));
+      if (!o) return;
+      const fee = OO_FEE[OO_EXCH_NAMES[x.book]], top = feeAdj(Number(o.price), fee);
+      let lv = ooLevels(Number(o.price), o.order_book, o.limits && o.limits.max); if (fee) lv = lv.map(l => ({ price: feeAdj(l.price, fee), size: l.size }));
+      const thr = dec(x.playTo), ok = lv.filter(l => dec(l.price) >= thr);
+      x.depth = { top: lv.length ? lv[0].size : (o.limits && o.limits.max) || null, live: top, to: ok.reduce((a, l) => a + l.size, 0), worst: ok.length ? ok[ok.length - 1].price : null, at: Date.now() }; n++;
+    });
+  }
+  save(); if (!quiet) toast(`Depth: ${n} of ${plays.length} exchange plays`); render(); return n;
+}
+const depthTxt = x => { const d = x.depth; if (!d) return ""; const $ = v => "$" + Math.round(v).toLocaleString(); return `${d.top != null ? $(d.top) + " @ " + fo(d.live) : ""}${d.to ? ` \u00b7 ${$(d.to)} to ${fo(x.playTo)}` : d.top != null ? " \u00b7 nothing to the play-to" : ""}`; };
 const SHARPR_STAT = { PTS: "PTS", REB: "REB", AST: "AST", PRA: "PRA", "3PM": "3PM" };
 const SHARPR_COLS = ["FanDuel", "Novig", "ProphetX", "Bet105", "Prop Builder"];   // the page's book columns, left to right, after Best Line
 function parseSharprPage(text) {
@@ -1163,7 +1227,7 @@ function render() {
   <div class="card"><h2>5%+ alignments \u00b7 open (${agreeOpen.length})</h2>${agreeOpen.length ? `<div class="scroll"><table><thead><tr>${th("Player")}${th("Pick")}${th("Best")}${th("Edges")}${th("Play to")}${th("Model gates")}</tr></thead><tbody>${agreeOpen.map(x => { const gt = gateFor(x); return `<tr><td>${x.player}<br><span class="m" style="font-weight:400;font-size:11px">${x.stat} \u00b7 ${x.gameDate.slice(5)} ${x.gameTime}</span></td><td class="${x.ou === "over" ? "o" : "u"}">${x.ou === "over" ? "O" : "U"} ${x.line}</td><td>${x.book} ${fo(x.odds)}</td><td style="white-space:normal;font-size:12px">${edgeTxt(x)}</td><td>${fo(x.playTo)}</td><td style="white-space:normal;font-size:11px;max-width:220px;color:${gt ? "#f87171" : "#4ade80"}">${gt ? "HELD \u2014 " + gt : "\u2713 clear"}</td></tr>`; }).join("")}</tbody></table></div>` : '<div class="m">No open play where both sources are 5%+ yet.</div>'}</div>
   <div class="card"><h2>By day \u00b7 ${fSrc === "AGREE" ? "agree" : fSrc} \u00b7 ${fThr}%+</h2>${days.length ? (() => { const asc = days.slice().sort(); let run = 0; const runBy = {}; asc.forEach(d => { run += tally(set.filter(x => x.gameDate === d)).a.pl; runBy[d] = run; });
     return `<div class="scroll"><table><thead><tr>${th("Day")}${th("All")}${th('<span class="o">Over</span>')}${th('<span class="u">Under</span>')}${th("Running")}</tr></thead><tbody>${days.map(d => { const t = tally(set.filter(x => x.gameDate === d)); const dd = new Date(d + "T12:00:00"); return `<tr><td>${dd.toLocaleDateString("en-US", { weekday: "short", month: "numeric", day: "numeric" })}</td>${cell(t.a)}${cell(t.o)}${cell(t.u)}<td class="${runBy[d] >= 0 ? "g" : "r"}" style="font-weight:800">${fmtU(runBy[d])}</td></tr>`; }).join("")}</tbody></table></div>`; })() : '<div class="m">Nothing yet.</div>'}</div>
-  <div class="card"><h2>Plays (latest ${recent.length})</h2><div class="scroll"><table><thead><tr>${th("Player")}${th("Pick")}${th("Best")}${th("Play to")}${th("Result")}${th("")}</tr></thead><tbody>${recent.map(x => { const g = slateFor(x.team); return `<tr><td>${logoImg(x.team, 18)}${x.player}<br><span class="m" style="font-weight:400;font-size:11px">${x.src} \u00b7 ${x.stat} \u00b7 ${x.gameDate.slice(5)}${g ? ` \u00b7 ${tm(x.team)} ${g.home ? "vs" : "@"} ${g.opp}` : ""} ${x.gameTime || (g ? g.time : "")}</span></td><td class="${x.ou === "over" ? "o" : "u"}">${x.ou === "over" ? "O" : "U"} ${x.line}</td><td>${x.book} ${fo(x.odds)}<br><span class="g" style="font-size:12px">${edgeTxt(x)}</span></td><td>${fo(x.playTo)}</td><td class="${resCls(x.result)}">${x.result === "pending" ? "\u2014" : x.result.toUpperCase() + (x.actual != null ? ` (${x.actual})` : "")}</td><td>${x.src === "AGREE" ? "" : `<button class="chip del" onclick="del('${x.key.replace(/'/g, "\\'")}')">\u00d7</button>`}</td></tr>`; }).join("")}</tbody></table></div></div>`;
+  <div class="card"><h2>Plays (latest ${recent.length})</h2><div class="scroll"><table><thead><tr>${th("Player")}${th("Pick")}${th("Best")}${th("Play to")}${th("Result")}${th("")}</tr></thead><tbody>${recent.map(x => { const t = teamOf(x), g = slateFor(t); return `<tr><td>${logoImg(t, 18)}${x.player}<br><span class="m" style="font-weight:400;font-size:11px">${x.src} \u00b7 ${x.stat} \u00b7 ${x.gameDate.slice(5)}${g ? ` \u00b7 ${tm(t)} ${g.home ? "vs" : "@"} ${g.opp}` : ""} ${x.gameTime || (g ? g.time : "")}</span></td><td class="${x.ou === "over" ? "o" : "u"}">${x.ou === "over" ? "O" : "U"} ${x.line}</td><td>${x.book} ${fo(x.odds)}<br><span class="g" style="font-size:12px">${edgeTxt(x)}</span>${x.depth ? `<br><span class="m" style="font-size:11px">${depthTxt(x)}</span>` : ""}</td><td>${fo(x.playTo)}</td><td class="${resCls(x.result)}">${x.result === "pending" ? "\u2014" : x.result.toUpperCase() + (x.actual != null ? ` (${x.actual})` : "")}</td><td>${x.src === "AGREE" ? "" : `<button class="chip del" onclick="del('${x.key.replace(/'/g, "\\'")}')">\u00d7</button>`}</td></tr>`; }).join("")}</tbody></table></div></div>`;
   const st = document.getElementById("srcstat"); if (st) st.innerHTML = SOURCES.filter(s => meta[s] || s !== "DIMERS").map(s => { const m = meta[s]; const n = rows.filter(x => x.src === s && isLive(x)).length; return `<div><b>${s}</b> ${m ? `loaded ${new Date(m.at).toLocaleString([], { month: "numeric", day: "numeric", hour: "numeric", minute: "2-digit" })} \u00b7 ${n} open` : "not loaded yet"}</div>`; }).join("");
 }
 
@@ -1184,7 +1248,7 @@ function fmtPlays(items, header) {
       const inPlay = b => b.roi == null || Number(b.roi) >= PLAY_TO_EV;
       const same = (x.books || []).filter(b => Number(b.line) === Number(x.line) && inPlay(b)), alt = (x.books || []).filter(b => Number(b.line) !== Number(x.line) && inPlay(b));
       const head = `${pre}${multi ? "" : `${x.player}${team}  `}${ou} ${x.line} ${stat} ${fo(x.odds)} ${x.book}${x.edges ? `  (${x.edges})` : ""}`;
-      L.push(same.length ? head : `${head}  play to ${fo(x.playTo)}`);
+      L.push((same.length ? head : `${head}  play to ${fo(x.playTo)}`) + (x.depth && x.depth.top != null ? `  [${depthTxt(x)}]` : ""));
       const bk = b => `${b.book} ${fo(b.odds)}${EXCH.has(b.book) ? " " + cents(b.odds) : ""}`;
       if (same.length) L.push(`${ind}${same.map(bk).join("  ")}  play to ${fo(x.playTo)}`);
       if (alt.length) {
@@ -1234,13 +1298,13 @@ function reportText() {
 }
 // Day-by-day recap: W-L and units per day with a running total, then the all-time line. Live picks and rolled-up days both count.
 function dayRecapText(src) {
-  const base = baseRows(src || "ALL").filter(x => x._hist || x.result === "hit" || x.result === "miss");
+  const base = baseRows(src || "ALL").filter(x => (x._hist || x.result === "hit" || x.result === "miss") && ctxOk(x));   // follows the RW-context chip (CLEAN / UPSIDE / IFFY / ALL)
   const days = [...new Set(base.map(x => x.gameDate))].sort(); if (!days.length) return "";
   const u = n => (n >= 0 ? "+" : "") + n.toFixed(2) + "u", rec = t => `${t.w}-${t.l}`, roi = t => t.st ? ` \u00b7 ROI ${t.pl / t.st * 100 >= 0 ? "+" : ""}${(t.pl / t.st * 100).toFixed(1)}%` : "";
   const d = days[days.length - 1], dayRows = base.filter(x => x.gameDate === d), live = dayRows.filter(x => !x._hist), t = tally(dayRows);
-  const open = (baseRows(src || "ALL")).filter(x => x.gameDate === d && x.result === "pending").length;
+  const open = (baseRows(src || "ALL")).filter(x => x.gameDate === d && x.result === "pending" && ctxOk(x)).length;
   const nice = new Date(d + "T12:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
-  const L = [`**SIM SOLO${src && src !== "ALL" ? " " + src : ""} \u2014 Recap ${nice}**`, `**${rec(t.a)}** (${u(t.a.pl)}${roi(t.a)})${open ? ` \u00b7 ${open} still open` : ""}`, ""];
+  const L = [`**SIM SOLO${src && src !== "ALL" ? " " + src : ""}${fCtx !== "ALL" ? " \u00b7 " + fCtx.toUpperCase() : ""} \u2014 Recap ${nice}**`, `**${rec(t.a)}** (${u(t.a.pl)}${roi(t.a)})${open ? ` \u00b7 ${open} still open` : ""}`, ""];
   if (live.length) live.slice().sort((a, b) => (a.gameTime || "").localeCompare(b.gameTime || "") || a.player.localeCompare(b.player)).forEach(x => {
     const icon = x.result === "hit" ? "\u2705" : "\u274c", o = x.odds > 0 ? "+" + x.odds : String(x.odds);
     L.push(`${icon} **${x.player}** ${x.ou === "over" ? "o" : "u"}${x.line} ${x.stat} ${o}${x.book ? " (" + x.book + ")" : ""}${x.actual != null ? ` \u2014 ${x.actual}` : ""}`); });
