@@ -994,13 +994,14 @@ async function loadPlays(plays, src, label, opts) {
       if (cur) { if (cur.result === "pending") { Object.assign(cur, rec, { result: cur.result }); upd++; } cur.touched = now; return; }
       rec.touched = now; rows.push(rec); added++;
     });
-    // a fresh upload replaces this source's OPEN plays for the same day(s): lines that dropped out of the export are removed (graded ones stay)
+    // a fresh upload: an OPEN play that dropped out of it (the price moved past 5%, the line was pulled) is NOT removed — it stays in the list and
+    // in AGREE and still grades (you may already have it). It is marked moved, and the copies leave it out. A later paste that has it again un-marks it.
     const keep = new Set(Object.values(groups).length ? rows.filter(x => x.src === src && dates.has(x.gameDate) && x.touched === now).map(x => x.key) : []);
-    const before = rows.length; rows = rows.filter(x => !(x.src === src && x.result === "pending" && dates.has(x.gameDate) && !keep.has(x.key))); const gone = before - rows.length;
+    let gone = 0; rows.forEach(x => { if (x.src === src && x.result === "pending" && dates.has(x.gameDate)) { const m = !keep.has(x.key); if (m && !x.moved) gone++; x.moved = m; } });
     rows.forEach(x => { delete x.touched; });
     meta[src] = { at: now, n: added + upd, file: label }; try { localStorage.setItem(META_KEY, JSON.stringify(meta)); } catch (e) {}
     save();
-    say(`${src}${gone ? ` \u00b7 ${gone} old open plays replaced` : ""}: ${added} new${upd ? `, ${upd} updated` : ""}${under ? ` \u00b7 ${under} under ${minEv}%` : ""}${noHead ? ` \u00b7 ${noHead} with no FD / PB / PIN / Bet105 price` : ""}${late ? ` \u00b7 ${late} already tipped` : ""}${dates.size ? ` \u00b7 ${[...dates].join(", ")}` : ""}`);
+    say(`${src}${gone ? ` \u00b7 ${gone} open play${gone === 1 ? "" : "s"} moved (kept, not in copies)` : ""}: ${added} new${upd ? `, ${upd} updated` : ""}${under ? ` \u00b7 ${under} under ${minEv}%` : ""}${noHead ? ` \u00b7 ${noHead} with no FD / PB / PIN / Bet105 price` : ""}${late ? ` \u00b7 ${late} already tipped` : ""}${dates.size ? ` \u00b7 ${[...dates].join(", ")}` : ""}`);
     toast(`${src}: ${added + upd} plays loaded`); render();
     try { await loadSlate(); if (fillTimes()) render(); } catch (e) {}
     try { await ooDepth(true); } catch (e) {}   // exchange depth for the new plays
@@ -1193,7 +1194,7 @@ function agreeRows() {
     const low = srcs.reduce((a, x) => x.ev < a.ev ? x : a), best = srcs.reduce((a, x) => x.odds > a.odds ? x : a), graded = srcs.find(x => x.result !== "pending");
     const order = { flagged: 3, downside: 2, upside: 1, clean: 0 }, worstCx = srcs.reduce((a, x) => (order[x.ctx] || 0) > (order[a.ctx] || 0) ? x : a);
     return { ctx: worstCx.ctx || "clean", ctxWhy: worstCx.ctxWhy || "", team: low.team, key: "AGREE|" + k, src: "AGREE", player: low.player, stat: low.stat, ou: low.ou, line: low.line, gameDate: low.gameDate, gameTime: low.gameTime, odds: best.odds, book: best.book, ev: low.ev, playTo: low.playTo,
-      srcEvs: srcs.sort((a, b) => b.ev - a.ev).map(x => ({ src: x.src, ev: x.ev })), books: best.books || [], result: graded ? graded.result : "pending", actual: graded ? graded.actual : null };
+      srcEvs: srcs.sort((a, b) => b.ev - a.ev).map(x => ({ src: x.src, ev: x.ev })), books: best.books || [], result: graded ? graded.result : "pending", actual: graded ? graded.actual : null, moved: srcs.some(x => x.moved) };
   }).filter(Boolean);
 }
 const baseRows = src => (src === "AGREE" ? agreeRows() : src === "ALL" ? rows : rows.filter(x => x.src === src)).concat(histRows(src));
@@ -1224,10 +1225,10 @@ function render() {
   <div class="card"><h2>By source \u00b7 ${fThr}%+${fStat === "ALL" ? "" : " \u00b7 " + fStat}</h2>${tbl("Source", bySrc)}</div>
   <div class="card"><h2>Clean vs iffy \u00b7 ${fSrc === "AGREE" ? "agree" : fSrc} \u00b7 ${fThr}%+</h2>${tbl("RW context", [["clean", "CLEAN"], ["upside", "UPSIDE"], ["downside", "DOWNSIDE"], ["flagged", "FLAGGED"]].map(([k, l]) => ({ label: `<span style="color:${CTX_COL[k]}">${l}</span>`, set: baseRows(fSrc).filter(x => (x.ctx || "clean") === k && x.ev >= fThr && (fStat === "ALL" || x.stat === fStat)) })).filter(l => l.set.length))}</div>
   <div class="card"><h2>By market \u00b7 ${fSrc === "AGREE" ? "agree" : fSrc} \u00b7 ${fThr}%+</h2>${tbl("Market", STATS.map(s => ({ label: s, set: baseRows(fSrc).filter(x => x.stat === s && x.ev >= fThr) })).filter(l => l.set.length).concat([{ label: "All", set: baseRows(fSrc).filter(x => x.ev >= fThr), total: true }]))}</div>
-  <div class="card"><h2>5%+ alignments \u00b7 open (${agreeOpen.length})</h2>${agreeOpen.length ? `<div class="scroll"><table><thead><tr>${th("Player")}${th("Pick")}${th("Best")}${th("Edges")}${th("Play to")}${th("Model gates")}</tr></thead><tbody>${agreeOpen.map(x => { const gt = gateFor(x); return `<tr><td>${x.player}<br><span class="m" style="font-weight:400;font-size:11px">${x.stat} \u00b7 ${x.gameDate.slice(5)} ${x.gameTime}</span></td><td class="${x.ou === "over" ? "o" : "u"}">${x.ou === "over" ? "O" : "U"} ${x.line}</td><td>${x.book} ${fo(x.odds)}</td><td style="white-space:normal;font-size:12px">${edgeTxt(x)}</td><td>${fo(x.playTo)}</td><td style="white-space:normal;font-size:11px;max-width:220px;color:${gt ? "#f87171" : "#4ade80"}">${gt ? "HELD \u2014 " + gt : "\u2713 clear"}</td></tr>`; }).join("")}</tbody></table></div>` : '<div class="m">No open play where both sources are 5%+ yet.</div>'}</div>
+  <div class="card"><h2>5%+ alignments \u00b7 open (${agreeOpen.length})</h2>${agreeOpen.length ? `<div class="scroll"><table><thead><tr>${th("Player")}${th("Pick")}${th("Best")}${th("Edges")}${th("Play to")}${th("Model gates")}</tr></thead><tbody>${agreeOpen.map(x => { const gt = gateFor(x); return `<tr><td>${x.player}<br><span class="m" style="font-weight:400;font-size:11px">${x.stat} \u00b7 ${x.gameDate.slice(5)} ${x.gameTime}</span></td><td class="${x.ou === "over" ? "o" : "u"}">${x.ou === "over" ? "O" : "U"} ${x.line}${x.moved && x.result === "pending" ? `<br><span class="m" style="font-size:10px;color:#fbbf24">moved \u00b7 not in copies</span>` : ""}</td><td>${x.book} ${fo(x.odds)}</td><td style="white-space:normal;font-size:12px">${edgeTxt(x)}</td><td>${fo(x.playTo)}</td><td style="white-space:normal;font-size:11px;max-width:220px;color:${gt ? "#f87171" : "#4ade80"}">${gt ? "HELD \u2014 " + gt : "\u2713 clear"}</td></tr>`; }).join("")}</tbody></table></div>` : '<div class="m">No open play where both sources are 5%+ yet.</div>'}</div>
   <div class="card"><h2>By day \u00b7 ${fSrc === "AGREE" ? "agree" : fSrc} \u00b7 ${fThr}%+</h2>${days.length ? (() => { const asc = days.slice().sort(); let run = 0; const runBy = {}; asc.forEach(d => { run += tally(set.filter(x => x.gameDate === d)).a.pl; runBy[d] = run; });
     return `<div class="scroll"><table><thead><tr>${th("Day")}${th("All")}${th('<span class="o">Over</span>')}${th('<span class="u">Under</span>')}${th("Running")}</tr></thead><tbody>${days.map(d => { const t = tally(set.filter(x => x.gameDate === d)); const dd = new Date(d + "T12:00:00"); return `<tr><td>${dd.toLocaleDateString("en-US", { weekday: "short", month: "numeric", day: "numeric" })}</td>${cell(t.a)}${cell(t.o)}${cell(t.u)}<td class="${runBy[d] >= 0 ? "g" : "r"}" style="font-weight:800">${fmtU(runBy[d])}</td></tr>`; }).join("")}</tbody></table></div>`; })() : '<div class="m">Nothing yet.</div>'}</div>
-  <div class="card"><h2>Plays (latest ${recent.length})</h2><div class="scroll"><table><thead><tr>${th("Player")}${th("Pick")}${th("Best")}${th("Play to")}${th("Result")}${th("")}</tr></thead><tbody>${recent.map(x => { const t = teamOf(x), g = slateFor(t); return `<tr><td>${logoImg(t, 18)}${x.player}<br><span class="m" style="font-weight:400;font-size:11px">${x.src} \u00b7 ${x.stat} \u00b7 ${x.gameDate.slice(5)}${g ? ` \u00b7 ${tm(t)} ${g.home ? "vs" : "@"} ${g.opp}` : ""} ${x.gameTime || (g ? g.time : "")}</span></td><td class="${x.ou === "over" ? "o" : "u"}">${x.ou === "over" ? "O" : "U"} ${x.line}</td><td>${x.book} ${fo(x.odds)}<br><span class="g" style="font-size:12px">${edgeTxt(x)}</span>${x.depth ? `<br><span class="m" style="font-size:11px">${depthTxt(x)}</span>` : ""}</td><td>${fo(x.playTo)}</td><td class="${resCls(x.result)}">${x.result === "pending" ? "\u2014" : x.result.toUpperCase() + (x.actual != null ? ` (${x.actual})` : "")}</td><td>${x.src === "AGREE" ? "" : `<button class="chip del" onclick="del('${x.key.replace(/'/g, "\\'")}')">\u00d7</button>`}</td></tr>`; }).join("")}</tbody></table></div></div>`;
+  <div class="card"><h2>Plays (latest ${recent.length})</h2><div class="scroll"><table><thead><tr>${th("Player")}${th("Pick")}${th("Best")}${th("Play to")}${th("Result")}${th("")}</tr></thead><tbody>${recent.map(x => { const t = teamOf(x), g = slateFor(t); return `<tr><td>${logoImg(t, 18)}${x.player}<br><span class="m" style="font-weight:400;font-size:11px">${x.src} \u00b7 ${x.stat} \u00b7 ${x.gameDate.slice(5)}${g ? ` \u00b7 ${tm(t)} ${g.home ? "vs" : "@"} ${g.opp}` : ""} ${x.gameTime || (g ? g.time : "")}</span></td><td class="${x.ou === "over" ? "o" : "u"}">${x.ou === "over" ? "O" : "U"} ${x.line}${x.moved && x.result === "pending" ? `<br><span class="m" style="font-size:10px;color:#fbbf24">moved \u00b7 not in copies</span>` : ""}</td><td>${x.book} ${fo(x.odds)}<br><span class="g" style="font-size:12px">${edgeTxt(x)}</span>${x.depth ? `<br><span class="m" style="font-size:11px">${depthTxt(x)}</span>` : ""}</td><td>${fo(x.playTo)}</td><td class="${resCls(x.result)}">${x.result === "pending" ? "\u2014" : x.result.toUpperCase() + (x.actual != null ? ` (${x.actual})` : "")}</td><td>${x.src === "AGREE" ? "" : `<button class="chip del" onclick="del('${x.key.replace(/'/g, "\\'")}')">\u00d7</button>`}</td></tr>`; }).join("")}</tbody></table></div></div>`;
   const st = document.getElementById("srcstat"); if (st) st.innerHTML = SOURCES.filter(s => meta[s] || s !== "DIMERS").map(s => { const m = meta[s]; const n = rows.filter(x => x.src === s && isLive(x)).length; return `<div><b>${s}</b> ${m ? `loaded ${new Date(m.at).toLocaleString([], { month: "numeric", day: "numeric", hour: "numeric", minute: "2-digit" })} \u00b7 ${n} open` : "not loaded yet"}</div>`; }).join("");
 }
 
@@ -1261,8 +1262,10 @@ function fmtPlays(items, header) {
   return L.join("\n");
 }
 // Copy back: every open play, best book and price, the play-to, and the other books (alt lines marked)
+// the copies leave out plays whose price moved out of the last paste (they stay in the lists and still grade)
+const notMoved = x => !x.moved;
 function playsText() {
-  const open = view().filter(isLive); if (!open.length) return "";
+  const open = view().filter(isLive).filter(notMoved); if (!open.length) return "";
   // AGREE rows carry every source's edge; single-source rows show their own (and which source, when ALL is selected)
   const edges = x => x.srcEvs ? x.srcEvs.map(e => `${e.src} +${e.ev.toFixed(1)}%`).join(" / ") : `${fSrc === "ALL" ? x.src + " " : ""}+${x.ev.toFixed(1)}%`;
   const label = fSrc === "AGREE" ? `agree props (Sharpr + Tabs all ${fThr}%+, play to from the lower edge)` : `${fSrc === "ALL" ? "sim" : fSrc} props (${fThr}%+)`;
@@ -1272,7 +1275,7 @@ function agreeList() {
   return agreeRows().filter(x => isLive(x) && (fStat === "ALL" || x.stat === fStat)).map(x => ({ ...x, srcs: x.srcEvs, best: { book: x.book, odds: x.odds }, low: { ev: x.ev } })).sort((a, b) => b.ev - a.ev);
 }
 function agreeText() {
-  const all = agreeList(); if (!all.length) return "";
+  const all = agreeList().filter(notMoved); if (!all.length) return "";
   const held = all.filter(x => gateFor(x)), list = all.filter(x => !gateFor(x));
   let t = list.length ? fmtPlays(list.map(x => ({ ...x, edges: x.srcEvs.map(e => `${e.src} +${e.ev.toFixed(1)}%`).join(" / ") })), "NBA agree props (Sharpr + Tabs 5%+, play to from the lower edge)") : "NBA agree props: (0)";
   if (held.length) t += `\n\nHELD by the model gates (${held.length})\n` + held.map(x => `${x.player} ${x.ou} ${x.line} ${STAT_WORD[x.stat] || x.stat} \u2014 ${gateFor(x)}`).join("\n");
