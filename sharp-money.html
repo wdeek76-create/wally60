@@ -2414,8 +2414,13 @@ async function tgcMenu(chat, msgId){
   const fd=new FormData(); fd.append('chat_id', chat); fd.append('text', tgcMenuText()); fd.append('parse_mode','HTML'); fd.append('reply_markup', JSON.stringify(tgcKeyboard()));
   try{ if(msgId){ fd.append('message_id', String(msgId)); await tgApi('editMessageText', fd); } else await tgApi('sendMessage', fd); }catch(e){ /* "message is not modified" etc. */ }
 }
+// is this your alerts channel? (set as @name or as its id on the page)
+const tgcIsMyChannel = c => !!c && !!tgChat && (String(c.id)===String(tgChat) || ('@'+String(c.username||'')).toLowerCase()===String(tgChat).toLowerCase());
 async function tgcButton(q){
-  const chat=String(q.message?.chat?.id||''), cmd=q.data||''; if(chat!==tgcOwner) return;
+  const chat=String(q.message?.chat?.id||''), cmd=q.data||'';
+  // your private chat, or the menu in your channel -- but only taps from YOU (a subscriber tapping does nothing)
+  const fromMe = tgcOwner && String(q.from?.id||'')===tgcOwner;
+  if(!(fromMe && (chat===tgcOwner || tgcIsMyChannel(q.message?.chat)))){ try{ const fd=new FormData(); fd.append('callback_query_id', q.id); fd.append('text', tgcOwner?'Only the owner can change Smart Money':'Link first: text the bot your code privately'); await tgApi('answerCallbackQuery', fd); }catch(e){} return; }
   const say=['open','recap','liverecap','backup'].includes(cmd.split(' ')[0]);
   const r=cmd==='menu' ? 'Updated' : await tgcRun(chat, cmd, !say);
   try{ const fd=new FormData(); fd.append('callback_query_id', q.id); fd.append('text', String(r||'').replace(/<[^>]+>/g,'').split('\n')[0].slice(0,190)); await tgApi('answerCallbackQuery', fd); }catch(e){}
@@ -2424,10 +2429,16 @@ async function tgcButton(q){
 async function tgcPoll(){
   if(tgcBusy || !tgToken) return; tgcBusy=true;
   try{
-    const fd=new FormData(); fd.append('offset', String(tgcOff)); fd.append('timeout','0'); fd.append('allowed_updates', JSON.stringify(['message','callback_query']));
+    const fd=new FormData(); fd.append('offset', String(tgcOff)); fd.append('timeout','0'); fd.append('allowed_updates', JSON.stringify(['message','callback_query','channel_post']));
     const ups=await tgApi('getUpdates', fd);
     for(const u of ups||[]){ tgcOff=u.update_id+1; LS.set('sm_tgc_off', String(tgcOff));
-      if(u.callback_query){ if(tgcOwner) await tgcButton(u.callback_query); continue; }
+      if(u.callback_query){ await tgcButton(u.callback_query); continue; }
+      // typed in your alerts channel (only its admins can post there): run it, answer in the channel, tidy up the command
+      const cp=u.channel_post;
+      if(cp && cp.text && tgcIsMyChannel(cp.chat)){ const ch=String(cp.chat.id), t=cp.text.trim();
+        if(!/^\//.test(t)) continue;   // only /commands -- normal posts are left alone
+        try{ const fd=new FormData(); fd.append('chat_id', ch); fd.append('message_id', String(cp.message_id)); await tgApi('deleteMessage', fd); }catch(e){}
+        await tgcRun(ch, t); continue; }
       const m=u.message; if(!m || m.chat?.type!=='private' || !m.text) continue; const chat=String(m.chat.id), t=m.text.trim();
       if(!tgcOwner){ if(new RegExp(`(^|\\D)${tgcCode}(\\D|$)`).test(t)){ tgcOwner=chat; LS.set('sm_tgc_owner', chat); tgcReply(chat, '✅ <b>Linked</b> — this chat now controls Smart Money. Tap the buttons below (send /menu anytime to bring them back, /help for typed commands).'); setTimeout(()=>tgcMenu(chat), 500); tgcRerender(); } else tgcReply(chat, 'Not linked yet: send /link and the code shown on the Smart Money page (📱 Phone control).'); continue; }
       if(chat!==tgcOwner) continue;   // only your chat
