@@ -46,6 +46,9 @@ h2{font-size:12px;letter-spacing:1px;text-transform:uppercase;color:var(--mut);m
       <label class="filebtn alt" style="color:#f59e0b;border-color:#f59e0b"><input type="file" accept=".csv,text/csv" onchange="toPs(this,'TABS')" hidden>TABS</label>
       <label class="filebtn alt" style="color:#eab308;border-color:#eab308"><input type="file" accept=".csv,text/csv" onchange="toPs(this,'DIMERS')" hidden>DIMERS</label>
     </div>
+    <h2 style="margin-top:4px">RG Situation Room</h2>
+    <textarea id="rg-paste" placeholder="Paste RotoGrinders' NBA injury report (Situation Room) here \u2014 the impact rating tags teammates' unders as avoid / overs as upside\u2026" spellcheck="false" style="width:100%;height:48px;background:#090b10;color:#e8edf3;border:1px solid #2a303a;border-radius:8px;padding:8px 10px;font:11px/1.4 ui-monospace,Menlo,monospace;resize:vertical;box-sizing:border-box"></textarea>
+    <div class="row" style="margin-top:6px"><button onclick="rgPasteLoad()" style="border-color:#34d399;color:#34d399">PARSE RG</button><button class="del" onclick="rgClear()">CLEAR RG</button><span id="rgstat" class="m" style="font-size:11px"></span></div>
     <div class="row"><button onclick="copyReport()">COPY FULL REPORT</button><button onclick="exportCsv()">EXPORT CSV</button><button class="del" onclick="clearAll()">CLEAR ALL</button><button onclick="ooSetBackend()" title="OpticOdds backend URL">⚙ OO</button></div>
   </div>
   <div class="info" id="info"></div>
@@ -919,6 +922,13 @@ function ctxFor(player, team, ou) {
   try {
     const d = rwData(), k = norm(player), t = tm(team);
     const own = d.injBy.get(k); if (own && !cleared(own)) return { cls: "flagged", why: `on the injury report (${own.status || "listed"})` };
+    const rg = rgCtx(player, team, ou); if (rg && rg.cls === "flagged") return rg;   // RG says he is on the report
+    if (rg) { const rest = ctxRest(player, team, ou, d, k, t); return rest.cls === "flagged" ? rest : rg; }   // the rating decides unless lineups flag him
+    return ctxRest(player, team, ou, d, k, t);
+  } catch (e) { return { cls: "clean", why: "" }; }
+}
+function ctxRest(player, team, ou, d, k, t) {
+  try {
     const me = d.rw && d.rw[k]; if (me && me.status && String(me.status).toUpperCase() !== "STARTING") return { cls: "flagged", why: `RW lineups: ${me.status}` };
     const starts = src => { const tt = src && (src[t] || null); return tt && Array.isArray(tt.starters) ? tt.starters.includes(k) : null; };
     const rwStart = me ? String(me.status).toUpperCase() === "STARTING" : null, rgS = starts(d.rg), tbS = starts(d.tabs);
@@ -941,6 +951,41 @@ function cleared(r) {
   if (/^out|doubt|inactive|season|suspen/i.test(r.status || "")) return false;
   return /good to go|will play|is playing|expected to play|cleared to (?:play|return)|shed (?:his|her|the) (?:questionable |probable |game-time )?(?:tag|designation)|(?:removed|dropped|taken) (?:off|from) the injury report|off the injury report|upgraded to (?:available|probable)|available to play|no (?:restrictions|limitations)|full go/i.test(r.own || "")
     && !/game[- ]time decision|minutes? (?:restriction|limit)|limited minutes|ruled out|won['\u2019]t play|will not play|out for|doubtful|not expected to play|remains questionable|still questionable|uncertain/i.test(r.own || "");
+}
+// ── RG SITUATION ROOM: status + IMPACT RTG (1-10) per player ────────────────────────────────────────────────────
+// Paste RotoGrinders' NBA injury report (the "Situation Room" page). The rating does the work: a teammate OUT with impact 7+ means his minutes and
+// usage go to the guys left — bad for an UNDER on that team (downside), good for an OVER (upside). 4-6 is the softer version of the same read.
+// The player himself on the report (O / D / Q) is flagged, like RotoWire. Kept for the day.
+const RG_KEY = "nba_sim_solo_rg_v1";
+let rgImpact = null; try { const z = JSON.parse(localStorage.getItem(RG_KEY) || "null"); if (z && z.day === localYMD(new Date())) rgImpact = z; } catch (e) {}
+function parseRgImpact(text) {
+  const POS = "(?:PG|SG|SF|PF|C|G|F)", re = new RegExp("^(.+?)[\\t ]+([A-Z]{2,3})[\\t ]+(" + POS + "(?:/" + POS + ")*)[\\t ]+(O|OUT|Q|D|DTD|GTD|P)[\\t ]+(.+?)[\\t ]+(\\d{1,2})$");
+  const players = {};
+  String(text || "").split("\n").forEach(l => { const m = l.trim().match(re); if (!m) return; const k = norm(m[1]); if (!k) return;
+    players[k] = { name: m[1].trim(), team: tm(m[2]), pos: m[3], status: m[4].toUpperCase(), part: m[5].trim(), impact: Number(m[6]) }; });
+  return players;
+}
+function rgPasteLoad() {
+  const ta = document.getElementById("rg-paste"), players = parseRgImpact(ta ? ta.value : ""), n = Object.keys(players).length;
+  if (!n) { say("RG Situation Room: couldn't read that paste \u2014 copy the whole injury report page (name, team, pos, status, injury, impact rating)."); toast("RG: nothing read"); return; }
+  rgImpact = { day: localYMD(new Date()), at: Date.now(), players }; try { localStorage.setItem(RG_KEY, JSON.stringify(rgImpact)); } catch (e) {}
+  if (ta) ta.value = "";
+  let re = 0; rows.filter(isLive).forEach(x => { const c = ctxFor(x.player, x.team, x.ou); x.ctx = c.cls; x.ctxWhy = c.why; re++; }); save();
+  const outs = Object.values(players).filter(p => /^(O|OUT|D|DTD)$/.test(p.status)), big = outs.filter(p => p.impact >= 7);
+  say(`RG Situation Room: ${n} players \u00b7 ${outs.length} out/doubtful, ${big.length} with impact 7+ \u00b7 re-tagged ${re} open plays`); toast(`RG: ${n} players`); render();
+}
+function rgClear() { rgImpact = null; try { localStorage.removeItem(RG_KEY); } catch (e) {} say("RG Situation Room cleared"); render(); }
+// the rating's read for a play: the player himself on the report → flagged; a teammate out/doubtful with a big rating → under downside / over upside
+function rgCtx(player, team, ou) {
+  if (!rgImpact || !rgImpact.players) return null;
+  const k = norm(player), t = tm(team), me = rgImpact.players[k];
+  if (me && /^(O|OUT|D|DTD|Q|GTD)$/.test(me.status)) return { cls: "flagged", why: `RG: ${me.status}${me.part ? " (" + me.part + ")" : ""}${me.impact ? " \u00b7 impact " + me.impact : ""}` };
+  if (!t) return null;
+  const outs = Object.values(rgImpact.players).filter(p => p.team === t && norm(p.name) !== k && /^(O|OUT|D|DTD)$/.test(p.status) && p.impact >= 4).sort((a, b) => b.impact - a.impact);
+  if (!outs.length) return null;
+  const top = outs[0], who = outs.slice(0, 2).map(p => `${p.name} ${p.status} (impact ${p.impact})`).join(", ");
+  if (top.impact >= 7) return ou === "under" ? { cls: "downside", why: `avoid the under: ${who} \u2014 minutes/usage flow to him` } : { cls: "upside", why: `more role with ${who}` };
+  return ou === "under" ? { cls: "downside", why: `under risk: ${who}` } : { cls: "upside", why: `some extra role: ${who}` };
 }
 // a bet you would actually place is HELD when the context says flagged or downside (same rule the Morning gates use)
 function gateFor(x) { const c = ctxFor(x.player, x.team, x.ou); return (c.cls === "flagged" || c.cls === "downside") ? c.why : null; }
@@ -1229,6 +1274,7 @@ function render() {
   <div class="card"><h2>By day \u00b7 ${fSrc === "AGREE" ? "agree" : fSrc} \u00b7 ${fThr}%+</h2>${days.length ? (() => { const asc = days.slice().sort(); let run = 0; const runBy = {}; asc.forEach(d => { run += tally(set.filter(x => x.gameDate === d)).a.pl; runBy[d] = run; });
     return `<div class="scroll"><table><thead><tr>${th("Day")}${th("All")}${th('<span class="o">Over</span>')}${th('<span class="u">Under</span>')}${th("Running")}</tr></thead><tbody>${days.map(d => { const t = tally(set.filter(x => x.gameDate === d)); const dd = new Date(d + "T12:00:00"); return `<tr><td>${dd.toLocaleDateString("en-US", { weekday: "short", month: "numeric", day: "numeric" })}</td>${cell(t.a)}${cell(t.o)}${cell(t.u)}<td class="${runBy[d] >= 0 ? "g" : "r"}" style="font-weight:800">${fmtU(runBy[d])}</td></tr>`; }).join("")}</tbody></table></div>`; })() : '<div class="m">Nothing yet.</div>'}</div>
   <div class="card"><h2>Plays (latest ${recent.length})</h2><div class="scroll"><table><thead><tr>${th("Player")}${th("Pick")}${th("Best")}${th("Play to")}${th("Result")}${th("")}</tr></thead><tbody>${recent.map(x => { const t = teamOf(x), g = slateFor(t); return `<tr><td>${logoImg(t, 18)}${x.player}<br><span class="m" style="font-weight:400;font-size:11px">${x.src} \u00b7 ${x.stat} \u00b7 ${x.gameDate.slice(5)}${g ? ` \u00b7 ${tm(t)} ${g.home ? "vs" : "@"} ${g.opp}` : ""} ${x.gameTime || (g ? g.time : "")}</span></td><td class="${x.ou === "over" ? "o" : "u"}">${x.ou === "over" ? "O" : "U"} ${x.line}${x.moved && x.result === "pending" ? `<br><span class="m" style="font-size:10px;color:#fbbf24">moved \u00b7 not in copies</span>` : ""}</td><td>${x.book} ${fo(x.odds)}<br><span class="g" style="font-size:12px">${edgeTxt(x)}</span>${x.depth ? `<br><span class="m" style="font-size:11px">${depthTxt(x)}</span>` : ""}</td><td>${fo(x.playTo)}</td><td class="${resCls(x.result)}">${x.result === "pending" ? "\u2014" : x.result.toUpperCase() + (x.actual != null ? ` (${x.actual})` : "")}</td><td>${x.src === "AGREE" ? "" : `<button class="chip del" onclick="del('${x.key.replace(/'/g, "\\'")}')">\u00d7</button>`}</td></tr>`; }).join("")}</tbody></table></div></div>`;
+  { const rs = document.getElementById("rgstat"); if (rs) rs.textContent = rgImpact ? `RG loaded ${new Date(rgImpact.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })} \u00b7 ${Object.keys(rgImpact.players).length} players` : "not loaded"; }
   const st = document.getElementById("srcstat"); if (st) st.innerHTML = SOURCES.filter(s => meta[s] || s !== "DIMERS").map(s => { const m = meta[s]; const n = rows.filter(x => x.src === s && isLive(x)).length; return `<div><b>${s}</b> ${m ? `loaded ${new Date(m.at).toLocaleString([], { month: "numeric", day: "numeric", hour: "numeric", minute: "2-digit" })} \u00b7 ${n} open` : "not loaded yet"}</div>`; }).join("");
 }
 
