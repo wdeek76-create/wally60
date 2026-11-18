@@ -6081,17 +6081,8 @@ function setNhlSaltTelegram() {
 async function _nhlSaltFinishSetup(token, chat) {
   if (!chat) {
     let chats = [];
-    try {
-      const r = await fetch(`https://api.telegram.org/bot${token}/getUpdates?limit=100`);
-      const j = await r.json();
-      if (!j.ok) throw new Error(j.description || r.status);
-      const seen = new Map();
-      (j.result || []).forEach(u => {
-        const m = u.message || u.channel_post || u.edited_message || u.edited_channel_post || (u.my_chat_member) || null;
-        const ch = m && m.chat; if (ch && ch.type !== "private") seen.set(String(ch.id), ch.title || ch.username || String(ch.id));
-      });
-      chats = [...seen.entries()];
-    } catch (e) { alert("Couldn't reach Telegram with that bot token (" + e.message + "). Check the token and try again."); return; }
+    try { chats = await _nhlTgChats(token); }
+    catch (e) { alert("Couldn't reach Telegram with that bot token (" + e.message + "). Check the token and try again."); return; }
     if (!chats.length) { alert("The bot hasn't seen any group or channel yet. Add it to the SALT chat, send a message there, then do Set SALT Telegram again and leave the chat ID blank."); return; }
     if (chats.length === 1) chat = chats[0][0];
     else {
@@ -6104,12 +6095,56 @@ async function _nhlSaltFinishSetup(token, chat) {
   showNhlToast("SALT Telegram saved · chat " + chat);
   if (currentTab === "discord") renderNhlDiscordTab();
 }
+// Telegram call: straight to api.telegram.org; if the browser can't reach it at all (blocked network, ad/tracker
+// blocker), the same request goes through this site's /api/telegram relay (api/telegram.js on Vercel).
+async function _nhlTgCall(token, method, fields) {
+  const form = () => { const fd = new FormData(); Object.entries(fields || {}).forEach(([k, v]) => fd.append(k, String(v))); return fd; };   // form data: no CORS preflight
+  let direct = null;
+  try { const r = await fetch(`https://api.telegram.org/bot${token}/${method}`, { method: "POST", body: form() }); return await r.json(); }
+  catch (e) { direct = e; }
+  const relays = [];
+  try { if (/^https?:$/.test(location.protocol)) relays.push(location.origin + "/api/telegram"); } catch (e) {}
+  const ob = typeof getOOBackend === "function" ? getOOBackend() : "";
+  if (/\/api\/odds$/i.test(ob)) relays.push(ob.replace(/\/api\/odds$/i, "/api/telegram"));
+  for (const url of [...new Set(relays)]) {
+    try { const fd = form(); fd.append("token", token); fd.append("method", method); const r = await fetch(url, { method: "POST", body: fd }); const j = await r.json(); if (j && "ok" in j) return j; } catch (e) {}
+  }
+  throw new Error("couldn't reach Telegram from this browser (" + (direct && direct.message || "blocked") + ") and no /api/telegram relay answered — upload api/telegram.js to the Vercel project");
+}
+async function _nhlTgChats(token) {
+  const j = await _nhlTgCall(token, "getUpdates", { limit: 100 });
+  if (!j.ok) throw new Error(j.description || j.error_code);
+  const seen = new Map();
+  (j.result || []).forEach(u => {
+    const m = u.message || u.channel_post || u.edited_message || u.edited_channel_post || u.my_chat_member || u.chat_member || null;
+    const ch = m && m.chat; if (ch && ch.type !== "private") seen.set(String(ch.id), ch.title || ch.username || String(ch.id));
+  });
+  return [...seen.entries()];
+}
+// Typed chat IDs come in many shapes: "t.me/name", "name" (→ @name), a channel/supergroup id missing its -100.
+function _nhlTgChatVariants(chat) {
+  const c = String(chat || "").trim().replace(/^https?:\/\/t\.me\//i, "").replace(/^t\.me\//i, "");
+  const out = [c];
+  if (/^[A-Za-z][\w]{3,}$/.test(c)) out.push("@" + c);
+  if (/^\d{6,}$/.test(c)) out.push("-100" + c, "-" + c);
+  if (/^-\d{6,}$/.test(c) && !/^-100/.test(c)) out.push("-100" + c.slice(1));
+  return [...new Set(out)];
+}
 async function _nhlSaltSend(html) {
   const tg = _nhlSaltTg();
-  const fd = new FormData();   // form data, not JSON: no CORS preflight
-  fd.append("chat_id", tg.chat); fd.append("text", html); fd.append("parse_mode", "HTML"); fd.append("disable_web_page_preview", "true");
-  const r = await fetch(`https://api.telegram.org/bot${tg.token}/sendMessage`, { method: "POST", body: fd });
-  let j = null; try { j = await r.json(); } catch (e) {}
+  const send = chat => _nhlTgCall(tg.token, "sendMessage", { chat_id: chat, text: html, parse_mode: "HTML", disable_web_page_preview: "true" });
+  const save = chat => { try { localStorage.setItem(NHL_SALT_TG_KEY, JSON.stringify({ token: tg.token, chat: String(chat) })); } catch (e) {} };
+  let j = await send(tg.chat);
+  // "chat not found": try the other shapes of what was typed, then the chats the bot has actually seen (SALT first).
+  if (j && !j.ok && /chat not found/i.test(j.description || "")) {
+    for (const v of _nhlTgChatVariants(tg.chat).slice(1)) { const t = await send(v); if (t && t.ok) { save(v); return; } }
+    let chats = []; try { chats = await _nhlTgChats(tg.token); } catch (e) {}
+    const pick = chats.find(([, t]) => /salt/i.test(t)) || (chats.length === 1 ? chats[0] : null);
+    if (pick) { const t = await send(pick[0]); if (t && t.ok) { save(pick[0]); showNhlToast(`SALT chat fixed → ${pick[1]}`); return; } j = t; }
+    else if (chats.length > 1) j = { ok: false, description: "chat not found — the bot is in " + chats.map(([id, t]) => `${t} (${id})`).join(", ") + "; Set SALT Telegram and pick SALT" };
+    else j = { ok: false, description: "chat not found, and the bot hasn't seen any group yet — add it to the SALT chat, send a message there, then try again" };
+  }
+  const r = { ok: !!(j && j.ok), status: j && j.error_code };
   if (!r.ok || !j || !j.ok) {
     const why = j && j.description ? j.description : String(r.status);
     // A group that became a supergroup gets a new id — Telegram tells us which one; save it and retry once.
@@ -6279,7 +6314,7 @@ async function sendNhlCard(mode) {
       let posted = false;
       if (_nhlSaltTg()) {
         try { if (btn) btn.textContent = "Posting…"; await _nhlSaltSend(text); posted = true; }
-        catch (err) { console.warn("[NHL] SALT Telegram failed", err); alert("Couldn't post to SALT on Telegram (" + err.message + ") — copying the text instead. Shift-click Send to SALT to fix the bot / chat."); }
+        catch (err) { console.warn("[NHL] SALT Telegram failed", err); alert("Couldn't post to SALT on Telegram.\n\nReason: " + err.message + "\n\nThe text was copied instead. Shift-click Send to SALT (or Set SALT Telegram on the DISCORD tab) to fix the bot / chat."); }
       }
       if (!posted) { const plain = text.replace(/<\/?b>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&"); try { await navigator.clipboard.writeText(plain); } catch (e) { console.log(plain); } }
       markSentSalt();
