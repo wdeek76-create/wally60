@@ -2463,21 +2463,23 @@ async function tgcButton(q){
     if(!tgcOwner){ say('Link phone control first: text the bot your code privately'); return; }
     if(!fromMe0){ say('Only the owner can mark bets'); return; }
     const on=cmd==='took', ok=tookMark(q.message?.message_id, on);
-    say(ok ? (on?'✅ Marked as taken':'Unmarked') : 'Couldn\'t find this bet (it may be graded already)');
+    say(ok ? (on?'✅ Taken':'Unmarked') : 'Couldn\'t find this bet (it may be graded already)');
     if(ok){ try{ const fd=new FormData(); fd.append('chat_id', chat); fd.append('message_id', String(q.message.message_id)); fd.append('reply_markup', JSON.stringify(TOOK_KB(on))); await tgApi('editMessageReplyMarkup', fd); }catch(e){} }
     return; }
   // your private chat, or the menu in your channel -- but only taps from YOU (a subscriber tapping does nothing)
   const fromMe = tgcOwner && String(q.from?.id||'')===tgcOwner;
   if(!(fromMe && (chat===tgcOwner || tgcIsMyChannel(q.message?.chat)))){ try{ const fd=new FormData(); fd.append('callback_query_id', q.id); fd.append('text', tgcOwner?'Only the owner can change Smart Money':'Link first: text the bot your code privately'); await tgApi('answerCallbackQuery', fd); }catch(e){} return; }
   const say=['open','recap','liverecap','backup'].includes(cmd.split(' ')[0]);
+  let answered=false; const ack=t=>{ if(answered) return; answered=true; try{ const fd=new FormData(); fd.append('callback_query_id', q.id); if(t) fd.append('text', String(t).replace(/<[^>]+>/g,'').split('\n')[0].slice(0,190)); tgApi('answerCallbackQuery', fd); }catch(e){} };
+  if(say) ack('Working…');   // slow ones: stop the spinner first
   const r=cmd==='menu' ? 'Updated' : await tgcRun(chat, cmd, !say);
-  try{ const fd=new FormData(); fd.append('callback_query_id', q.id); fd.append('text', String(r||'').replace(/<[^>]+>/g,'').split('\n')[0].slice(0,190)); await tgApi('answerCallbackQuery', fd); }catch(e){}
+  ack(r);
   await tgcMenu(chat, q.message?.message_id);
 }
-async function tgcPoll(){
+async function tgcPoll(wait){
   if(tgcBusy || !tgToken) return; tgcBusy=true;
   try{
-    const fd=new FormData(); fd.append('offset', String(tgcOff)); fd.append('timeout','0'); fd.append('allowed_updates', JSON.stringify(['message','callback_query','channel_post','message_reaction_count','message_reaction']));
+    const fd=new FormData(); fd.append('offset', String(tgcOff)); fd.append('timeout', String(wait||0)); fd.append('allowed_updates', JSON.stringify(['message','callback_query','channel_post','message_reaction_count','message_reaction']));
     const ups=await tgApi('getUpdates', fd);
     for(const u of ups||[]){ tgcOff=u.update_id+1; LS.set('sm_tgc_off', String(tgcOff));
       if(u.callback_query){ await tgcButton(u.callback_query); continue; }
@@ -2504,7 +2506,13 @@ async function tgcPoll(){
   }
   finally{ tgcBusy=false; }
 }
-setTimeout(tgcPoll, 6000); setInterval(tgcPoll, 5000);
+(async function tgcLoop(){
+  await new Promise(z=>setTimeout(z,3000));
+  for(;;){ if(!tgToken){ await new Promise(z=>setTimeout(z,5000)); continue; }
+    const t0=Date.now(); await tgcPoll(25);
+    if(!tgcStat.ok) await new Promise(z=>setTimeout(z,4000));          // offline / error: back off a bit
+    else if(Date.now()-t0<400) await new Promise(z=>setTimeout(z,600));  // came back instantly: tiny breather
+  } })();
 // ───────────────────────── UFC market drops (moneylines) ─────────────────────────
 // Not exchange money: a sharp book (Circa / Pinnacle / BetOnline) dropping a fighter's price 15c+ while
 // FanDuel still hangs the old number. Fresh only -- the drop has to happen while the page is watching
