@@ -2021,6 +2021,7 @@ function renderTracker() {
         <button id="nick-btn" onclick="if(event.shiftKey){setNhlNickWebhook();return;}sendNhlCard('nick')" title="Posts Nick's card to his channel (shift-click to change the webhook / role)" style="background:#0a1628;border:1px solid #0d2035;color:#00aaff;
           border-radius:6px;padding:7px 14px;font-size:13px;font-weight:600;cursor:pointer;
           font-family:'Inter',sans-serif;">⧉ Send to Nick</button>
+        <button id="copy-picks-btn" onclick="sendNhlCard('copy')" title="The Discord card's picks (still inside play-to) as text with every book, copied to the clipboard" style="background:#0a1628;border:1px solid #0d2035;color:#9fb8d6;border-radius:6px;padding:7px 14px;font-size:13px;font-weight:600;cursor:pointer;font-family:'Inter',sans-serif;">⧉ Copy picks</button>
         <button id="salt-btn" onclick="if(event.shiftKey){setNhlSaltTelegram();return;}sendNhlCard('salt')" title="Nick's picks as plain text (no sources, no picture) to SALT on Telegram — shift-click to change the bot / chat" style="background:#0a1628;border:1px solid #0d2035;color:#f59e0b;border-radius:6px;padding:7px 14px;font-size:13px;font-weight:600;cursor:pointer;font-family:'Inter',sans-serif;">✉ Send to SALT</button>
         <button id="discord-btn" onclick="if(event.shiftKey){setNhlDiscordWebhook();return;}sendNhlCard('discord')" title="Posts the card straight to your Discord channel (shift-click to change the webhook)" style="background:#0a1628;border:1px solid #0d2035;color:#cc66ff;
           border-radius:6px;padding:7px 14px;font-size:13px;font-weight:600;cursor:pointer;
@@ -5741,7 +5742,7 @@ function _nhlBuildCardReport(refreshed, kept, mode) {
   const dropped = refreshed.filter(b => !kept.some(f => f.id === b.id));
   _nhlLastCardDetail = ""; _nhlCardDetailOpen = false;
   if (!dropped.length) return "";
-  const label = mode === "nick" ? "Nick" : mode === "me" ? "My" : "Discord";
+  const label = mode === "nick" ? "Nick" : mode === "me" ? "My" : mode === "copy" ? "Copy picks" : mode === "salt" ? "SALT" : "Discord";
   const lines = dropped.map(b => {
     const pt = _nhlCardPlayTo(b);
     const head = `${b.player} ${(b.ou || "").toLowerCase().startsWith("o") ? "O" : "U"}${b.line}`;
@@ -6291,14 +6292,14 @@ async function sendNhlCard(mode) {
   const today = _ymdLocal(new Date());
   const sentToday = b => b.sentTo && b.sentTo[_nhlSentKey(mode)] === today;
   let picks = all, newOnly = false, alreadySent = [];
-  if (all.some(sentToday)) {
+  if (mode !== "copy" && all.some(sentToday)) {
     const fresh = all.filter(b => !sentToday(b));
     alreadySent = all.filter(sentToday);
     const label = mode === "nick" ? "Nick" : mode === "me" ? "My" : mode === "salt" ? "SALT" : "Discord";
     if (!fresh.length) { if (!confirm(`Nothing new since your last ${label} card today. Send all open picks again?`)) return; }
     else { picks = fresh; newOnly = true; }
   }
-  const btnId = mode === "nick" ? "nick-btn" : mode === "me" ? "me-btn" : mode === "salt" ? "salt-btn" : "discord-btn";
+  const btnId = mode === "nick" ? "nick-btn" : mode === "me" ? "me-btn" : mode === "salt" ? "salt-btn" : mode === "copy" ? "copy-picks-btn" : "discord-btn";
   const btn = document.getElementById(btnId);
   const orig = btn ? btn.textContent : "";
   if (btn) { btn.disabled = true; btn.textContent = "Refreshing odds…"; }
@@ -6308,7 +6309,7 @@ async function sendNhlCard(mode) {
   try {
     const refreshed = await _nhlRefreshPicksForCard(picks);
     // Only send picks still inside our threshold at the current live price. They stay in the tracker either way.
-    const rangeOpts = mode === "discord" ? { playToOnly: true } : undefined;
+    const rangeOpts = mode === "discord" || mode === "copy" ? { playToOnly: true } : undefined;
     const freshPicks = mode === "me" ? _nhlMeCardPicks(refreshed) : refreshed.filter(b => _nhlStillInRange(b, rangeOpts));
     const droppedNeg = refreshed.length - freshPicks.length;
     _nhlLastCardReport = _nhlBuildCardReport(refreshed, freshPicks, mode);
@@ -6329,6 +6330,13 @@ async function sendNhlCard(mode) {
     _nhlPaintCardReport();
     if (droppedNeg) console.log("[NHL card] left off " + droppedNeg + " pick(s):", refreshed.filter(b => !freshPicks.some(f => f.id === b.id)).map(b => b.player + " " + b.odds));
     if (!freshPicks.length) { alert(mode === "me" ? "No open bet has FanDuel, Novig or ProphetX within 10 cents of play-to right now." : "No pending pick is still in range at the current price — nothing to send."); if (btn) { btn.textContent = orig; btn.disabled = false; } return; }
+    if (mode === "copy") {   // the Discord card's picks as text, on the clipboard — nothing marked sent
+      const plain = (await _nhlSaltText(freshPicks, false)).replace(/<\/?b>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+      let ok = false; try { await navigator.clipboard.writeText(plain); ok = true; } catch (e) { console.log(plain); }
+      showNhlToast(ok ? `Copied ${freshPicks.length} pick${freshPicks.length === 1 ? "" : "s"}` : "Copy blocked — the picks are in the console");
+      if (btn) { btn.textContent = ok ? "✓ COPIED" : orig; setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 1500); }
+      return;
+    }
     if (mode === "salt") {   // text only: post it (webhook + role) or copy it
       const text = await _nhlSaltText(freshPicks, newOnly);
       const markSentSalt = () => { freshPicks.forEach(fp => { const real = bets.find(x => x.id === fp.id); if (real) real.sentTo = Object.assign({}, real.sentTo, { salt: today }); }); saveBets(); };
