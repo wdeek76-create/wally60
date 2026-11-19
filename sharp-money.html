@@ -656,11 +656,17 @@ const smGoodPlay = e => /^🟢/.test(smPlayGrade(e)?.g||'');
 const smGradeTxt = g => !g ? '' : ['market', g.parts.some(x=>x.sec==='srcHold')?'srcHold':'hold', 'exch'].map(sec=>g.parts.find(x=>x.sec===sec)).filter(Boolean)
   .map(x=>`${x.r.u>0?'🟢':x.r.u<0?'🔴':'⚪'} ${x.sec==='market'?String(x.lab).replace(/^(NBA|WNBA|NFL|NHL|MLB|NCAAF|NCAAB) /,''):x.lab} ${x.r.u>=0?'+':''}${x.r.u.toFixed(2)}u`).join('\n');
 // graded bets -> the record, then out of the tracker (FD bets on games through Nov 2 are already in the restored record)
+// a bet whose game started 24h+ ago and still never graded (no result came back for it) is voided -- it drops
+// out of Open and isn't counted in the record either way
+function smVoidStale(){ let n=0; const now=Date.now();
+  tracked.forEach(t=>{ if(t.src!=='sharp' || t.final) return; const st=t.start?new Date(t.start).getTime():NaN; if(!isNaN(st) && now-st>24*3600e3){ t.final=true; t.result='void'; t.voidedAt=now; n++; } });
+  if(n){ saveTracked(); smDumpGraded(true); } return n; }
+setTimeout(smVoidStale, 5000); setInterval(smVoidStale, 15*60e3);
 function smDumpGraded(now0){
   let ch=false; const keep=[], now=Date.now(), wait=now0===true?0:10*60e3;
   tracked.forEach(t=>{
     if(t.src==='sharp' && t.final && t.result){ if(!t.gradedAt) t.gradedAt=now;
-      if(now-t.gradedAt>=wait){ if(!((t.bookKey||'fanduel')==='fanduel' && smBetDay(t)<=SM_BASE_UNTIL)) smRecordBet(t); ch=true; return; } }
+      if(now-t.gradedAt>=wait){ if(t.result!=='void' && !((t.bookKey||'fanduel')==='fanduel' && smBetDay(t)<=SM_BASE_UNTIL)) smRecordBet(t); ch=true; return; } }
     keep.push(t); });
   if(ch){ tracked=keep; smRecSave(); saveTracked(); if(viewMode==='tracker') renderTracker(); }
 }
@@ -2402,7 +2408,13 @@ async function tgcRun(chat, txt, quiet){
     case 'telegram': case 'tg': smTgPaused=!onOff(a, !smTgPaused); LS.set('sm_tg_paused', smTgPaused?'1':''); r=`Telegram alerts ${smTgPaused?'paused':'on'} (commands still work)`; break;
     case 'recap': smPostRecapNow(); r='Posting the FD recap…'; break;
     case 'liverecap': { const days=[...new Set(nlTracked.map(t=>nlDay(t)))].sort(); nlPostRecap(days[days.length-1]||etToday(), true); r='Posting the in-game recap…'; break; }
-    case 'open': { const o=tracked.filter(t=>t.src==='sharp'&&!t.final); r=o.length?`📋 <b>Open (${o.length})</b>\n`+o.slice(0,40).map(t=>tgEsc(`${titleCase(t.playerName||'')} ${sideTxt(t)} ${t.line??''} ${t.marketLabel||t.mkey} ${fmtAm(t.price)}`.replace(/\s+/g,' '))).join('\n'):'No open bets'; break; }
+    case 'open': { smVoidStale();
+      const today=etToday(), live=t=>{ const st=t.start?new Date(t.start).getTime():NaN; return isNaN(st) || etDayOf(st)>=today || Date.now()<st; };
+      const sent=tracked.filter(t=>t.src==='sharp' && !t.final && !t.small && !smMuted(t) && live(t)), took=sent.filter(t=>t.reacted);
+      const ln=t=>tgEsc(`${titleCase(t.playerName||'')} ${sideTxt(t)} ${t.line??''} ${t.marketLabel||t.mkey} ${fmtAm(t.price)}`.replace(/\s+/g,' '));
+      if(!quiet) await tgcReply(chat, took.length ? `👍 <b>Taken (${took.length})</b>\n`+took.slice(0,60).map(ln).join('\n') : '👍 <b>Taken (0)</b>\nNo reacted bets open');
+      r = sent.length ? `📋 <b>All sent (${sent.length})</b>\n`+sent.slice(0,60).map(t=>(t.reacted?'👍 ':'')+ln(t)).join('\n') : '📋 <b>All sent (0)</b>\nNo open bets';
+      break; }
     case 'record': r=tgcStatus().split('\n').slice(-3).join('\n'); break;
     case 'backup': { const h=LS.get('sm_backup_hook',''); if(!h){ r='No backup channel set on the page'; break; } try{ await smAutoBackup?.(true); r='Backup posted'; }catch(e){ r='Backup failed'; } break; }
     default: r=`Didn't get "${tgEsc(cmd0)}". /help for the list.`;
