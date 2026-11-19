@@ -663,7 +663,18 @@ const LIGHT_MAP = {
 };
 const DARK_MAP = Object.fromEntries(Object.entries(LIGHT_MAP).map(([k, v]) => [v, k]));   // not used for text (many-to-one), see restore below
 function _themeOn() { try { return localStorage.getItem(THEME_KEY) === "light"; } catch (e) { return false; } }
-function _mapCss(css) { return css.replace(/text-shadow:[^;]*;?/gi, "").replace(/#([0-9a-fA-F]{6})\b/g, (m, h) => { const to = LIGHT_MAP[h.toLowerCase()]; return to ? "#" + to : m; }).replace(/#fff\b/gi, "#0b1220"); }   // the dark-mode glows / black outlines are dropped: on white they read as smudges
+// Rule for light mode: no pale text. A mapped colour takes its light partner; any other colour used as TEXT (color:) that is too light to read on
+// white is darkened by luminance (same hue, roughly 55% darker). Backgrounds / borders are only changed by the map, so panels stay light.
+const _lum = h => { const r = parseInt(h.slice(0, 2), 16), g = parseInt(h.slice(2, 4), 16), b = parseInt(h.slice(4, 6), 16); return 0.2126 * r + 0.7152 * g + 0.0722 * b; };
+const _darken = (h, f) => "#" + [0, 2, 4].map(i => Math.round(parseInt(h.slice(i, i + 2), 16) * f).toString(16).padStart(2, "0")).join("");
+function _mapCss(css) {
+  css = css.replace(/text-shadow:[^;]*;?/gi, "");   // the dark-mode glows / black outlines read as smudges on white
+  css = css.replace(/#([0-9a-fA-F]{6})\b/g, (m, h) => { const to = LIGHT_MAP[h.toLowerCase()]; return to ? "#" + to : m; }).replace(/#fff\b/gi, "#0b1220");
+  // text colours still too light after the map
+  css = css.replace(/(^|;|\s)color:\s*#([0-9a-fA-F]{6})\b/g, (m, pre, h) => { const L = _lum(h); return L > 140 ? `${pre}color:${_darken(h, L > 200 ? 0.35 : 0.55)}` : m; });
+  css = css.replace(/(^|;|\s)color:\s*rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*[\d.]+)?\)/g, (m, pre, r, g, b) => `${pre}color:rgb(${Math.round(r * 0.45)},${Math.round(g * 0.45)},${Math.round(b * 0.45)})`);   // faded rgba text → solid dark
+  return css;
+}
 let _themeBusy = false;
 function _applyLight(root) {
   if (!_themeOn() || _themeBusy) return; _themeBusy = true;
@@ -673,7 +684,23 @@ function _applyLight(root) {
     if (root === document || root === document.body) { const b = document.body; b.dataset.darkBg = b.dataset.darkBg || b.style.background || ""; b.style.background = "#f4f6fa"; b.style.color = "#1e293b"; document.documentElement.style.background = "#f4f6fa"; }
   } finally { _themeBusy = false; }
 }
+// Safety net: after the inline remap, walk the page and darken any element whose COMPUTED text colour is still too light on a light background
+// (class-styled text the inline pass can't see). Stores the override so the dark switch can undo it.
+function _darkenPale(root) {
+  if (!_themeOn()) return;
+  const els = (root && root.querySelectorAll) ? root.querySelectorAll("*") : [];
+  for (const el of els) {
+    if (!el.offsetParent || el.closest("#nav, .mcard, #copy-toast")) continue;
+    const cs = getComputedStyle(el), c = cs.color.match(/\d+/g); if (!c) continue;
+    const L = 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]; if (L <= 150) continue;
+    // only when the text actually sits on something light
+    let bgL = 255, p = el; while (p && p !== document.body) { const bg = getComputedStyle(p).backgroundColor.match(/[\d.]+/g); if (bg && bg.length >= 3 && (bg.length < 4 || +bg[3] > 0.4)) { bgL = 0.2126 * bg[0] + 0.7152 * bg[1] + 0.0722 * bg[2]; break; } p = p.parentElement; }
+    if (bgL <= 150) continue;
+    const f = L > 200 ? 0.3 : 0.5; el.style.setProperty("color", `rgb(${Math.round(c[0] * f)},${Math.round(c[1] * f)},${Math.round(c[2] * f)})`, "important"); el.dataset.paleFix = "1";
+  }
+}
 function _restoreDark() {
+  document.querySelectorAll("[data-pale-fix]").forEach(el => { el.style.removeProperty("color"); delete el.dataset.paleFix; });
   document.querySelectorAll("[data-dark]").forEach(el => { el.setAttribute("style", el.dataset.dark); delete el.dataset.dark; delete el.dataset.themed; });
   const b = document.body; b.style.background = b.dataset.darkBg || ""; b.style.color = ""; document.documentElement.style.background = ""; delete b.dataset.darkBg;
 }
@@ -691,13 +718,17 @@ document.addEventListener("DOMContentLoaded", () => {
     html[data-theme="light"] #header{background:#ffffff !important;border-color:#d9dee6 !important}
     html[data-theme="light"] #copy-toast{background:#1e293b;color:#fff}
     html[data-theme="light"] #merge-btn{background:#1e40af !important;color:#fff !important;border-color:#1e40af !important}
-    html[data-theme="light"] *{text-shadow:none !important}`;
+    html[data-theme="light"] *{text-shadow:none !important}
+    html[data-theme="light"] .overview-stat{background:#ffffff !important;border-color:#d9dee6 !important}
+    html[data-theme="light"] .os-label, html[data-theme="light"] .os-sub, html[data-theme="light"] .os-value, html[data-theme="light"] .overview-stat *{color:#1e293b}
+    html[data-theme="light"] .os-label{color:#475569 !important}`;
   document.head.appendChild(st);
   const sync = () => { document.documentElement.setAttribute("data-theme", _themeOn() ? "light" : "dark"); const btn = document.getElementById("theme-btn"); if (btn) btn.textContent = _themeOn() ? "\u263d DARK" : "\u2600 LIGHT"; };
   sync();
-  if (_themeOn()) _applyLight(document);
-  // every re-render re-maps the new elements
-  new MutationObserver(muts => { if (!_themeOn() || _themeBusy) return; muts.forEach(m => { m.addedNodes.forEach(n => { if (n.nodeType === 1) { _applyLight(n); if (n.getAttribute && n.getAttribute("style") && !n.dataset.themed) { const st = n.getAttribute("style"); n.dataset.dark = st; const mp = _mapCss(st); n.setAttribute("style", mp); n.dataset.themed = mp; } } }); if (m.type === "attributes" && m.target.nodeType === 1 && m.attributeName === "style") { const el = m.target, st = el.getAttribute("style"); if (st && el.dataset.themed !== st) { el.dataset.dark = st; const mp = _mapCss(st); if (mp !== st) { el.setAttribute("style", mp); el.dataset.themed = mp; } else el.dataset.themed = st; } } }); }).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["style"] });
+  if (_themeOn()) { _applyLight(document); _darkenPale(document); }
+  // every re-render re-maps the new elements (the pale-text pass runs once the burst of changes settles)
+  let _paleTimer = null; const _schedPale = () => { clearTimeout(_paleTimer); _paleTimer = setTimeout(() => _darkenPale(document), 120); };
+  new MutationObserver(muts => { if (!_themeOn() || _themeBusy) return; _schedPale(); muts.forEach(m => { m.addedNodes.forEach(n => { if (n.nodeType === 1) { _applyLight(n); if (n.getAttribute && n.getAttribute("style") && !n.dataset.themed) { const st = n.getAttribute("style"); n.dataset.dark = st; const mp = _mapCss(st); n.setAttribute("style", mp); n.dataset.themed = mp; } } }); if (m.type === "attributes" && m.target.nodeType === 1 && m.attributeName === "style") { const el = m.target, st = el.getAttribute("style"); if (st && el.dataset.themed !== st) { el.dataset.dark = st; const mp = _mapCss(st); if (mp !== st) { el.setAttribute("style", mp); el.dataset.themed = mp; } else el.dataset.themed = st; } } }); }).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["style"] });
   const _origToggle = toggleTheme; window.toggleTheme = () => { _origToggle(); sync(); };
 });
 // Daily data (board pastes, lineups, injuries, depth charts, RG impact) is re-pulled every day, so it is cleared once a new day starts (5am rollover for late games).
