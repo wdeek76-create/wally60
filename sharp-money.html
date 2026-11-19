@@ -1014,9 +1014,9 @@ function tgText(pl, e){ const em=pl.embeds?.[0]||{};
   return [tgEsc(game), bet+arbLine+(gr?`\n${tgEsc(smGradeTxt(gr))}`:''), rwTxt, em.url?tgEsc(em.url)+(isFdUrl(em.url)&&fdDesk(em.url)!==em.url?`\n🖥 Desktop: ${tgEsc(fdDesk(em.url))}`:''):''].filter(Boolean).join('\n\n').slice(0,4000); }
 async function tgApi(method, fd){ const r=await fetch(`https://api.telegram.org/bot${tgToken}/${method}`, { method:'POST', body:fd }); const d=await r.json().catch(()=>({}));
   if(!d.ok) throw new Error(d.description||`HTTP ${r.status}`); return d.result; }
-async function tgSend(text, photo){
+async function tgSend(text, photo, markup){
   if(!tgOn()) return false;
-  try{ const fd=new FormData(); fd.append('chat_id', tgChat); fd.append('parse_mode','HTML');
+  try{ const fd=new FormData(); fd.append('chat_id', tgChat); fd.append('parse_mode','HTML'); if(markup) fd.append('reply_markup', JSON.stringify(markup));
     let m;
     if(photo && text.length<=1024){ fd.append('caption', text); fd.append('photo', photo, 'vs.png'); m=await tgApi('sendPhoto', fd); }
     else { fd.append('text', text); fd.append('link_preview_options', JSON.stringify({ is_disabled:true })); m=await tgApi('sendMessage', fd); }
@@ -1108,7 +1108,7 @@ async function sharpDcPump(){
         const head=String(pl.embeds?.[0]?.title||'');
         // borrowing play: thumbnail is "target VIA borrowed book" (drawn here, uploaded with the post)
         const vs = e.via ? await smVsImage(bk2(e), e.via.book).catch(()=>null) : null;
-        const tgP = tgOn() && (e.tgt||'fanduel')==='fanduel' ? tgSend(tgText(pl, e), vs) : null;   // Telegram: same play, same time
+        const tgP = tgOn() && (e.tgt||'fanduel')==='fanduel' ? tgSend(tgText(pl, e), vs, TOOK_KB(false)) : null;   // Telegram: same play, same time
         if(vs && pl.embeds?.[0]){ pl.embeds[0].thumbnail={ url:'attachment://vs.png' }; pl.files=[{ name:'vs.png', blob:vs }]; }
         if(hookFor(e)) ok=await discordPost({ ...pl, ...rt, content:[head, rt.content].filter(Boolean).join(' ') }, m=>{ why=m; }, hookFor(e));
         if(tgP){ const tok=await tgP; if(!tok) why=[why, `Telegram: ${tgLastErr}`].filter(Boolean).join(' · '); if(!hookFor(e)) ok=!!tok;
@@ -2363,6 +2363,7 @@ function tgcStatus(){
     `Live in-game ${NL_OFF?'off':'on'} (exch min ${nlKalMin?usd(nlKalMin):'any'}) · UFC drops ${ufcOn?'on':'off'}`,
     `Discord ${discordHook?(smDcPaused?'paused':'on'):'not set'} · Telegram ${tgToken&&tgChat?(smTgPaused?'paused':'on'):'not set'}`,
     last?`Last scan ${Math.round((Date.now()-last)/1000)}s ago`:'No scan yet',
+    `👍 today: ${reactToday().length} taken · ${tracked.filter(t=>t.src==='sharp'&&t.tgMsg&&!t.final).length} open alerts with a Took-it button · reactions received today: ${reactSeen.day===etToday()?reactSeen.n:0}`,
     ``, `Today FD: ${tS&&tS.n?tgEsc(smFmt(tS)):'no graded bets'} · open ${open}`,
     `All-time FD: ${aS&&aS.n?tgEsc(smFmt(aS)):'—'}`,
     ...(()=>{ const T=D?.react, Aa=R.all?.react, ln=(lab,o)=>o&&o.n?`${lab} ${tgEsc(smFmt(o))}`:null;
@@ -2445,9 +2446,26 @@ async function tgcMenu(chat, msgId){
   try{ if(msgId){ fd.append('message_id', String(msgId)); await tgApi('editMessageText', fd); } else await tgApi('sendMessage', fd); }catch(e){ /* "message is not modified" etc. */ }
 }
 // is this your alerts channel? (set as @name or as its id on the page)
+const TOOK_KB = on => ({ inline_keyboard:[[{ text: on ? '✅ Taken · tap to undo' : '✅ Took it', callback_data: on ? 'untook' : 'took' }]] });
+let reactSeen = (()=>{ try{ const o=JSON.parse(LS.get('sm_react_seen','null')); return o && o.day===etToday() ? o : { day:etToday(), n:0, at:0 }; }catch(e){ return { day:etToday(), n:0, at:0 }; } })();
+// mark the bet(s) behind a Telegram post as taken / not -- from the Took it button or a reaction
+function tookMark(id, on){ let hit=false;
+  tracked.forEach(t=>{ if(t.tgMsg===id){ t.reacted=on; hit=true; } }); if(hit) saveTracked();
+  let uh=false; ufcTracked.forEach(t=>{ if(t.tgMsg===id){ t.reacted=on; uh=true; } }); if(uh) ufcSave();
+  if(hit||uh){ reactMark(id, on); tgcRerender(); } return hit||uh; }
 const tgcIsMyChannel = c => !!c && !!tgChat && (String(c.id)===String(tgChat) || ('@'+String(c.username||'')).toLowerCase()===String(tgChat).toLowerCase());
 async function tgcButton(q){
   const chat=String(q.message?.chat?.id||''), cmd=q.data||'';
+  // ✅ Took it / undo under an alert
+  if(cmd==='took' || cmd==='untook'){
+    const fromMe0 = tgcOwner && String(q.from?.id||'')===tgcOwner;
+    const say=t=>{ try{ const fd=new FormData(); fd.append('callback_query_id', q.id); fd.append('text', t); tgApi('answerCallbackQuery', fd); }catch(e){} };
+    if(!tgcOwner){ say('Link phone control first: text the bot your code privately'); return; }
+    if(!fromMe0){ say('Only the owner can mark bets'); return; }
+    const on=cmd==='took', ok=tookMark(q.message?.message_id, on);
+    say(ok ? (on?'✅ Marked as taken':'Unmarked') : 'Couldn\'t find this bet (it may be graded already)');
+    if(ok){ try{ const fd=new FormData(); fd.append('chat_id', chat); fd.append('message_id', String(q.message.message_id)); fd.append('reply_markup', JSON.stringify(TOOK_KB(on))); await tgApi('editMessageReplyMarkup', fd); }catch(e){} }
+    return; }
   // your private chat, or the menu in your channel -- but only taps from YOU (a subscriber tapping does nothing)
   const fromMe = tgcOwner && String(q.from?.id||'')===tgcOwner;
   if(!(fromMe && (chat===tgcOwner || tgcIsMyChannel(q.message?.chat)))){ try{ const fd=new FormData(); fd.append('callback_query_id', q.id); fd.append('text', tgcOwner?'Only the owner can change Smart Money':'Link first: text the bot your code privately'); await tgApi('answerCallbackQuery', fd); }catch(e){} return; }
@@ -2466,9 +2484,8 @@ async function tgcPoll(){
       // a reaction on an alert in your channel (channels only send the count): any reaction = you bet it
       const rc=u.message_reaction_count || u.message_reaction;
       if(rc && tgcIsMyChannel(rc.chat)){ const n=u.message_reaction_count ? (rc.reactions||[]).reduce((a,x)=>a+(x.total_count||0),0) : (rc.new_reaction||[]).length;
-        const id=rc.message_id; let hit=false;
-        tracked.forEach(t=>{ if(t.tgMsg===id){ t.reacted=n>0; hit=true; } }); if(hit){ saveTracked(); reactMark(id, n>0); }
-        ufcTracked.forEach(t=>{ if(t.tgMsg===id){ t.reacted=n>0; hit=true; } }); if(hit){ ufcSave(); tgcRerender(); }
+        reactSeen={ day:etToday(), n:(reactSeen.day===etToday()?reactSeen.n:0)+1, at:Date.now() }; LS.set('sm_react_seen', JSON.stringify(reactSeen));
+        tookMark(rc.message_id, n>0);
         continue; }
       // typed in your alerts channel (only its admins can post there): run it, answer in the channel, tidy up the command
       const cp=u.channel_post;
@@ -2615,7 +2632,7 @@ function ufcPost({ c, f, fd, drop, fair, ev, others }){
       description:`🥊 UFC · vs ${vs} · ${when} ET`,
       fields:[ { name:'📉 Market dropping', value:dropTxt+(others.length?`\n${others.join(' · ')}`:'') },
         { name:'Edge', value:`Fair **${fmtAm(fairAm)}** · **+${ev.toFixed(1)}% EV** at FD ${fmtAm(fd.price)}` } ], footer:{ text:'UFC market drop' } }] }, null, discordHook);
-  if(tgOn()) tgSend([`🥊 UFC · vs ${tgEsc(vs)} · ${tgEsc(when)} ET`, `<b>${tgEsc(name)} ML</b>\n<b>${fmtAm(fd.price)}</b> FanDuel`, `📉 ${tgEsc(dropTxt)}${others.length?`\n${tgEsc(others.join(' · '))}`:''}`, `Fair ${fmtAm(fairAm)} · +${ev.toFixed(1)}% EV`, url?tgEsc(url)+(desk&&desk!==url?`\n🖥 Desktop: ${tgEsc(desk)}`:''):''].filter(Boolean).join('\n\n')).then(mid=>{ const t=ufcTracked.find(x=>x.id===`${c.fx}|${normName(c.who)}`); if(t && typeof mid==='number'){ t.tgMsg=mid; ufcSave(); } });
+  if(tgOn()) tgSend([`🥊 UFC · vs ${tgEsc(vs)} · ${tgEsc(when)} ET`, `<b>${tgEsc(name)} ML</b>\n<b>${fmtAm(fd.price)}</b> FanDuel`, `📉 ${tgEsc(dropTxt)}${others.length?`\n${tgEsc(others.join(' · '))}`:''}`, `Fair ${fmtAm(fairAm)} · +${ev.toFixed(1)}% EV`, url?tgEsc(url)+(desk&&desk!==url?`\n🖥 Desktop: ${tgEsc(desk)}`:''):''].filter(Boolean).join('\n\n'), null, TOOK_KB(false)).then(mid=>{ const t=ufcTracked.find(x=>x.id===`${c.fx}|${normName(c.who)}`); if(t && typeof mid==='number'){ t.tgMsg=mid; ufcSave(); } });
 }
 setTimeout(ufcTick, 15e3); setInterval(ufcTick, 45e3);
 // ───────────────────────── NBA Live (props, in-game only) ─────────────────────────
