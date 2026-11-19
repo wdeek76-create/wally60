@@ -4586,6 +4586,10 @@ const PF_LONG_MIN = 150, PF_LONG_MAX = 600, PF_LONG_HOLD = 5;
 const pfLongOk = c => !pfLong || (Number(c.refRow?.price)>=PF_LONG_MIN && Number(c.refRow?.price)<=PF_LONG_MAX);
 // legs swapped out of the auto parlays (the next best takes their place); cleared with Reset swaps
 const pfExclude = new Set();
+// legs you opened a bet link for (a leg's own link, the full-parlay link or a book chip): left out of future
+// parlays for the rest of the day -- saved on this device, cleared the next day or with "Show again"
+const pfPlaced = new Set((()=>{ try{ const o=JSON.parse(LS.get('props_pf_placed','null')); return o && o.day===new Date().toDateString() ? o.keys : []; }catch(e){ return []; } })());
+const pfPlacedSave = () => LS.set('props_pf_placed', JSON.stringify({ day:new Date().toDateString(), keys:[...pfPlaced] }));
 // type a team to find its game (college especially): plays / auto parlays only from matching games
 let pfTeamQ = '';
 const pfTeamOk = c => { if(!pfTeamQ.trim()) return true; const f=c.fx||(c.fxs||[]).find(x=>x.id===c.p.fixtureId); return !!f && [f.away?.name,f.home?.name,f.away?.ab,f.home?.ab].some(n=>n && nameMatches(n,pfTeamQ)); };
@@ -5033,7 +5037,7 @@ function pfDetHtml(ref, tgt, L, mine, sharp){
 // other side (props) or the sharp books' devig (mains); ranked by EV at the target. Not SGP: one
 // leg per game. SGP: the best game's legs. Up to 5 different parlays.
 function pfAutoParlays(){
-  const all=pfSports().flatMap(sk=>pfCacheBy[sk]?.list||[]).filter(pfSideOk).filter(pfLongOk).filter(pfTeamOk).filter(c=>!pfExclude.has(pfCandKey(c))).filter(c=>(c.src!=='exch' || c.liq>=pfMin) && c.refRow && c.fairP!=null && Math.abs(Number(c.refRow.price))<1000).sort((a,b)=>b.ev-a.ev);
+  const all=pfSports().flatMap(sk=>pfCacheBy[sk]?.list||[]).filter(pfSideOk).filter(pfLongOk).filter(pfTeamOk).filter(c=>!pfExclude.has(pfCandKey(c)) && !pfPlaced.has(pfCandKey(c))).filter(c=>(c.src!=='exch' || c.liq>=pfMin) && c.refRow && c.fairP!=null && Math.abs(Number(c.refRow.price))<1000).sort((a,b)=>b.ev-a.ev);
   const seen=new Set(), pool=all.filter(c=>{ const k=c.p.fixtureId+'|'+c.p.key+'|'+c.mkey; if(seen.has(k)) return false; seen.add(k); return true; });
   const oneGame = !pfSgp && new Set(pool.map(c=>c.p.fixtureId)).size>=pfLegs;
   const pick=(list,start)=>{ const out=[], team=new Map(), games=new Set();
@@ -5067,7 +5071,7 @@ function pfParlayCardHtml(P, i){
   const linkBtn = tgt==='fanduel'
     ? (fdUrl ? `<a class="pfgo" href="${esc(fdUrl)}" target="_blank" rel="noopener">Open full parlay on FD ↗</a>` : `<span class="pftag">FD didn't send slip links for every leg -- open each below</span>`)
     : `<a class="pfgo" href="${esc(BOOK_HOME[tgt]||'#')}" target="_blank" rel="noopener">Open ${esc(bookShort(tgt))} ↗</a>`;
-  return `<div class="pfpar">
+  return `<div class="pfpar" data-pfkeys="${esc(P.legs.map(pfCandKey).join('~'))}">
     <div class="pfparh"><div><div class="pfname">Parlay ${i+1} <span class="pfbet">${P.legs.length} legs${P.sameGame?' · same game':''}</span></div>
       <div class="pfmeta">${esc(bookShort(tgt))} ${fmtAm(pfBoost?P.boosted:P.price)}${pfBoost?` (+${pfBoost}% boost, ${fmtAm(P.price)})`:''} · fair ${fmtAm(P.fair)}${P.sameGame?' · SGP: the slip price will be lower':''}</div></div>
       <span class="pftag${P.ev>0?' good':''}" style="font-size:12.5px">${P.ev>0?'+':''}${P.ev.toFixed(1)}% EV</span></div>
@@ -5151,6 +5155,7 @@ function pfHtml(){
       <div class="pfopt"><label>Borrow within</label>${seg('data-pfborrow',[[10,'10c'],[20,'20c'],[30,'30c']],pfBorrowC)}</div>
       <div class="pfopt"><label>Long shots</label>${seg('data-pflong',[[0,'Off'],[1,`+${PF_LONG_MIN} to +${PF_LONG_MAX}`]],pfLong?1:0)}</div>
       ${pfMode==='auto'&&pfExclude.size?`<div class="pfopt"><label>Swapped out</label><div class="seg"><button data-pfunswap>Reset ${pfExclude.size} swap${pfExclude.size===1?'':'s'}</button></div></div>`:''}
+      ${pfMode==='auto'&&pfPlaced.size?`<div class="pfopt"><label>Already bet today</label><div class="seg"><button data-pfunplace>Show ${pfPlaced.size} leg${pfPlaced.size===1?'':'s'} again</button></div></div>`:''}
       ${pfMode==='auto'?'':`<div class="pfopt"><label>Sort</label>${seg('data-pfsort',[['hold','Tightest'],['money','Most $']],pfSort)}</div>`}
       <div class="pfopt"><label>Build</label><div style="display:flex;gap:6px">${seg('data-pfmode',[['pick','Pick'],['auto','Auto']],pfMode)}<div class="seg"><button class="${pfSgp?'on':''}" data-pfsgp="1">SGP</button></div></div></div>
       ${pfMode==='auto'?`<div class="pfopt"><label>Legs</label><div style="display:flex;gap:6px;align-items:center"><div class="seg"><button data-pflegs="-1">−</button><input id="pfLegsIn" type="text" inputmode="numeric" value="${pfLegs}"><button data-pflegs="1">+</button></div></div></div>`:''}
@@ -5178,6 +5183,11 @@ function bindPf(view){
   view.querySelectorAll('[data-pflong]').forEach(b=>b.addEventListener('click',()=>{ pfLong=b.dataset.pflong==='1'; LS.set('props_pflong',pfLong?'1':'0'); renderParlay(); }));
   view.querySelectorAll('[data-pfswap]').forEach(b=>b.addEventListener('click',ev=>{ ev.stopPropagation(); pfExclude.add(b.dataset.pfswap); renderParlay(); }));
   view.querySelector('[data-pfunswap]')?.addEventListener('click',()=>{ pfExclude.clear(); renderParlay(); });
+  view.querySelector('[data-pfunplace]')?.addEventListener('click',()=>{ pfPlaced.clear(); pfPlacedSave(); renderParlay(); });
+  // opening a bet link in a parlay card = you're betting it: those legs stop showing up in new parlays
+  view.querySelectorAll('.pfpar').forEach(card=>card.addEventListener('click',ev=>{ const a=ev.target.closest('a[href]'); if(!a || a.getAttribute('href')==='#') return;
+    const leg=a.closest('.pfleg'), keys = leg ? [leg.querySelector('[data-pfswap]')?.dataset.pfswap].filter(Boolean) : String(card.dataset.pfkeys||'').split('~').filter(Boolean);
+    keys.forEach(k=>pfPlaced.add(k)); pfPlacedSave(); setTimeout(()=>{ if(viewMode==='parlay') renderParlay(); }, 800); }));
   view.querySelectorAll('[data-pfside]').forEach(b=>b.addEventListener('click',()=>{ pfPropSide=b.dataset.pfside; LS.set('props_pfside',pfPropSide); renderParlay(); }));
   $('#pfGame')?.addEventListener('change',e=>{ pfGame=e.target.value; renderParlay(); });
   { let t=null; $('#pfTeam')?.addEventListener('input',e=>{ pfTeamQ=e.target.value; clearTimeout(t); t=setTimeout(()=>{ renderParlay(); const i=$('#pfTeam'); if(i){ i.focus(); i.setSelectionRange(i.value.length,i.value.length); } },250); }); }
