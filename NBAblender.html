@@ -2236,7 +2236,7 @@ function _psDownload(lines, fname, n) {
   showToast(`Exported ${n} players → ${fname}`);
 }
 function _psDate() { const d = new Date(); return d.getFullYear() + "-" + String(d.getMonth()+1).padStart(2,"0") + "-" + String(d.getDate()).padStart(2,"0"); }
-function doExportPropShop(srcKey) {
+function doExportPropShop(srcKey, fname) {
   const esc = v => `"${String(v ?? "").replace(/"/g, '""')}"`;
   const f2 = v => (v != null && !isNaN(v) && v > 0) ? Number(v).toFixed(2) : "";
   const lines = [_PS_HEAD.join(",")];
@@ -2247,7 +2247,7 @@ function doExportPropShop(srcKey) {
     if (!sl) { showToast(`${srcKey.toUpperCase()} not loaded`); return; }
     rows = sl.players.slice().sort((a, b) => a.rawName.localeCompare(b.rawName));
     rows.forEach(p => lines.push([esc(p.rawName), esc(p.team || ""), f2(p.min), f2(p.pts), f2(p.reb), f2(p.ast), f2(p.threepm)].join(",")));
-    _psDownload(lines, `${SOURCES[i].label}PS${_psDate()}.csv`, rows.length);
+    _psDownload(lines, fname || `${SOURCES[i].label}PS${_psDate()}.csv`, rows.length);
     return;
   }
   if (!merged || !merged.length) { showToast("Run the blend first"); return; }
@@ -22706,6 +22706,7 @@ function scheduleNextTickerRefresh() {
   }, delay);
 }
 
+window.addEventListener("load", () => { try { if (typeof switchTab === "function") switchTab("morning"); } catch (e) {} });   // the Morning page is the home page
 document.addEventListener("DOMContentLoaded", () => {
   const oddsEl = document.getElementById("modal-odds");
   if (oddsEl) oddsEl.addEventListener("input", () => { updateStakePreview(); updateEvPreview(); });
@@ -25869,6 +25870,8 @@ async function morningRefreshRwLineups() {
     let r = {}; try { r = JSON.parse(localStorage.getItem(RW_API_SYNC_KEY) || "{}") || {}; } catch (e) {}
     const done = r.done || [], fail = r.fail || [];
     _lineupReport = [{ bad: !done.some(x => /^lineups/.test(x)), text: `RW refreshed from the RotoWire API: ${done.join(" \u00b7 ") || "nothing came back"}${fail.length ? ` \u00b7 failed: ${fail.join("; ").slice(0, 200)}` : ""}` }];
+    // the RW projections as a PropShop CSV too, named the way the extension names its files ("RW-NBA 2.17pm.csv"), so RW lands in the same folder as the rest
+    try { const idx = SOURCES.findIndex(x => x.key === "rotowire"); if (slots[idx] && done.some(x => /^projections/.test(x))) { const d = new Date(), h = d.getHours(), mm = String(d.getMinutes()).padStart(2, "0"); doExportPropShop("rotowire", `RW-NBA ${h % 12 || 12}.${mm}${h < 12 ? "am" : "pm"}.csv`); } } catch (e) { console.warn("RW PS csv", e); }
   } catch (e) {
     _lineupReport = [{ bad: true, text: "RW refresh failed: " + String(e && e.message || e).slice(0, 220) + " \u2014 paste the RW page and PARSE RW instead" }];
     showToast("RW refresh failed \u2014 see the lineup check");
@@ -28052,8 +28055,8 @@ async function _morningCardHtml(picks, mode) {
     const line = `<div style="font:700 11px 'Plus Jakarta Sans';letter-spacing:.12em;color:#e6edf5;text-transform:uppercase;margin-bottom:2px;">${esc(String(stat).toUpperCase())}</div><div style="${mono}font-weight:800;font-size:26px;color:#fff;line-height:1;">${b.line}</div>`;
     const isOver = String(b.ou).toLowerCase() === "over", sGrad = isOver ? "linear-gradient(180deg,#fb6f84,#dc2626)" : "linear-gradient(180deg,#3fd47a,#16a34a)";
     const side = `<div style="display:inline-block;background:${sGrad};border-radius:999px;padding:6px 22px;font:800 16px 'Plus Jakarta Sans';letter-spacing:.08em;color:#fefefe;box-shadow:0 4px 0 rgba(0,0,0,.18),0 6px 10px rgba(0,0,0,.18);white-space:nowrap;">${esc(b.ou.toUpperCase())} <span style="${mono}font-size:19px;">${b.line}</span></div>${pt ? `<div style="font:600 15px 'Plus Jakarta Sans';color:#e6edf5;margin-top:6px;">play to ${pt}${nick ? " <span style=\"font-size:11px;\">(floor)</span>" : ""}</div>` : ""}`;
-    // Nick: floor = the card's play-to (anchored to the second-worst source); ceiling = the average of the two most generous sources' play-tos
-    const ceil = (() => { if (!nick) return null; try { const xs = MORNING_SRC_KEYS.map(k => { const f = b.sourceFairs && b.sourceFairs[k]; const d = f != null ? oddsToDecimal(f) : null; const e = b.sourceEvs && b.sourceEvs[k]; return d ? { p: 1 / d, ev: e != null ? Number(e) : -Infinity } : null; }).filter(Boolean).sort((x, y) => y.ev - x.ev).slice(0, 2); if (xs.length < 2) return null; const p = (xs[0].p + xs[1].p) / 2; return decimalToAmerican((1 + MORNING_QUAL_EV / 100) / p); } catch (e) { return null; } })();
+        // Nick: floor = the card's play-to (the anchor: second-worst source); ceiling = the next source up from the anchor (third-worst), its own play-to
+    const ceil = (() => { if (!nick) return null; try { const xs = MORNING_SRC_KEYS.map(k => { const f = b.sourceFairs && b.sourceFairs[k]; const d = f != null ? oddsToDecimal(f) : null; const e = b.sourceEvs && b.sourceEvs[k]; return d ? { k, d, ev: e != null ? Number(e) : -Infinity } : null; }).filter(Boolean).sort((x, y) => x.ev - y.ev); let i = xs.findIndex(x => x.k === b.anchorSrc); if (i < 0) i = Math.min(1, xs.length - 1); const nx = xs[i + 1]; return nx ? decimalToAmerican((1 + MORNING_QUAL_EV / 100) * nx.d) : null; } catch (e) { return null; } })();
     const propCell = `<div style="font:700 11px 'Plus Jakarta Sans';letter-spacing:.12em;color:#e6edf5;text-transform:uppercase;margin-bottom:6px;">${esc(String(stat).toUpperCase())}</div>${side}${ceil != null ? `<div style="font:600 13px 'Plus Jakarta Sans';color:#fbbf24;margin-top:3px;">ceiling ${odds(ceil)}</div>` : ""}`;
     const bestTop = _mIsExchange(bookN) ? topSize(b, bookN, exchDepth) : null;
     const best = `<div style="display:inline-flex;align-items:center;gap:12px;">${bookLogo(bookN, 34)}<span style="${mono}font-weight:800;font-size:24px;color:#fff;">${odds(b.odds)}</span></div>${_mIsExchange(bookN) ? `<div style="margin-top:4px;display:flex;justify-content:center;gap:8px;">${cents(b.odds)}${sz(bestTop != null ? bestTop : exchDepth)}</div>` : ""}`;
