@@ -2722,8 +2722,16 @@ async function nlRefreshState(){
 const nlStatNow = (fid, who, mk, sk, market) => { const row=(nlState[fid]?.players||[]).find(x=>normName(cleanSel(x.player?.name||''))===who);
   if(!row) return null; const v=statFor(row, mk, sk||'nba', [market]); return v==null||isNaN(v) ? null : Number(v); };
 // "Lakers 54 @ Jazz 60 · Q3 5:21"
-const nlScoreLine = f => { if(!f) return ''; const st=nlState[f.id]||{}, A=teamNick(f.away.name)||f.away.ab, H=teamNick(f.home.name)||f.home.ab, sc=!isNaN(st.away)&&!isNaN(st.home);
-  return `${A}${sc?' '+st.away:''} @ ${H}${sc?' '+st.home:''} · ${st.label||'LIVE'}`; };
+// mine = 'away' / 'home': the bet's player's team, in bold ("**76ers 25**")
+const nlScoreLine = (f, mine) => { if(!f) return ''; const st=nlState[f.id]||{}, A=teamNick(f.away.name)||f.away.ab, H=teamNick(f.home.name)||f.home.ab, sc=!isNaN(st.away)&&!isNaN(st.home);
+  const b=(side,x)=>mine===side?`**${x}**`:x;
+  return `${b('away',`${A}${sc?' '+st.away:''}`)} @ ${b('home',`${H}${sc?' '+st.home:''}`)} · ${st.label||'LIVE'}`; };
+// which side of the game the bet's player is on: FD row's team_id, else his OpticOdds player record (cached)
+async function nlTeamSide(p){ const f=p.f; if(!f) return null;
+  const sideOf=id=>id==null?null:String(id)===String(f.away?.id)?'away':String(id)===String(f.home?.id)?'home':null;
+  let sd=sideOf(p.fd?.team_id); if(sd) return sd;
+  const pid=p.fd?.player_id; if(!pid) return null;
+  try{ const info=await Promise.race([smInfo({pid}), new Promise(z=>setTimeout(()=>z(null),2500))]); return sideOf(info?.teamId); }catch(e){ return null; } }
 let nlKal = null;   // what Kalshi sent on the last scan (shown on the tab)
 const nlFdNow = new Map(), nlFdFx = new Set();   // FD's price on every bet this scan + games FD answered for
 function nlFind(rows){
@@ -2840,7 +2848,8 @@ function nlPlayGrade(p, sigs){
       size!=null ? U.filter(t=>nlMoney(t)===nlMoney({size})) : [], U.filter(t=>nlHoldB(t.hold)===nlHoldB(best)) ];
     let w=0, roi=0, n=0; groups.forEach(g=>{ const r=nlRecOf(g); if(!r.n||!r.s) return; const wt=Math.min(r.n,150); roi+=(r.u/r.s)*wt; w+=wt; n+=r.n; });
     if(!w) return null; roi=roi/w*100; return { roi, n, g:smGrade({ u:roi, s:100 }) }; }catch(err){ return null; } }
-function nlPost(p, sigs){
+async function nlPost(p, sigs){
+  const mine=await nlTeamSide(p);
   const lg=(SPORTS[p.sk]?.label||'NBA').toUpperCase(), mk=marketLabel(p.sk||'nba',p.mk), bet=`${titleCase(p.name)} ${nlSide(p.side)}${p.line!=null?' '+p.line:''} ${mk}`;
   const title=`${fmtAm(p.fd.price)} ${bet}`, opp=nlSide(NL_OPP[p.side]);
   const role=/^\d{15,}$/.test(nlRole)?nlRole:'', f=p.f, fdUrl=fdMobile(()=>sharpLink(p.fd)), cur=nlStatNow(p.fid, p.who, p.mk, p.sk, p.market);
@@ -2865,7 +2874,7 @@ function nlPost(p, sigs){
   fields.push({ name:'Fade:', value:[...links, `Sent <t:${Math.floor(Date.now()/1000)}:R>`].join('\n') });
   discordPost({ username:'FanDuel', avatar_url:httpsLogo('fanduel'), content:[title, role?`<@&${role}>`:''].filter(Boolean).join(' '), allowed_mentions: role?{roles:[role]}:{parse:[]},
     embeds:[{ title, url:discordUrl(fdUrl)||undefined, color:gr ? (/^🟢/.test(gr.g)?0x22c55e:/^🔴/.test(gr.g)?0xef4444:0xeab308) : sigs.some(x=>x.hold<-0.05)?0x22c55e:0xeab308, thumbnail:httpsLogo('fanduel')?{url:httpsLogo('fanduel')}:undefined,
-      description:`${f?nlScoreLine(f)+'\n':''}**${nlSide(p.side).toUpperCase()}${p.line!=null?' '+p.line:''}** ${esc(mk).toUpperCase()}${cur!=null?` (now **${cur}**)`:''}`, fields }] }, null, nlHook);
+      description:`${f?nlScoreLine(f, mine)+'\n':''}**${nlSide(p.side).toUpperCase()}${p.line!=null?' '+p.line:''}** ${esc(mk).toUpperCase()}${cur!=null?` (now **${cur}**)`:''}`, fields }] }, null, nlHook);
 }
 // Recap: once every play tracked on a day is graded and no game is on, post that day's results and the
 // all-time record (by signal, sport) to the in-game channel -- once per day. The tab has a button too.
