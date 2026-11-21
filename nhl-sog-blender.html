@@ -2735,6 +2735,9 @@ function _nhlPaintModelSummary() {
   el.innerHTML = `<b style="color:#fff;">Model</b> <span style="color:#9fb8d6;">· live prices · last run ${t}${_nhlModelBusy ? " · running…" : ""}</span>
     ${_nhlModelCounts ? `<span style="color:#fff;margin-left:8px;">${_nhlModelCounts.projected} players projected · <b>${_nhlModelCounts.lines}</b> with a SOG main line · <b>${_nhlModelCounts.all4}</b> of those with all 4 sources</span>` : ""}
     ${_nhlCoverageHtml()}
+    ${_nhlModelCounts && _nhlModelCounts.funnel ? (() => { const f = _nhlModelCounts.funnel, st = (n, t) => `<b style="color:#fff;">${n}</b> <span style="color:#9fb8d6;">${t}</span>`;
+      return `<div style="margin-top:4px;font-size:12px;">${st(f.lines, "lines")} → ${st(f.all4, "with all 4 sources")} → ${st(f.priced, "with a trusted price")} → ${st(f.qual3, "with 3+ sources at " + NHL_PS_QUAL_EV + "%+")} → ${st(f.plays, "with no source negative")}
+        <span style="color:#eab308;margin-left:8px;">· ${f.nearNeg} blocked only by a source between −2% and 0% · ${f.two3} with 2 at ${NHL_PS_QUAL_EV}%+ and none negative</span></div>`; })() : ""}
     <b style="color:${rows.length ? "#22c55e" : "#9fb8d6"};margin-left:8px;">${rows.length} play${rows.length === 1 ? "" : "s"}</b>
     ${rows.map(r => `<span style="display:inline-block;margin:2px 4px;padding:2px 8px;border:1px solid #22c55e66;background:#22c55e14;border-radius:5px;color:#fff;font-size:12px;"><b>${escapeHtmlBasic(r.player)}</b> ${r.ou === "over" ? "O" : "U"}${r.line} ${Number(r.odds) > 0 ? "+" : ""}${r.odds} ${escapeHtmlBasic(r.book || "")} <span style="color:#22c55e;font-weight:800;">+${r.anchorEv}%</span></span>`).join("")}
     <button onclick="runNhlModel({silent:false})" style="margin-left:8px;background:transparent;border:1px solid #0066cc;color:#00aaff;border-radius:5px;padding:2px 10px;font-size:12px;font-weight:700;cursor:pointer;">Run now</button>${_nhlLinkedNamesHtml().replace("margin-bottom:16px", "margin:8px 0 0")}`;
@@ -2865,7 +2868,17 @@ async function runNhlModel(opts) {
         const lacks = Object.keys(missing).filter(k => _nhlModelCsvProj(k, e.player, e.home, e.away) == null);
         if (lacks.length === Object.keys(missing).length) return;
         lacks.forEach(k => { if (!missing[k].some(x => x.p === e.player)) missing[k].push({ p: e.player, t: e.away + "@" + e.home }); }); });
-      _nhlModelCounts = { projected: proj.size, lines: Object.keys(mainLine).length, all4: Object.values(evalMap).filter(e => e.have.length === PS_SOURCE_KEYS_NHL.length).length, missing }; }
+      // Funnel: where today's lines drop out of the rule (best side per player).
+      const all4 = Object.values(evalMap).filter(e => e.have.length === PS_SOURCE_KEYS_NHL.length);
+      const sidesOf = e => Object.values(e.sides || {});
+      const priced = all4.filter(e => sidesOf(e).length);
+      const qual3 = priced.filter(e => sidesOf(e).some(x => x.qual >= 3));
+      const plays = qual3.filter(e => sidesOf(e).some(x => x.ok));
+      const worstOf = x => Math.min(...Object.values(x.evs));
+      const nearNeg = qual3.filter(e => !sidesOf(e).some(x => x.ok) && sidesOf(e).some(x => x.qual >= 3 && worstOf(x) >= -2)).length;   // blocked only by a source between -2% and 0%
+      const two3 = priced.filter(e => !sidesOf(e).some(x => x.qual >= 3) && sidesOf(e).some(x => x.qual === 2 && worstOf(x) >= 0)).length;   // 2 at 3%+, none negative
+      _nhlModelCounts = { projected: proj.size, lines: Object.keys(mainLine).length, all4: all4.length, missing,
+        funnel: { lines: Object.keys(mainLine).length, all4: all4.length, priced: priced.length, qual3: qual3.length, plays: plays.length, nearNeg, two3 } }; }
     try { reRender(); _nhlPaintModelSummary(); } catch (e) {}
     try { _nhlFindMissingSources(byPL, mainLine, iso); } catch (e) { console.warn("[NHL names] check failed", e && e.message); }
     // Check-only run: show what the model sees right now, log nothing (model log, tracker and solo untouched).
