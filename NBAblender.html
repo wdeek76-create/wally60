@@ -25252,8 +25252,41 @@ const MORNING_PROFILES = {
     keys: { ps: "nba_tipoff_ps_v1", bets: "nba_tipoff_bets_v1", psx: "nba_tipoff_psx_v1", toTracker: "nba_tipoff_to_tracker", skip: "nba_tipoff_skip_v1", hash: "nba_tipoff_paste_hash_v1", solo: "nba_tipoff_solo_v1", soloAgg: "nba_tipoff_solo_agg_v1", shadow: "nba_tipoff_shadow_v1", webhook: "nba_tipoff_discord_webhook", role: "nba_tipoff_discord_role", nick: "nba_morning_nick_webhook", nickRole: "nba_morning_nick_role", salt: "nba_tipoff_salt_telegram", avail: "nba_tipoff_avail_telegram" } },
 };
 const _mProfState = {};
-function _mSnapshotState() { return { morningPs, morningPsX, morningBets, morningSkip, morningPasteHash, morningSolo, morningSoloAgg, morningShadow, morningView, morningStatFilter, morningSelSrc, morningSelStat, morningLastCheck, morningSearch, morningExtraMkt }; }
-function _mRestoreState(t) { ({ morningPs, morningPsX, morningBets, morningSkip, morningPasteHash, morningSolo, morningSoloAgg, morningShadow, morningView, morningStatFilter, morningSelSrc, morningSelStat, morningLastCheck, morningSearch, morningExtraMkt } = t); }
+function _mSnapshotState() { return { morningPs, morningPsX, morningBets, morningSkip, morningPasteHash, morningSolo, morningSoloAgg, morningShadow, morningView, morningStatFilter, morningSelSrc, morningSelStat, morningLastCheck, morningSearch, morningExtraMkt, morningGamesSel }; }
+function _mRestoreState(t) { ({ morningPs, morningPsX, morningBets, morningSkip, morningPasteHash, morningSolo, morningSoloAgg, morningShadow, morningView, morningStatFilter, morningSelSrc, morningSelStat, morningLastCheck, morningSearch, morningExtraMkt, morningGamesSel } = t); }
+// ── GAMES (TIP OFF): pick the game(s) the CSVs you pasted are for. Only props from those games are read off the boards; the rest of the slate is ignored.
+// Nothing selected = every game. The pick is kept for the day.
+let morningGamesSel = new Set();
+const MORNING_GAMES_SEL_KEY = "nba_tipoff_games_sel_v1";
+function _mGamesSelLoad() { morningGamesSel = new Set(); try { const d = JSON.parse(localStorage.getItem(MORNING_GAMES_SEL_KEY) || "null"); if (d && d.day === localYMD(new Date()) && Array.isArray(d.sel)) morningGamesSel = new Set(d.sel); } catch (e) {} }
+function _mGamesSelSave() { try { localStorage.setItem(MORNING_GAMES_SEL_KEY, JSON.stringify({ day: localYMD(new Date()), sel: [...morningGamesSel] })); } catch (e) {} }
+function _mGameTeams(g) { const m = String(g || "").toUpperCase().match(/([A-Z]{2,3})\s*@\s*([A-Z]{2,3})/); return m ? [normTeamAbbr(m[1]) || m[1], normTeamAbbr(m[2]) || m[2]] : []; }
+// does this prop belong to one of the selected games? (by its game string, else by its team)
+function _mGameSelOk(p) {
+  if (MORNING_PROFILE !== "tipoff" || !morningGamesSel.size) return true;
+  const teams = new Set([...morningGamesSel].flatMap(_mGameTeams));
+  const t = normTeamAbbr(p.team || "") || String(p.team || "").toUpperCase();
+  const gt = _mGameTeams(p.game);
+  if (gt.length) return gt.some(x => teams.has(x));
+  if (t) return teams.has(t);
+  return true;   // no team known: never hide a prop by accident
+}
+function morningToggleGameSel(key) { if (key === "*") morningGamesSel.clear(); else if (morningGamesSel.has(key)) morningGamesSel.delete(key); else morningGamesSel.add(key); _mGamesSelSave(); renderMorning(); }
+function _mGamesSelHtml() {
+  if (MORNING_PROFILE !== "tipoff") return "";
+  try { if (!_lineupGamesLoad()) _lineupEnsureGames().then(g => { if (g && g.length && _mIsMorningTab()) renderMorning(); }); } catch (e) {}
+  const slate = (_lineupGamesLoad() || []).map(g => ({ key: `${g.away} @ ${g.home}`, at: g.at || 0 }));
+  const seen = new Set(slate.map(g => g.key));
+  MORNING_SRC_KEYS.forEach(k => (morningPs[k] || []).forEach(p => { const gt = _mGameTeams(p.game); if (gt.length === 2) { const key = gt.join(" @ "); if (!seen.has(key)) { seen.add(key); slate.push({ key, at: 0 }); } } }));
+  slate.sort((a, b) => a.at - b.at || a.key.localeCompare(b.key));
+  const onBoards = new Set(); MORNING_SRC_KEYS.forEach(k => (morningPs[k] || []).forEach(p => _mGameTeams(p.game).forEach(t => onBoards.add(t))));
+  const chip = (key, on, extra) => `<button onclick="morningToggleGameSel('${_mEsc(key)}')" style="background:${on ? "#fbbf24" : "transparent"};border:1px solid ${on ? "#fbbf24" : "#525a64"};color:${on ? "#050507" : "#d4dae3"};border-radius:999px;padding:3px 12px;font-size:11px;font-weight:800;cursor:pointer;white-space:nowrap;">${on ? "\u2713 " : ""}${_mEsc(key)}${extra || ""}</button>`;
+  const all = !morningGamesSel.size;
+  return `<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:10px;padding:8px 10px;border:1px solid #fbbf2455;border-radius:8px;background:#fbbf240a;">
+    <span style="font-size:10px;font-weight:800;letter-spacing:.8px;color:#fbbf24;margin-right:4px;">GAMES THESE CSVs ARE FOR</span>
+    ${chip("*", all).replace(">\u2713 *<", ">\u2713 ALL<").replace(">*<", ">ALL<")}${slate.map(g => { const gt = _mGameTeams(g.key), has = gt.some(t => onBoards.has(t)); return chip(g.key, morningGamesSel.has(g.key), (g.at ? ` <span style="opacity:.6;font-weight:600;">${_mEsc(_gameClock(g.at))}</span>` : "") + (has ? ` <span style="opacity:.6;">\u25cf</span>` : "")); }).join("")}
+    <span style="font-size:10px;color:#8b93a0;margin-left:auto;">${all ? "every game on the boards is in" : `${morningGamesSel.size} game${morningGamesSel.size === 1 ? "" : "s"} \u2014 props from other games are ignored`} \u00b7 \u25cf = on the boards</span></div>`;
+}
 function _mLoadProfileState(pr) {   // first visit of a profile: everything from its own storage keys
   morningPs = {}; morningPsX = {}; pr.sources.forEach(x => { morningPs[x.key] = []; morningPsX[x.key] = []; });
   loadMorningPs();
@@ -25265,6 +25298,7 @@ function _mLoadProfileState(pr) {   // first visit of a profile: everything from
   morningSoloAgg = { dates: [], rows: [] }; try { const a = JSON.parse(localStorage.getItem(MORNING_SOLO_AGG_KEY) || "null"); if (a && Array.isArray(a.rows)) morningSoloAgg = { dates: a.dates || [], rows: a.rows }; } catch (e) {}
   morningShadow = []; try { morningShadow = JSON.parse(localStorage.getItem(MORNING_SHADOW_KEY) || "[]") || []; } catch (e) {}
   morningView = "ensemble"; morningStatFilter = "ALL"; morningSelSrc = pr.sources[0].key; morningSelStat = "AUTO"; morningLastCheck = null; morningSearch = ""; morningExtraMkt = "ALL";
+  _mGamesSelLoad();
 }
 function _mSetProfile(key) {
   const pr = MORNING_PROFILES[key]; if (!pr || key === MORNING_PROFILE) return;
@@ -26541,6 +26575,7 @@ function computeMorningEnsemble(ps) {
   const coverage = {};      // src|stat -> Set(player)
   const pastedStat = {};    // src|stat -> bool (that source's board for this market is in)
   MORNING_SRC_KEYS.forEach(src => (ps[src] || []).forEach(p => {
+    if (!_mGameSelOk(p)) return;   // TIP OFF: outside the chosen game(s)
     const pk = resolveNorm(p.player);
     (coverage[src + "|" + p.stat] = coverage[src + "|" + p.stat] || new Set()).add(pk);
     pastedStat[src + "|" + p.stat] = true;
@@ -27220,7 +27255,7 @@ function renderMorning() {
         ? `<span onclick="morningPickSlot('${k}','${st}')" title="${_mSrc(k).label} ${MORNING_STAT_LABEL[st]}: ${by[st]} props loaded — click to re-paste" style="cursor:pointer;text-align:center;color:#4ade80;font-weight:800;">✓<span style="color:#6b7380;font-weight:600;font-size:9px;"> ${by[st]}</span></span>`
         : `<span onclick="morningPickSlot('${k}','${st}')" title="${_mSrc(k).label} ${MORNING_STAT_LABEL[st]}: not pasted yet" style="cursor:pointer;text-align:center;color:#3a414b;">○</span>`).join("");
     }).join("") + `</div>`;
-  const pastePanel = `<div style="${card}">
+  const pastePanel = _mGamesSelHtml() + `<div style="${card}">
     <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;align-items:flex-start;">
       <div>
         <div style="font-size:13px;font-weight:800;color:#d4dae3;letter-spacing:1px;text-transform:uppercase;">Paste PropShop board</div>
