@@ -26543,6 +26543,7 @@ function computeMorningEnsemble(ps) {
   }));
   const funnel = {};
   const bump = (stat, gate) => { ["ALL", stat].forEach(s => { funnel[s] = funnel[s] || Object.fromEntries(GATES.map(g => [g, 0])); funnel[s][gate]++; }); };
+  const blocked = [];   // would have cleared but for the news / lineup / Situation Room gate
   const cleared = [], misses = [], altLines = {};
   Object.values(byKey).forEach(entry => {
     bump(entry.stat, "pasted");
@@ -26582,14 +26583,15 @@ function computeMorningEnsemble(ps) {
     bump(entry.stat, "proj");
     const team = entry.team || _mTeamFor(entry.player);
     const newsWhy = _mNewsGate(entry.player, team, entry.ou);
-    if (newsWhy) { miss("news", newsWhy); return; }
-    bump(entry.stat, "news");
+    // A news / lineup / Situation Room block is the one gate you can overrule: the prop is priced like a cleared pick and parked in BLOCKED (never auto-logged) so it can be logged by hand.
+    const newsBlocked = newsWhy || null;
+    if (newsWhy) miss("news", newsWhy); else bump(entry.stat, "news");
     // Price gate: the tracked price has to be playable — a regular book, or an exchange with $500+ at the price. Exchange
     // prices under $500 are alt books only; if nothing playable is left there is no pick.
-    if (!entry.sources.some(x => _mPlayable(x.prop))) { miss("price", "only exchange prices under $" + MORNING_EXCH_MIN_LIQ + " (" + entry.sources.map(x => (x.prop.book || "?") + (x.prop.liq != null ? " $" + x.prop.liq : "")).join(", ") + ")"); return; }
-    bump(entry.stat, "price");
-    if (_mRejected(entry.player)) { miss("cleared", "on the reject list"); return; }
-    bump(entry.stat, "cleared");
+    if (!entry.sources.some(x => _mPlayable(x.prop))) { if (newsBlocked) return; miss("price", "only exchange prices under $" + MORNING_EXCH_MIN_LIQ + " (" + entry.sources.map(x => (x.prop.book || "?") + (x.prop.liq != null ? " $" + x.prop.liq : "")).join(", ") + ")"); return; }
+    if (!newsBlocked) bump(entry.stat, "price");
+    if (_mRejected(entry.player)) { if (newsBlocked) return; miss("cleared", "on the reject list"); return; }
+    if (!newsBlocked) bump(entry.stat, "cleared");
     let best = null;
     entry.sources.forEach(({ prop }) => { if (_mPlayable(prop) && (!best || parseInt(prop.odds) > parseInt(best.odds))) best = prop; });
     // Best price = the highest playable price on the boards; a tie goes FanDuel, then Prop Builder, then Pinnacle.
@@ -26611,7 +26613,7 @@ function computeMorningEnsemble(ps) {
     entry.sources.forEach(x => { const mv = x.prop.minutes > 0 ? Number(x.prop.minutes) : _mCsvMin(x.src, entry.player); sourceMins[x.src] = mv != null ? mv : null; });
     MORNING_SRC_KEYS.forEach(k => { if (!(k in sourceMins)) { const mv = _mCsvMin(k, entry.player); if (mv != null) sourceMins[k] = mv; } });
     const mvals = Object.values(sourceMins).filter(v => v != null);
-    cleared.push({
+    (newsBlocked ? blocked : cleared).push({ newsWhy: newsBlocked,
       anchorSrc: anchor.src, anchorProj: anchorProj != null ? anchorProj : null, modelProj, sourceMins, expMin: mvals.length ? mvals.reduce((a, b) => a + b, 0) / mvals.length : null,
       player: entry.player, team, stat: entry.stat, ou: entry.ou, line: entry.line,
       gameDateIso: entry.gameDateIso, game: entry.game, gameTime: entry.gameTime || "", sourcePrices: entry.sources.map(x => ({ src: x.src, book: x.prop.book || "", odds: parseInt(x.prop.odds, 10), ev: Number(x.prop.ev), liq: x.prop.liq != null ? x.prop.liq : null, alt: !_mPlayable(x.prop) })), sourcesAgreed: uniq, qualCount, requiredQual, missingSrc, missingProj,
@@ -26631,9 +26633,17 @@ function computeMorningEnsemble(ps) {
     for (let i = cleared.length - 1; i >= 0; i--) if (!keep.has(cleared[i])) cleared.splice(i, 1);
   }
   cleared.sort((a, b) => b.sourcesAgreed.length - a.sourcesAgreed.length || b.qualCount - a.qualCount || (b.ev || 0) - (a.ev || 0));
+  { // blocked: one line per player / market / side too (main line first, then the best alt)
+    const pickOf = new Map();
+    blocked.forEach(c => { const k = resolveNorm(c.player) + "|" + c.stat + "|" + c.ou + "|" + (c.gameDateIso || ""); const cur = pickOf.get(k);
+      if (!cur || (cur.altLine && !c.altLine) || (cur.altLine === c.altLine && (c.minEv || 0) > (cur.minEv || 0))) pickOf.set(k, c); });
+    const keep = new Set(pickOf.values());
+    for (let i = blocked.length - 1; i >= 0; i--) if (!keep.has(blocked[i])) blocked.splice(i, 1);
+    blocked.sort((a, b) => b.sourcesAgreed.length - a.sourcesAgreed.length || b.qualCount - a.qualCount || (b.ev || 0) - (a.ev || 0));
+  }
   const order = { cleared: 0, price: 0.5, news: 1, proj: 2, worst: 3, qual: 4, coverage: 5, oppo: 6 };
   misses.sort((a, b) => order[a.gate] - order[b.gate]);
-  return { cleared, funnel, misses, gates: GATES, altLines };
+  return { cleared, blocked, funnel, misses, gates: GATES, altLines };
 }
 
 function _mLoggedKey(r) { return resolveNorm(r.player) + "|" + r.stat + "|" + (r.gameDateIso || r.gameDate); }
@@ -26709,6 +26719,7 @@ function _mLogRow(r) {
     proj: r.proj, anchorSrc: r.anchorSrc || null, anchorProj: r.anchorProj != null ? r.anchorProj : null, modelProj: r.modelProj != null ? r.modelProj : null, sourceFairs: r.sourceFairs || null, sourceMins: r.sourceMins || null, expMin: r.expMin != null ? r.expMin : null, sourceProjs: r.sourceProjs, sourceEvs: r.sourceEvs, sourcesAgreed: r.sourcesAgreed, qualCount: r.qualCount,
     requiredQual: r.requiredQual, missingSrc: r.missingSrc, missingProj: r.missingProj,
     stake: s.stake, toWin: s.toWin, result: "pending", actual: null,
+    newsWhy: r.newsWhy || null, forced: !!r.forced,   // logged by hand over a news / Situation Room block
   });
   // The Tracker copy is made when the pick goes out on a card (see _mDropUnpriced), not when it first clears: picks pop in and out as boards are re-pasted, and the ones that never reach a card shouldn't land in the Tracker.
   return true;
@@ -26734,6 +26745,14 @@ function morningRemovePlay(i) {
   if (tbs.length) { bets = bets.filter(x => !tbs.includes(x)); try { if (currentTab === "tracker") renderTracker(); } catch (e) {} }
   try { saveMorningBets(); if (tbs.length) saveBets(); } catch (e) {}
   showToast(`Removed ${r.player} ${r.stat}${tbs.length ? ` (and ${tbs.length} open Tracker bet${tbs.length === 1 ? "" : "s"})` : ""}`); renderMorning();
+}
+// LOG on the BLOCKED view: the pick goes into this model's log exactly like a cleared one, with the block reason kept on it.
+function morningLogBlocked(pn, stat, ou, line, date) {
+  const r = (computeMorningEnsemble().blocked || []).find(x => resolveNorm(x.player) === pn && x.stat === stat && x.ou === ou && String(x.line) === String(line) && String(x.gameDateIso || "") === String(date));
+  if (!r) { showToast("That prop is no longer on the boards"); renderMorning(); return; }
+  if (_mLogRow({ ...r, forced: true })) { saveMorningBets(); showToast(`Logged ${displayPlayerName(r.player)} ${r.ou} ${r.line} ${r.stat} over the block`); }
+  else showToast("Already logged");
+  renderMorning();
 }
 function morningAutoLog() {
   if (!morningNewsLoadedAt()) return 0;   // never auto-log blind — today's RW news has to be in
@@ -27166,7 +27185,7 @@ function renderMorning() {
   const el = document.getElementById("morning-tab");
   if (!el) return;
   pruneMorningPs();
-  const { cleared, funnel, misses, gates } = computeMorningEnsemble();
+  const { cleared, blocked, funnel, misses, gates } = computeMorningEnsemble();
   const statOk = s => morningStatFilter === "ALL" || s === morningStatFilter;
   const today = localYMD(new Date());
   const card = "background:linear-gradient(135deg,#0c0d10 0%,#0a0d12 50%,#0c0d10 100%);border:1px solid #1a1d22;border-radius:10px;padding:14px;margin-bottom:16px;";
@@ -27267,11 +27286,13 @@ function renderMorning() {
   let viewBody = "";
   if (morningView === "ensemble") {
     const rows = cleared.filter(r => statOk(r.stat) && _mNameHit(r.player) && !_mSkipped(r));
+    // held back by the news / lineup / Situation Room gate only: shown here, never auto-logged, LOG by hand if you still like it
+    const brows = (blocked || []).filter(r => statOk(r.stat) && _mNameHit(r.player) && !_mSkipped(r));
     window._morningCleared = cleared;
-    viewBody = rows.length ? `<div style="display:flex;justify-content:flex-end;margin-bottom:6px;">${getNickWebhook() ? btn("➤ NICK", "morningPostNick()", true, "#00aaff") : ""}${btn("🖼 DISCORD", "morningPostDiscord()", !!getMorningWebhook(), "#5865f2")}${btn(getSalt() ? "✈ SALT" : "✈ SALT SETUP", "morningPostSalt()", !!getSalt(), "#2AABEE")}${getSalt() ? btn("⚙", "morningSetSalt()", false) : ""}${getSalt() ? btn(getAvail() ? "✈ AVAIL" : "✈ AVAIL SETUP", "morningPostAvail()", !!getAvail(), "#2AABEE") + (getAvail() ? btn("⚙", "morningSetAvail()", false) : "") : ""}${btn("LOG ALL TO MORNING", "morningLogAll()", true, "#c4b5fd")}</div>
+    viewBody = (rows.length || brows.length) ? `<div style="display:flex;justify-content:flex-end;margin-bottom:6px;">${getNickWebhook() ? btn("➤ NICK", "morningPostNick()", true, "#00aaff") : ""}${btn("🖼 DISCORD", "morningPostDiscord()", !!getMorningWebhook(), "#5865f2")}${btn(getSalt() ? "✈ SALT" : "✈ SALT SETUP", "morningPostSalt()", !!getSalt(), "#2AABEE")}${getSalt() ? btn("⚙", "morningSetSalt()", false) : ""}${getSalt() ? btn(getAvail() ? "✈ AVAIL" : "✈ AVAIL SETUP", "morningPostAvail()", !!getAvail(), "#2AABEE") + (getAvail() ? btn("⚙", "morningSetAvail()", false) : "") : ""}${btn("LOG ALL TO MORNING", "morningLogAll()", true, "#c4b5fd")}</div>
       <div style="overflow-x:auto;"><table style="border-collapse:collapse;width:100%;"><thead><tr>${["", "PLAYER", "STAT", "SIDE", "LINE", "ANCHOR · MODEL", "AGREE · SOURCES (PROJ · EV)", "BEST", "BOOK", "FAIR", "PLAY TO", "WORST EV"].map(th).join("")}</tr></thead><tbody>
-      ${rows.map(r => { const i = cleared.indexOf(r), logged = _mAlreadyLogged(r); return `<tr style="border-top:1px solid #1a1d22;">
-        ${td(`<span style="display:inline-flex;gap:6px;align-items:center;">${logged ? `<span style="font-size:11px;font-weight:800;color:#4ade80;">✓ LOGGED</span>` : btn("LOG", `morningTrackRow(${i})`, true, "#c4b5fd")}<button onclick="morningRemovePlay(${i})" title="Remove this play for today" style="background:transparent;border:1px solid #f8717166;color:#f87171;border-radius:5px;padding:2px 8px;font-size:12px;font-weight:800;cursor:pointer;">\u2715</button></span>`)}
+      ${rows.concat(brows).map(r => { const i = cleared.indexOf(r), logged = _mAlreadyLogged(r), blk = !!r.newsWhy; return `<tr style="border-top:1px solid #1a1d22;${blk ? "background:#fb923c0d;" : ""}">
+        ${td(`<span style="display:inline-flex;gap:6px;align-items:center;">${logged ? `<span style="font-size:11px;font-weight:800;color:#4ade80;">✓ LOGGED</span>` : blk ? btn("LOG", `morningLogBlocked('${_mEsc(resolveNorm(r.player))}','${r.stat}','${r.ou}','${r.line}','${r.gameDateIso || ""}')`, true, "#fb923c") + `<span style="font-size:10px;font-weight:800;color:#fb923c;border:1px solid #fb923c66;border-radius:4px;padding:1px 6px;white-space:nowrap;" title="${_mEsc(r.newsWhy)}">NOT LOGGED · ${_mEsc(r.newsWhy)}</span>` : btn("LOG", `morningTrackRow(${i})`, true, "#c4b5fd")}${blk ? "" : `<button onclick="morningRemovePlay(${i})" title="Remove this play for today" style="background:transparent;border:1px solid #f8717166;color:#f87171;border-radius:5px;padding:2px 8px;font-size:12px;font-weight:800;cursor:pointer;">\u2715</button>`}</span>`)}
         ${td(_mPlayerCell(r.player, r.team))}${td(r.stat, "font-weight:800;color:#fff;")}${td(r.ou.toUpperCase(), `font-weight:800;color:${r.ou === "over" ? "#4ade80" : "#f87171"};`)}${td(r.line + (r.altLine ? ` <span style="font-size:10px;font-weight:800;color:#f472b6;border:1px solid #f472b666;border-radius:4px;padding:0 4px;" title="Alt line: not the line most books hang, but every source is +EV here">ALT</span>` : ""), "color:#fff;")}
         ${td(_mAnchorModelHtml(r))}
         ${td(`<span style="display:inline-flex;gap:5px;align-items:center;"><b style="color:#c4b5fd;">${r.sourcesAgreed.length}/${r.requiredQual}</b>${_mSrcPills(r.sourceProjs, r.sourceEvs, r.missingSrc, r.missingProj)}</span>`)}
@@ -28028,7 +28049,7 @@ function morningCardPicks() {
   try {
     if (MORNING_SRC_KEYS.some(k => (morningPs[k] || []).length)) {
       const ck = r => [resolveNorm(r.player || ""), String(r.stat || "").toUpperCase(), r.ou, Number(r.line)].join("|");
-      const now = new Set(computeMorningEnsemble().cleared.map(ck));
+      const ens = computeMorningEnsemble(); const now = new Set(ens.cleared.concat(ens.blocked || []).map(ck));
       open = open.filter(b => now.has(ck(b)));
     }
   } catch (e) {}
