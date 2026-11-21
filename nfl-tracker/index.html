@@ -5495,8 +5495,14 @@ async function copyEnsemble(mode) {
   Object.keys(byDate).sort().forEach((dateKey, di) => {
     if (di > 0) out.push('');
     const dp = byDate[dateKey];
-    out.push((mode === 'partners' ? 'NFL Props' : (isCons ? 'NFL Full Consensus' : 'NFL Ensemble')) + (isCons ? '' : _tierLabel()) + (_noYards ? ' (no yardage)' : '') + ' - ' + fmtDate(dateKey) + ' (' + dp.length + ')');
-    out.push('');
+    if (mode === 'partners') {
+      // Clean partner header: "NFL Model - Week 12" once; the date only when the card spans several days
+      if (di === 0) { const wk = (weekRange(isoWeek(dateKey)).label || '').split(' (')[0]; out.push('NFL Model' + (wk && /^Week/.test(wk) ? ' - ' + wk : '')); out.push(''); }
+      if (Object.keys(byDate).length > 1) { out.push(fmtDate(dateKey)); out.push(''); }
+    } else {
+      out.push((isCons ? 'NFL Full Consensus' : 'NFL Ensemble') + (isCons ? '' : _tierLabel()) + (_noYards ? ' (no yardage)' : '') + ' - ' + fmtDate(dateKey) + ' (' + dp.length + ')');
+      out.push('');
+    }
     const byGame = {};
     dp.forEach(p => { const g = p.game || 'Unknown'; (byGame[g] = byGame[g] || []).push(p); });
     Object.keys(byGame).sort((a,b) => parseTime(byGame[a][0].gameTime) - parseTime(byGame[b][0].gameTime)).forEach(g => {
@@ -5517,7 +5523,7 @@ async function copyEnsemble(mode) {
         const lv = liveLine(p);
         const tierTag = (document.getElementById('ensTierSel')?.value === 'all') ? (p.tier === 'strong' ? '  [10%+]' : '  [5-10%]') : '';
         if (mode === 'partners') {
-          out.push('    ' + nm + '  ' + sideWord(p.side) + ' ' + p.line + ' ' + p.odds + '  play to ' + pt.odds + tierTag);
+          out.push('    ' + nm + '  ' + sideWord(p.side) + ' ' + p.line + ' ' + p.odds + '  play to ' + pt.odds);
           const ooLinesP = ooCopyLinesForPlay(p, oddsByGame[p.game || ''], '      ', false);
           if (ooLinesP.length) out.push(...ooLinesP);
           else (Array.isArray(p.altLines) ? p.altLines : []).slice().sort((a,b) => Math.abs(a.line - p.line) - Math.abs(b.line - p.line)).forEach(al => {
@@ -7719,10 +7725,38 @@ function _ooWatchDiag(p, rows, m) {
     }
   });
 }
+// Partner copy: total money on the exchanges at or better than the play-to (top of book included),
+// per exchange — "Depth to -120: $839 (Novig $301 · Kalshi $277 · Prophet X $262)". No levels/averages.
+function _ooDepthLine(rows, playTo) {
+  const per = [];
+  (rows || []).filter(o => _ooIsExch(o.sportsbook)).forEach(o => {
+    const tot = ooDepthLevels(o, playTo).reduce((a, l) => a + l.size, 0);
+    if (tot > 0) { const ex = per.find(x => x.book === o.sportsbook); if (ex) ex.tot = Math.max(ex.tot, tot); else per.push({ book: o.sportsbook, tot }); }
+  });
+  if (!per.length) return null;
+  per.sort((a, b) => b.tot - a.tot);
+  const total = per.reduce((a, x) => a + x.tot, 0);
+  return `Depth to ${_ooFmtPrice(playTo)}: ${_ooFmtUsd(total)}` + (per.length > 1 ? ` (${per.map(x => x.book + ' ' + _ooFmtUsd(x.tot)).join(' · ')})` : ` (${per[0].book})`);
+}
 function ooCopyLinesForPlay(p, rows, indent, withSources = true) {
   if (!rows || !rows.length) return [];
   const m = ooMatchProp(p, rows); const pt = _ooPlayTo(p); const out = [];
   _ooWatchDiag(p, rows, m);
+  if (!withSources) {
+    // Partners: price + book, exchanges with win %, one depth line to the play-to
+    const fmtP = o => _ooIsExch(o.sportsbook) ? `${_ooFmtPrice(o.price)} ${o.sportsbook}${_ooImplPct(o.price) ? ' (' + Math.round(Number(_ooImplPct(o.price))) + '%)' : ''}` : `${_ooFmtPrice(o.price)} ${o.sportsbook}`;
+    const ok = m.exact.filter(o => _ooPlayable(o.price, pt?.odds));
+    ok.forEach(o => out.push(indent + fmtP(o)));
+    if (!ok.length && m.exact.length) out.push(indent + '(nothing at or better than play-to)');
+    const d = pt ? _ooDepthLine(m.exact, pt.odds) : null; if (d) out.push(indent + d);
+    _ooGroupOther(p, m.other).filter(g => g.pt).forEach(g => {
+      const gok = g.rows.filter(o => _ooPlayable(o.price, g.pt.odds)); if (!gok.length) return;
+      out.push(indent + `alt ${p.side === 'O' ? 'o' : 'u'}${g.points} · play to ${_ooFmtPrice(g.pt.odds)}`);
+      gok.forEach(o => out.push(indent + '  ' + fmtP(o)));
+      const gd = _ooDepthLine(g.rows, g.pt.odds); if (gd) out.push(indent + '  ' + gd);
+    });
+    return out;
+  }
   const fmt = o => { if (_ooIsExch(o.sportsbook)) { const w = _ooImplPct(o.price); return `${_ooFmtPrice(o.price)}${w ? ' (' + w + '%)' : ''} ${o.sportsbook}${o.limits?.max ? ' Liq $' + Math.round(o.limits.max) : ''}`; } return `${_ooFmtPrice(o.price)} ${o.sportsbook}`; };
   const ok = m.exact.filter(o => _ooPlayable(o.price, pt?.odds));
   ok.forEach(o => out.push(indent + fmt(o)));
