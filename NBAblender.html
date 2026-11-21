@@ -28411,6 +28411,7 @@ async function morningPostNick() {
   const hook = getNickWebhook();
   if (!hook) { morningSetNickWebhook(); return; }
   let picks = morningCardPicks();
+  if (MORNING_PROFILE === "tipoff") return _mPostNickByGame(hook, picks);   // TIP OFF goes out game by game as lineups confirm: one post per game, only picks Nick hasn't had yet
   if (!picks.length) { showToast("No pending morning picks to send"); return; }
   if (!confirm(`Post ${picks.length} pick${picks.length === 1 ? "" : "s"} to Nick's channel now?`)) return;
   showToast("Refreshing live prices + exchange depth\u2026");
@@ -28432,6 +28433,40 @@ async function morningPostNick() {
   } catch (e) { showToast("Nick post failed \u2014 " + (e && e.message || e)); return; }
   { const at = Date.now(); picks.forEach(b => { if (b.nickOdds == null) Object.assign(b, { nickOdds: b.odds, nickBook: b.book, nickAt: at }); }); saveMorningBets(); }   // the price Nick got: AVAIL compares live prices to this
   showToast(`Posted ${picks.length} pick${picks.length === 1 ? "" : "s"} to Nick's channel \u2713`);
+}
+// TIP OFF → Nick, by game: every pick not yet sent to Nick, grouped by its game, one card + one post per game (earliest tip first).
+// Picks already on a Nick post (nickOdds stamped) are never re-sent, so pasting the next confirmed lineup and hitting NICK only posts that game.
+async function _mPostNickByGame(hook, picks) {
+  picks = (picks || []).filter(b => b.nickOdds == null);
+  if (!picks.length) { showToast("Nothing new for Nick \u2014 every pending pick has already been sent"); return; }
+  const gameOf = b => String(b.game || b.team || "?").trim();
+  const timeOf = b => { const m = String(b.gameTime || "").match(/(\d{1,2}:\d{2}\s*[AP]M)/i); return m ? (Date.parse("1/1/2000 " + m[1].toUpperCase().replace(/\s+/, " ")) || 0) : 0; };
+  const groups = {}; picks.forEach(b => { const g = gameOf(b); (groups[g] = groups[g] || []).push(b); });
+  const games = Object.keys(groups).sort((a, b) => timeOf(groups[a][0]) - timeOf(groups[b][0]) || a.localeCompare(b));
+  if (!confirm(`Post ${picks.length} new pick${picks.length === 1 ? "" : "s"} to Nick's channel \u2014 ${games.length} post${games.length === 1 ? "" : "s"}, one per game?\n\n${games.map(g => `${g}: ${groups[g].length}`).join("\n")}`)) return;
+  showToast("Refreshing live prices + exchange depth\u2026");
+  try { await morningRefreshPicks(picks); } catch (e) {}
+  const role = getNickRole();
+  let posted = 0, sentPicks = 0;
+  for (const g of games) {
+    const gp = _mDropUnpriced(groups[g]);
+    if (!gp.length) { showToast(`${g}: no pick with a real price \u2014 skipped`); continue; }
+    showToast(`Building Nick card \u2014 ${g}\u2026`);
+    let blob;
+    try { blob = await _morningCardBlob(gp, "nick"); } catch (e) { console.error("[TIP OFF card]", e); showToast(`${g}: card failed \u2014 ` + (e && e.message || "see console")); continue; }
+    if (!blob) { showToast(`${g}: card failed`); continue; }
+    const fd = new FormData();
+    fd.append("payload_json", JSON.stringify({ content: `${role ? `<@&${role}> ` : ""}**${MORNING_TITLE_NICE} \u00b7 ${g} (${gp.length} Play${gp.length === 1 ? "" : "s"})**`, allowed_mentions: role ? { parse: [], roles: [role] } : { parse: [] } }));
+    fd.append("files[0]", new File([blob], `tipoff-nick-${g.replace(/[^A-Za-z0-9]+/g, "-")}-${localYMD(new Date())}.png`, { type: "image/png" }));
+    try {
+      const r = await fetch(hook + (hook.includes("?") ? "&" : "?") + "wait=true", { method: "POST", body: fd });
+      if (!r.ok) { const t = await r.text().catch(() => ""); throw new Error(`Discord said ${r.status} ${t.slice(0, 120)}`); }
+    } catch (e) { showToast(`${g}: Nick post failed \u2014 ` + (e && e.message || e)); continue; }
+    { const at = Date.now(); gp.forEach(b => { if (b.nickOdds == null) Object.assign(b, { nickOdds: b.odds, nickBook: b.book, nickAt: at }); }); saveMorningBets(); }
+    posted++; sentPicks += gp.length;
+  }
+  showToast(posted ? `Posted ${sentPicks} pick${sentPicks === 1 ? "" : "s"} to Nick in ${posted} game post${posted === 1 ? "" : "s"} \u2713` : "Nothing posted");
+  try { renderMorning(); } catch (e) {}
 }
 async function morningPostDiscord() {
   const hook = getMorningWebhook();
