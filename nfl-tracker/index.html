@@ -5489,16 +5489,30 @@ async function copyEnsemble(mode) {
   const parseTime = gt => { const m = (gt||'').match(/(\d+):(\d+)\s*(AM|PM)/i); if (!m) return 9999; let h=parseInt(m[1]); const min=parseInt(m[2]); const pm=m[3].toUpperCase()==='PM'; if (h===12) h = pm?12:0; else if (pm) h+=12; return h*60+min; };
   const srcLabel = { ftn: 'FTN', '4for4': '4for4', rotowire: 'Rotowire', fantasy_points: 'FP', dimers: 'Dimers', rts: 'RTS', blitz: 'Blitz', stok: 'Stokastic' };
 
+  // Partners copy only: leave out picks where books HAVE a price but none is at/better than the
+  // play-to (main line or any alt line). Picks with no prices pulled at all stay (can't tell).
+  // The tracker itself is untouched.
+  const _inRange = p => {
+    const rows = oddsByGame[p.game || ''] || []; if (!rows.length) return true;
+    const m = ooMatchProp(p, rows), pt = _ooPlayTo(p);
+    if (!m.exact.length && !m.other.length) return true;
+    if (m.exact.some(o => _ooPlayable(o.price, pt?.odds))) return true;
+    return _ooGroupOther(p, m.other).some(g => g.pt && g.rows.some(o => _ooPlayable(o.price, g.pt.odds)));
+  };
+  const copyPlays = mode === 'partners' ? plays.filter(_inRange) : plays;
+  const _dropped = plays.length - copyPlays.length;
+  if (_dropped) console.log('[copy] left out of the partners copy (nothing at/better than play-to):', plays.filter(p => !_inRange(p)).map(p => p.player + ' ' + p.side + p.line).join(', '));
+  if (!copyPlays.length) { alert('Nothing in range right now — every pick\'s books are below its play-to.'); return; }
   const byDate = {};
-  plays.forEach(p => { const d = p.date || 'Unknown'; (byDate[d] = byDate[d] || []).push(p); });
+  copyPlays.forEach(p => { const d = p.date || 'Unknown'; (byDate[d] = byDate[d] || []).push(p); });
   const out = [];
   Object.keys(byDate).sort().forEach((dateKey, di) => {
     if (di > 0) out.push('');
     const dp = byDate[dateKey];
     if (mode === 'partners') {
       // Clean partner header: "NFL Model - Week 12" once; the date only when the card spans several days
-      if (di === 0) { const wk = (weekRange(isoWeek(dateKey)).label || '').split(' (')[0]; out.push('NFL Model' + (wk && /^Week/.test(wk) ? ' - ' + wk : '')); out.push(''); }
-      if (Object.keys(byDate).length > 1) { out.push(fmtDate(dateKey)); out.push(''); }
+      if (di === 0) { const wk = (weekRange(isoWeek(dateKey)).label || '').split(' (')[0]; out.push('NFL Model' + (wk && /^Week/.test(wk) ? ' - ' + wk : '') + ' (' + copyPlays.length + ')'); out.push(''); }
+      if (Object.keys(byDate).length > 1) { out.push(fmtDate(dateKey) + ' (' + dp.length + ')'); out.push(''); }
     } else {
       out.push((isCons ? 'NFL Full Consensus' : 'NFL Ensemble') + (isCons ? '' : _tierLabel()) + (_noYards ? ' (no yardage)' : '') + ' - ' + fmtDate(dateKey) + ' (' + dp.length + ')');
       out.push('');
@@ -5523,6 +5537,7 @@ async function copyEnsemble(mode) {
         const lv = liveLine(p);
         const tierTag = (document.getElementById('ensTierSel')?.value === 'all') ? (p.tier === 'strong' ? '  [10%+]' : '  [5-10%]') : '';
         if (mode === 'partners') {
+          if (out.length && out[out.length - 1] !== '' && !/:$/.test(out[out.length - 1])) out.push(''); // blank line between players
           out.push('    ' + nm + '  ' + sideWord(p.side) + ' ' + p.line + ' ' + p.odds + '  play to ' + pt.odds);
           const ooLinesP = ooCopyLinesForPlay(p, oddsByGame[p.game || ''], '      ', false);
           if (ooLinesP.length) out.push(...ooLinesP);
