@@ -2737,7 +2737,7 @@ function _nhlPaintModelSummary() {
     ${_nhlCoverageHtml()}
     ${_nhlModelCounts && _nhlModelCounts.funnel ? (() => { const f = _nhlModelCounts.funnel, st = (n, t) => `<b style="color:#fff;">${n}</b> <span style="color:#9fb8d6;">${t}</span>`;
       return `<div style="margin-top:4px;font-size:12px;">${st(f.lines, "lines")} → ${st(f.all4, "with all 4 sources")} → ${st(f.priced, "with a trusted price")} → ${st(f.qual3, "with 3+ sources at " + NHL_PS_QUAL_EV + "%+")} → ${st(f.plays, "with no source negative")}
-        <span style="color:#eab308;margin-left:8px;">· ${f.nearNeg} blocked only by a source between −2% and 0% · ${f.two3} with 2 at ${NHL_PS_QUAL_EV}%+ and none negative</span></div>`; })() : ""}
+        <div style="margin-top:2px;color:#eab308;">What if — plays today if the rule priced at <b>any book's best</b> (DK, Caesars, MGM…): <b>${f.anyBook}</b> · needed only <b>2%</b>: <b>${f.at2}</b> · allowed the worst source down to <b>−2%</b>: <b>${f.neg2}</b> <span style="color:#9fb8d6;">(now: ${f.plays})</span></div></div>`; })() : ""}
     <b style="color:${rows.length ? "#22c55e" : "#9fb8d6"};margin-left:8px;">${rows.length} play${rows.length === 1 ? "" : "s"}</b>
     ${rows.map(r => `<span style="display:inline-block;margin:2px 4px;padding:2px 8px;border:1px solid #22c55e66;background:#22c55e14;border-radius:5px;color:#fff;font-size:12px;"><b>${escapeHtmlBasic(r.player)}</b> ${r.ou === "over" ? "O" : "U"}${r.line} ${Number(r.odds) > 0 ? "+" : ""}${r.odds} ${escapeHtmlBasic(r.book || "")} <span style="color:#22c55e;font-weight:800;">+${r.anchorEv}%</span></span>`).join("")}
     <button onclick="runNhlModel({silent:false})" style="margin-left:8px;background:transparent;border:1px solid #0066cc;color:#00aaff;border-radius:5px;padding:2px 10px;font-size:12px;font-weight:700;cursor:pointer;">Run now</button>${_nhlLinkedNamesHtml().replace("margin-bottom:16px", "margin:8px 0 0")}`;
@@ -2823,9 +2823,18 @@ async function runNhlModel(opts) {
         });
       }
       {
-        const ev = { line, have, sides: {} };
+        const ev = { line, have, sides: {}, whatIf: { anyBook: false, at2: false, neg2: false } };
+        const ruleAt = (ou, price, bar, floor) => {
+          const d = oddsToDecimal(price); if (d == null || have.length < PS_SOURCE_KEYS_NHL.length) return false;
+          const vals = have.map(src => (_nhlPoissonHit(ou, line, projs[src]) * d - 1) * 100);
+          return vals.filter(v => v >= bar).length >= 3 && Math.min(...vals) >= floor;
+        };
         for (const ou of ["over", "under"]) {
+          const anyBest = ents.filter(e => !e.alt && e[ou] != null).reduce((m, e) => Math.max(m, Number(e[ou])), -Infinity);
+          if (isFinite(anyBest) && ruleAt(ou, anyBest, NHL_PS_QUAL_EV, 0)) ev.whatIf.anyBook = true;
           const live = await _nhlLiveBookFor(player, line, ou, iso, [home, away], { exch500: true });
+          if (live && ruleAt(ou, live.price, 2, 0)) ev.whatIf.at2 = true;
+          if (live && ruleAt(ou, live.price, NHL_PS_QUAL_EV, -2)) ev.whatIf.neg2 = true;
           const d = live ? oddsToDecimal(live.price) : null; if (d == null) continue;
           const evs = {}; have.forEach(src => { evs[src] = Math.round((_nhlPoissonHit(ou, line, projs[src]) * d - 1) * 1000) / 10; });
           const vals = have.map(x => evs[x]), qual = vals.filter(e => e >= NHL_PS_QUAL_EV).length, neg = have.filter(x => evs[x] < 0);
@@ -2877,8 +2886,10 @@ async function runNhlModel(opts) {
       const worstOf = x => Math.min(...Object.values(x.evs));
       const nearNeg = qual3.filter(e => !sidesOf(e).some(x => x.ok) && sidesOf(e).some(x => x.qual >= 3 && worstOf(x) >= -2)).length;   // blocked only by a source between -2% and 0%
       const two3 = priced.filter(e => !sidesOf(e).some(x => x.qual >= 3) && sidesOf(e).some(x => x.qual === 2 && worstOf(x) >= 0)).length;   // 2 at 3%+, none negative
+      const wi = k => all4.filter(e => e.whatIf && e.whatIf[k]).length;
       _nhlModelCounts = { projected: proj.size, lines: Object.keys(mainLine).length, all4: all4.length, missing,
-        funnel: { lines: Object.keys(mainLine).length, all4: all4.length, priced: priced.length, qual3: qual3.length, plays: plays.length, nearNeg, two3 } }; }
+        funnel: { lines: Object.keys(mainLine).length, all4: all4.length, priced: priced.length, qual3: qual3.length, plays: plays.length, nearNeg, two3,
+          anyBook: wi("anyBook"), at2: wi("at2"), neg2: wi("neg2") } }; }
     try { reRender(); _nhlPaintModelSummary(); } catch (e) {}
     try { _nhlFindMissingSources(byPL, mainLine, iso); } catch (e) { console.warn("[NHL names] check failed", e && e.message); }
     // Check-only run: show what the model sees right now, log nothing (model log, tracker and solo untouched).
@@ -2937,13 +2948,18 @@ function _nhlAutoLinkNames(byPL, mainLine) {
     const me = _nhlNameParts(player);
     PS_SOURCE_KEYS_NHL.forEach(src => {
       if (!srcs[src] || !Object.keys(srcs[src]).length || _nhlModelCsvProj(src, player, home, away) != null) return;
-      const cands = Object.values(srcs[src]).filter(v => {
+      // Last names compare loosely: Stützle / Stuetzle, Höglander / Hoeglander (umlaut written as "ue/oe/ae").
+      const loose = l => l.replace(/([aou])e/g, "$1");
+      const named = Object.values(srcs[src]).filter(v => {
         if (!v || !v.name || !(v.sog > 0)) return false;
         const p2 = _nhlNameParts(v.name);
-        if (p2.last !== me.last || !_nhlFirstCompatible(me.first, p2.first)) return false;
-        if (v.team && !(_nhlTeamCanon(v.team) === _nhlTeamCanon(home) || _nhlTeamCanon(v.team) === _nhlTeamCanon(away))) return false; // wrong team
+        if (loose(p2.last) !== loose(me.last) || !_nhlFirstCompatible(me.first, p2.first)) return false;
         return !boardRaw.has(nnRaw(v.name)); // he isn't someone else on the board
       });
+      const onTeam = named.filter(v => !v.team || _nhlTeamCanon(v.team) === _nhlTeamCanon(home) || _nhlTeamCanon(v.team) === _nhlTeamCanon(away));
+      // Team must match — unless he's the only one with that name in the source at all (a traded player still listed
+      // under his old team, like Panarin).
+      const cands = onTeam.length ? onTeam : (named.length === 1 ? named : []);
       if (cands.length === 1) {
         _NHL_NAME_ALIAS[nn(cands[0].name)] = pk; linked++;
         console.log(`[NHL names] auto-matched ${_NHL_SRC_TAG[src]} "${cands[0].name}" = "${player}"`);
