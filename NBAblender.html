@@ -11399,13 +11399,13 @@ function _copyOpenFiltered(kind, returnText) {
   // Morning bets list every book the picture shows; book codes (PB, FD, ...) are named, and each book appears once (its best price)
   const _nmB = bk => BOOK_CODE_NAMES[String(bk || "").trim().toUpperCase()] || bk;
   const _oneEach = (b, list) => { const by = new Map(); list.forEach(a => { if (!a || !a.book || a.odds == null) return; const k = _nmB(a.book) + "|" + (a.line != null ? Number(a.line) : Number(b.line)); const cur = by.get(k); if (!cur || Number(a.odds) > Number(cur.odds)) by.set(k, { ...a, book: _nmB(a.book) }); }); return [...by.values()].filter(a => !(a.book === _nmB(b.book) && (a.line == null || Number(a.line) === Number(b.line)))).sort((x, y) => Number(y.odds) - Number(x.odds)); };   // best price first, like the picture
-  const _cardOf = b => { try { return morningBets.find(x => String(x.id) === String(b.morningId) || String(x.trackerId) === String(b.id)); } catch (e) { return null; } };
+  const _cardOf = b => { try { return _mLogOf(b.source).find(x => String(x.id) === String(b.morningId) || String(x.trackerId) === String(b.id)); } catch (e) { return null; } };   // the bet's own model's log
   // other lines that clear today (same as the picture): each book on them, carrying that line's own fair so its group gets its own play-to
   let _altLn = {}; try { _altLn = computeMorningEnsemble().altLines || {}; } catch (e) {}
   const _altLineBooks = (b, m) => { try { const k = resolveNorm(b.player || "") + "|" + String(b.stat || "").toUpperCase() + "|" + String(b.ou || "").toLowerCase() + "|" + ((m && m.gameDate) || b.gameDate || "");
     return (_altLn[k] || []).filter(a => Number(a.line) === Number(b.line) ? b.fair != null : (!a.main && a.fairProb != null)).flatMap(a => (a.books || []).map(x => ({ book: _nmB(x.book), odds: Number(x.odds), line: Number(a.line), fair: Number(a.line) === Number(b.line) ? b.fair : a.fairProb * 100 })))
       .filter(x => x.book && !isNaN(x.odds) && _mOurBook(x.book) && !_mIsExchange(x.book) && (playToOdds(x.fair, MORNING_QUAL_EV) == null || x.odds >= playToOdds(x.fair, MORNING_QUAL_EV))); } catch (e) { return []; } };
-  const open = bets.filter(b => b.result === "pending").map(b => {
+  const open = bets.filter(b => b.result === "pending" && _openModelOk(b)).map(b => {
     if (b.source !== "morning" && b.source !== "tipoff") return b;
     const m = _cardOf(b), head = m ? { book: _nmB(m.book), odds: Number(m.odds), line: b.line, fair: b.fair } : null;   // the same headline book / price the picture shows
     return { ...b, book: _nmB(b.book), _cardHead: head, _ptEv: MORNING_QUAL_EV, altBooks: _oneEach(head || b, (Array.isArray(b.altBooks) ? b.altBooks : []).concat(_mCardBooksFor(b), _altLineBooks(b, m), [{ book: _nmB(b.book), odds: b.odds, line: b.line, fair: b.fair }])) };
@@ -11681,7 +11681,7 @@ function _copyOpenFiltered(kind, returnText) {
 // text but renders to image). Same filtering, sorting, and alt-grouping
 // logic — different output. Copy Props text function above is untouched.
 async function shareOpenPropsAsImage() {
-  const open = bets.filter(b => b.result === "pending");
+  const open = bets.filter(b => b.result === "pending" && _openModelOk(b));
   if (!open.length) { showToast("No open props to share"); return; }
   const isTotal = b => (b.stat || "").toUpperCase() === "GAME_TOTAL";
   const filtered = open.filter(b => !isTotal(b));
@@ -11952,7 +11952,7 @@ async function shareOpenPropsAsImage() {
 // direction bars, accent colors, gradient header. Same data as PartnerSC,
 // different render. Use this when sharing with friends; PartnerSC for partners.
 async function shareOpenPropsAsImageExclusive() {
-  const open = bets.filter(b => b.result === "pending");
+  const open = bets.filter(b => b.result === "pending" && _openModelOk(b));
   if (!open.length) { showToast("No open props to share"); return; }
   const isTotal = b => (b.stat || "").toUpperCase() === "GAME_TOTAL";
   const filtered = open.filter(b => !isTotal(b));
@@ -12415,7 +12415,7 @@ async function shareOpenPropsAsImageDiscord(betList) {
   // Defaults to open props; pass an explicit list to share a hand-picked set.
   const open = (Array.isArray(betList) && betList.length)
     ? betList
-    : bets.filter(b => b.result === "pending");
+    : bets.filter(b => b.result === "pending" && _openModelOk(b));
   if (!open.length) { showToast("No open props to share"); return; }
   const isTotal = b => (b.stat || "").toUpperCase() === "GAME_TOTAL";
   const filtered = open.filter(b => !isTotal(b));
@@ -16374,6 +16374,11 @@ let seasonFilter = "combined";
 // Model filter for Tracker: 'all' | 'morning' | 'tipoff' | 'manual' — which model logged the bet (b.source).
 let modelFilter = "all";
 function setModelFilter(val) { modelFilter = val; renderTracker(); }
+// Open-prop copies / pictures: on a model tab only that model's bets; on the Tracker whatever the ALL MODELS / MORNING / TIP OFF / MANUAL chip says.
+function _openModelOk(b) {
+  if (typeof currentTab !== "undefined" && (currentTab === "morning" || currentTab === "tipoff") && typeof MORNING_TAG !== "undefined") return b && b.source === MORNING_TAG;
+  return modelMatch(b);
+}
 function modelMatch(b) {
   if (modelFilter === "all") return true;
   if (modelFilter === "manual") return b.source !== "morning" && b.source !== "tipoff";
@@ -25319,6 +25324,13 @@ function _mOtherModelOpen(entry) {
   const pn = resolveNorm(entry.player || ""), st = String(entry.stat || "").toUpperCase(), day = entry.gameDateIso || localYMD(new Date());
   const hit = list.find(b => b && b.result === "pending" && resolveNorm(b.player || "") === pn && String(b.stat || "").toUpperCase() === st && b.ou !== entry.ou && (b.gameDate || "") === day);
   return hit ? `Morning model has the ${String(hit.ou).toUpperCase()} ${hit.line} open` : null;
+}
+// The log of a given model (morning | tipoff): the live array when it is the active profile, else the parked copy, else storage.
+function _mLogOf(tag) {
+  if (tag === MORNING_TAG) return morningBets;
+  if (_mProfState[tag] && Array.isArray(_mProfState[tag].morningBets)) return _mProfState[tag].morningBets;
+  const pr = MORNING_PROFILES[tag]; if (!pr) return [];
+  try { return JSON.parse(localStorage.getItem(pr.keys.bets) || "[]") || []; } catch (e) { return []; }
 }
 function _mIsMorningTab() { return currentTab === "morning" || currentTab === "tipoff"; }
 // A pick that was deleted on the Tracker also goes from its model's log (whichever profile it belongs to, open or not)
