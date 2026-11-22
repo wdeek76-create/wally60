@@ -670,10 +670,14 @@ const _lum = h => { const r = parseInt(h.slice(0, 2), 16), g = parseInt(h.slice(
 const _darken = (h, f) => "#" + [0, 2, 4].map(i => Math.round(parseInt(h.slice(i, i + 2), 16) * f).toString(16).padStart(2, "0")).join("");
 function _mapCss(css) {
   css = css.replace(/text-shadow:[^;]*;?/gi, "");   // the dark-mode glows / black outlines read as smudges on white
+  // dark TEXT on a coloured chip (active filter pills: color:#050507 on blue / green / amber) must stay dark: only backgrounds flip
+  css = css.replace(/(^|;|\s)color:\s*#([0-9a-fA-F]{6})\b/g, (m, pre, h) => { const L = _lum(h); return L < 70 || L > 215 ? `${pre}color:#__DARKTEXT__` : m; }).replace(/(^|;|\s)color:\s*#fff\b/gi, "$1color:#__DARKTEXT__");   // near-black or white text: decided by the chip's own background at the end
   css = css.replace(/#([0-9a-fA-F]{6})\b/g, (m, h) => { const to = LIGHT_MAP[h.toLowerCase()]; return to ? "#" + to : m; }).replace(/#fff\b/gi, "#0b1220");
+
   // text colours still too light after the map
   css = css.replace(/(^|;|\s)color:\s*#([0-9a-fA-F]{6})\b/g, (m, pre, h) => { const L = _lum(h); return L > 140 ? `${pre}color:${_darken(h, L > 200 ? 0.35 : 0.55)}` : m; });
   css = css.replace(/(^|;|\s)color:\s*rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*[\d.]+)?\)/g, (m, pre, r, g, b) => `${pre}color:rgb(${Math.round(r * 0.45)},${Math.round(g * 0.45)},${Math.round(b * 0.45)})`);   // faded rgba text → solid dark
+  { const bg = css.match(/background(?:-color)?:\s*(?:linear-gradient\([^)]*\)|#([0-9a-fA-F]{6})\b)/i); css = css.replace(/#__DARKTEXT__/g, bg && bg[1] && _lum(bg[1]) < 120 ? "#ffffff" : "#0b1220"); }   // text on a dark chip (blue / purple) is white, everywhere else near-black
   return css;
 }
 let _themeBusy = false;
@@ -10823,6 +10827,9 @@ async function gradeOneBet(id) {
 
 function copyDailyRecap() { _copyDailyRecapFiltered("all"); }
 function copyDailyRecapProps() { _copyDailyRecapFiltered("props"); }
+function _recapIsTipOff() { return (typeof currentTab !== "undefined" && currentTab === "tipoff") || ((typeof currentTab === "undefined" || currentTab !== "morning") && typeof modelFilter !== "undefined" && modelFilter === "tipoff"); }
+// Tracker day header COPY: that day's Props Recap for the model chip that is on (copy only, never posted)
+function copyModelDay(day) { _copyDailyRecapFiltered("props", day, { noPost: true }); }
 function copyDailyRecapTotals() { _copyDailyRecapFiltered("totals"); }
 
 // The recap webhook: its own saved address (so recaps can go to a different channel), else the Discord card webhook. Set it with the \u2699 next to Props Recap.
@@ -10853,7 +10860,7 @@ async function _postRecapToWebhook(text, day) {
     showToast(`Props recap posted to Discord${day ? " (" + day + ")" : ""} \u2713`); return true;
   } catch (e) { showToast("Recap post failed \u2014 " + (e && e.message || e)); return false; }
 }
-function _copyDailyRecapFiltered(kind) {
+function _copyDailyRecapFiltered(kind, forDate, opts) {
   // Group settled bets by their game date
   const isTotal = b => (b.stat || "").toUpperCase() === "GAME_TOTAL";
   let settled = bets.filter(b => b.result !== "pending" && _openModelOk(b));   // the active model on its tab; the model chip on the Tracker
@@ -10891,7 +10898,8 @@ function _copyDailyRecapFiltered(kind) {
   // Use whatever date is most recent in the settled bets — most natural for
   // post-grade recaps. The Yesterday stat line is its own contextual row;
   // it's about the prior calendar day, not the picks.
-  const targetDate = dateKeys[0];
+  if (forDate && !byDate[forDate]) { showToast(`No settled ${_MODEL_LABEL[modelFilter] || ""} props for ${forDate}`); return; }
+  const targetDate = forDate || dateKeys[0];
   const dayBets = byDate[targetDate];
   const hits = dayBets.filter(b => b.result === "hit");
   const misses = dayBets.filter(b => b.result === "miss");
@@ -10960,7 +10968,7 @@ function _copyDailyRecapFiltered(kind) {
     const parts = (targetDate || "").split("/");
     return parts.length >= 2 ? `${parts[0]}/${parts[1]}` : targetDate;
   })();
-  const headerKind = kind === "props" ? "Props" : kind === "totals" ? "Totals" : "Recap";
+  const headerKind = kind === "props" ? (_recapIsTipOff() ? "Tip Off" : "Props") : kind === "totals" ? "Totals" : "Recap";   // TIP OFF recaps are titled "NBA Tip Off"
   lines.push(`NBA ${headerKind}`);
   // Recent activity context — picks day (colon-labeled with its date) + WTD/MTD/YTD.
   // Picks day W-L matches the picks list below. No all-time / ROI line — recap
@@ -11044,7 +11052,7 @@ function _copyDailyRecapFiltered(kind) {
     } catch(e) { return false; }
   };
   const label = kind === "props" ? "props" : kind === "totals" ? "totals" : "bets";
-  if (kind === "props") {   // the props recap also posts to the recap webhook; the first time there is none, ask for it
+  if (kind === "props" && !(opts && opts.noPost)) {   // the props recap also posts to the recap webhook; the first time there is none, ask for it
     if (!getRecapWebhook() && !window._recapAsked) { window._recapAsked = true; setRecapWebhook(); }
     if (getRecapWebhook()) _postRecapToWebhook(text, targetDate);
   }
@@ -15876,9 +15884,17 @@ function renderTracker() {
             const o = Number(b.discordOdds != null ? b.discordOdds : b.odds), stake = Number(b.stake) || 1, win = o > 0 ? stake * o / 100 : stake * 100 / Math.abs(o || -110);
             if (b.result === "hit") { st.w++; st.pl += win; st.staked += stake; } else if (b.result === "miss") { st.l++; st.pl -= stake; st.staked += stake; } else if (b.result === "void") st.v++; else st.open++;
           });
-          const n = st.w + st.l; if (!n && !st.open) return "";
+          // the model's own record for the day (official bets, bet price), with a COPY of that day's Props Recap
+          const md = { w: 0, l: 0, v: 0, open: 0, pl: 0, staked: 0 };
+          (dateBets.get(dateKey) || []).filter(b => b && modelMatch(b) && (b.stat || "").toUpperCase() !== "GAME_TOTAL").forEach(b => {
+            const o = Number(b.odds), stake = Number(b.stake) || 1, win = o > 0 ? stake * o / 100 : stake * 100 / Math.abs(o || -110);
+            if (b.result === "hit") { md.w++; md.pl += win; md.staked += stake; } else if (b.result === "miss") { md.l++; md.pl -= stake; md.staked += stake; } else if (b.result === "void") md.v++; else md.open++;
+          });
+          const mn = md.w + md.l, mc = modelFilter === "tipoff" ? "#fbbf24" : modelFilter === "morning" ? "#93c5fd" : "#22c55e";
+          const modelLine = (mn || md.open) ? `<span style="display:inline-flex;gap:10px;align-items:baseline;font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:800;"><span style="font-family:inherit;font-size:10px;letter-spacing:1px;color:${mc};">${_MODEL_LABEL[modelFilter] || "ALL"}</span>${mn ? `<span style="color:#fff;">${md.w}-${md.l}${md.v ? `-${md.v}` : ""}</span><span style="color:${md.pl >= 0 ? "#4ade80" : "#f87171"};">${md.pl >= 0 ? "+" : ""}${md.pl.toFixed(2)}u</span>` : ""}${md.open ? `<span style="color:#a8b0bb;font-size:11px;">${md.open} open</span>` : ""}${mn ? `<button onclick="event.stopPropagation();copyModelDay('${dateKey}')" title="Copy this day's ${_MODEL_LABEL[modelFilter] || ""} props recap" style="background:transparent;border:1px solid ${mc}99;color:${mc};border-radius:4px;padding:1px 8px;font-size:10px;font-weight:800;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;">COPY</button>` : ""}</span>` : "";
+          const n = st.w + st.l; if (!n && !st.open) return modelLine ? `<span style="margin-left:auto;display:inline-flex;gap:16px;align-items:baseline;">${modelLine}</span>` : "";
           const roi = st.staked ? st.pl / st.staked * 100 : 0;
-          return `<span style="margin-left:auto;display:inline-flex;gap:12px;align-items:baseline;font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:800;"><span style="font-family:inherit;font-size:10px;letter-spacing:1px;color:#c4b5fd;">DISCORD</span>${n ? `<span style="color:#fff;">${st.w}-${st.l}${st.v ? `-${st.v}` : ""} <span style="color:#a8b0bb;font-weight:600;">(${(st.w / n * 100).toFixed(0)}%)</span></span><span style="color:${st.pl >= 0 ? "#4ade80" : "#f87171"};">${st.pl >= 0 ? "+" : ""}${st.pl.toFixed(2)}u</span><span style="color:#a8b0bb;font-size:11px;font-weight:600;">${roi >= 0 ? "+" : ""}${roi.toFixed(1)}% ROI</span>` : ""}${st.open ? `<span style="color:#fbbf24;font-size:11px;">${st.open} open</span>` : ""}<button onclick="copyDiscordDay('${dateKey}')" title="Copy this day's Discord recap" style="background:transparent;border:1px solid #7c3aed99;color:#c4b5fd;border-radius:6px;padding:3px 10px;font-size:11px;font-weight:800;letter-spacing:.5px;cursor:pointer;font-family:inherit;">COPY</button></span>`;
+          return `<span style="margin-left:auto;display:inline-flex;gap:16px;align-items:baseline;font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:800;">${modelLine}<span style="display:inline-flex;gap:12px;align-items:baseline;"><span style="font-family:inherit;font-size:10px;letter-spacing:1px;color:#c4b5fd;">DISCORD</span>${n ? `<span style="color:#fff;">${st.w}-${st.l}${st.v ? `-${st.v}` : ""} <span style="color:#a8b0bb;font-weight:600;">(${(st.w / n * 100).toFixed(0)}%)</span></span><span style="color:${st.pl >= 0 ? "#4ade80" : "#f87171"};">${st.pl >= 0 ? "+" : ""}${st.pl.toFixed(2)}u</span><span style="color:#a8b0bb;font-size:11px;font-weight:600;">${roi >= 0 ? "+" : ""}${roi.toFixed(1)}% ROI</span>` : ""}${st.open ? `<span style="color:#fbbf24;font-size:11px;">${st.open} open</span>` : ""}<button onclick="copyDiscordDay('${dateKey}')" title="Copy this day's Discord recap" style="background:transparent;border:1px solid #7c3aed99;color:#c4b5fd;border-radius:6px;padding:3px 10px;font-size:11px;font-weight:800;letter-spacing:.5px;cursor:pointer;font-family:inherit;">COPY</button></span></span>`;
         })()}
       </div>
       <div style="overflow-x:auto;">${groupsHtml}</div>
@@ -15903,7 +15919,7 @@ function renderTracker() {
     <div id="tracker-controls">
       <span style="font-size:16px;font-weight:800;color:#fff;">${scopedBets.length} ${betKindFilter==='all'?'Bets':betKindFilter==='props'?'Props':betKindFilter==='totals'?'Totals':'Spreads'} Tracked</span>
       ${betKindFilter !== 'all' ? `<span style="font-size:10px;font-weight:700;color:#7dd3fc;background:#1e40af26;border:1px solid #1e40af55;border-radius:4px;padding:2px 8px;letter-spacing:0.5px;text-transform:uppercase;">${betKindFilter}</span>` : ''}
-      ${modelFilter !== 'all' ? `<span style="font-size:10px;font-weight:700;color:${modelFilter==='tipoff'?'#fbbf24':modelFilter==='morning'?'#93c5fd':'#a78bfa'};border:1px solid currentColor;border-radius:4px;padding:2px 8px;letter-spacing:0.5px;text-transform:uppercase;">${modelFilter==='tipoff'?'TIP OFF':modelFilter}</span>` : ''}
+      ${modelFilter !== 'all' ? `<span style="font-size:10px;font-weight:700;color:${modelFilter==='tipoff'?'#fbbf24':'#93c5fd'};border:1px solid currentColor;border-radius:4px;padding:2px 8px;letter-spacing:0.5px;text-transform:uppercase;">${modelFilter==='tipoff'?'TIP OFF':'MORNING'}</span>` : ''}
       ${seasonFilter !== 'combined' ? `<span style="font-size:10px;font-weight:700;color:${seasonFilter==='playoffs'?'#a855f7':'#7dd3fc'};background:${seasonFilter==='playoffs'?'#a855f726':'#1e40af26'};border:1px solid ${seasonFilter==='playoffs'?'#a855f755':'#1e40af55'};border-radius:4px;padding:2px 8px;letter-spacing:0.5px;text-transform:uppercase;">${seasonFilter==='playoffs'?'Playoffs':'Reg Season'}</span>` : ''}
       <span style="font-size:11px;color:#22c55e;background:#22c55e15;border:1px solid #22c55e33;border-radius:4px;padding:2px 8px;">Auto-saved</span>
       <span style="color:#1a1d22;font-size:12px;">|</span>
@@ -16134,9 +16150,9 @@ function renderTracker() {
             }).join("")}
           </div>
           <div style="display:inline-flex;background:linear-gradient(135deg, #0c0d10 0%, #0a0d12 50%, #0c0d10 100%);border:1px solid #1a1d22;border-radius:6px;padding:2px;gap:2px;" title="Which model logged the bet">
-            ${[["all","ALL MODELS"],["morning","MORNING"],["tipoff","TIP OFF"],["manual","MANUAL"]].map(([k,lbl]) => {
+            ${[["morning","MORNING"],["tipoff","TIP OFF"],["all","ALL MODELS"]].map(([k,lbl]) => {
               const active = modelFilter === k;
-              const activeColor = k === "tipoff" ? "#fbbf24" : k === "morning" ? "#93c5fd" : k === "manual" ? "#a78bfa" : "#22c55e";
+              const activeColor = k === "tipoff" ? "#fbbf24" : k === "morning" ? "#93c5fd" : "#22c55e";
               return `<button onclick="setModelFilter('${k}')" style="background:${active?activeColor:'transparent'};border:none;color:${active?'#050507':'#d4dae3'};border-radius:4px;padding:4px 10px;font-size:10px;font-weight:700;letter-spacing:0.5px;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;">${lbl}</button>`;
             }).join("")}
           </div>
@@ -16372,16 +16388,18 @@ let betKindFilter = "props";
 // betIsPlayoffs() (game date on/after NBA_PLAYOFFS_START = playoffs).
 let seasonFilter = "combined";
 // Model filter for Tracker: 'all' | 'morning' | 'tipoff' | 'manual' — which model logged the bet (b.source).
-let modelFilter = "all";
-function setModelFilter(val) { modelFilter = val; renderTracker(); }
+let modelFilter = "morning"; try { const v = localStorage.getItem("nba_tracker_model_filter"); if (["all", "morning", "tipoff"].includes(v)) modelFilter = v; } catch (e) {}
+function setModelFilter(val) { modelFilter = val; try { localStorage.setItem("nba_tracker_model_filter", val); } catch (e) {} renderTracker(); }
+const _MODEL_LABEL = { all: "ALL MODELS", morning: "MORNING", tipoff: "TIP OFF" };
 // Open-prop copies / pictures: on a model tab only that model's bets; on the Tracker whatever the ALL MODELS / MORNING / TIP OFF / MANUAL chip says.
 function _openModelOk(b) {
-  if (typeof currentTab !== "undefined" && (currentTab === "morning" || currentTab === "tipoff") && typeof MORNING_TAG !== "undefined") return b && b.source === MORNING_TAG;
+  if (typeof currentTab !== "undefined" && (currentTab === "morning" || currentTab === "tipoff") && typeof MORNING_TAG !== "undefined") return !!b && (MORNING_TAG === "tipoff" ? b.source === "tipoff" : b.source !== "tipoff");
   return modelMatch(b);
 }
+// a bet tracked by hand belongs with Morning
 function modelMatch(b) {
   if (modelFilter === "all") return true;
-  if (modelFilter === "manual") return b.source !== "morning" && b.source !== "tipoff";
+  if (modelFilter === "morning") return b.source !== "tipoff";
   return b.source === modelFilter;
 }
 let gradeLog = [];
