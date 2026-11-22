@@ -254,6 +254,7 @@ _nhlApplyTheme();
   <button class="tab-btn" onclick="switchTab('discord')">DISCORD</button>
   <button class="tab-btn" onclick="switchTab('solo')">SOLO SOURCES</button>
   <button class="tab-btn" onclick="switchTab('model')" style="display:none;">MODEL</button>
+  <button class="tab-btn" onclick="switchTab('expected')">EXPECTED</button>
 </div>
 <div id="main">
   <div id="up-tab">
@@ -1231,10 +1232,12 @@ function switchTab(t){
   document.getElementById('totals-tab').style.display=t==='totals'?'block':'none';
   document.getElementById('discord-tab').style.display=t==='discord'?'block':'none';
   document.getElementById('solo-tab').style.display=t==='solo'?'block':'none';
+  document.getElementById('expected-tab').style.display=t==='expected'?'block':'none';
   document.getElementById('model-tab').style.display=t==='model'?'block':'none';
-  document.querySelectorAll('.tab-btn').forEach((b,i)=>b.classList.toggle('active',['up','res','tracker','ag','totals','discord','solo','model'][i]===t));
+  document.querySelectorAll('.tab-btn').forEach((b,i)=>b.classList.toggle('active',['up','res','tracker','ag','totals','discord','solo','model','expected'][i]===t));
   if(t==='model') renderNhlModelTab();
   if(t==='solo') renderNhlSoloTab();
+  if(t==='expected') renderNhlExpected();
   if(t==='discord') renderNhlDiscordTab();
   if(t==='totals') renderNhlTotals();
   if(t==='tracker') renderTracker();
@@ -2669,6 +2672,72 @@ async function _nhlGradeShadowLog(log) {
 function _nhlUnitWin(x) { const o = Number(x.odds); return o > 0 ? o / 100 : 1; }
 function _nhlUnitRisk(x) { const o = Number(x.odds); return o > 0 ? 1 : Math.abs(o) / 100; }
 function _nhlSoloWin(x) { return x.odds > 0 ? x.odds / 100 : 100 / Math.abs(x.odds); }
+// ── EXPECTED: season P&L from the tracker's props + an end-of-regular-season projection ─────────────
+// Everything comes from what's actually tracked: the per-bet edge is the real settled units ÷ settled bets, and
+// the pace is real bets per calendar day over the last 30 days (off days included). Both can be overridden.
+const NHL_EXP_KEY = "nhl_expected_inputs";
+const NHL_SEASON_END_DEFAULT = "2027-04-15";   // NHL regular-season finale (editable)
+function _nhlExpInputs() { try { return JSON.parse(localStorage.getItem(NHL_EXP_KEY) || "{}") || {}; } catch (e) { return {}; } }
+function _nhlExpSet(k, v) { const o = _nhlExpInputs(); if (v === "" || v == null) delete o[k]; else o[k] = v; try { localStorage.setItem(NHL_EXP_KEY, JSON.stringify(o)); } catch (e) {} renderNhlExpected(); }
+function renderNhlExpected() {
+  const el = document.getElementById("expected-tab"); if (!el) return;
+  const props = bets.filter(b => b.stat === "SOG" || !b.stat);
+  const settled = props.filter(b => b.result === "hit" || b.result === "miss"), voids = props.filter(b => b.result === "void").length;
+  const plOf = b => b.result === "hit" ? b.toWin : b.result === "miss" ? -b.stake : 0;
+  const w = settled.filter(b => b.result === "hit").length, n = settled.length;
+  const pl = settled.reduce((a, b) => a + plOf(b), 0), staked = settled.reduce((a, b) => a + b.stake, 0);
+  const perBet = n ? pl / n : 0, u100 = perBet * 100;
+  // actual pace: bets per calendar day over the last 30 days (or since the first bet if that's sooner)
+  const dayMs = b => _nhlBetDayMs(b);
+  const today0 = new Date(); today0.setHours(0, 0, 0, 0);
+  const since = today0.getTime() - 29 * 86400000;
+  const recent = props.filter(b => b.result !== "void" && !isNaN(dayMs(b)) && dayMs(b) >= since && dayMs(b) <= today0.getTime());
+  const firstMs = recent.length ? Math.min(...recent.map(dayMs)) : today0.getTime();
+  const spanDays = Math.max(1, Math.round((today0.getTime() - Math.max(since, firstMs)) / 86400000) + 1);
+  const pace = recent.length / spanDays;
+  const inp = _nhlExpInputs();
+  const perDay = inp.perDay != null && inp.perDay !== "" ? Number(inp.perDay) : pace;
+  const end = inp.end || NHL_SEASON_END_DEFAULT;
+  const endMs = new Date(end + "T12:00:00").getTime();
+  const daysLeft = Math.max(0, Math.round((endMs - today0.getTime()) / 86400000));   // calendar days after today through the finale
+  const remaining = Math.round(perDay * daysLeft), added = remaining * perBet, final = pl + added;
+  const c = v => v > 0 ? "#22c55e" : v < 0 ? "#f87171" : "#fff", u = v => (v >= 0 ? "+" : "") + v.toFixed(2) + "u";
+  const endTxt = new Date(endMs).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", year: "numeric" });
+  const kpis = _nhlDashKpis([
+    ["Record", `${w}-${n - w}`, n ? (w / n * 100).toFixed(1) + "% win" : "", "#fff"],
+    ["Units P&L", u(pl), `${n} bets · ${staked.toFixed(1)}u staked`, c(pl)],
+    ["ROI", staked ? (pl >= 0 ? "+" : "") + (pl / staked * 100).toFixed(1) + "%" : "—", `${perBet >= 0 ? "+" : ""}${perBet.toFixed(2)}u/bet`, c(pl)],
+    ["Units/100", u(u100), "per 100 bets", c(u100)],
+  ]);
+  const inputCss = "width:90px;background:#060b14;border:1px solid #0d2035;border-radius:8px;color:#fff;padding:8px 10px;font-size:16px;font-weight:700;";
+  const proj = `<div class="dpanel wide" style="margin-bottom:12px;padding:14px 16px;"><div class="dhead"><span>End of regular season projection</span></div>
+    <div style="font-size:13px;color:#fff;margin-bottom:10px;">Regular season ends <b>${endTxt}</b>. Projects the rest of the season at your actual pace × your actual per-bet edge (${perBet >= 0 ? "+" : ""}${perBet.toFixed(2)}u/bet from ${n} settled).</div>
+    <div style="display:flex;flex-wrap:wrap;align-items:center;gap:14px;margin-bottom:12px;font-size:13px;color:#fff;">
+      <label>Bets per day <input type="number" step="0.5" min="0" value="${perDay.toFixed(1)}" onchange="_nhlExpSet('perDay', this.value)" style="${inputCss}"></label>
+      <span style="color:#9fb8d6;">your actual pace: ${pace.toFixed(1)}/day over the last ${spanDays} day${spanDays === 1 ? "" : "s"} (off days included)${inp.perDay != null ? ` · <a href="#" onclick="_nhlExpSet('perDay','');return false;" style="color:#00aaff;">use actual</a>` : ""}</span>
+      <label style="margin-left:auto;">Season ends <input type="date" value="${end}" onchange="_nhlExpSet('end', this.value)" style="${inputCss}width:150px;font-size:13px;"></label>
+    </div>
+    ${_nhlDashKpis([
+      ["Days left", daysLeft, `through ${new Date(endMs).toLocaleDateString("en-US", { month: "short", day: "numeric" })}`, "#fff"],
+      ["Bets remaining", remaining, `${perDay.toFixed(1)}/day`, "#fff"],
+      ["Projected added", u(added), "from here", c(added)],
+      ["Projected final", u(final), "season total", c(final)],
+    ])}</div>`;
+  const f = { pl: plOf, stake: b => b.stake };
+  const cols = [{ head: "Units/100", html: r => { const nn2 = r.w + r.l; if (!nn2) return "—"; const v = r.pl / nn2 * 100; return `<b style="color:${c(v)};">${v >= 0 ? "+" : ""}${v.toFixed(2)}u</b>`; } }];
+  const side = ["over", "under"].map(sd => _nhlDashRow(sd === "over" ? "Over" : "Under", props.filter(b => b.ou === sd), f));
+  const lineKeys = [...new Set(props.filter(b => b.line != null).map(b => Number(b.line) + "|" + (b.ou === "over" ? "over" : "under")))].sort((a, b) => parseFloat(a) - parseFloat(b) || (a.endsWith("over") ? -1 : 1));
+  const byLine = lineKeys.map(k => { const ln = Number(k.split("|")[0]), sd = k.split("|")[1]; return _nhlDashRow((sd === "over" ? "Over " : "Under ") + ln, props.filter(b => Number(b.line) === ln && (b.ou === "over" ? "over" : "under") === sd), f); });
+  const months = [...new Set(settled.map(b => { const d = new Date(dayMs(b)); return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0"); }))].sort().reverse();
+  const byMonth = months.map(m => _nhlDashRow(new Date(m + "-15T12:00:00").toLocaleDateString("en-US", { month: "long", year: "numeric" }), props.filter(b => { const d = new Date(dayMs(b)); return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") === m; }), f));
+  el.innerHTML = `<div style="font-size:14px;color:#fff;margin-bottom:12px;">Season P&L from <b>${n}</b> settled props${voids ? ` (${voids} void)` : ""}. <span style="color:#00aaff;">Units/100</span> is your result per 100 bets — the standard way to read an edge at scale.</div>
+    <div class="ddash" style="margin-top:0;">${kpis}${proj}
+    <div class="dgrid two">
+      ${_nhlDashTable("By side", side, { keepOrder: true, cols })}
+      ${_nhlDashTable("By line", byLine, { keepOrder: true, cols })}
+      ${_nhlDashTable("By month", byMonth, { keepOrder: true, cols })}
+    </div></div>`;
+}
 function renderNhlSoloTab() {
   const el = document.getElementById("solo-tab"); if (!el) return;
   const zero = () => ({ w: 0, l: 0, pl: 0 });
@@ -7145,6 +7214,7 @@ function scheduleNextTickerRefresh() {
   <div id="totals-tab" style="display:none;"></div>
   <div id="discord-tab" style="display:none;padding:24px 32px;"></div>
   <div id="solo-tab" style="display:none;padding:24px 32px;"></div>
+  <div id="expected-tab" style="display:none;padding:24px 32px;"></div>
   <div id="model-tab" style="display:none;padding:24px 32px;"></div>
 
 <!-- PROPSHOP PASTE MODAL -->
