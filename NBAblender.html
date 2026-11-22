@@ -10847,6 +10847,20 @@ function setRecapWebhook() {
   return !!getRecapWebhook();
 }
 // Posts a recap's text to the recap webhook, split on line breaks so no message goes past Discord's 2000-character limit.
+// The recap also goes to the model's SALT Telegram channel (Morning's or TIP OFF's bot + channel, whichever model the recap is for). Quiet when none is set up.
+function _saltCfgFor(tag) { try { const pr = MORNING_PROFILES[tag] || MORNING_PROFILES.morning; return JSON.parse(localStorage.getItem(pr.keys.salt) || "null") || null; } catch (e) { return null; } }
+async function _postRecapToTelegram(text, tag) {
+  const cfg = _saltCfgFor(tag); if (!cfg || !cfg.token || !cfg.chat || !text) return false;
+  try {
+    const chunks = []; let cur = "";
+    String(text).split("\n").forEach(l => { if ((cur + "\n" + l).length > 3900) { chunks.push(cur); cur = l; } else cur = cur ? cur + "\n" + l : l; }); if (cur) chunks.push(cur);
+    for (const c of chunks) {
+      const r = await fetch(`https://api.telegram.org/bot${cfg.token}/sendMessage`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ chat_id: cfg.chat, text: c, disable_web_page_preview: true }) });
+      const j = await r.json().catch(() => ({})); if (!r.ok || !j.ok) throw new Error(j.description || `Telegram said ${r.status}`);
+    }
+    showToast(`Recap sent to Telegram \u2713`); return true;
+  } catch (e) { showToast("Telegram recap failed \u2014 " + (e && e.message || e)); return false; }
+}
 async function _postRecapToWebhook(text, day) {
   const hook = getRecapWebhook(); if (!hook || !text) return false;
   const chunks = []; let cur = "";
@@ -11055,6 +11069,7 @@ function _copyDailyRecapFiltered(kind, forDate, opts) {
   if (kind === "props" && !(opts && opts.noPost)) {   // the props recap also posts to the recap webhook; the first time there is none, ask for it
     if (!getRecapWebhook() && !window._recapAsked) { window._recapAsked = true; setRecapWebhook(); }
     if (getRecapWebhook()) _postRecapToWebhook(text, targetDate);
+    _postRecapToTelegram(text, _recapIsTipOff() ? "tipoff" : "morning");   // and to that model's SALT channel
   }
   if (tryExec(text)) {
     showToast(`Copied ${dayBets.length} ${label} recap for ${targetDate}`);
