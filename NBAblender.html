@@ -10834,7 +10834,8 @@ function copyDailyRecapTotals() { _copyDailyRecapFiltered("totals"); }
 
 // The recap webhook: its own saved address (so recaps can go to a different channel), else the Discord card webhook. Set it with the \u2699 next to Props Recap.
 const RECAP_WEBHOOK_KEY = "nba_recap_webhook";
-function getRecapWebhook() { try { return localStorage.getItem(RECAP_WEBHOOK_KEY) || getMorningWebhook() || ""; } catch (e) { return ""; } }
+// The Props Recap goes to NICK's channel (and the model's SALT Telegram), never the main Discord channel.
+function getRecapWebhook() { try { return getNickWebhook() || ""; } catch (e) { return ""; } }
 function setRecapWebhook() {
   let cur = ""; try { cur = localStorage.getItem(RECAP_WEBHOOK_KEY) || ""; } catch (e) {}
   const v = prompt("Paste the Discord webhook URL the recaps should post to (Channel settings \u2192 Integrations \u2192 Webhooks \u2192 Copy Webhook URL).\n\nLeave empty to use the Discord card webhook" + (getMorningWebhook() ? " (already set)" : " (none set)") + ". Saved only in this browser.", cur);
@@ -11067,8 +11068,7 @@ function _copyDailyRecapFiltered(kind, forDate, opts) {
   };
   const label = kind === "props" ? "props" : kind === "totals" ? "totals" : "bets";
   if (kind === "props" && !(opts && opts.noPost)) {   // the props recap also posts to the recap webhook; the first time there is none, ask for it
-    if (!getRecapWebhook() && !window._recapAsked) { window._recapAsked = true; setRecapWebhook(); }
-    if (getRecapWebhook()) _postRecapToWebhook(text, targetDate);
+    if (getRecapWebhook()) _postRecapToWebhook(text, targetDate); else showToast("No Nick webhook set \u2014 recap copied only");
     _postRecapToTelegram(text, _recapIsTipOff() ? "tipoff" : "morning");   // and to that model's SALT channel
   }
   if (tryExec(text)) {
@@ -16441,9 +16441,21 @@ function discordDayText(day) {
   const label = day === localYMD(new Date()) ? "Today" : day === localYMD(y) ? "Yesterday" : new Date(day + "T12:00:00").toLocaleDateString("en-US", { weekday: "short", month: "numeric", day: "numeric" });
   return `${label}: ${st.w}-${st.l}${st.v ? "-" + st.v : ""} ${st.pl >= 0 ? "+" : ""}${st.pl.toFixed(2)}u`;
 }
+// Tracker day header, DISCORD line COPY: copies the day's Discord recap AND posts it to that model's Discord channel (the main one, not Nick's).
 function copyDiscordDay(day) {
   const t = discordDayText(day); if (!t) { showToast("Nothing sent to Discord that day"); return; }
   try { navigator.clipboard.writeText(t).then(() => showToast("Day recap copied"), () => prompt("Copy:", t)); } catch (e) { prompt("Copy:", t); }
+  _postDayRecapToDiscord(t);
+}
+async function _postDayRecapToDiscord(text) {
+  const tag = (typeof modelFilter !== "undefined" && modelFilter === "tipoff") ? "tipoff" : "morning";
+  let hook = ""; try { hook = localStorage.getItem(MORNING_PROFILES[tag].keys.webhook) || ""; } catch (e) {}
+  if (!hook) { showToast(`No ${tag === "tipoff" ? "TIP OFF" : "Morning"} Discord webhook set \u2014 copied only`); return; }
+  try {
+    const r = await fetch(hook + (hook.includes("?") ? "&" : "?") + "wait=true", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content: text.slice(0, 1990), allowed_mentions: { parse: [] } }) });
+    if (!r.ok) throw new Error(`Discord said ${r.status}`);
+    showToast("Day recap posted to Discord \u2713");
+  } catch (e) { showToast("Discord post failed \u2014 " + (e && e.message || e)); }
 }
 // Tracker rows: click a row to open / close its full card (kept open across re-renders).
 window._betExpanded = window._betExpanded || new Set();
