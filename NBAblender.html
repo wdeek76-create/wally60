@@ -1151,11 +1151,24 @@ function localYMD(d) {
 }
 // A bet's day as local YYYY-MM-DD. Returns "" when the bet carries no usable
 // date — those are treated as stale and excluded from live displays.
+// Any date string a bet might carry → "YYYY-MM-DD" ("" when it can't be read). "Invalid Date" and blanks are skipped, m/d/yyyy is accepted.
+function _dayIso(v) {
+  const t = String(v == null ? "" : v).trim();
+  if (!t || /invalid/i.test(t)) return "";
+  if (/^\d{4}-\d{2}-\d{2}$/.test(t)) return t;
+  let m = t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/); if (m) return `${m[3]}-${m[1].padStart(2, "0")}-${m[2].padStart(2, "0")}`;
+  m = t.match(/^(\d{4}-\d{2}-\d{2})[T ]/); if (m) return m[1];
+  return localYMD(t);
+}
 function betDayLocal(b) {
-  const d = (b && (b.gameDate || b.date)) || "";
-  if (!d) return "";
-  if (/^\d{4}-\d{2}-\d{2}$/.test(d)) return d;
-  return localYMD(d);
+  if (!b) return "";
+  return _dayIso(b.gameDate) || _dayIso(b.date) || _dayIso((b.timestamp || "").split(" ").find(x => /\d{4}/.test(x)) || "") || "";
+}
+// Repair bets saved with a broken date label ("Invalid Date"): rebuild it from the game date / timestamp
+function _repairBetDates(list) {
+  let n = 0;
+  (list || []).forEach(b => { if (b && /invalid/i.test(String(b.date || ""))) { const iso = betDayLocal(b); if (iso) { const [y, mo, d] = iso.split("-"); b.date = `${+mo}/${+d}/${y}`; n++; } } });
+  return n;
 }
 // NBA 2026-27 regular season → postseason cutoff. Regular season ends Sun Apr 11,
 // 2027; anything on/after this date (play-in Apr 13-16, then playoffs) counts as
@@ -2637,6 +2650,7 @@ function loadBets() {
     const raw = localStorage.getItem("nba_blender_bets");
     if (raw) bets = JSON.parse(raw).sort((a,b) => b.id - a.id);
   } catch(e) {}
+  try { if (_repairBetDates(bets)) saveBets(); } catch (e) {}   // a bet saved with an "Invalid Date" label gets its date back from the game date / timestamp
   // One-time migration: rename legacy "DK (Courtside/Onyx)" to "DraftKings"
   // across all stored bets, including altBooks. Older bets were saved under
   // the legacy book name; this normalizes them so the share card and tracker
@@ -10913,7 +10927,7 @@ function _copyDailyRecapFiltered(kind, forDate, opts) {
   // Use whatever date is most recent in the settled bets — most natural for
   // post-grade recaps. The Yesterday stat line is its own contextual row;
   // it's about the prior calendar day, not the picks.
-  if (forDate && !byDate[forDate]) { showToast(`No settled ${_MODEL_LABEL[modelFilter] || ""} props for ${forDate}`); return; }
+  if (forDate && !byDate[forDate]) { const want = _dayIso(forDate); const hit = want && dateKeys.find(k => _dayIso(k) === want); if (hit) forDate = hit; else { showToast(`No settled ${_MODEL_LABEL[modelFilter] || ""} props for ${forDate}`); return; } }
   const targetDate = forDate || dateKeys[0];
   const dayBets = byDate[targetDate];
   const hits = dayBets.filter(b => b.result === "hit");
@@ -15856,7 +15870,8 @@ function renderTracker() {
   const dateGroups = new Map();    // ISO date string → Map<player, html[]>
   const dateBets = new Map();      // ISO date string → bets (for the day's Discord record)
   betCards.forEach(({ bet, html }) => {
-    const dateKey = (bet.date || (bet.timestamp || "").split(" ")[0] || "—");
+    let dateKey = (bet.date || (bet.timestamp || "").split(" ")[0] || "—");
+    if (/invalid/i.test(dateKey)) { const iso = betDayLocal(bet); dateKey = iso ? (([y, mo, d]) => `${+mo}/${+d}/${y}`)(iso.split("-")) : "—"; }
     if (!dateBets.has(dateKey)) dateBets.set(dateKey, []); dateBets.get(dateKey).push(bet);
     if (!dateGroups.has(dateKey)) dateGroups.set(dateKey, new Map());
     const playerMap = dateGroups.get(dateKey);
