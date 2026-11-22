@@ -15162,14 +15162,25 @@ function copyStatBreakdown() {
   }
 }
 
+function setExpectedModel(k) { modelFilter = k; try { localStorage.setItem("nba_tracker_model_filter", k); } catch (e) {} renderExpected(); }
 function renderExpected() {
   const el = document.getElementById("expected-tab");
   try { loadBets(); } catch(e) {}
-  const all = (typeof bets !== "undefined" && Array.isArray(bets)) ? bets : [];
+  // The model the Tracker chip is on (MORNING by default: Morning picks + hand bets; TIP OFF; or ALL MODELS)
+  const all = ((typeof bets !== "undefined" && Array.isArray(bets)) ? bets : []).filter(b => b && (typeof modelMatch !== "function" || modelMatch(b)));
+  const _modelName = (typeof _MODEL_LABEL !== "undefined" && typeof modelFilter !== "undefined") ? (_MODEL_LABEL[modelFilter] || "ALL MODELS") : "ALL MODELS";
   // Settled props only (exclude game totals/spreads, voids don't count toward ROI).
   const isTot = b => { const s=(b.stat||"").toUpperCase(); return s==="GAME_TOTAL"||s==="GAME_SPREAD"; };
   const settled = all.filter(b => (b.result==="hit"||b.result==="miss") && !isTot(b) && b.line!=null);
   const voids = all.filter(b => b.result==="void" && !isTot(b));
+  // Your real pace: official props (settled or open) per distinct betting day, over the last 14 betting days of this model
+  const _eosBpd = (() => {
+    const byDay = {}; all.filter(b => !isTot(b) && b.result !== "void").forEach(b => { const d = betDayLocal(b); if (d) byDay[d] = (byDay[d] || 0) + 1; });
+    const days = Object.keys(byDay).sort().slice(-14); const n = days.reduce((a, d) => a + byDay[d], 0);
+    const avg = days.length ? n / days.length : 0;
+    let saved = null; try { saved = Number(localStorage.getItem("nba_expected_bpd_" + (typeof modelFilter !== "undefined" ? modelFilter : "all"))); } catch (e) {}
+    return { days: days.length, n, avg, def: saved > 0 ? saved : Math.max(1, Math.round(avg || 0)) };
+  })();
 
   const plOf = b => {
     const stake = b.stake!=null ? Number(b.stake) : 1;
@@ -15252,8 +15263,14 @@ function renderExpected() {
 
   el.innerHTML = `
   <div style="max-width:860px;margin:0 auto;padding:18px 16px 60px;font-family:'Plus Jakarta Sans',sans-serif;">
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px;">
+      <span style="font-size:10px;font-weight:800;letter-spacing:1px;color:#a8b0bb;">MODEL</span>
+      <div style="display:inline-flex;background:linear-gradient(135deg, #0c0d10 0%, #0a0d12 50%, #0c0d10 100%);border:1px solid #1a1d22;border-radius:6px;padding:2px;gap:2px;" title="Same chip as the Tracker: MORNING = Morning picks + hand bets">
+        ${[["morning","MORNING"],["tipoff","TIP OFF"],["all","ALL MODELS"]].map(([k,lbl]) => { const active = (typeof modelFilter !== "undefined" ? modelFilter : "all") === k; const ac = k === "tipoff" ? "#fbbf24" : k === "morning" ? "#93c5fd" : "#22c55e"; return `<button onclick="setExpectedModel('${k}')" style="background:${active?ac:'transparent'};border:none;color:${active?'#050507':'#d4dae3'};border-radius:4px;padding:4px 10px;font-size:10px;font-weight:700;letter-spacing:0.5px;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;">${lbl}</button>`; }).join("")}
+      </div>
+    </div>
     <div style="font-size:11px;font-weight:700;color:#d4dae3;margin-bottom:16px;line-height:1.5;">
-      Season P&amp;L from <span style="color:#fff;font-weight:800;">${O.n}</span> settled props${voids.length?` (${voids.length} void)`:""}. The <span style="color:#7dd3fc;font-weight:800;">Units/100</span> column normalizes your result to a per-100-bet rate — the standard way to read your edge at scale. At your pace, multiply it by ${(O.n/100).toFixed(1)} to see where ${O.n} bets lands you.
+      <span style="color:#fff;font-weight:800;">${_modelName}</span> &middot; season P&amp;L from <span style="color:#fff;font-weight:800;">${O.n}</span> settled props${voids.length?` (${voids.length} void)`:""}. The <span style="color:#7dd3fc;font-weight:800;">Units/100</span> column normalizes your result to a per-100-bet rate — the standard way to read your edge at scale. At your pace, multiply it by ${(O.n/100).toFixed(1)} to see where ${O.n} bets lands you.
     </div>
 
     <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:22px;">
@@ -15268,8 +15285,8 @@ function renderExpected() {
       <div style="font-size:11px;font-weight:600;color:#d4dae3;margin-bottom:14px;">Regular season ends <span style="color:#fff;font-weight:800;">Sun, Apr 11, 2027</span>. Projects remaining bets at your pace × your current per-bet edge (${fmtU(O.plPerBet)}/bet).</div>
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:16px;">
         <span style="font-size:12px;font-weight:700;color:#fff;">Bets per day</span>
-        <input id="eos-bpd" type="number" min="0" max="40" value="17" oninput="updateEosCalc(${O.plPerBet!=null?O.plPerBet:0}, ${O.pl})" style="width:70px;background:#070809;border:1px solid #283041;border-radius:6px;color:#fff;font-family:'JetBrains Mono',monospace;font-size:14px;font-weight:700;padding:7px 10px;text-align:center;">
-        <span style="font-size:11px;font-weight:600;color:#d4dae3;">(you've averaged ~15–20)</span>
+        <input id="eos-bpd" type="number" min="0" max="60" value="${_eosBpd.def}" oninput="updateEosCalc(${O.plPerBet!=null?O.plPerBet:0}, ${O.pl});try{localStorage.setItem('nba_expected_bpd_'+(typeof modelFilter!=='undefined'?modelFilter:'all'),this.value)}catch(e){}" style="width:70px;background:#070809;border:1px solid #283041;border-radius:6px;color:#fff;font-family:'JetBrains Mono',monospace;font-size:14px;font-weight:700;padding:7px 10px;text-align:center;">
+        <span style="font-size:11px;font-weight:600;color:#d4dae3;">${_eosBpd.days ? `(${_modelName}: you've averaged ${_eosBpd.avg.toFixed(1)}/day over the last ${_eosBpd.days} betting day${_eosBpd.days === 1 ? "" : "s"}, ${_eosBpd.n} official bets)` : "(no settled bets yet to read a pace from)"}</span>
       </div>
       <div id="eos-out" style="display:flex;gap:12px;flex-wrap:wrap;"></div>
     </div>
