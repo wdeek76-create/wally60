@@ -67,8 +67,22 @@ function toPropShopNBA(text) {
     .map(r => ({ name: r[C.name].trim(), team: C.team ? (r[C.team] || "").trim() : "", min: g(r, C.min), pts: g(r, C.pts), reb: g(r, C.reb), ast: g(r, C.ast), threepm: g(r, C.threepm) }))
     .filter(p => p.pts != null || p.reb != null || p.ast != null)        // OUT players / empty rows carry no numbers
     .sort((a, b) => a.name.localeCompare(b.name));
-  const lines = [PS_HEAD.join(",")].concat(players.map(p => [esc(p.name), esc(p.team), f2(p.min), f2(p.pts), f2(p.reb), f2(p.ast), f2(p.threepm)].join(",")));
-  return { sport: "NBA", src, n: players.length, csv: "﻿" + lines.join("\n") };
+  return { sport: "NBA", src, n: players.length, csv: nbaCsv(players), players };   // players: for the day's per-source merge (a source exported in several files, e.g. Saber by game)
+}
+function nbaCsv(players) {
+  const esc = v => `"${String(v ?? "").replace(/"/g, '""')}"`;
+  const f2 = v => (v != null && !isNaN(v) && v >= 0) ? Number(v).toFixed(2) : "";
+  const rows = players.slice().sort((a, b) => a.name.localeCompare(b.name));
+  return "﻿" + [PS_HEAD.join(",")].concat(rows.map(p => [esc(p.name), esc(p.team), f2(p.min), f2(p.pts), f2(p.reb), f2(p.ast), f2(p.threepm)].join(","))).join("\n");
+}
+// NBA day merge, the way the blender's Saber combine worked: a new file REPLACES the teams it covers and keeps every other team from earlier files.
+// (A later file for the same teams is an update; a file for other games adds to the day.) Players with no team are matched by name.
+function mergeNba(prev, next) {
+  const key = n => String(n || "").toLowerCase().replace(/[.'’]/g, "").replace(/\s+/g, " ").trim();
+  const teams = new Set((next || []).map(p => String(p.team || "").toUpperCase()).filter(Boolean));
+  const names = new Set((next || []).map(p => key(p.name)));
+  const kept = (prev || []).filter(p => !teams.has(String(p.team || "").toUpperCase()) && !names.has(key(p.name)));
+  return kept.concat(next || []);
 }
 
 // ── NFL ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -169,4 +183,4 @@ function toPropShop(text, fileName) {
   const out = nflCsv(players);
   return { sport: "NFL", src, n: out.n, csv: out.csv, players };   // players: for the day's per-source merge in the background script
 }
-if (typeof module !== "undefined") module.exports = { toPropShop, detectSource, detectNfl, parseCSV, mergeNfl, nflCsv };
+if (typeof module !== "undefined") module.exports = { toPropShop, detectSource, detectNfl, parseCSV, mergeNfl, nflCsv, mergeNba, nbaCsv };

@@ -20,14 +20,19 @@ chrome.downloads.onChanged.addListener(delta => {
       try { out = toPropShop(text, name); } catch (e) { note("Convert failed: " + name, String(e && e.message || e)); return; }
       if (!out) return;                                             // not a projections source we know: leave it alone
       if (!out.n) { note(`${out.src}: nothing to convert`, `${name} has no projections in it yet — re-download once ${out.src} publishes numbers.`); return; }
-      // NFL sources come in parts (Stok pass / rush / rec, RotoWire master / RB-WR-TE / QB, FTN full / QB): the day's parts are merged per player, and the
-      // PropShop file is rewritten with everything so far (the earlier combined file for that source is replaced).
+      // A source that comes in several files the same day is merged into ONE PropShop file, and the earlier combined file is replaced:
+      //   NBA — Saber (or any source) exported by game: a new file replaces the teams it covers, other teams from earlier files are kept.
+      //   NFL — Stok pass / rush / rec, RotoWire master / RB-WR-TE / QB, FTN full / QB: merged per player.
       chrome.storage.local.get({ nflParts: {} }, st => {
         let csv = out.csv, n = out.n, merged = false, replaceId = null;
-        const key = out.sport === "NFL" ? `${out.src}|${today()}` : null;
+        const key = `${out.sport}|${out.src}|${today()}`;
         if (key) {
           const prev = st.nflParts[key];
-          if (prev && Array.isArray(prev.players) && prev.players.length) { const all = mergeNfl(prev.players, out.players); const o = nflCsv(all); csv = o.csv; n = o.n; merged = true; replaceId = prev.fileId || null; out.players = all; }
+          if (prev && Array.isArray(prev.players) && prev.players.length) {
+            if (out.sport === "NFL") { const all = mergeNfl(prev.players, out.players); const o = nflCsv(all); csv = o.csv; n = o.n; out.players = all; }
+            else { const all = mergeNba(prev.players, out.players); csv = nbaCsv(all); n = all.length; out.players = all; }
+            merged = n !== out.players.length || true; replaceId = prev.fileId || null;
+          }
           const parts = {}; Object.keys(st.nflParts).forEach(k => { if (k.endsWith("|" + today())) parts[k] = st.nflParts[k]; });   // only today's parts are kept
           parts[key] = { players: out.players, at: Date.now() };
           chrome.storage.local.set({ nflParts: parts });
