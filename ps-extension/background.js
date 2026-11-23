@@ -23,13 +23,25 @@ chrome.downloads.onChanged.addListener(delta => {
       const dataUrl = "data:text/csv;charset=utf-8," + encodeURIComponent(out.csv);
       chrome.downloads.download({ url: dataUrl, filename: fname, conflictAction: "uniquify", saveAs: false }, newId => {
         // the PropShop file is the one you keep: the raw export is removed (unless "keep original" is on in the popup)
-        if (!cfg.keepOriginal && newId != null) chrome.downloads.removeFile(it.id, () => { void chrome.runtime.lastError; chrome.downloads.erase({ id: it.id }); });
+        if (!cfg.keepOriginal && newId != null) removeOriginal(it.id, name);
         chrome.storage.local.get({ log: [] }, s => { const log = [{ at: Date.now(), from: name, to: fname, src: out.src, n: out.n }].concat(s.log).slice(0, 20); chrome.storage.local.set({ log }); });
         note(`${out.src} → PropShop`, `${out.n} players → ${fname}${cfg.keepOriginal ? "" : " (original removed)"}`);
       });
     });
   });
 });
+// Remove the raw export. Right after "complete" the file can still be held by the browser / a scanner, so retry a few times before giving up
+// (and say so in the log + a notification instead of silently leaving two files).
+function removeOriginal(id, name, attempt) {
+  attempt = attempt || 1;
+  chrome.downloads.removeFile(id, () => {
+    const err = chrome.runtime.lastError;
+    if (!err) { chrome.downloads.erase({ id }); return; }
+    if (attempt < 5) { setTimeout(() => removeOriginal(id, name, attempt + 1), attempt * 1500); return; }
+    chrome.storage.local.get({ log: [] }, s => { const log = [{ at: Date.now(), from: name, to: "", src: "", n: 0, err: "original not removed: " + (err.message || "blocked") }].concat(s.log).slice(0, 20); chrome.storage.local.set({ log }); });
+    note("Original kept: " + name, "Chrome wouldn't delete the raw export (" + (err.message || "blocked") + "). Delete it by hand.");
+  });
+}
 function note(title, message) {
   try { chrome.notifications.create({ type: "basic", iconUrl: "icon.png", title, message }); } catch (e) {}
 }
