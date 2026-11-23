@@ -546,7 +546,7 @@ select.sel:focus { border-color: var(--teal); }
   <span class="source-label">Source</span>
   <div class="source-tabs" id="sourceTabs"></div>
   <span class="source-hint" id="sourceHint"></span>
-  <button class="btn ghost" id="tickerToggleBtn" onclick="toggleTicker()" style="margin-left:auto;padding:4px 10px;font-size:11px" title="Show / hide the games bar with scores and box scores">📅 Games</button>
+  <button class="btn ghost" id="tickerToggleBtn" onclick="openSchedule()" style="margin-left:auto;padding:4px 10px;font-size:11px" title="This week's schedule">📅 Schedule</button>
 </div>
 
 <!-- TABS -->
@@ -4315,7 +4315,7 @@ function render() {
   _keepManualPicks(); // hand-added Ensemble picks can't go missing
   syncPropsAlias(); // recompute ensemble props on every render
   renderSourceBar();
-  if (_sched.events.length && !_tickerHidden) renderTicker();
+  if (_sched.events.length) renderTicker();
   const wrap = document.getElementById('wrap');
   document.getElementById('tab-log-count').textContent = props.length;
   const pendingCount = props.filter(p => !p.result || p.result === '').length;
@@ -7234,21 +7234,30 @@ function _ensemblePropsForGame(ev) {
 // in-play stats. Feeds the ticker's live pace projection below;
 // findPlayerStat() (same fuzzy-match fn autoGrade uses) reads from it.
 let _tickerLookup = {};
-// Games bar (schedule / scores / box scores) is hidden by default — it was a lot on screen and its
-// live stats pull re-fetched every live + finished game's box score. Hidden = no live stats pull;
-// the schedule itself still loads (cards / odds use it to find each pick's game).
-let _tickerHidden = (() => { try { return localStorage.getItem('nfl_ticker_hidden') !== '0'; } catch (e) { return true; } })();
+// Schedule strip: a plain ticker (teams + kickoff, or score + LIVE/FINAL). Clicking it opens the
+// week's schedule. No pick counts / pace dots / box scores — so no live box-score pulls either.
+const _tickerHidden = true; // live stats for the old pace dots: off
 function _applyTickerVisibility() {
   const el = document.getElementById('tickerWrap');
-  if (el) el.style.display = (_tickerHidden || currentTab === 'blender') ? 'none' : '';
-  const b = document.getElementById('tickerToggleBtn');
-  if (b) { b.textContent = _tickerHidden ? '📅 Games' : '📅 Hide games'; b.style.color = _tickerHidden ? '' : 'var(--teal)'; }
+  if (el) el.style.display = currentTab === 'blender' ? 'none' : '';
 }
-function toggleTicker() {
-  _tickerHidden = !_tickerHidden;
-  try { localStorage.setItem('nfl_ticker_hidden', _tickerHidden ? '1' : '0'); } catch (e) {}
-  _applyTickerVisibility();
-  if (!_tickerHidden) loadSchedule(true);
+function openSchedule() {
+  let ov = document.getElementById('scheduleModal');
+  if (!ov) { ov = document.createElement('div'); ov.id = 'scheduleModal'; ov.className = 'modal-ov'; ov.addEventListener('click', e => { if (e.target === ov) ov.classList.remove('open'); }); document.body.appendChild(ov); }
+  const evs = (_sched.events || []).slice().sort((a, b) => new Date(a.date) - new Date(b.date));
+  const byDay = {};
+  evs.forEach(ev => { const d = new Date(ev.date); const k = d.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' }); (byDay[k] = byDay[k] || []).push(ev); });
+  const row = ev => {
+    const t = new Date(ev.date).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+    const st = ev.state === 'in' ? `<b style="color:var(--teal)">● ${escHtml(ev.detail || 'LIVE')}</b>` : ev.completed ? '<span class="dim">FINAL</span>' : `<span class="mono">${t}</span>`;
+    const sc = ev.state !== 'pre' && ev.awayScore !== '' ? `<span class="mono" style="font-weight:700">${ev.awayScore}–${ev.homeScore}</span>` : '';
+    const team = ab => `<span style="display:inline-flex;align-items:center;gap:6px;min-width:64px"><img src="${_logoUrl(ab)}" style="width:18px;height:18px" onerror="this.style.display='none'">${escHtml(ab)}</span>`;
+    return `<tr><td style="width:110px">${st}</td><td>${team(ev.away)} <span class="dim">@</span> ${team(ev.home)}</td><td class="r">${sc}</td></tr>`;
+  };
+  ov.innerHTML = `<div class="modal" style="max-width:560px;width:95%"><div class="modal-title">Schedule</div>
+    ${Object.keys(byDay).length ? Object.entries(byDay).map(([d, list]) => `<div style="margin:12px 0 4px;font-weight:800;font-size:12px;letter-spacing:.04em">${escHtml(d.toUpperCase())}</div><table class="tbl"><tbody>${list.map(row).join('')}</tbody></table>`).join('') : '<p class="dim">No games loaded yet.</p>'}
+    <div class="modal-actions"><button class="btn ghost" onclick="document.getElementById('scheduleModal').classList.remove('open')">Close</button></div></div>`;
+  ov.classList.add('open');
 }
 async function _tickerRefreshLiveStats() {
   if (_tickerHidden) return;
@@ -7338,25 +7347,13 @@ function renderTicker() {
   if (!_sched.events.length) { el.innerHTML = '<span class="dim" style="font-size:11px;padding:8px 12px">No games found this week.</span>'; return; }
   const fmtKick = iso => { const d = new Date(iso); return d.toLocaleDateString('en-US',{weekday:'short'}) + ' ' + d.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'}); };
   el.innerHTML = _sched.events.map(ev => {
-    // Shows EVERY scheduled game, but the open-props count and the live PROJ
-    // badge only count ENSEMBLE picks — standalone-source props on the same
-    // game don't factor in (see _ensemblePropsForGame above).
-    const mine = _ensemblePropsForGame(ev);
-    const pend = mine.filter(p => !p.result || p.result === '').length;
     const cls = 'tk-game' + (ev.state === 'in' ? ' live' : ev.completed ? ' final' : '') + (_sched.active === ev.id ? ' active' : '');
     const statusHtml = ev.state === 'in' ? `<span class="live">● ${escHtml(ev.detail)}</span>` : ev.completed ? `<span class="final">FINAL</span>` : `<span>${fmtKick(ev.date)}</span>`;
     const showScore = ev.state !== 'pre';
-    const proj = _nflGameBetProjection(ev, mine);
-    const projHtml = proj
-      ? `<span style="font-size:10px;font-weight:800;letter-spacing:0.2px;margin-left:4px;color:${proj.units>0?_PACE.green:(proj.units<0?_PACE.red:_PACE.orange)}">${proj.settled?'':'PROJ '}${proj.w}-${proj.l} ${proj.units>=0?'+':''}${proj.units.toFixed(2)}u</span>`
-      : '';
-    // One dot per Ensemble pick once the game is on: green / orange / red by how it's trending.
-    const dots = ev.state === 'pre' ? '' : mine.map(p => { const st = _nflPaceStatus(p, ev); return st ? `<span title="${escHtml(p.player)} ${p.side==='O'?'o':'u'}${p.line}" style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${st.color};margin-right:2px"></span>` : ''; }).join('');
-    const dotsHtml = dots ? `<div style="margin-top:3px;line-height:1">${dots}</div>` : '';
-    return `<div class="${cls}" onclick="toggleGameDetail('${ev.id}')">
+    return `<div class="${cls}" onclick="openSchedule()" style="cursor:pointer">
       <div class="tk-row"><span class="tk-team"><img src="${_logoUrl(ev.away)}" onerror="this.style.display='none'">${ev.away}</span>${showScore ? `<span class="tk-score">${ev.awayScore ?? ''}</span>` : ''}</div>
       <div class="tk-row"><span class="tk-team"><img src="${_logoUrl(ev.home)}" onerror="this.style.display='none'">${ev.home}</span>${showScore ? `<span class="tk-score">${ev.homeScore ?? ''}</span>` : ''}</div>
-      <div class="tk-status">${statusHtml}<span class="tk-props${mine.length?'':' none'}">${mine.length ? (pend ? pend + ' open' : mine.length + ' graded') : '—'}</span>${projHtml}</div>${dotsHtml}
+      <div class="tk-status">${statusHtml}</div>
     </div>`;
   }).join('');
 }
