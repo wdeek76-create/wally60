@@ -21,3 +21,7 @@ Prices are converted as shown (no fee added); anything under 3% or over 97% (fee
 ## v2.0
 - **ProphetX:** the 2% fee on winnings is baked into every price shown (what you actually get).
 - **To-win helper:** tap the AMX pill to cycle $100 / $150 / $200 / $300 / $400 / off (remembered). Hover any converted price: "to win $200: bet $234". Shift+tap the pill hides it.
+
+
+## v2.1
+- Typing a price in the order box (Make): a label above it shows that price in American odds + how much to bet to win your pill amount (ProphetX: after the 2% fee).

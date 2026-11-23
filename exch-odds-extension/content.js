@@ -120,7 +120,7 @@
   const WINS = [100, 150, 200, 300, 400, 0];
   let winAmt = Number(store.get('amxWin') ?? 0) || 0;
   pill.onclick = e => { if (e.shiftKey) { pill.remove(); store.set('amxPill','0'); return; }
-    winAmt = WINS[(WINS.indexOf(winAmt) + 1) % WINS.length]; store.set('amxWin', String(winAmt)); paintPill(); hideTip(); };
+    winAmt = WINS[(WINS.indexOf(winAmt) + 1) % WINS.length]; store.set('amxWin', String(winAmt)); paintPill(); hideTip(); paintBox(); };
   pill.title = 'Tap: to-win amount ($100 / $150 / $200 / $300 / $400 / off) · Shift+tap: hide · Alt+A: on/off';
   // hover a converted price -> "To win $200: bet $234"
   const tip = document.createElement('div');
@@ -132,12 +132,36 @@
     const el = e.target; if (!el || el === pill || el === tip) return;
     const tn = [...(el.childNodes || [])].find(n => n.nodeType === 3 && nodes.has(n) && mine.get(n) === n.nodeValue);
     const m = tn && /([+-]\d{3,5})/.exec(tn.nodeValue); if (!m) return hideTip();
-    const risk = winAmt / (decOfAm(m[1]) - 1);
+    const o = orig.get(tn), pm = o && /(\d{1,2}(?:\.\d{1,2})?)\s?(?:¢|%|c\b)|\$?(0?\.\d{2,3})/.exec(o), pr = pm ? (pm[1] ? parseFloat(pm[1]) / 100 : parseFloat(pm[2])) : null;
+    const risk = winAmt / ((pr ? netDec(pr) : decOfAm(m[1])) - 1);   // the exact price, same as the box helper
     tip.textContent = `${m[1]} · to win ${usd(winAmt)}: bet ${usd(risk)}${IS_PX ? ' (after 2% fee)' : ''}`;
     if (!tip.isConnected) document.body.appendChild(tip);
     const r = el.getBoundingClientRect(); tip.style.left = Math.max(4, Math.min(innerWidth - 240, r.left)) + 'px'; tip.style.top = Math.max(4, r.top - 30) + 'px'; tip.style.display = 'block';
   }, true);
   document.addEventListener('scroll', hideTip, true);
+
+  // the price you're typing / making: live "54 -> -117 · to win $200: bet $234" right above the box (PX: after the fee)
+  const boxTip = document.createElement('div');
+  boxTip.style.cssText = 'position:fixed;z-index:2147483647;padding:4px 10px;border-radius:8px;background:#111;color:#fff;font:800 13px system-ui,sans-serif;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,.45);display:none;white-space:nowrap';
+  let boxEl = null;
+  const boxVal = el => String(el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' ? el.value : (el.textContent || '')).trim();
+  const priceOf = raw => { const t = raw.replace(/[^\d.]/g, ''); if (!t || t === '.') return null; const v = parseFloat(t); if (!isFinite(v)) return null;
+    const p = v < 1 ? v : v / 100; return p >= 0.01 && p <= 0.99 ? p : null; };
+  function paintBox(){
+    const el = boxEl; if (!el || !el.isConnected || off) { boxTip.style.display = 'none'; return; }
+    const p = priceOf(boxVal(el)); if (p == null) { boxTip.style.display = 'none'; return; }
+    const d = netDec(p), a = amOfDec(d), am = a > 0 ? '+' + a : String(a);
+    boxTip.textContent = am + (winAmt ? ' · to win $' + winAmt + ': bet ' + usd(winAmt / (d - 1)) : '') + (IS_PX ? ' · 2% fee in' : '');
+    if (!boxTip.isConnected) document.body.appendChild(boxTip);
+    const r = el.getBoundingClientRect(); boxTip.style.display = 'block';
+    boxTip.style.left = Math.max(4, Math.min(innerWidth - boxTip.offsetWidth - 4, r.left)) + 'px';
+    boxTip.style.top = (r.top > 34 ? r.top - 30 : r.bottom + 6) + 'px';
+  }
+  const boxFrom = e => { const t = realTarget(e); return isTyping(t) ? t : null; };
+  document.addEventListener('focusin', e => { const t = boxFrom(e); if (t) { boxEl = t; paintBox(); } }, true);
+  ['input', 'keyup'].forEach(ev => document.addEventListener(ev, e => { const t = boxFrom(e) || (boxEl && boxEl.isConnected ? boxEl : null); if (t) { boxEl = t; requestAnimationFrame(paintBox); } }, true));
+  document.addEventListener('focusout', e => { const t = boxFrom(e); if (t && t === boxEl) setTimeout(() => { let a = document.activeElement; while (a?.shadowRoot?.activeElement) a = a.shadowRoot.activeElement; if (a !== boxEl) { boxEl = null; boxTip.style.display = 'none'; } }, 200); }, true);
+  window.addEventListener('scroll', () => boxEl && paintBox(), true);
   function paintPill(){ if (store.get('amxPill') === '0' || window.top !== window) return; pill.textContent = off ? 'AMX · off (Alt+A)' : editZone ? 'AMX · paused while typing' : `AMX${IS_PX ? ' · 2% fee in' : ''} · ${winAmt ? 'win $' + winAmt : 'win off'}`; if (document.body && !pill.isConnected) document.body.appendChild(pill); }
 
   watch(document.documentElement);
