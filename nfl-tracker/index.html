@@ -1036,7 +1036,14 @@ function bookCell(p) {
   }).join('');
   return `<div class="ens-srcs">${rows}</div>`;
 }
-const normName = n => String(n||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z ]/g,'').trim().replace(/\s+/g,' ');
+// Memoized: called hundreds of thousands of times per render (Ensemble rebuild matches every source
+// pick by name) on a few hundred distinct names — was ~60% of the time of every click.
+const _normNameCache = new Map();
+const normName = n => {
+  const k = String(n || ''); let v = _normNameCache.get(k);
+  if (v === undefined) { v = k.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z ]/g,'').trim().replace(/\s+/g,' '); if (_normNameCache.size > 50000) _normNameCache.clear(); _normNameCache.set(k, v); }
+  return v;
+};
 const lastName = n => { const p = String(n||'').trim().split(' '); return p[p.length-1]; };
 function unitRisk(p) { const o = parseFloat(p.odds); if (isNaN(o)) return 1; return o > 0 ? 1 : Math.abs(o)/100; }
 function fmtU(n) { return (n>=0?'+':'')+n.toFixed(2)+'u'; }
@@ -4643,6 +4650,16 @@ function _bdFilterPlayers(q) {
 }
 
 // ===== WEEKLY VIEW =====
+function _toggleWeekRow(rowId, w) {
+  const row = document.getElementById(rowId); if (!row) return;
+  const body = row.querySelector('.period-body');
+  if (body && !body.dataset.filled) {
+    const wp = (window._weeklyGroups || {})[w] || [];
+    body.innerHTML = currentSource === 'ensemble' ? renderEnsembleTiered(wp, renderPropTable, true) : renderPropTable(wp, true);
+    body.dataset.filled = '1';
+  }
+  row.classList.toggle('open');
+}
 function renderWeekly() {
   const wrap = document.getElementById('wrap');
   const byWeek = {};
@@ -4652,6 +4669,7 @@ function renderWeekly() {
     byWeek[w].push(p);
   });
   const weeks = Object.keys(byWeek).sort().reverse();
+  window._weeklyGroups = byWeek; // a week's table is built the first time it's opened (was: every week, every render)
   const rows = weeks.map((w, idx) => {
     const wp = byWeek[w];
     const s = calcStats(wp);
@@ -4660,7 +4678,7 @@ function renderWeekly() {
     const wr = weekRange(w);
     return `
       <div class="period-row ${idx === 0 ? 'open' : ''}" id="${rowId}">
-        <div class="period-head" onclick="document.getElementById('${rowId}').classList.toggle('open')">
+        <div class="period-head" onclick="_toggleWeekRow('${rowId}','${w}')">
           <div>
             <div class="period-label">${wr.label}</div>
             <div class="period-sub">${wr.start} → ${wr.end}</div>
@@ -4674,8 +4692,8 @@ function renderWeekly() {
             <span class="period-toggle">▶</span>
           </div>
         </div>
-        <div class="period-body">
-          ${currentSource === 'ensemble' ? renderEnsembleTiered(wp, renderPropTable, true) : renderPropTable(wp, true)}
+        <div class="period-body" data-filled="${idx === 0 ? '1' : ''}">
+          ${idx === 0 ? (currentSource === 'ensemble' ? renderEnsembleTiered(wp, renderPropTable, true) : renderPropTable(wp, true)) : ''}
         </div>
       </div>`;
   }).join('');
@@ -4919,6 +4937,8 @@ async function gradeDateFromPending(dateStr) {
 }
 
 // ===== BET LOG =====
+// Bet Log draws the newest 300 rows (drawing 1,500+ rows took ~0.2 s on every click); Show more adds 300.
+let _betLogLimit = 300;
 function renderBetLog() {
   const wrap = document.getElementById('wrap');
   let filtered = [...props];
@@ -4974,7 +4994,8 @@ function renderBetLog() {
             <button class="filt-pill ${filters.result==='push'?'active':''}" onclick="setFilter('result','push')">Pushes</button>
           </div>
         </div>
-        ${currentSource === 'ensemble' ? renderEnsembleTiered(filtered, renderPropTable, false) : renderPropTable(filtered, false)}
+        ${(() => { const shown = filtered.slice(0, _betLogLimit); return (currentSource === 'ensemble' ? renderEnsembleTiered(shown, renderPropTable, false) : renderPropTable(shown, false))
+          + (filtered.length > shown.length ? `<div style="text-align:center;margin:12px 0"><button class="btn ghost" onclick="_betLogLimit += 300; render()">Show ${Math.min(300, filtered.length - shown.length)} more (${filtered.length - shown.length} older)</button></div>` : ''); })()}
       </div>
     </div>
   `;
