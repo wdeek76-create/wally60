@@ -1,7 +1,11 @@
-# PropShop CSV Auto-Format (Chrome extension)
+# PropShop CSV Auto-Format (Chrome extension) — NBA + NFL
 
-Download an NBA projections CSV the normal way — **Tabs, Sharpr, STOK (Data Hub Stats), RG (projections-nba), Saber,
-RotoWire or Dimers** — and it is replaced by the PropShop version, named with the source and the time it came down: `RG-NBA 2.17pm.csv`, `TABS-NBA 9.40am.csv`, ...
+Download a projections CSV the normal way and it is replaced by the PropShop version, named with the source, the sport and the time it came down: `RG-NBA 2.17pm.csv`, `STOK-NFL 2.17pm.csv`, ...
+- **NBA**: Tabs, Sharpr, STOK (Data Hub Stats), RG (projections-nba), Saber, RotoWire, Dimers → `Player, Team, Minutes, Points, Rebounds, Assists, Three Pointers`
+- **NFL**: Dimers, FTN, RotoWire, FantasyPts, 4for4, RTS, Stok Data Hub → `Player, Team, Pass_Att … Rec_Yds` (the NFL blender's EXPORT PS columns)
+- **NFL parts are merged**: Stok's pass / rush / rec files, RotoWire's QB / RB-WR-TE / master exports and FTN's full / QB exports are merged per player across the day. Each new part writes a fresh combined file and removes the earlier one, so the newest `STOK-NFL …csv` always has everything downloaded so far.
+- RotoWire and FantasyPts share a layout: a file is labelled FPTS only when its name says FantasyPts, otherwise RW.
+- 4for4 and RTS carry no team column, so Team is blank in their PropShop files.
 Upload that to PropShop (the blender's Upload tab takes it too). Any other CSV is left alone. Output is the same as the blender's EXPORT PS button.
 Want the raw export kept as well? Tick **Keep the original file too** in the toolbar popup.
 
