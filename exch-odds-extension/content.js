@@ -43,16 +43,15 @@
     mine.set(node, out); node.nodeValue = out; converted++;
   }
 
-  // never inside the order ticket: there you type the price in % / ¢, so it stays exactly as the site shows it
-  // (forms, popups, order / ticket / slip panels, and anything sitting right next to an input box)
-  const ORDER_ROLE = 'form,[role="dialog"],[aria-modal="true"],[data-testid*="order" i],[data-testid*="ticket" i],[data-testid*="slip" i]';
-  // class words like "order-panel", "ticket", "betslip", "modal", "drawer" -- not "border-..." or Tailwind's "order-1"
-  const ORDER_CLS = /(^|[\s_-])(order(?!-(?:\d|first|last|none)\b)|ticket|bet-?slip|slip|modal|dialog|drawer)/i;
+  // never inside the order ticket, where you type the price in % / ¢: a price sitting right next to an input box
+  // (same small block), or anything in a popup that has an input. The order BOOK and market prices still convert.
+  const ORDER_POP = '[role="dialog"],[aria-modal="true"]';
   const orderCache = new WeakMap();
+  const hasInput = el => !!el?.querySelector?.('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]),textarea,[contenteditable="true"]');
   const inOrder = el => { if (orderCache.has(el)) return orderCache.get(el);
-    let hit = false; try { hit = !!el.closest(ORDER_ROLE); } catch (e) {}
-    for (let a = el, i = 0; !hit && a && i < 12; i++, a = a.parentElement) { const c = typeof a.className === 'string' ? a.className : (a.getAttribute?.('class') || ''); if (ORDER_CLS.test(c)) hit = true; }
-    if (!hit) { let a = el; for (let i = 0; i < 2 && a && !hit; i++, a = a.parentElement) hit = !!a.querySelector?.('input,textarea,select,[contenteditable="true"]'); }
+    let hit = false;
+    for (let a = el, i = 0; !hit && a && i < 3; i++, a = a.parentElement) hit = hasInput(a);
+    if (!hit) { try { const pop = el.closest(ORDER_POP); hit = !!pop && hasInput(pop); } catch (e) {} }
     orderCache.set(el, hit); return hit; };
   const okText = n => { const p = n.parentElement || n.parentNode?.host; if (!p || SKIP.has(p.tagName) || p.isContentEditable) return false; if (mine.get(n) !== n.nodeValue && ANY.test(n.nodeValue) && inOrder(p)) return false; return mine.get(n) !== n.nodeValue && ANY.test(n.nodeValue); };
   function scan(root){
