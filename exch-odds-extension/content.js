@@ -43,7 +43,18 @@
     mine.set(node, out); node.nodeValue = out; converted++;
   }
 
-  const okText = n => { const p = n.parentElement || n.parentNode?.host; if (!p || SKIP.has(p.tagName) || p.isContentEditable) return false; return mine.get(n) !== n.nodeValue && ANY.test(n.nodeValue); };
+  // never inside the order ticket: there you type the price in % / ¢, so it stays exactly as the site shows it
+  // (forms, popups, order / ticket / slip panels, and anything sitting right next to an input box)
+  const ORDER_ROLE = 'form,[role="dialog"],[aria-modal="true"],[data-testid*="order" i],[data-testid*="ticket" i],[data-testid*="slip" i]';
+  // class words like "order-panel", "ticket", "betslip", "modal", "drawer" -- not "border-..." or Tailwind's "order-1"
+  const ORDER_CLS = /(^|[\s_-])(order(?!-(?:\d|first|last|none)\b)|ticket|bet-?slip|slip|modal|dialog|drawer)/i;
+  const orderCache = new WeakMap();
+  const inOrder = el => { if (orderCache.has(el)) return orderCache.get(el);
+    let hit = false; try { hit = !!el.closest(ORDER_ROLE); } catch (e) {}
+    for (let a = el, i = 0; !hit && a && i < 12; i++, a = a.parentElement) { const c = typeof a.className === 'string' ? a.className : (a.getAttribute?.('class') || ''); if (ORDER_CLS.test(c)) hit = true; }
+    if (!hit) { let a = el; for (let i = 0; i < 2 && a && !hit; i++, a = a.parentElement) hit = !!a.querySelector?.('input,textarea,select,[contenteditable="true"]'); }
+    orderCache.set(el, hit); return hit; };
+  const okText = n => { const p = n.parentElement || n.parentNode?.host; if (!p || SKIP.has(p.tagName) || p.isContentEditable) return false; if (mine.get(n) !== n.nodeValue && ANY.test(n.nodeValue) && inOrder(p)) return false; return mine.get(n) !== n.nodeValue && ANY.test(n.nodeValue); };
   function scan(root){
     if (!root) return;
     if (root.nodeType === 3) { if (okText(root)) convert(root); return; }
