@@ -44,16 +44,16 @@
     mine.set(node, out); node.nodeValue = out; converted++;
   }
 
-  // never inside the order ticket, where you type the price in % / ¢: a price sitting right next to an input box
-  // (same small block), or anything in a popup that has an input. The order BOOK and market prices still convert.
-  const ORDER_POP = '[role="dialog"],[aria-modal="true"]';
-  const orderCache = new WeakMap();
-  const hasInput = el => !!el?.querySelector?.('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]),textarea,[contenteditable="true"]');
-  const inOrder = el => { if (orderCache.has(el)) return orderCache.get(el);
-    let hit = false;
-    for (let a = el, i = 0; !hit && a && i < 3; i++, a = a.parentElement) hit = hasInput(a);
-    if (!hit) { try { const pop = el.closest(ORDER_POP); hit = !!pop && hasInput(pop); } catch (e) {} }
-    orderCache.set(el, hit); return hit; };
+  // only the box you type the price in stays as the site shows it: text inside an editable box (contenteditable,
+  // role=textbox / spinbutton, whatever has focus) or sitting right inside the same wrapper as an <input>
+  // (the ¢ / % next to the number). Everything else -- the order book, the ticket's other numbers -- converts.
+  const BOX = '[contenteditable=""],[contenteditable="true"],[role="textbox"],[role="spinbutton"],[role="combobox"],[inputmode]';
+  const DIRECT_INPUT = ':scope > input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]), :scope > textarea';
+  const inOrder = el => {
+    try { if (el.closest(BOX)) return true; } catch (e) {}
+    const f = document.activeElement; if (f && f !== document.body && f.contains?.(el)) return true;
+    for (let a = el, i = 0; a && i < 2; i++, a = a.parentElement) { try { if (a.querySelector(DIRECT_INPUT)) return true; } catch (e) {} }
+    return false; };
   const okText = n => { const p = n.parentElement || n.parentNode?.host; if (!p || SKIP.has(p.tagName) || p.isContentEditable) return false; if (mine.get(n) !== n.nodeValue && ANY.test(n.nodeValue) && inOrder(p)) return false; return mine.get(n) !== n.nodeValue && ANY.test(n.nodeValue); };
   function scan(root){
     if (!root) return;
@@ -100,27 +100,11 @@
 
   // Alt+A: back to the site's own prices / American odds again
   document.addEventListener('keydown', e => {
-    if (e.key === 'Escape' && paused) { setPaused(false); return; }
     if (!(e.altKey && (e.key === 'a' || e.key === 'A' || e.code === 'KeyA'))) return;
     off = !off; store.set('amxOff', off ? '1' : '0'); e.preventDefault();
     if (off) revertAll(); else if (!paused) resumeAll();
     paintPill();
   }, true);
 
-  // "Make" (posting your own order, priced in % / ¢): pause while you make it -- everything back to the site's
-  // prices. Back on with Take, after you place / submit it, cancel / close, Esc, or 2 minutes.
-  function setPaused(on){
-    if (paused === on) return; paused = on; clearTimeout(pauseT);
-    if (on) { pauseT = setTimeout(() => setPaused(false), 120e3); revertAll(); }
-    else if (!off) resumeAll();
-    paintPill();
-  }
-  const btnText = el => { const b = el.closest?.('button,[role="button"],[role="tab"],a,label'); return b ? (b.innerText || b.textContent || '').replace(/\s+/g, ' ').trim() : ''; };
-  document.addEventListener('click', e => {
-    if (e.target === pill) return;
-    const t = btnText(e.target); if (!t || t.length > 40) return;
-    if (/^make\b/i.test(t)) setPaused(true);
-    else if (paused && /^take\b/i.test(t)) setPaused(false);
-    else if (paused && /^(place|submit|confirm|post|cancel|close|done|✕|×|x)\b/i.test(t)) setTimeout(() => setPaused(false), 1500);
-  }, true);
+  const setPaused = () => {};   // (v1.5's pause-on-Make replaced by leaving just the typing box alone)
 })();
