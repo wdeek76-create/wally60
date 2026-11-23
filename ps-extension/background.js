@@ -2,7 +2,7 @@
 importScripts("convert.js");
 
 const clock = () => { const d = new Date(), h = d.getHours(), m = String(d.getMinutes()).padStart(2, "0"); return `${h % 12 || 12}.${m}${h < 12 ? "am" : "pm"}`; };   // 2.17pm
-const ourOwn = name => /-(NBA|NFL) \d{1,2}\.\d{2}(?:am|pm)(?: \(\d+\))?\.csv$/i.test(name);   // never re-convert a file we wrote
+const ourOwn = name => /-(MASTER-)?(NBA|NFL) \d{1,2}\.\d{2}(?:am|pm)(?: \(\d+\))?\.csv$/i.test(name);   // never re-convert a file we wrote
 const today = () => { const d = new Date(); return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`; };
 
 chrome.downloads.onChanged.addListener(delta => {
@@ -32,7 +32,7 @@ chrome.downloads.onChanged.addListener(delta => {
           parts[key] = { players: out.players, at: Date.now() };
           chrome.storage.local.set({ nflParts: parts });
         }
-        const fname = `${out.src}-${out.sport} ${clock()}.csv`;        // e.g. "RG-NBA 2.17pm.csv", "STOK-NFL 2.17pm.csv"
+        const fname = `${out.src}-${merged ? "MASTER-" : ""}${out.sport} ${clock()}.csv`;        // "RG-NBA 2.17pm.csv", "STOK-NFL 2.17pm.csv", merged parts → "STOK-MASTER-NFL 2.31pm.csv"
         const dataUrl = "data:text/csv;charset=utf-8," + encodeURIComponent(csv);
         chrome.downloads.download({ url: dataUrl, filename: fname, conflictAction: "uniquify", saveAs: false }, newId => {
           // the PropShop file is the one you keep: the raw export is removed (unless "keep original" is on in the popup)
