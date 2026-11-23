@@ -6,6 +6,7 @@
 (() => {
   const store = { get:k=>{ try{ return localStorage.getItem(k); }catch(e){ return null; } }, set:(k,v)=>{ try{ localStorage.setItem(k,v); }catch(e){} } };
   let off = store.get('amxOff') === '1';
+  let paused = false, pauseT = null;   // paused while you Make an order (see below)
 
   // 3-97 cents / percent (skips fees like "2%"), not part of a bigger number
   const RE_C = /(^|[^\d.])(\d{1,2}(?:\.\d{1,2})?\s?(?:¢|%|c\b))/g;
@@ -39,7 +40,7 @@
     out += txt.slice(last);
     if (out === txt) return;
     orig.set(node, txt); nodes.add(node);
-    if (off) return;
+    if (off || paused) return;
     mine.set(node, out); node.nodeValue = out; converted++;
   }
 
@@ -88,18 +89,38 @@
   const pill = document.createElement('div');
   pill.style.cssText = 'position:fixed;left:8px;bottom:8px;z-index:2147483647;padding:3px 8px;border-radius:999px;background:#111;color:#fff;font:700 11px system-ui,sans-serif;opacity:.8;cursor:pointer';
   pill.onclick = () => { pill.remove(); store.set('amxPill','0'); };
-  function paintPill(){ if (store.get('amxPill') === '0' || window.top !== window) return; pill.textContent = off ? 'AMX · off (Alt+A)' : `AMX · ${converted} converted`; if (document.body && !pill.isConnected) document.body.appendChild(pill); }
+  function paintPill(){ if (store.get('amxPill') === '0' || window.top !== window) return; pill.textContent = off ? 'AMX · off (Alt+A)' : paused ? 'AMX · paused (Make)' : `AMX · ${converted} converted`; if (document.body && !pill.isConnected) document.body.appendChild(pill); }
 
   watch(document.documentElement);
   scan(document.body);
-  setInterval(() => { if (!off) scan(document.body); nodes.forEach(n => { if (!n.isConnected) nodes.delete(n); }); }, 4000);
+  setInterval(() => { if (!off && !paused) scan(document.body); nodes.forEach(n => { if (!n.isConnected) nodes.delete(n); }); }, 4000);
+
+  const revertAll = () => nodes.forEach(n => { if (n.isConnected && mine.get(n) === n.nodeValue && orig.has(n)) { const o = orig.get(n); mine.set(n, o); n.nodeValue = o; } });
+  const resumeAll = () => { mine = new WeakMap(); scan(document.body); };
 
   // Alt+A: back to the site's own prices / American odds again
   document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && paused) { setPaused(false); return; }
     if (!(e.altKey && (e.key === 'a' || e.key === 'A' || e.code === 'KeyA'))) return;
     off = !off; store.set('amxOff', off ? '1' : '0'); e.preventDefault();
-    if (off) { nodes.forEach(n => { if (n.isConnected && mine.get(n) === n.nodeValue && orig.has(n)) { const o = orig.get(n); mine.set(n, o); n.nodeValue = o; } }); }
-    else { mine = new WeakMap(); scan(document.body); }
+    if (off) revertAll(); else if (!paused) resumeAll();
     paintPill();
+  }, true);
+
+  // "Make" (posting your own order, priced in % / ¢): pause while you make it -- everything back to the site's
+  // prices. Back on with Take, after you place / submit it, cancel / close, Esc, or 2 minutes.
+  function setPaused(on){
+    if (paused === on) return; paused = on; clearTimeout(pauseT);
+    if (on) { pauseT = setTimeout(() => setPaused(false), 120e3); revertAll(); }
+    else if (!off) resumeAll();
+    paintPill();
+  }
+  const btnText = el => { const b = el.closest?.('button,[role="button"],[role="tab"],a,label'); return b ? (b.innerText || b.textContent || '').replace(/\s+/g, ' ').trim() : ''; };
+  document.addEventListener('click', e => {
+    if (e.target === pill) return;
+    const t = btnText(e.target); if (!t || t.length > 40) return;
+    if (/^make\b/i.test(t)) setPaused(true);
+    else if (paused && /^take\b/i.test(t)) setPaused(false);
+    else if (paused && /^(place|submit|confirm|post|cancel|close|done|✕|×|x)\b/i.test(t)) setTimeout(() => setPaused(false), 1500);
   }, true);
 })();
