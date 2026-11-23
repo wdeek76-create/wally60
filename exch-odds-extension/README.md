@@ -16,3 +16,8 @@ Prices are converted as shown (no fee added); anything under 3% or over 97% (fee
 ## Making orders (v1.9)
 - Click into any box / start typing: the whole page goes back to the site's own %/¢ (pill says "paused while typing"). Type the price the way the site wants it (%: -150 = 60, -110 = 52.4, +120 = 45.5).
 - Click out of the box: American odds again.
+
+
+## v2.0
+- **ProphetX:** the 2% fee on winnings is baked into every price shown (what you actually get).
+- **To-win helper:** tap the AMX pill to cycle $100 / $150 / $200 / $300 / $400 / off (remembered). Hover any converted price: "to win $200: bet $234". Shift+tap the pill hides it.

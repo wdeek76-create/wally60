@@ -15,11 +15,16 @@
   const ANY = /\d\s?(¢|%|c\b)|(^|[^\d])\$?0?\.\d{2}/;
   const SKIP = new Set(['SCRIPT','STYLE','NOSCRIPT','TEXTAREA','INPUT','SELECT','OPTION','CODE','PRE']);
 
+  // ProphetX takes 2% of what you win: on its pages the odds shown are what you actually get after the fee
+  const IS_PX = /(^|\.)prophetx\.co$/i.test(location.hostname), PX_FEE = 0.02;
+  const netDec = p => 1 + (1 / p - 1) * (IS_PX ? 1 - PX_FEE : 1);   // decimal odds after the fee
+  const amOfDec = d => d >= 2 ? Math.round((d - 1) * 100) : -Math.round(100 / (d - 1));
   const american = p => {               // p = win chance 0-1
     if (!(p >= 0.03 && p <= 0.97)) return null;
-    const a = p >= 0.5 ? -Math.round(p / (1 - p) * 100) : Math.round((1 - p) / p * 100);
+    const a = amOfDec(netDec(p));
     return a > 0 ? '+' + a : String(a);
   };
+  const decOfAm = a => { const n = Number(a); return n > 0 ? 1 + n / 100 : 1 + 100 / -n; };
   const probOf = s => { const x = s.replace(/[\s$¢%c]/g, ''); return x.startsWith('.') || x.startsWith('0.') ? parseFloat(x) : parseFloat(x) / 100; };
 
   let converted = 0;
@@ -111,8 +116,29 @@
   // "AMX · 12" pill: proof it's running on this page (tap = hide it)
   const pill = document.createElement('div');
   pill.style.cssText = 'position:fixed;left:8px;bottom:8px;z-index:2147483647;padding:3px 8px;border-radius:999px;background:#111;color:#fff;font:700 11px system-ui,sans-serif;opacity:.8;cursor:pointer';
-  pill.onclick = () => { pill.remove(); store.set('amxPill','0'); };
-  function paintPill(){ if (store.get('amxPill') === '0' || window.top !== window) return; pill.textContent = off ? 'AMX · off (Alt+A)' : editZone ? 'AMX · paused while typing' : `AMX · ${converted} converted`; if (document.body && !pill.isConnected) document.body.appendChild(pill); }
+  // to-win helper: tap the pill to cycle $100 / $150 / $200 / $300 / $400 / off (remembered); Shift+tap hides the pill
+  const WINS = [100, 150, 200, 300, 400, 0];
+  let winAmt = Number(store.get('amxWin') ?? 0) || 0;
+  pill.onclick = e => { if (e.shiftKey) { pill.remove(); store.set('amxPill','0'); return; }
+    winAmt = WINS[(WINS.indexOf(winAmt) + 1) % WINS.length]; store.set('amxWin', String(winAmt)); paintPill(); hideTip(); };
+  pill.title = 'Tap: to-win amount ($100 / $150 / $200 / $300 / $400 / off) · Shift+tap: hide · Alt+A: on/off';
+  // hover a converted price -> "To win $200: bet $234"
+  const tip = document.createElement('div');
+  tip.style.cssText = 'position:fixed;z-index:2147483647;padding:4px 9px;border-radius:8px;background:#111;color:#fff;font:700 12px system-ui,sans-serif;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,.4);display:none';
+  const hideTip = () => { tip.style.display = 'none'; };
+  const usd = v => '$' + (v >= 100 ? Math.round(v) : v.toFixed(2)).toLocaleString();
+  document.addEventListener('mouseover', e => {
+    if (!winAmt || off || editZone) return hideTip();
+    const el = e.target; if (!el || el === pill || el === tip) return;
+    const tn = [...(el.childNodes || [])].find(n => n.nodeType === 3 && nodes.has(n) && mine.get(n) === n.nodeValue);
+    const m = tn && /([+-]\d{3,5})/.exec(tn.nodeValue); if (!m) return hideTip();
+    const risk = winAmt / (decOfAm(m[1]) - 1);
+    tip.textContent = `${m[1]} · to win ${usd(winAmt)}: bet ${usd(risk)}${IS_PX ? ' (after 2% fee)' : ''}`;
+    if (!tip.isConnected) document.body.appendChild(tip);
+    const r = el.getBoundingClientRect(); tip.style.left = Math.max(4, Math.min(innerWidth - 240, r.left)) + 'px'; tip.style.top = Math.max(4, r.top - 30) + 'px'; tip.style.display = 'block';
+  }, true);
+  document.addEventListener('scroll', hideTip, true);
+  function paintPill(){ if (store.get('amxPill') === '0' || window.top !== window) return; pill.textContent = off ? 'AMX · off (Alt+A)' : editZone ? 'AMX · paused while typing' : `AMX${IS_PX ? ' · 2% fee in' : ''} · ${winAmt ? 'win $' + winAmt : 'win off'}`; if (document.body && !pill.isConnected) document.body.appendChild(pill); }
 
   watch(document.documentElement);
   scan(document.body);
