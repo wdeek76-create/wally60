@@ -160,8 +160,27 @@
   const boxFrom = e => { const t = realTarget(e); return isTyping(t) ? t : null; };
   document.addEventListener('focusin', e => { const t = boxFrom(e); if (t) { boxEl = t; paintBox(); } }, true);
   ['input', 'keyup'].forEach(ev => document.addEventListener(ev, e => { const t = boxFrom(e) || (boxEl && boxEl.isConnected ? boxEl : null); if (t) { boxEl = t; requestAnimationFrame(paintBox); } }, true));
-  document.addEventListener('focusout', e => { const t = boxFrom(e); if (t && t === boxEl) setTimeout(() => { let a = document.activeElement; while (a?.shadowRoot?.activeElement) a = a.shadowRoot.activeElement; if (a !== boxEl) { boxEl = null; boxTip.style.display = 'none'; } }, 200); }, true);
+  document.addEventListener('focusout', e => { const t = boxFrom(e); if (t && t === boxEl) setTimeout(() => { let a = document.activeElement; while (a?.shadowRoot?.activeElement) a = a.shadowRoot.activeElement; if (a !== boxEl && (!boxEl || priceOf(boxVal(boxEl)) == null)) { boxEl = null; boxTip.style.display = 'none'; } }, 200); }, true);
   window.addEventListener('scroll', () => boxEl && paintBox(), true);
+
+  // Clicking a price in the order book: the site fills the price box itself (no typing) -- find the box whose
+  // value just changed and show the label for it. Then keep following that box (clicks, +/- buttons, typing).
+  const allBoxes = () => { const out = []; const walk = root => { root.querySelectorAll?.('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"])').forEach(i => out.push(i));
+      root.querySelectorAll?.('*').forEach(el => { if (el.shadowRoot) walk(el.shadowRoot); }); }; walk(document); return out; };
+  let snap = new Map();
+  document.addEventListener('pointerdown', () => { snap = new Map(allBoxes().map(i => [i, i.value])); }, true);
+  const findFilled = () => { for (const [i, v] of snap) if (i.isConnected && i.value !== v && priceOf(i.value) != null) return i; return null; };
+  document.addEventListener('click', e => { if (e.target === pill) return;
+    let found = false; const t = realTarget(e), onBox = boxEl && (t === boxEl || inBox(t)), onPrice = !!t?.closest?.('*') && [...(t.childNodes || [])].some(n => nodes.has(n));
+    [120, 400, 900].forEach(ms => setTimeout(() => { const i = findFilled(); if (i) { found = true; boxEl = i; paintBox(); }
+      // clicked somewhere else (not the box, not a price, and the box didn't change): put the label away
+      else if (ms === 900 && !found && boxEl && !onBox && !onPrice) { let a = document.activeElement; while (a?.shadowRoot?.activeElement) a = a.shadowRoot.activeElement; if (a !== boxEl) { boxEl = null; boxTip.style.display = 'none'; } } }, ms)); }, true);
+  const inBox = t => { for (let n = t; n; n = n.parentNode || n.host) if (n === boxEl) return true; return false; };
+  // follow the box while it's showing (the site can change it without any event we'd see)
+  let lastShown = '';
+  setInterval(() => { if (!boxEl) return; if (!boxEl.isConnected) { boxEl = null; boxTip.style.display = 'none'; return; }
+    const v = boxVal(boxEl) + '|' + winAmt; if (v !== lastShown) { lastShown = v; paintBox(); } }, 300);
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && boxEl) { boxEl = null; boxTip.style.display = 'none'; } }, true);
   function paintPill(){ if (store.get('amxPill') === '0' || window.top !== window) return; pill.textContent = off ? 'AMX · off (Alt+A)' : editZone ? 'AMX · paused while typing' : `AMX${IS_PX ? ' · 2% fee in' : ''} · ${winAmt ? 'win $' + winAmt : 'win off'}`; if (document.body && !pill.isConnected) document.body.appendChild(pill); }
 
   watch(document.documentElement);

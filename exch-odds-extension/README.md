@@ -25,3 +25,7 @@ Prices are converted as shown (no fee added); anything under 3% or over 97% (fee
 
 ## v2.1
 - Typing a price in the order box (Make): a label above it shows that price in American odds + how much to bet to win your pill amount (ProphetX: after the 2% fee).
+
+
+## v2.2
+- Click a price in the order book: when the site drops it into the price box, the label shows that price (American odds + bet to win your amount). Esc hides it.
