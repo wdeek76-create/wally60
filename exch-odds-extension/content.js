@@ -163,6 +163,49 @@
   document.addEventListener('focusout', e => { const t = boxFrom(e); if (t && t === boxEl) setTimeout(() => { let a = document.activeElement; while (a?.shadowRoot?.activeElement) a = a.shadowRoot.activeElement; if (a !== boxEl && (!boxEl || priceOf(boxVal(boxEl)) == null)) { boxEl = null; boxTip.style.display = 'none'; } }, 200); }, true);
   window.addEventListener('scroll', () => boxEl && paintBox(), true);
 
+  // ── Fill: when the bet slip opens with an EMPTY amount box, type your default amount in (never presses Place).
+  // Second pill: tap cycles off / $100 / $200 / $300 / $500 (remembered). If the slip shows a max / available
+  // amount next to the box that's smaller, that's what goes in instead.
+  const FILLS = [0, 100, 200, 300, 500];
+  let fillAmt = Number(store.get('amxFill') ?? 0) || 0;
+  const fillPill = document.createElement('div');
+  fillPill.style.cssText = 'position:fixed;left:8px;bottom:34px;z-index:2147483647;padding:3px 8px;border-radius:999px;background:#111;color:#fff;font:700 11px system-ui,sans-serif;opacity:.8;cursor:pointer';
+  fillPill.title = 'Tap: amount to drop into an empty bet slip (off / $100 / $200 / $300 / $500)';
+  const paintFill = () => { if (store.get('amxPill') === '0' || window.top !== window) return; fillPill.textContent = fillAmt ? `Fill $${fillAmt}` : 'Fill off'; if (document.body && !fillPill.isConnected) document.body.appendChild(fillPill); };
+  fillPill.onclick = () => { fillAmt = FILLS[(FILLS.indexOf(fillAmt) + 1) % FILLS.length]; store.set('amxFill', String(fillAmt)); paintFill(); };
+  setTimeout(paintFill, 0);
+  const labelOf = i => { const bits = [i.placeholder, i.name, i.id, i.getAttribute('aria-label')];
+    try { if (i.id) { const l = document.querySelector(`label[for="${CSS.escape(i.id)}"]`); if (l) bits.push(l.textContent); } } catch (e) {}
+    // just the box's own block: its parent's text (the label + unit next to it), not the whole ticket
+    const par = i.parentElement; if (par) bits.push((par.innerText || '').slice(0, 80));
+    if (par && !(par.innerText || '').trim() && par.parentElement) bits.push((par.parentElement.innerText || '').slice(0, 80));
+    return bits.filter(Boolean).join(' ').toLowerCase(); };
+  const isPriceBox = t => /\b(price|odds|limit price|probability|chance)\b|%|¢/.test(t);
+  const isAmountBox = t => /\b(amount|stake|wager|risk|bet size|size|spend|cost|quantity|contracts|shares|buy for|\$)/.test(t) || /\$/.test(t);
+  const maxNear = i => { let a = i.parentElement; for (let k = 0; k < 4 && a; k++, a = a.parentElement) { const m = /(?:max|available|avail\.?|up to|liquidity)[^$\d]{0,12}\$?\s?([\d,]+(?:\.\d+)?)/i.exec(a.innerText || ''); if (m) return parseFloat(m[1].replace(/,/g, '')); } return null; };
+  const filled = new WeakSet();
+  function tryFill(){
+    if (!fillAmt || off) return;
+    for (const i of allBoxes()) {
+      if (filled.has(i) || !i.isConnected || i.disabled || i.readOnly || i.value) continue;
+      if (i.type === 'search' || /search/i.test(i.placeholder || '') || i.closest?.('header,nav,[role="search"]')) continue;
+      const r = i.getBoundingClientRect(); if (!r.width || !r.height) continue;
+      const t = labelOf(i); if (isPriceBox(t) || !isAmountBox(t)) continue;
+      filled.add(i);
+      const mx = maxNear(i), amt = mx != null && mx > 0 && mx < fillAmt ? mx : fillAmt;
+      setVal(i, String(amt)); hint(i, `Filled $${amt}${amt < fillAmt ? ' (max available)' : ''}`);
+    }
+  }
+  const setVal = (el, v) => { const d = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), 'value'); if (d?.set) d.set.call(el, v); else el.value = v;
+    el.dispatchEvent(new Event('input', { bubbles: true, composed: true })); el.dispatchEvent(new Event('change', { bubbles: true, composed: true })); };
+  let hintEl = null;
+  const hint = (el, t) => { try { hintEl?.remove(); const r = el.getBoundingClientRect(); hintEl = document.createElement('div'); hintEl.textContent = t;
+    hintEl.style.cssText = `position:fixed;left:${Math.max(4, r.left)}px;top:${Math.max(4, r.top - 24)}px;z-index:2147483647;padding:2px 8px;border-radius:999px;background:#14532d;color:#fff;font:700 12px system-ui,sans-serif;pointer-events:none`;
+    document.body.appendChild(hintEl); setTimeout(() => hintEl?.remove(), 2500); } catch (e) {} };
+  // check after clicks (opening the slip) and whenever the page adds things
+  document.addEventListener('click', e => { if (e.target === fillPill || e.target === pill) return; [150, 500, 1200].forEach(ms => setTimeout(tryFill, ms)); }, true);
+  new MutationObserver(() => { clearTimeout(tryFill._t); tryFill._t = setTimeout(tryFill, 250); }).observe(document.documentElement, { childList: true, subtree: true });
+
   // Clicking a price in the order book: the site fills the price box itself (no typing) -- find the box whose
   // value just changed and show the label for it. Then keep following that box (clicks, +/- buttons, typing).
   const allBoxes = () => { const out = []; const walk = root => { root.querySelectorAll?.('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"])').forEach(i => out.push(i));

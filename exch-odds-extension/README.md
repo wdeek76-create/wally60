@@ -29,3 +29,7 @@ Prices are converted as shown (no fee added); anything under 3% or over 97% (fee
 
 ## v2.2
 - Click a price in the order book: when the site drops it into the price box, the label shows that price (American odds + bet to win your amount). Esc hides it.
+
+
+## v2.3
+- **Fill** pill (above AMX): tap cycles off / $100 / $200 / $300 / $500 (remembered). When the bet slip opens with an empty amount box, that amount is typed in (never the price box, never over something you typed, never presses Place). If the slip shows a smaller max / available amount, that goes in instead.
