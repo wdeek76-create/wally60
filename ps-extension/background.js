@@ -39,7 +39,7 @@ chrome.downloads.onChanged.addListener(delta => {
           if (!cfg.keepOriginal && newId != null) removeOriginal(it.id, name);
           if (merged && replaceId != null && newId != null) removeOriginal(replaceId, "earlier " + out.src + " file");   // the combined file supersedes the earlier one
           if (key && newId != null) chrome.storage.local.get({ nflParts: {} }, s2 => { if (s2.nflParts[key]) { s2.nflParts[key].fileId = newId; chrome.storage.local.set({ nflParts: s2.nflParts }); } });
-          chrome.storage.local.get({ log: [] }, s => { const log = [{ at: Date.now(), from: name, to: fname, src: out.src, n }].concat(s.log).slice(0, 20); chrome.storage.local.set({ log }); });
+          chrome.storage.local.get({ log: [] }, s => { const log = [{ at: Date.now(), from: name, to: fname, src: out.src, sport: out.sport, n }].concat(s.log).slice(0, 20); chrome.storage.local.set({ log }); });
           note(`${out.src} ${out.sport} → PropShop`, `${n} players → ${fname}${merged ? " (parts merged)" : ""}${cfg.keepOriginal ? "" : " (original removed)"}`);
         });
       });
