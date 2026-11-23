@@ -2732,7 +2732,40 @@ const EVICTABLE_KEYS = [
   "nba_rw_lineups_raw",        // raw lineup pastes (the parsed lineups are stored separately)
   "nba_tabs_lineups_raw",
   "nba_rw_news_feed_v1",       // RotoWire news, re-synced
+  "nba_injuries_cache",        // re-synced from RotoWire / ESPN
+  "nba_rw_depth_v1",           // re-synced
+  "nba_starter_log_v1",        // rebuilt from box scores
+  "nba_lineup_games_v1",       // ESPN slate, refetched
+  "nba_matchup_opp_avg_v1",    // recomputed
+  "nba_session_tracked_props_v1",
+  "nba_team_stats_2025", "nba_team_stats_2025_updated",   // last season's team stats, re-pasted if ever needed
 ];
+// Deeper trim when evicting caches is not enough: the heavy logs are re-saved with the open-only fields stripped off settled rows, and the
+// boards keep only our books. Nothing that drives a record, a recap, CLV or the solo stats is touched.
+function _storageDeepTrim() {
+  let n = 0;
+  const slim = (key, fn) => { try { const raw = localStorage.getItem(key); if (!raw) return; const v = JSON.parse(raw); const out = JSON.stringify(fn ? fn(v) : v, _slimGraded); if (out.length < raw.length) { localStorage.setItem(key, out); n += raw.length - out.length; } } catch (e) {} };
+  slim("nba_blender_bets"); slim("nba_morning_bets_v1"); slim("nba_tipoff_bets_v1"); slim("nba_morning_shadow_v1"); slim("nba_tipoff_shadow_v1");
+  const boards = v => { Object.keys(v || {}).forEach(k => { (v[k] || []).forEach(r => { if (Array.isArray(r.csvBooks)) r.csvBooks = r.csvBooks.filter(x => _mOurBook(x.book)); }); }); return v; };
+  ["nba_morning_ps_v1", "nba_tipoff_ps_v1", "nba_morning_psx_v1", "nba_tipoff_psx_v1"].forEach(k => slim(k, boards));
+  if (n) console.warn(`[storage] deep trim freed ${Math.round(n / 1024)}kb`);
+  return n;
+}
+// Every save heals itself: when the browser says the store is full, the refetchable caches go first, then the deep trim, then the save is retried.
+(function () {
+  const orig = Storage.prototype.setItem; let busy = false;
+  Storage.prototype.setItem = function (k, v) {
+    try { return orig.call(this, k, v); }
+    catch (e) {
+      if (this !== localStorage || busy) throw e;
+      busy = true;
+      try {
+        freeStorageSpace(String(v).length * 2);
+        try { return orig.call(this, k, v); } catch (e2) { _storageDeepTrim(); const r = orig.call(this, k, v); try { showToast("Storage was full \u2014 trimmed caches and old book lists to make room"); } catch (e3) {} return r; }
+      } finally { busy = false; }
+    }
+  };
+})();
 function storageBytes() {
   let n = 0;
   try { for (const k in localStorage) {
@@ -2766,7 +2799,8 @@ function freeStorageSpace(neededBytes) {
 }
 // Warn before it becomes a problem, not after.
 function checkStorageHealth() {
-  const used = storageBytes();
+  let used = storageBytes();
+  if (used > STORAGE_BUDGET_BYTES * 0.92) { try { freeStorageSpace(used - STORAGE_BUDGET_BYTES * 0.8); _storageDeepTrim(); } catch (e) {} used = storageBytes(); }   // near the line: clean up before a save fails
   const pct = Math.round((used / STORAGE_BUDGET_BYTES) * 100);
   if (pct >= 85) {
     console.warn(`[storage] ${pct}% full (${Math.round(used / 1024)}kb). Biggest:`, storageReport().slice(0, 3));
@@ -2780,7 +2814,7 @@ function checkStorageHealth() {
 }
 
 // Order-book snapshots / book lists are only needed while a bet is open: graded bets are stored without them (the record, price, CLV and projections stay)
-const _BULKY_KEYS = new Set(["liq", "liqLevels", "liqBooks", "ooBooks", "keyOff"]);
+const _BULKY_KEYS = new Set(["liq", "liqLevels", "liqBooks", "ooBooks", "keyOff", "altBooks", "sourcePrices", "lineBooks", "_cardHead", "hist"]);
 function _slimGraded(k, v) { return (_BULKY_KEYS.has(k) && this && this.result && this.result !== "pending") ? undefined : v; }
 function saveBets() {
   const json = JSON.stringify(bets, _slimGraded);
@@ -22845,6 +22879,7 @@ function scheduleNextTickerRefresh() {
 }
 
 window.addEventListener("load", () => { try { if (typeof switchTab === "function") switchTab("morning"); } catch (e) {} });   // the Morning page is the home page
+document.addEventListener("DOMContentLoaded", () => { try { checkStorageHealth(); } catch (e) {} });   // clean up on load when the store is near full
 document.addEventListener("DOMContentLoaded", () => {
   const oddsEl = document.getElementById("modal-odds");
   if (oddsEl) oddsEl.addEventListener("input", () => { updateStakePreview(); updateEvPreview(); });
@@ -27029,7 +27064,7 @@ function parsePropShopCsv(text) {
     const away = _matchupKey(r.away_team) || "", home = _matchupKey(r.home_team) || "";
     const row = { player: String(r.Player).trim(), team: String(r.Team || "").trim(), game: away && home ? `${away} @ ${home}` : "", gameTime: d ? d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }) : "",
       gameDateIso: d ? localYMD(d) : String(r.Date || ""), ou: best.ou, line: best.line, odds: best.odds, book: _psCsvBook(r.Book), liq: null, ev: best.ev, proj: Number(r.Proj) || null, minutes: null, simFair: null,
-      csvBooks: at.map(x => ({ book: _psCsvBook(x.r.Book), odds: x.odds, ev: x.ev })), isMain: String(ln) === String(main) };
+      csvBooks: at.map(x => ({ book: _psCsvBook(x.r.Book), odds: x.odds, ev: x.ev })).filter(x => _mOurBook(x.book)), isMain: String(ln) === String(main) };
     (out[best.stat] = out[best.stat] || []).push(row);
     });
   });
