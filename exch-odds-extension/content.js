@@ -28,7 +28,7 @@
   const nodes = new Set();     // converted nodes, to flip back with Alt+A
 
   function convert(node){
-    const txt = node.nodeValue; if (mine.get(node) === txt) return;
+    const txt = node.nodeValue; if (mine.get(node) === txt || inEdit(node)) return;
     if (!ANY.test(txt)) return;
     const hits = [];
     for (const re of [RE_C, RE_S]) { re.lastIndex = 0; let m;
@@ -54,7 +54,18 @@
     const f = document.activeElement; if (f && f !== document.body && f.contains?.(el)) return true;
     for (let a = el, i = 0; a && i < 2; i++, a = a.parentElement) { try { if (a.querySelector(DIRECT_INPUT)) return true; } catch (e) {} }
     return false; };
-  const okText = n => { const p = n.parentElement || n.parentNode?.host; if (!p || SKIP.has(p.tagName) || p.isContentEditable) return false; if (mine.get(n) !== n.nodeValue && ANY.test(n.nodeValue) && inOrder(p)) return false; return mine.get(n) !== n.nodeValue && ANY.test(n.nodeValue); };
+  // While you're typing in a box (Make an order, a price, a size): the whole form around it is hands-off --
+  // the site re-draws the price as you type (12 -> "12%"), and converting that mid-typing garbled it.
+  let editZone = null;
+  const isTyping = el => !!el && (el.isContentEditable || (el.tagName === 'INPUT' && !/^(hidden|checkbox|radio|button|submit|range|color|file)$/i.test(el.type || '')) || el.tagName === 'TEXTAREA' || /^(textbox|spinbutton)$/i.test(el.getAttribute?.('role') || ''));
+  const zoneOf = el => { let z = el; try { const c = el.closest('form,[role="dialog"],[aria-modal="true"]'); if (c) return c; } catch (e) {}
+    for (let i = 0; i < 6 && z.parentElement && z.parentElement !== document.body; i++) z = z.parentElement; return z; };
+  const inEdit = el => !!editZone && editZone.contains(el);
+  document.addEventListener('focusin', e => { const t = e.target; if (!isTyping(t) || t.closest?.('header,nav,[role="search"]')) return;
+    editZone = zoneOf(t); nodes.forEach(n => { if (n.isConnected && inEdit(n) && mine.get(n) === n.nodeValue && orig.has(n)) { const o = orig.get(n); mine.set(n, o); n.nodeValue = o; } }); }, true);
+  document.addEventListener('focusout', e => { if (!isTyping(e.target)) return;
+    setTimeout(() => { if (isTyping(document.activeElement) && editZone && editZone.contains(document.activeElement)) return; const z = editZone; editZone = null; if (z && z.isConnected && !off) { mine = new WeakMap(); scan(document.body); } }, 250); }, true);
+  const okText = n => { if (inEdit(n)) return false; const p = n.parentElement || n.parentNode?.host; if (!p || SKIP.has(p.tagName) || p.isContentEditable) return false; if (mine.get(n) !== n.nodeValue && ANY.test(n.nodeValue) && inOrder(p)) return false; return mine.get(n) !== n.nodeValue && ANY.test(n.nodeValue); };
   function scan(root){
     if (!root) return;
     if (root.nodeType === 3) { if (okText(root)) convert(root); return; }
