@@ -64,33 +64,19 @@
   const inEdit = el => { if (!editZone) return false; for (let n = el; n; n = n.parentNode || n.host) if (n === editZone) return true; return false; };
   const realTarget = e => { const p = e.composedPath ? e.composedPath() : []; return (p[0] && p[0].nodeType === 1 ? p[0] : e.target); };   // inside web components too
   const startEdit = t => { if (!t || t === document.body || t === document.documentElement || t.closest?.('header,nav,[role="search"]')) return;
-    const z = zoneOf(t); if (editZone === z) return; editZone = z;
-    nodes.forEach(n => { if (n.isConnected && inEdit(n) && mine.get(n) === n.nodeValue && orig.has(n)) { const o = orig.get(n); mine.set(n, o); n.nodeValue = o; } }); };
-  const endEdit = () => { const z = editZone; editZone = null; if (z && z.isConnected && !off) { mine = new WeakMap(); scan(document.body); } };
+    // v1.9: while you type anywhere, the WHOLE page goes back to the site's own %/¢ (simple + reliable)
+    if (editZone) return; editZone = document.documentElement; revertAll(); paintPill(); };
+  const endEdit = () => { if (!editZone) return; editZone = null; if (!off) { mine = new WeakMap(); scan(document.body); } paintPill(); };
   document.addEventListener('focusin', e => { const t = realTarget(e); if (isTyping(t)) startEdit(t); }, true);
   // a price box the site built itself (not a real input): typing a number / . / backspace into it counts too
   document.addEventListener('keydown', e => { if (e.altKey || e.ctrlKey || e.metaKey) return; if (/^[0-9.,+-]$|^Backspace$|^Delete$/.test(e.key)) startEdit(realTarget(e)); }, true);
 
-  // Type American odds in a price box: "-150" / "+120", then Enter or Tab -> the box gets the % / ¢ the site wants
-  // (60 / 45.5). Enter only converts (press Enter again to submit), so nothing goes in at the wrong price.
-  const AM_RE = /^\s*([+-])\s*(\d{3,5})\s*$/;
-  const toPct = (sign, n) => { if (n < 100) return null; const p = sign === '-' ? n / (n + 100) : 100 / (n + 100); return Math.round(p * 1000) / 10; };
-  const setVal = (el, v) => { const d = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), 'value'); if (d?.set) d.set.call(el, v); else el.value = v;
-    el.dispatchEvent(new Event('input', { bubbles: true, composed: true })); el.dispatchEvent(new Event('change', { bubbles: true, composed: true })); };
-  const amFill = el => { if (!el || el.tagName !== 'INPUT') return false; const m = AM_RE.exec(el.value || ''); if (!m) return false;
-    const pct = toPct(m[1], Number(m[2])); if (pct == null || pct <= 0 || pct >= 100) return false;
-    setVal(el, String(pct).replace(/\.0$/, '')); hint(el, `${m[1]}${m[2]} → ${String(pct).replace(/\.0$/, '')}`); return true; };
-  let hintEl = null;
-  const hint = (el, t) => { try { hintEl?.remove(); const r = el.getBoundingClientRect(); hintEl = document.createElement('div'); hintEl.textContent = t;
-    hintEl.style.cssText = `position:fixed;left:${Math.max(4, r.left)}px;top:${Math.max(4, r.top - 24)}px;z-index:2147483647;padding:2px 8px;border-radius:999px;background:#111;color:#fff;font:700 12px system-ui,sans-serif;pointer-events:none`;
-    document.body.appendChild(hintEl); setTimeout(() => hintEl?.remove(), 2500); } catch (e) {} };
-  document.addEventListener('keydown', e => { if (e.key !== 'Enter' && e.key !== 'Tab') return; const t = realTarget(e); if (amFill(t) && e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); } }, true);
-  document.addEventListener('focusout', e => { amFill(realTarget(e)); }, true);
+
   document.addEventListener('beforeinput', e => startEdit(realTarget(e)), true);
   // clicking anywhere outside the form you were typing in: back to American odds there
-  document.addEventListener('pointerdown', e => { if (editZone && !e.composedPath?.().includes(editZone) && !inEdit(realTarget(e))) setTimeout(endEdit, 150); }, true);
+  document.addEventListener('pointerdown', e => { if (!editZone) return; const t = realTarget(e); if (isTyping(t)) return; setTimeout(() => { let a = document.activeElement; while (a?.shadowRoot?.activeElement) a = a.shadowRoot.activeElement; if (!isTyping(a)) endEdit(); }, 300); }, true);
   document.addEventListener('focusout', e => { const t = realTarget(e); if (!isTyping(t)) return;
-    setTimeout(() => { let a = document.activeElement; while (a?.shadowRoot?.activeElement) a = a.shadowRoot.activeElement; if (a && a !== document.body && inEdit(a)) return; endEdit(); }, 250); }, true);
+    setTimeout(() => { let a = document.activeElement; while (a?.shadowRoot?.activeElement) a = a.shadowRoot.activeElement; if (isTyping(a)) return; endEdit(); }, 300); }, true);
   const okText = n => { if (inEdit(n)) return false; const p = n.parentElement || n.parentNode?.host; if (!p || SKIP.has(p.tagName) || p.isContentEditable) return false; if (mine.get(n) !== n.nodeValue && ANY.test(n.nodeValue) && inOrder(p)) return false; return mine.get(n) !== n.nodeValue && ANY.test(n.nodeValue); };
   function scan(root){
     if (!root) return;
@@ -126,7 +112,7 @@
   const pill = document.createElement('div');
   pill.style.cssText = 'position:fixed;left:8px;bottom:8px;z-index:2147483647;padding:3px 8px;border-radius:999px;background:#111;color:#fff;font:700 11px system-ui,sans-serif;opacity:.8;cursor:pointer';
   pill.onclick = () => { pill.remove(); store.set('amxPill','0'); };
-  function paintPill(){ if (store.get('amxPill') === '0' || window.top !== window) return; pill.textContent = off ? 'AMX · off (Alt+A)' : paused ? 'AMX · paused (Make)' : `AMX · ${converted} converted`; if (document.body && !pill.isConnected) document.body.appendChild(pill); }
+  function paintPill(){ if (store.get('amxPill') === '0' || window.top !== window) return; pill.textContent = off ? 'AMX · off (Alt+A)' : editZone ? 'AMX · paused while typing' : `AMX · ${converted} converted`; if (document.body && !pill.isConnected) document.body.appendChild(pill); }
 
   watch(document.documentElement);
   scan(document.body);

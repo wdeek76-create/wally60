@@ -13,7 +13,6 @@ It only rewrites the text you see; it never clicks or changes anything on the si
 Prices are converted as shown (no fee added); anything under 3% or over 97% (fees etc.) is left alone.
 
 
-## Making orders (v1.8)
-- While you type in a box, the form around it stays in the site's %/¢ (no garbling).
-- Type American odds in a price box: `-150` / `+120`, then **Enter** or **Tab** -> it fills the % the site wants (60 / 45.5). Enter only converts; press Enter again to submit.
-- Or just type the % (e.g. 60 for -150).
+## Making orders (v1.9)
+- Click into any box / start typing: the whole page goes back to the site's own %/¢ (pill says "paused while typing"). Type the price the way the site wants it (%: -150 = 60, -110 = 52.4, +120 = 45.5).
+- Click out of the box: American odds again.
