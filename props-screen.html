@@ -290,6 +290,11 @@ body.am .tick{display:none!important}
 .lnstep .stp{width:38px;height:38px;border-radius:50%;border:1px solid var(--line2);background:var(--bg2);color:var(--text);display:flex;align-items:center;justify-content:center;transition:transform .1s,background .15s}
 .lnstep .stp:active{transform:scale(.92);background:var(--bg3)}.lnstep .stp:disabled{opacity:.25}
 .lnwas{font-size:10.5px;color:var(--sub)}
+/* one fixed-height row for "↺ main" / "from X" / the move note: it never grows or disappears, so the rows below stay put */
+.lnmeta{height:22px;display:flex;align-items:center;justify-content:center;gap:6px;overflow:hidden;white-space:nowrap;font-size:11px;margin-top:2px}
+.lnmeta .movenote{overflow:hidden;text-overflow:ellipsis;margin:0;padding:0}
+.lnmeta .was{flex:none}
+.lnmeta .lnback{margin-top:0;flex:none}
 .lnback{margin-top:2px;padding:2px 10px;border:0;border-radius:999px;background:var(--bg3);color:var(--sub);font-size:11px;font-weight:700}
 /* depth in the bars: bold, full-strength text (white in dark mode) */
 .bbxbar :is(.bbxbt,.bbxlv,.bbxlv b,.bbxlv .lc,.bbxtot,.bbxln,.dim,span:not(.liqd)),.qarbliqtxt,.qarbliqbar:not(:has(i)) .qarbliqtxt{color:var(--text)!important;opacity:1!important;font-weight:800!important}
@@ -3325,7 +3330,27 @@ const BOARD_MS = 2500; let boardBusy = false;
 const BOARD_FULL_MS = 30e3, BOARD_IDLE_MS = 5*60e3;
 let boardFullAt = { fx:null, at:0 }, boardTouchAt = Date.now();
 ['pointerdown','touchstart','scroll','keydown','wheel'].forEach(ev=>window.addEventListener(ev,()=>{ const idle=Date.now()-boardTouchAt>BOARD_IDLE_MS; boardTouchAt=Date.now(); if(idle && boardTimer && !boardBusy) refreshBoardOdds(); },{passive:true, capture:true}));
-function startBoardTimer(){ clearInterval(boardTimer); boardTimer=setInterval(()=>{ if(!document.hidden && !boardBusy) refreshBoardOdds(); }, BOARD_MS); }
+function startBoardTimer(){ clearInterval(boardTimer); boardTimer=setInterval(()=>{ if(!document.hidden && !boardBusy) refreshBoardOdds(); }, BOARD_MS);
+  clearInterval(exFastTimer); exFastTimer=setInterval(()=>{ if(!document.hidden && !exFastBusy && mode5On()) exFast(); }, EX_FAST_MS); }
+// My books on: the exchanges' money moves fastest -- Novig + ProphetX alone, every second, just the market on screen
+const EX_FAST_MS = 1000, EX_FAST_BOOKS = ['Novig','Prophet X'];
+let exFastTimer = null, exFastBusy = false;
+async function exFast(){
+  const p=current; if(!p || viewMode!=='sport' || !document.querySelector('.pcard')){ clearInterval(exFastTimer); exFastTimer=null; return; }
+  if(Date.now()-boardTouchAt > BOARD_IDLE_MS || boardBusy) return;
+  const mk=pMkeys(p)[curMktIdx]; if(!mk) return;
+  const bm=bookMode; bookMode=false; let names; try{ names=marketNamesFor(p,mk); } finally{ bookMode=bm; } if(!names.length) return;
+  exFastBusy=true; const fx=p.fixtureId, rows=[];
+  try{ const r=await oo('/fixtures/odds',{fixture_id:[fx],sportsbook:EX_FAST_BOOKS,market:names}); (r?.data?.[0]?.odds||[]).forEach(o=>{ o._fx=fx; if(mainBookRow(sportKey,o)) rows.push(o); }); }
+  catch(e){ return; } finally{ exFastBusy=false; }
+  if(current!==p || !rows.length || boardBusy) return;
+  const isEx=o=>EX_FAST_BOOKS.some(b=>b.toLowerCase()===String(o.sportsbook||'').toLowerCase()), nm=new Set(names.map(n=>String(n).toLowerCase())), mine=o=>o._fx===fx && nm.has(String(o.market||'').toLowerCase()) && isEx(o);
+  const got=new Set(rows.map(o=>String(o.sportsbook).toLowerCase()));   // only replace a book that answered
+  const keep=o=>!(mine(o) && got.has(String(o.sportsbook).toLowerCase()));
+  mainRows = mainRows.filter(keep).concat(rows.filter(o=>o.is_main!==false));
+  const ack=altKey(p,mk); if(altCache[ack]) altCache[ack]=altCache[ack].filter(keep).concat(rows);
+  const ctx=`${p.key}|${mk}`; if(document.querySelector(`.mk[data-ctx="${ctx}"]`)) rerenderCard(p,ctx);
+}
 async function refreshBoardOdds(){
   boardBusy=true; try{ await refreshBoardOdds0(); } finally{ boardBusy=false; }
 }
@@ -3446,9 +3471,8 @@ function marketCardHtml(p, mkey){
   return `<div class="mk${isSingle?' single':''}" data-ctx="${ctx}" data-line="${nowLine??''}">
     <div class="mkh">
       <div class="mkname">${esc(marketLabel(sportKey,mkey))}</div>
-      <div class="lnstep">${stp}<span class="lnbig">${line!=null?line:'—'}</span>${stpR}</div>${was?`<div class="lnwas">${was}</div>`:''}
-      ${tag}
-      ${note?`<div class="movenote">${esc(note)}</div>`:''}
+      <div class="lnstep">${stp}<span class="lnbig">${line!=null?line:'—'}</span>${stpR}</div>
+      <div class="lnmeta">${tag}${was}${note?`<span class="movenote">${esc(note)}</span>`:''}</div>
     </div>
     ${body}
   </div>`;
