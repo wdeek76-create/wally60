@@ -24,3 +24,6 @@ Prices are converted as shown (no fee added); anything under 3% or over 97% (fee
 ## v3.1
 - Fill now works by hand: click into the amount box -> a green **Fill $300** chip appears next to it -> tap it (or press **Alt+F**) and the amount goes in. Tap the bottom `Fill` button to change the amount / turn it off.
 - **⏎ Enter bets** (bottom button, on by default): pressing Enter presses the slip's Place / Submit button -- the one next to the box you're typing in. Once per 2 seconds max. Tap the button to turn it off.
+
+## v3.2
+- Hover helper removed. Instead a **yellow label right under the box you type your $ in**: "$300 wins $256 at -117 · to win $200: bet $235" (price taken from the slip; ProphetX after the fee). Live as you type.

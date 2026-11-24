@@ -4,7 +4,7 @@
 // converting as they move.
 // The big ON / OFF switch bottom-left (or Alt+A) flips back to the site's own prices -- turn it OFF to make an
 // order in %/¢, ON again after. Remembered.
-// Extras: ProphetX odds include its 2% fee on winnings · hover a price for "to win $X: bet $Y" (tap "Win" to pick
+// Extras: ProphetX odds include its 2% fee on winnings · a yellow label under the box you type your $ in shows what it wins (tap "Win" to pick
 // the amount) · "Fill": click into the amount box, tap the green chip (or Alt+F) and your amount goes in.
 (() => {
   const store = { get:k=>{ try{ return localStorage.getItem(k); }catch(e){ return null; } }, set:(k,v)=>{ try{ localStorage.setItem(k,v); }catch(e){} } };
@@ -99,7 +99,7 @@
     b.style.cssText = 'border:0;border-radius:999px;padding:7px 12px;cursor:pointer;font:inherit;box-shadow:0 2px 8px rgba(0,0,0,.35)';
     b.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); fn(); }); bar.appendChild(b); return b; };
   const bOn = mk('American odds on / off (Alt+A) -- OFF to make an order in the site\'s %/¢', () => setOff(!off));
-  const bWin = mk('Hover a price: how much to bet to win this amount (tap to change)', () => { winAmt = WINS[(WINS.indexOf(winAmt) + 1) % WINS.length]; store.set('amxWin', String(winAmt)); paint(); });
+  const bWin = mk('Shown under the box you type your $ in: how much to bet to win this amount (tap to change)', () => { winAmt = WINS[(WINS.indexOf(winAmt) + 1) % WINS.length]; store.set('amxWin', String(winAmt)); paint(); });
   const bFill = mk('Click into the amount box, then tap the green Fill chip (or Alt+F) -- tap here to change the amount', () => { fillAmt = FILLS[(FILLS.indexOf(fillAmt) + 1) % FILLS.length]; store.set('amxFill', String(fillAmt)); paint(); });
   let enterOn = store.get('amxEnter') !== '0';
   const bEnter = mk('Enter places the order (presses the slip\'s Place / Submit button) -- tap to turn on / off', () => { enterOn = !enterOn; store.set('amxEnter', enterOn ? '1' : '0'); paint(); });
@@ -113,22 +113,8 @@
     if (document.body && !bar.isConnected) document.body.appendChild(bar);
   }
 
-  // ── hover a converted price: "-117 · to win $200: bet $235" ──
-  const tip = document.createElement('div'); tip.setAttribute('data-amx-ui', '1');
-  tip.style.cssText = 'position:fixed;z-index:2147483647;padding:4px 9px;border-radius:8px;background:#111;color:#fff;font:700 12px system-ui,sans-serif;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,.4);display:none';
-  function hideTip(){ tip.style.display = 'none'; }
+  function hideTip(){ /* (hover helper removed -- see the slip label) */ }
   const usd = v => '$' + (v >= 100 ? Math.round(v) : v.toFixed(2)).toLocaleString();
-  document.addEventListener('mouseover', e => {
-    if (!winAmt || off) return hideTip();
-    const el = e.target; if (!el || el.closest?.('[data-amx-ui]')) return;
-    const tn = [...(el.childNodes || [])].find(n => n.nodeType === 3 && nodes.has(n) && mine.get(n) === n.nodeValue);
-    const m = tn && /([+-]\d{3,5})/.exec(tn.nodeValue); if (!m) return hideTip();
-    const p = prob.get(tn); if (!p) return hideTip();
-    tip.textContent = `${m[1]} · to win ${usd(winAmt)}: bet ${usd(winAmt / (netDec(p) - 1))}${IS_PX ? ' (after 2% fee)' : ''}`;
-    if (!tip.isConnected) document.body.appendChild(tip);
-    const r = el.getBoundingClientRect(); tip.style.left = Math.max(4, Math.min(innerWidth - 260, r.left)) + 'px'; tip.style.top = Math.max(4, r.top - 30) + 'px'; tip.style.display = 'block';
-  }, true);
-  document.addEventListener('scroll', hideTip, true);
 
   // ── Fill: click into the amount box -> a "Fill $300" chip pops up next to it; tap it (or Alt+F) and the amount
   // goes in. You pick the box, so it works whatever the site calls it. Never presses Place.
@@ -152,13 +138,49 @@
     const r = el.getBoundingClientRect(); chip.style.display = 'block';
     chip.style.left = Math.min(innerWidth - chip.offsetWidth - 4, r.right + 6) + 'px'; chip.style.top = Math.max(4, r.top + r.height / 2 - 13) + 'px';
     if (r.right + 6 + chip.offsetWidth > innerWidth) { chip.style.left = Math.max(4, r.left) + 'px'; chip.style.top = Math.max(4, r.top - 32) + 'px'; } };
-  const doFill = el => { if (!el || !fillAmt) return; setVal(el, String(fillAmt)); hideChip(); };
+  const doFill = el => { if (!el || !fillAmt) return; setVal(el, String(fillAmt)); hideChip(); setTimeout(() => typeof paintLab === 'function' && paintLab(), 50); };
   chip.addEventListener('mousedown', e => e.preventDefault());   // keep the cursor in the box
   chip.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); doFill(chipFor); });
   document.addEventListener('focusin', e => { const p = e.composedPath ? e.composedPath()[0] : e.target; if (p?.closest?.('[data-amx-ui]')) return; showChip(isBox(p) ? p : deep()); }, true);
   document.addEventListener('focusout', () => setTimeout(() => { const a = deep(); if (a !== chipFor && document.activeElement !== chip) hideChip(); }, 150), true);
   document.addEventListener('keydown', e => { if (e.altKey && (e.key === 'f' || e.key === 'F' || e.code === 'KeyF')) { const a = deep(); if (isBox(a) && fillAmt) { e.preventDefault(); doFill(a); } } }, true);
   window.addEventListener('scroll', () => { if (chipFor) showChip(chipFor); }, true);
+
+  // ── Slip label, right under the box you're typing your $ in (bright, can't miss it):
+  //    "$300 wins $256 at -117 · to win $200: bet $235"   (ProphetX: after its 2% fee)
+  // The price comes from the slip around the box: a price shown there, or the price box's value.
+  const lab = document.createElement('div'); lab.setAttribute('data-amx-ui', '1');
+  lab.style.cssText = 'position:fixed;z-index:2147483647;padding:5px 11px;border-radius:9px;background:#facc15;color:#111;font:800 13px system-ui,sans-serif;pointer-events:none;box-shadow:0 3px 10px rgba(0,0,0,.45);display:none;white-space:nowrap';
+  let labFor = null;
+  const upOne = x => x.parentElement || (x.getRootNode?.() instanceof ShadowRoot ? x.getRootNode().host : null);
+  const priceIn = v => { const t = String(v || '').replace(/[^\d.]/g, ''); if (!t || t === '.') return null; const n = parseFloat(t); const p = n < 1 ? n : n / 100; return p >= 0.02 && p <= 0.98 ? p : null; };
+  function slipPrice(box){
+    for (let a = upOne(box), k = 0; a && a !== document.body && a !== document.documentElement && k < 8; k++, a = upOne(a)) {
+      for (const n of nodes) if (n.isConnected && a.contains(n) && prob.get(n)) return prob.get(n);   // a price shown in the slip
+      const other = [...(a.querySelectorAll?.('input') || [])].find(i => i !== box && isBox(i) && priceIn(i.value) != null && /[%¢]|price|odds/i.test((i.parentElement?.innerText || '') + ' ' + (i.placeholder || '') + ' ' + (i.name || '')));
+      if (other) return priceIn(other.value);   // you're making it: the price box's value
+    }
+    return null;
+  }
+  function paintLab(){
+    const el = labFor; if (!el || !el.isConnected) { lab.style.display = 'none'; return; }
+    const p = slipPrice(el); if (p == null) { lab.style.display = 'none'; return; }
+    const d = netDec(p), a = amOfDec(d), am = a > 0 ? '+' + a : String(a);
+    const stake = parseFloat(String(el.isContentEditable ? el.textContent : el.value).replace(/[^\d.]/g, ''));
+    const parts = [];
+    if (stake > 0) parts.push(`${usd(stake)} wins ${usd(stake * (d - 1))} at ${am}`); else parts.push(am);
+    if (winAmt) parts.push(`to win ${usd(winAmt)}: bet ${usd(winAmt / (d - 1))}`);
+    lab.textContent = parts.join('  ·  ') + (IS_PX ? '  (fee in)' : '');
+    if (!lab.isConnected) document.body.appendChild(lab);
+    const r = el.getBoundingClientRect(); lab.style.display = 'block';
+    lab.style.left = Math.max(4, Math.min(innerWidth - lab.offsetWidth - 4, r.left)) + 'px';
+    lab.style.top = (r.bottom + 6 + lab.offsetHeight < innerHeight ? r.bottom + 6 : Math.max(4, r.top - lab.offsetHeight - 6)) + 'px';
+  }
+  document.addEventListener('focusin', e => { const t = e.composedPath ? e.composedPath()[0] : e.target; if (t?.closest?.('[data-amx-ui]')) return; if (isBox(t) && !t.closest?.('header,nav,[role="search"]') && t.type !== 'search') { labFor = t; paintLab(); } }, true);
+  ['input', 'keyup'].forEach(ev => document.addEventListener(ev, () => { if (labFor) requestAnimationFrame(paintLab); }, true));
+  document.addEventListener('focusout', () => setTimeout(() => { const a = deep(); if (a !== labFor && document.activeElement !== chip) { labFor = null; lab.style.display = 'none'; } }, 150), true);
+  window.addEventListener('scroll', () => { if (labFor) paintLab(); }, true);
+  setInterval(() => { if (labFor) paintLab(); }, 500);   // live price changes / the site re-drawing the slip
 
   // ── Enter = press the slip's Place / Submit button (the one next to where you're typing). Same button you'd click;
   // once per 2 seconds max. Never picks a bet or a price -- only presses what's already there.
