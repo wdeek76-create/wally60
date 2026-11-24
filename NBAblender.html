@@ -12547,7 +12547,7 @@ async function shareOpenPropsAsImageDiscord(betList) {
       const liqOf = nm => (b.liq && b.liq.books && b.liq.books[nm]) ? b.liq.books[nm].liq : null;
       const cands = (own ? [{ book: own, odds: b.ownLive != null ? Number(b.ownLive) : Number(b.odds), liq: liqOf(own) }] : [])
         .concat((Array.isArray(b.altBooks) ? b.altBooks : []).filter(a => a && a.book && a.odds != null && (a.line == null || Number(a.line) === Number(b.line))).map(a => ({ book: a.book, odds: Number(a.odds), liq: a.liq != null ? a.liq : liqOf(a.book) })));
-      const elig = cands.filter(c => _mHeadlineBook(_mBookName(c.book)) || (_mIsExchange(c.book) && c.liq != null && c.liq >= MORNING_EXCH_MIN_LIQ));
+      const elig = cands.filter(c => _mHeadlineBook(_mBookName(c.book)) || (_mIsExchange(c.book) && c.liq != null && c.liq > 0));
       if (!elig.length) { dropped.push(b.player); return null; }
       const best = elig.reduce((a, c) => c.odds > a.odds ? c : a);
       const fairProb = b.fair != null && Number(b.fair) > 0 ? Number(b.fair) / (Number(b.fair) > 1 ? 100 : 1) : null;
@@ -28735,6 +28735,10 @@ function _mPostTitle(picks) {
 async function morningPostNick() {
   const hook = getNickWebhook();
   if (!hook) { morningSetNickWebhook(); return; }
+  _mStrictNick = true;   // Nick's card: FanDuel / Prop Builder / Pinnacle / Bet105 (or an exchange with the size) only
+  try { await _morningPostNickInner(hook); } finally { _mStrictNick = false; }
+}
+async function _morningPostNickInner(hook) {
   let picks = morningCardPicks();
   if (MORNING_PROFILE === "tipoff") return _mPostNickByGame(hook, picks);   // TIP OFF goes out game by game as lineups confirm: one post per game, only picks Nick hasn't had yet
   if (!picks.length) { showToast("No pending morning picks to send"); return; }
@@ -28796,8 +28800,7 @@ async function _mPostNickByGame(hook, picks) {
 async function morningPostDiscord() {
   const hook = getMorningWebhook();
   if (!hook) { morningSetWebhook(); return; }
-  _mWideHeadline = true;   // Discord: any of our books can be the headline price
-  try { await _morningPostDiscordInner(hook); } finally { _mWideHeadline = false; }
+  await _morningPostDiscordInner(hook);
 }
 async function _morningPostDiscordInner(hook) {
   let picks = morningCardPicks();
@@ -28889,10 +28892,12 @@ async function morningRefreshPicks(picks) {
     const pricedOurs = pricedAll.filter(x => _mOurBook(x.book));
     const priced = pricedOurs.length ? pricedOurs : pricedAll;     // the headline price comes from our books only (if none has a price the pick is dropped on this run)
     priced.forEach(x => { if (_mIsExchange(x.book)) x.liq = depthOf(x.book); });
-    const playable = priced.filter(x => _mHeadlineBook(_mBookName(x.book)) || (_mIsExchange(x.book) && x.liq != null && x.liq >= MORNING_EXCH_MIN_LIQ));   // headline = FD / Prop Builder / Pinnacle / Bet105, or an exchange with the size
-    let best = playable[0] || priced[0];
+    const playable = priced.filter(x => _mHeadlineBook(_mBookName(x.book)) || (_mIsExchange(x.book) && x.liq != null && x.liq > 0));   // headline = FD / Prop Builder / Pinnacle / Bet105, or an exchange with the size
+    const strictX = x => _mStrictBook(_mBookName(x.book)) || (_mIsExchange(x.book) && x.liq != null && x.liq >= MORNING_EXCH_MIN_LIQ);
+    const pool = (_mStrictNick && playable.some(strictX)) ? playable.filter(strictX) : playable;
+    let best = pool[0] || priced[0];
     if (!best) { b.liveMissing = true; return; }
-    playable.forEach(x => { if (x.odds > best.odds || (x.odds === best.odds && rank(x.book) < rank(best.book))) best = x; });
+    pool.forEach(x => { if (x.odds > best.odds || (x.odds === best.odds && rank(x.book) < rank(best.book))) best = x; });
     if (!best.book || /^propshop$/i.test(String(best.book).trim())) { const inf = inferBookFromAlts(best.odds, b.line, priced.filter(x => x !== best).map(x => ({ book: x.book, odds: x.odds, line: b.line }))); if (inf) best = priced.find(x => x.book === inf && x.odds === best.odds) || best; }   // "PropShop" is only a placeholder for a board price whose book was not read
     b.odds = best.odds; b.book = best.book;
     b.altBooks = priced.filter(x => x !== best && !(x.book === best.book && x.odds === best.odds)).map(x => ({ book: x.book, odds: x.odds, liq: x.liq != null ? x.liq : null }));
@@ -28925,13 +28930,17 @@ const _mOurBook = bk => { const n = _mBookName(bk); return !!n && ALT_BOOKS_ORDE
 // The HEADLINE price (the one we track and put on the card) must be FanDuel, Prop Builder, Pinnacle or Bet105 — or an exchange with at least
 // MORNING_EXCH_MIN_LIQ at that price. Every other book of ours (DraftKings, Kambi, Fliff, Bookmaker, exchanges under that depth) is an alt book only.
 const MORNING_HEADLINE_BOOKS = new Set(["FanDuel", "Prop Builder", "Pinnacle", "Bet105"]);
-// Discord card: every one of our books can headline (like the NHL blender), not just the four above; exchanges still need the $500. Nick stays strict.
-let _mWideHeadline = false;
-const _mHeadlineBook = n => MORNING_HEADLINE_BOOKS.has(n) || (_mWideHeadline && _mOurBook(n) && !_mIsExchange(n));
+// A pick is REAL (stays logged, goes on the Discord card, SALT, copies) when any of our books has it at the play-to, or an exchange with the $500
+// (like the NHL blender). Only NICK's card keeps the strict four: a pick that fails that is left off his card, never dropped from the log.
+let _mStrictNick = false;
+const _mHeadlineBook = n => MORNING_HEADLINE_BOOKS.has(n) || (_mOurBook(n) && !_mIsExchange(n));
+const _mStrictBook = n => MORNING_HEADLINE_BOOKS.has(n);
+const _mStrictOk = b => { const n = _mBookName(b && b.book); if (!n) return false; if (_mStrictBook(n)) return true; if (_mIsExchange(n)) { const l = _mExchLiq(b, n); return l != null && l >= MORNING_EXCH_MIN_LIQ; } return false; };   // Nick: exchange needs the $500
+const _mExchLiq = (b, n) => (b.liqBooks && b.liqBooks[n] && b.liqBooks[n].liq != null) ? b.liqBooks[n].liq : ((b.sourcePrices || []).find(x => _mBookName(x.book) === n && x.odds === b.odds) || {}).liq;
 const _mHeadlineOk = b => {
   const n = _mBookName(b && b.book); if (!n) return false;
   if (_mHeadlineBook(n)) return true;
-  if (_mIsExchange(n)) { const l = (b.liqBooks && b.liqBooks[n] && b.liqBooks[n].liq != null) ? b.liqBooks[n].liq : ((b.sourcePrices || []).find(x => _mBookName(x.book) === n && x.odds === b.odds) || {}).liq; return l != null && l >= MORNING_EXCH_MIN_LIQ; }
+  if (_mIsExchange(n)) { const l = _mExchLiq(b, n); return l != null && l > 0; }   // an exchange with ANY size at the play-to is a real price (the card shows the depth: more is better)
   return false;
 };
 const _mRealBook = _mHeadlineOk;
@@ -28966,14 +28975,16 @@ function _mDropUnpriced(picks) {
   const unbooked = picks.filter(b => _mPlaceholderBook(b.book));
   if (unbooked.length) { const ids = new Set(unbooked.map(x => String(x.id))); morningDropUnbooked(true); picks = picks.filter(x => !ids.has(String(x.id))); try { renderMorning(); } catch (e) {} showToast(`Dropped ${unbooked.length} pick${unbooked.length === 1 ? "" : "s"} with no real book (log + Tracker): ${unbooked.slice(0, 4).map(x => displayPlayerName(x.player)).join(", ")}`); }
   const inRange = b => _mInRange(b, b.odds);   // the price we can actually get is still at the play-to or better
-  const kept = picks.filter(b => _mRealBook(b) && inRange(b) && !b.liveMissing), dropped = picks.filter(x => !kept.includes(x));
+  const real = picks.filter(b => _mRealBook(b) && inRange(b) && !b.liveMissing);
+  const kept = _mStrictNick ? real.filter(_mStrictOk) : real, dropped = picks.filter(x => !kept.includes(x));
+  const offNick = _mStrictNick ? real.filter(b => !kept.includes(b)) : [];   // real plays Nick's card leaves off: they stay in the log
   kept.forEach(b => { delete b.cardSkip; b.cardAt = Date.now(); });
   if (morningToTrackerOn()) { let n = 0; kept.forEach(b => { try { if (_mPushTracker(b, true)) n++; } catch (e) {} }); if (n) { try { saveBets(); } catch (e) {} } }
-  dropped.forEach(b => { b.cardSkip = b.liveMissing ? "its book no longer posts this line" : !_mHeadlineOk(b) ? "no FD / PB / PIN / Bet105 price (or exchange under $" + MORNING_EXCH_MIN_LIQ + ") on this run" : "price is past the play-to"; });
-  // only official bets (the ones that reach the Tracker) stay: a pick with no real price at the play-to is removed from the Morning log, not kept as a board-only entry
-  { const gone = new Set(dropped.filter(b => b.result === "pending" && !b.trackerId).map(b => String(b.id))); if (gone.size) morningBets = morningBets.filter(b => !gone.has(String(b.id))); }
+  dropped.forEach(b => { b.cardSkip = offNick.includes(b) ? "not on Nick's card: no FD / PB / PIN / Bet105 price on this run (still a play at " + (b.book || "another book") + ")" : b.liveMissing ? "its book no longer posts this line" : !_mHeadlineOk(b) ? "no price at one of our books (or exchange under $" + MORNING_EXCH_MIN_LIQ + ") on this run" : "price is past the play-to"; });
+  // only official bets (the ones that reach the Tracker) stay: a pick with no real price at the play-to at ANY of our books is removed from the Morning log
+  { const gone = new Set(dropped.filter(b => b.result === "pending" && !b.trackerId && !offNick.includes(b)).map(b => String(b.id))); if (gone.size) morningBets = morningBets.filter(b => !gone.has(String(b.id))); }
   try { saveMorningBets(); } catch (e) {}
-  if (dropped.length) showToast(`Left off the card (no FanDuel / Prop Builder / Pinnacle / Bet105 price, or an exchange with the size, at the play-to on this run): ${dropped.slice(0, 4).map(x => displayPlayerName(x.player)).join(", ")}${dropped.length > 4 ? " +" + (dropped.length - 4) + " more" : ""}`);
+  if (dropped.length) showToast(`Left off the card (${_mStrictNick ? "no FanDuel / Prop Builder / Pinnacle / Bet105 price" : "no price at one of our books"}, or an exchange with the size, at the play-to on this run): ${dropped.slice(0, 4).map(x => displayPlayerName(x.player)).join(", ")}${dropped.length > 4 ? " +" + (dropped.length - 4) + " more" : ""}${offNick.length ? " \u00b7 kept in the log" : ""}`);
   return kept;
 }
 async function morningSendCard(mode) {
