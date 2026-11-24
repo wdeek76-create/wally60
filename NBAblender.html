@@ -12547,7 +12547,7 @@ async function shareOpenPropsAsImageDiscord(betList) {
       const liqOf = nm => (b.liq && b.liq.books && b.liq.books[nm]) ? b.liq.books[nm].liq : null;
       const cands = (own ? [{ book: own, odds: b.ownLive != null ? Number(b.ownLive) : Number(b.odds), liq: liqOf(own) }] : [])
         .concat((Array.isArray(b.altBooks) ? b.altBooks : []).filter(a => a && a.book && a.odds != null && (a.line == null || Number(a.line) === Number(b.line))).map(a => ({ book: a.book, odds: Number(a.odds), liq: a.liq != null ? a.liq : liqOf(a.book) })));
-      const elig = cands.filter(c => MORNING_HEADLINE_BOOKS.has(_mBookName(c.book)) || (_mIsExchange(c.book) && c.liq != null && c.liq >= MORNING_EXCH_MIN_LIQ));
+      const elig = cands.filter(c => _mHeadlineBook(_mBookName(c.book)) || (_mIsExchange(c.book) && c.liq != null && c.liq >= MORNING_EXCH_MIN_LIQ));
       if (!elig.length) { dropped.push(b.player); return null; }
       const best = elig.reduce((a, c) => c.odds > a.odds ? c : a);
       const fairProb = b.fair != null && Number(b.fair) > 0 ? Number(b.fair) / (Number(b.fair) > 1 ? 100 : 1) : null;
@@ -28796,6 +28796,10 @@ async function _mPostNickByGame(hook, picks) {
 async function morningPostDiscord() {
   const hook = getMorningWebhook();
   if (!hook) { morningSetWebhook(); return; }
+  _mWideHeadline = true;   // Discord: any of our books can be the headline price
+  try { await _morningPostDiscordInner(hook); } finally { _mWideHeadline = false; }
+}
+async function _morningPostDiscordInner(hook) {
   let picks = morningCardPicks();
   if (!picks.length) { showToast("No pending morning picks to send"); return; }
   if (!confirm(`Post ${picks.length} morning pick${picks.length === 1 ? "" : "s"} to Discord now?`)) return;
@@ -28885,7 +28889,7 @@ async function morningRefreshPicks(picks) {
     const pricedOurs = pricedAll.filter(x => _mOurBook(x.book));
     const priced = pricedOurs.length ? pricedOurs : pricedAll;     // the headline price comes from our books only (if none has a price the pick is dropped on this run)
     priced.forEach(x => { if (_mIsExchange(x.book)) x.liq = depthOf(x.book); });
-    const playable = priced.filter(x => MORNING_HEADLINE_BOOKS.has(_mBookName(x.book)) || (_mIsExchange(x.book) && x.liq != null && x.liq >= MORNING_EXCH_MIN_LIQ));   // headline = FD / Prop Builder / Pinnacle / Bet105, or an exchange with the size
+    const playable = priced.filter(x => _mHeadlineBook(_mBookName(x.book)) || (_mIsExchange(x.book) && x.liq != null && x.liq >= MORNING_EXCH_MIN_LIQ));   // headline = FD / Prop Builder / Pinnacle / Bet105, or an exchange with the size
     let best = playable[0] || priced[0];
     if (!best) { b.liveMissing = true; return; }
     playable.forEach(x => { if (x.odds > best.odds || (x.odds === best.odds && rank(x.book) < rank(best.book))) best = x; });
@@ -28921,9 +28925,12 @@ const _mOurBook = bk => { const n = _mBookName(bk); return !!n && ALT_BOOKS_ORDE
 // The HEADLINE price (the one we track and put on the card) must be FanDuel, Prop Builder, Pinnacle or Bet105 — or an exchange with at least
 // MORNING_EXCH_MIN_LIQ at that price. Every other book of ours (DraftKings, Kambi, Fliff, Bookmaker, exchanges under that depth) is an alt book only.
 const MORNING_HEADLINE_BOOKS = new Set(["FanDuel", "Prop Builder", "Pinnacle", "Bet105"]);
+// Discord card: every one of our books can headline (like the NHL blender), not just the four above; exchanges still need the $500. Nick stays strict.
+let _mWideHeadline = false;
+const _mHeadlineBook = n => MORNING_HEADLINE_BOOKS.has(n) || (_mWideHeadline && _mOurBook(n) && !_mIsExchange(n));
 const _mHeadlineOk = b => {
   const n = _mBookName(b && b.book); if (!n) return false;
-  if (MORNING_HEADLINE_BOOKS.has(n)) return true;
+  if (_mHeadlineBook(n)) return true;
   if (_mIsExchange(n)) { const l = (b.liqBooks && b.liqBooks[n] && b.liqBooks[n].liq != null) ? b.liqBooks[n].liq : ((b.sourcePrices || []).find(x => _mBookName(x.book) === n && x.odds === b.odds) || {}).liq; return l != null && l >= MORNING_EXCH_MIN_LIQ; }
   return false;
 };
