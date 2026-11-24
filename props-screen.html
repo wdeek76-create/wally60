@@ -164,9 +164,9 @@ main{flex:1;padding:12px calc(var(--sar) + 12px) max(160px, calc(var(--ftrh,76px
 .pcard>*{position:relative}
 .ptop{display:flex;flex-direction:column;align-items:center;gap:8px;text-align:center}
 .hs{width:64px;height:64px;border-radius:50%;background:var(--bg3);border:2px solid var(--line2);object-fit:cover;flex:0 0 auto;display:flex;align-items:center;justify-content:center;font-weight:800;color:var(--dim);font-size:16px;overflow:hidden}
-.hs img{width:100%;height:100%;object-fit:cover}
+.pcard .hs{overflow:hidden}.hs img{width:100%;height:100%;object-fit:cover}.hs img.hsx{object-position:50% 12%;transform:scale(1.18);transform-origin:50% 22%;image-rendering:auto}
 .hswrap{position:relative;flex:0 0 auto}
-.hswrap .posbadge{position:absolute;right:-6px;bottom:-2px;background:var(--purple);color:var(--text);font-size:9px;font-weight:800;letter-spacing:.3px;padding:2px 6px;border-radius:999px;border:2px solid var(--bg2);white-space:nowrap}
+.hswrap .posbadge{position:absolute;right:-6px;bottom:-2px;background:var(--text);color:var(--bg2);font-size:10px;font-weight:900;letter-spacing:.3px;padding:2px 6px;border-radius:999px;border:2px solid var(--bg2);white-space:nowrap}
 .pname{font-family:var(--oddsfont);font-size:18px;font-weight:800;letter-spacing:-.2px;display:flex;align-items:center;justify-content:center;gap:8px;flex-wrap:wrap}
 .tl{width:18px;height:18px;object-fit:contain;vertical-align:middle}
 .pname .tl{width:32px;height:32px}
@@ -2123,6 +2123,34 @@ let current = null;         // selected player index entry
 const altCache = {};        // fixtureId|marketName -> rows (every line, not just main)
 const altPending = {};
 const playerInfo = {};      // pid -> {team, teamId, pos, headshot}
+// Sharper player photos: ESPN's full-size headshots (1040px) instead of the small feed logo. Built from ESPN's
+// team rosters (name -> ESPN id), cached 3 days; any player ESPN doesn't have keeps the old photo.
+const ESPN_LG = { nba:'nba', wnba:'wnba' }, espnHsP = {};
+function espnHsMap(lg){
+  if(espnHsP[lg]) return espnHsP[lg];
+  return espnHsP[lg]=(async()=>{
+    try{ const c=JSON.parse(LS.get('props_espnhs_'+lg,'null')); if(c && Date.now()-c.at<3*86400e3 && Object.keys(c.map||{}).length>50) return c.map; }catch(e){}
+    const map={};
+    try{
+      const tr=await fetch(`https://site.api.espn.com/apis/site/v2/sports/basketball/${lg}/teams`).then(r=>r.json());
+      const ids=(tr?.sports?.[0]?.leagues?.[0]?.teams||[]).map(t=>t.team?.id).filter(Boolean);
+      for(let i=0;i<ids.length;i+=6) await Promise.all(ids.slice(i,i+6).map(id=>fetch(`https://site.api.espn.com/apis/site/v2/sports/basketball/${lg}/teams/${id}/roster`).then(r=>r.json()).then(j=>{
+        (j?.athletes||[]).forEach(a=>{ const nm=normName(a.fullName||a.displayName||''); if(nm && a.id) map[nm]=a.id; }); }).catch(()=>{})));
+    }catch(e){ espnHsP[lg]=null; return {}; }
+    if(Object.keys(map).length>50) LS.set('props_espnhs_'+lg, JSON.stringify({ at:Date.now(), map }));
+    else espnHsP[lg]=null;   // try again next time
+    return map; })();
+}
+async function espnHeadshot(p){
+  const lg=ESPN_LG[sportKey]; if(!lg || !p || p.isTeam || p.isGame) return null;
+  const map=await espnHsMap(lg); const id=map?.[p.key] || map?.[normName(p.name)]; return id ? `https://a.espncdn.com/i/headshots/${lg}/players/full/${id}.png` : null;
+}
+// swap the photo on the open player card for the sharp one once it's loaded
+async function hsUpgrade(p){
+  const url=await espnHeadshot(p).catch(()=>null); if(!url || current!==p) return;
+  const im=new Image(); im.onload=()=>{ if(current!==p) return; const box=document.querySelector('.pcard .hs'); if(!box) return;
+    box.innerHTML=''; const i=document.createElement('img'); i.src=url; i.alt=''; i.className='hsx'; box.appendChild(i); }; im.src=url;
+}
 let injuries = { byPid:{}, byName:{}, at:0 };   // from /injuries
 // OpticOdds injuries are off (RotoWire's box on the player page is the news source): no pills, notes or fetch
 const OPTIC_INJ_OFF = true;
@@ -3252,12 +3280,19 @@ const rwOpen = new Set();   // blurbs you expanded
 // over 38 minutes" -> {pts:18, reb:11, ast:5, stl:1, blk:2, min:38, '3pm':..}
 const RW_NUM = {zero:0,one:1,two:2,three:3,four:4,five:5,six:6,seven:7,eight:8,nine:9,ten:10,eleven:11,twelve:12,thirteen:13,fourteen:14,fifteen:15,sixteen:16,seventeen:17,eighteen:18,nineteen:19,twenty:20};
 function rwStats(txt){
-  const t=String(txt||'').toLowerCase().replace(/–|—/g,'-'); const n=w=>w==null?null:(/^\d+$/.test(w)?+w:RW_NUM[w]??null);
-  const W='(\\d+|'+Object.keys(RW_NUM).join('|')+')', get=re=>{ const m=new RegExp(W+'\\s+'+re).exec(t); return m?n(m[1]):null; };
-  const o={ pts:get('points?\\b'), reb:get('(?:total\\s+)?rebounds?\\b'), ast:get('assists?\\b'), stl:get('steals?\\b'), blk:get('blocks?\\b'), min:get('minutes?\\b') };
-  { const bl=new RegExp('blocked\\s+'+W+'\\s+shots?').exec(t); if(o.blk==null && bl) o.blk=n(bl[1]); const st=new RegExp('(?:stole|swiped)\\s+'+W).exec(t); if(o.stl==null && st) o.stl=n(st[1]); }
-  // threes: "(2-5 3Pt" / "4-for-8 from deep" / "three 3-pointers"
-  let m=/(\d+)-(?:for-)?(\d+)\s*(?:3pt|3-pt|threes|from (?:deep|three|beyond the arc|downtown))/.exec(t); if(m) o['3pm']=+m[1];
+  let t=String(txt||'').toLowerCase().replace(/[–—]/g,'-');
+  // words -> digits first ("twenty-two" -> 22, "five" -> 5), so a number is always read whole
+  const TENS={twenty:20,thirty:30,forty:40,fifty:50};
+  t=t.replace(/\b(twenty|thirty|forty|fifty)-(one|two|three|four|five|six|seven|eight|nine)\b/g,(m,a,b)=>String(TENS[a]+RW_NUM[b]));
+  t=t.replace(/\b(twenty|thirty|forty|fifty)\b/g,m=>String(TENS[m]));
+  t=t.replace(new RegExp('\\b('+Object.keys(RW_NUM).sort((a,b)=>b.length-a.length).join('|')+')\\b','g'),m=>String(RW_NUM[m]));
+  // only the game line: stop before season / average talk ("He's averaging 2.1 rebounds ...")
+  const cut=t.search(/\b(averag|on the season|this season|per game|over his last|over the last|in his last|across his last)/); if(cut>0) t=t.slice(0,cut);
+  const get=re=>{ const m=new RegExp('(?:^|[^\\d.-])(\\d+)\\s+'+re).exec(t); return m?+m[1]:null; };
+  const o={ pts:get('points?\\b'), reb:get('(?:total\\s+|offensive\\s+)?(?:rebounds?|boards)\\b'), ast:get('assists?\\b'), stl:get('steals?\\b'), blk:get('blocks?\\b'), min:get('minutes?\\b') };
+  { const bl=/blocked\s+(\d+)\s+shots?/.exec(t); if(o.blk==null && bl) o.blk=+bl[1]; const st=/(?:stole|swiped)\s+(\d+)/.exec(t); if(o.stl==null && st) o.stl=+st[1]; }
+  // threes: "(2-5 3pt" / "4-for-8 from deep" / "3 3-pointers"
+  const m=/(\d+)-(?:for-)?(\d+)\s*(?:3pt|3-pt|threes|from (?:deep|three|beyond the arc|downtown))/.exec(t); if(m) o['3pm']=+m[1];
   else { const t3=get("(?:3-pointers?|three-pointers?|treys?)\\b"); if(t3!=null) o['3pm']=t3; }
   if(o.pts==null && o.reb==null && o.ast==null) return null;
   return o;
@@ -3346,6 +3381,7 @@ async function openPlayer(p, startAt, keepScroll){
   // Pinned above the search bar instead of inline in the scrolling card, so switching players
   // from here never yanks the screen back to the top of a new page.
   renderGstripDock(p, mkeys[startIdx]);
+  hsUpgrade(p);
   bindView(p);
   initMarketScroll(mkeys, startIdx);
   startBoardTimer();
