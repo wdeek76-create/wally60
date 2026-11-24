@@ -13,23 +13,9 @@ It only rewrites the text you see; it never clicks or changes anything on the si
 Prices are converted as shown (no fee added); anything under 3% or over 97% (fees etc.) is left alone.
 
 
-## Making orders (v1.9)
-- Click into any box / start typing: the whole page goes back to the site's own %/¢ (pill says "paused while typing"). Type the price the way the site wants it (%: -150 = 60, -110 = 52.4, +120 = 45.5).
-- Click out of the box: American odds again.
-
-
-## v2.0
-- **ProphetX:** the 2% fee on winnings is baked into every price shown (what you actually get).
-- **To-win helper:** tap the AMX pill to cycle $100 / $150 / $200 / $300 / $400 / off (remembered). Hover any converted price: "to win $200: bet $234". Shift+tap the pill hides it.
-
-
-## v2.1
-- Typing a price in the order box (Make): a label above it shows that price in American odds + how much to bet to win your pill amount (ProphetX: after the 2% fee).
-
-
-## v2.2
-- Click a price in the order book: when the site drops it into the price box, the label shows that price (American odds + bet to win your amount). Esc hides it.
-
-
-## v2.3
-- **Fill** pill (above AMX): tap cycles off / $100 / $200 / $300 / $500 (remembered). When the bet slip opens with an empty amount box, that amount is typed in (never the price box, never over something you typed, never presses Place). If the slip shows a smaller max / available amount, that goes in instead.
+## v3.0
+- American odds everywhere, all the time (like 1.2).
+- **Bottom-left switch:** `AMX ON` (green) / `AMX OFF · %/¢` (grey) -- tap OFF to make an order in the site's own prices, ON when you're done. Remembered. Alt+A does the same.
+- ProphetX odds include its 2% fee on winnings.
+- `Win $X`: hover a price to see how much to bet to win that amount (tap to change / turn off).
+- `Fill $X`: an empty bet-slip amount box gets that amount (or the smaller max shown). Never the price box, never over what you typed, never presses Place. Tap to change / turn off.
