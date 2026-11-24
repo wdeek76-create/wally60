@@ -5,7 +5,7 @@
 // The big ON / OFF switch bottom-left (or Alt+A) flips back to the site's own prices -- turn it OFF to make an
 // order in %/¢, ON again after. Remembered.
 // Extras: ProphetX odds include its 2% fee on winnings · hover a price for "to win $X: bet $Y" (tap "Win" to pick
-// the amount) · "Fill" drops a default amount into an empty bet-slip amount box (never presses anything).
+// the amount) · "Fill": click into the amount box, tap the green chip (or Alt+F) and your amount goes in.
 (() => {
   const store = { get:k=>{ try{ return localStorage.getItem(k); }catch(e){ return null; } }, set:(k,v)=>{ try{ localStorage.setItem(k,v); }catch(e){} } };
   let off = store.get('amxOff') === '1';
@@ -100,12 +100,15 @@
     b.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); fn(); }); bar.appendChild(b); return b; };
   const bOn = mk('American odds on / off (Alt+A) -- OFF to make an order in the site\'s %/¢', () => setOff(!off));
   const bWin = mk('Hover a price: how much to bet to win this amount (tap to change)', () => { winAmt = WINS[(WINS.indexOf(winAmt) + 1) % WINS.length]; store.set('amxWin', String(winAmt)); paint(); });
-  const bFill = mk('Drop this amount into an empty bet-slip amount box (tap to change)', () => { fillAmt = FILLS[(FILLS.indexOf(fillAmt) + 1) % FILLS.length]; store.set('amxFill', String(fillAmt)); paint(); });
+  const bFill = mk('Click into the amount box, then tap the green Fill chip (or Alt+F) -- tap here to change the amount', () => { fillAmt = FILLS[(FILLS.indexOf(fillAmt) + 1) % FILLS.length]; store.set('amxFill', String(fillAmt)); paint(); });
+  let enterOn = store.get('amxEnter') !== '0';
+  const bEnter = mk('Enter places the order (presses the slip\'s Place / Submit button) -- tap to turn on / off', () => { enterOn = !enterOn; store.set('amxEnter', enterOn ? '1' : '0'); paint(); });
   function paint(){
     if (window.top !== window) return;
     bOn.textContent = off ? 'AMX OFF · %/¢' : `AMX ON${IS_PX ? ' · fee in' : ''}`;
     bOn.style.background = off ? '#3f3f46' : '#16a34a'; bOn.style.color = '#fff';
     bWin.textContent = winAmt ? `Win $${winAmt}` : 'Win off'; bWin.style.background = '#111'; bWin.style.color = winAmt ? '#fff' : '#9ca3af';
+    bEnter.textContent = enterOn ? '⏎ Enter bets' : '⏎ off'; bEnter.style.background = enterOn ? '#1d4ed8' : '#111'; bEnter.style.color = enterOn ? '#fff' : '#9ca3af';
     bFill.textContent = fillAmt ? `Fill $${fillAmt}` : 'Fill off'; bFill.style.background = '#111'; bFill.style.color = fillAmt ? '#fff' : '#9ca3af';
     if (document.body && !bar.isConnected) document.body.appendChild(bar);
   }
@@ -127,35 +130,60 @@
   }, true);
   document.addEventListener('scroll', hideTip, true);
 
-  // ── Fill: an EMPTY amount box in the bet slip gets your default amount (or the smaller max shown). Never the
-  // price box, never over something you typed, never presses Place.
-  const allBoxes = () => { const out = []; const walk = root => { root.querySelectorAll?.('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"])').forEach(i => out.push(i));
-      root.querySelectorAll?.('*').forEach(el => { if (el.shadowRoot) walk(el.shadowRoot); }); }; walk(document); return out; };
-  const labelOf = i => { const bits = [i.placeholder, i.name, i.id, i.getAttribute('aria-label')];
-    try { if (i.id) { const l = document.querySelector(`label[for="${CSS.escape(i.id)}"]`); if (l) bits.push(l.textContent); } } catch (e) {}
-    const par = i.parentElement; if (par) bits.push((par.innerText || '').slice(0, 80));
-    if (par && !(par.innerText || '').trim() && par.parentElement) bits.push((par.parentElement.innerText || '').slice(0, 80));
-    return bits.filter(Boolean).join(' ').toLowerCase(); };
-  const isPriceBox = t => /\b(price|odds|limit price|probability|chance)\b|%|¢/.test(t);
-  const isAmountBox = t => /\b(amount|stake|wager|risk|bet size|size|spend|cost|quantity|contracts|shares|buy for)\b/.test(t) || /\$/.test(t);
-  const maxNear = i => { let a = i.parentElement; for (let k = 0; k < 4 && a; k++, a = a.parentElement) { const m = /(?:max|available|avail\.?|up to|liquidity)[^$\d]{0,12}\$?\s?([\d,]+(?:\.\d+)?)/i.exec(a.innerText || ''); if (m) return parseFloat(m[1].replace(/,/g, '')); } return null; };
-  const setVal = (el, v) => { const d = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), 'value'); if (d?.set) d.set.call(el, v); else el.value = v;
-    el.dispatchEvent(new Event('input', { bubbles: true, composed: true })); el.dispatchEvent(new Event('change', { bubbles: true, composed: true })); };
-  const filled = new WeakSet();
-  function tryFill(){
-    if (!fillAmt) return;
-    for (const i of allBoxes()) {
-      if (filled.has(i) || !i.isConnected || i.disabled || i.readOnly || i.value) continue;
-      if (i.type === 'search' || /search/i.test(i.placeholder || '') || i.closest?.('header,nav,[role="search"]')) continue;
-      const r = i.getBoundingClientRect(); if (!r.width || !r.height) continue;
-      const t = labelOf(i); if (isPriceBox(t) || !isAmountBox(t)) continue;
-      filled.add(i);
-      const mx = maxNear(i), amt = mx != null && mx > 0 && mx < fillAmt ? mx : fillAmt;
-      setVal(i, String(amt));
-    }
+  // ── Fill: click into the amount box -> a "Fill $300" chip pops up next to it; tap it (or Alt+F) and the amount
+  // goes in. You pick the box, so it works whatever the site calls it. Never presses Place.
+  const setVal = (el, v) => {
+    if (el.isContentEditable) { el.focus(); document.execCommand('selectAll', false); document.execCommand('insertText', false, v); return; }
+    el.focus(); try { el.select?.(); } catch (e) {}
+    // typing it in like a person first (works with sites that ignore programmatic values), then the React-safe setter
+    let ok = false; try { ok = document.execCommand('insertText', false, v); } catch (e) {}
+    if (!ok || el.value !== v) { const d = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), 'value'); if (d?.set) d.set.call(el, v); else el.value = v;
+      el.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, inputType: 'insertText', data: v })); }
+    el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+  };
+  const isBox = el => !!el && (el.isContentEditable || el.tagName === 'TEXTAREA' || (el.tagName === 'INPUT' && !/^(hidden|checkbox|radio|button|submit|range|color|file|search)$/i.test(el.type || '')));
+  const deep = () => { let a = document.activeElement; while (a?.shadowRoot?.activeElement) a = a.shadowRoot.activeElement; return a; };
+  const chip = document.createElement('button'); chip.type = 'button'; chip.setAttribute('data-amx-ui', '1');
+  chip.style.cssText = 'position:fixed;z-index:2147483647;border:0;border-radius:999px;padding:5px 11px;background:#16a34a;color:#fff;font:800 12px system-ui,sans-serif;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.4);display:none';
+  let chipFor = null;
+  const hideChip = () => { chip.style.display = 'none'; chipFor = null; };
+  const showChip = el => { if (!fillAmt || !isBox(el) || /search/i.test(el.placeholder || '') || el.closest?.('header,nav,[role="search"]')) return hideChip();
+    chipFor = el; chip.textContent = `Fill $${fillAmt}`; if (!chip.isConnected) document.body.appendChild(chip);
+    const r = el.getBoundingClientRect(); chip.style.display = 'block';
+    chip.style.left = Math.min(innerWidth - chip.offsetWidth - 4, r.right + 6) + 'px'; chip.style.top = Math.max(4, r.top + r.height / 2 - 13) + 'px';
+    if (r.right + 6 + chip.offsetWidth > innerWidth) { chip.style.left = Math.max(4, r.left) + 'px'; chip.style.top = Math.max(4, r.top - 32) + 'px'; } };
+  const doFill = el => { if (!el || !fillAmt) return; setVal(el, String(fillAmt)); hideChip(); };
+  chip.addEventListener('mousedown', e => e.preventDefault());   // keep the cursor in the box
+  chip.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); doFill(chipFor); });
+  document.addEventListener('focusin', e => { const p = e.composedPath ? e.composedPath()[0] : e.target; if (p?.closest?.('[data-amx-ui]')) return; showChip(isBox(p) ? p : deep()); }, true);
+  document.addEventListener('focusout', () => setTimeout(() => { const a = deep(); if (a !== chipFor && document.activeElement !== chip) hideChip(); }, 150), true);
+  document.addEventListener('keydown', e => { if (e.altKey && (e.key === 'f' || e.key === 'F' || e.code === 'KeyF')) { const a = deep(); if (isBox(a) && fillAmt) { e.preventDefault(); doFill(a); } } }, true);
+  window.addEventListener('scroll', () => { if (chipFor) showChip(chipFor); }, true);
+
+  // ── Enter = press the slip's Place / Submit button (the one next to where you're typing). Same button you'd click;
+  // once per 2 seconds max. Never picks a bet or a price -- only presses what's already there.
+  const PLACE_STRONG = /^(place|submit|confirm|post order|place order|place bet|review order)\b/i;
+  const PLACE_NEAR = /^(place|submit|confirm|post|buy|sell|take|make|bet|review)\b/i;   // only counted inside the slip you're in
+  const NO = /(remove|clear|cancel|share|log ?in|deposit|withdraw|close|back)/i;
+  const lbl = el => (el.innerText || el.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
+  const usable = el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && !el.disabled && el.getAttribute('aria-disabled') !== 'true' && getComputedStyle(el).visibility !== 'hidden' && !el.closest('[data-amx-ui]'); };
+  const btnsIn = root => [...(root.querySelectorAll?.('button,[role="button"],input[type="submit"]') || [])].filter(usable);
+  function findPlaceBtn(){
+    // 1) the closest block around the box you're in that has an order button
+    let a = deep(); const up = x => x.parentElement || (x.getRootNode?.() instanceof ShadowRoot ? x.getRootNode().host : null);
+    if (!isBox(a)) a = null;   // only when your cursor is in a box (the slip you're filling in)
+    for (let k = 0; a && a !== document.body && a !== document.documentElement && k < 10; k++, a = up(a)) { const b = btnsIn(a).find(el => PLACE_NEAR.test(lbl(el)) && !NO.test(lbl(el))); if (b) return b; }
+    // 2) anywhere on the page: only an unmistakable Place / Submit / Confirm
+    return btnsIn(document).find(el => PLACE_STRONG.test(lbl(el)) && !NO.test(lbl(el))) || null;
   }
-  document.addEventListener('click', e => { if (e.target.closest?.('[data-amx-ui]')) return; [150, 500, 1200].forEach(ms => setTimeout(tryFill, ms)); }, true);
-  new MutationObserver(() => { clearTimeout(tryFill._t); tryFill._t = setTimeout(tryFill, 250); }).observe(document.documentElement, { childList: true, subtree: true });
+  let lastEnter = 0;
+  document.addEventListener('keydown', e => {
+    if (!enterOn || e.key !== 'Enter' || e.shiftKey || e.ctrlKey || e.metaKey || e.altKey || e.repeat) return;
+    const now = Date.now(); if (now - lastEnter < 2000) return;
+    const b = findPlaceBtn(); if (!b) return;
+    lastEnter = now; e.preventDefault(); e.stopPropagation(); b.click();
+    const t = lbl(b).slice(0, 36); bEnter.textContent = '⏎ ' + t; setTimeout(paint, 2500);
+  }, true);
 
   watch(document.documentElement);
   scan(document.body);

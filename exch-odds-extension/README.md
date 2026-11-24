@@ -19,3 +19,8 @@ Prices are converted as shown (no fee added); anything under 3% or over 97% (fee
 - ProphetX odds include its 2% fee on winnings.
 - `Win $X`: hover a price to see how much to bet to win that amount (tap to change / turn off).
 - `Fill $X`: an empty bet-slip amount box gets that amount (or the smaller max shown). Never the price box, never over what you typed, never presses Place. Tap to change / turn off.
+
+
+## v3.1
+- Fill now works by hand: click into the amount box -> a green **Fill $300** chip appears next to it -> tap it (or press **Alt+F**) and the amount goes in. Tap the bottom `Fill` button to change the amount / turn it off.
+- **⏎ Enter bets** (bottom button, on by default): pressing Enter presses the slip's Place / Submit button -- the one next to the box you're typing in. Once per 2 seconds max. Tap the button to turn it off.
