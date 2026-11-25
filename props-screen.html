@@ -1206,7 +1206,15 @@ const extraBad = new Set();
 // player prop is dropped (mainBookRow) so it never shows outside those markets.
 const bookReqFor = sk => [...BOOK_REQ,'BookMaker'];
 const mainBookRow = (sk,o) => canonBook(o.sportsbook)!=='bookmaker' || (()=>{ const mk=marketKeyFor(sk,o.market); return !!mk && (TEAM_MKS.has(mk)||GAME_MKS.has(mk)); })();
-const EXCH = new Set(['novig','prophet x','kalshi','polymarket','polymarket global']);
+const EXCH = new Set(['novig','prophet x','kalshi','polymarket','polymarket global','4cx']);
+// 4Cx: its own request (its own chunk), so if the feed doesn't know the name nothing else is lost -- a refused name is
+// remembered for a day and not asked again
+const XCX = '4Cx';
+const xcxBadUntil = () => Number(LS.get('props_4cx_bad','0'));
+const xcxOn = () => Date.now() > xcxBadUntil();
+const xcxBad = () => LS.set('props_4cx_bad', String(Date.now()+86400e3));
+const bookChunksFor = sk => [...chunk(bookReqFor(sk),5), ...(xcxOn() ? [[XCX]] : [])];
+const ooBk = (bk, q) => { const p=oo('/fixtures/odds', q); return bk.length===1 && bk[0]===XCX ? p.catch(e=>{ if(e?.status>=400 && e?.status<500) xcxBad(); return null; }) : p; };
 const SHOW_MAX = new Set(['pinnacle','bet105']); // flat-limit books whose max we show under the odds too
 const SHORT = { 'fanatics':'FAN','bovada':'Bovada','onyx odds':'Onyx','props builder':'PB','fanduel':'FD','novig':'Novig','prophet x':'PX','kalshi':'Kalshi','pinnacle':'Pin','bet105':'b105','draftkings':'DK','fliff':'Fliff','betonline':'BOL','caesars':'Caes','hard rock bet':'HR','betmgm':'MGM','kambi':'Kambi','betrivers':'BR','bookmaker':'BKM','circa':'Circa' };
 Object.assign(SHORT,{ 'rob waterhouse':'RobW','robwaterhouse':'RobW','polymarket':'Poly','polymarket global':'Poly G','betano':'Betano','bet365':'365','thescore bet':'theScore','espn bet':'theScore','circa sports':'Circa','bally bet':'Bally','betway':'Betway','betparx':'Parx','sporttrade':'ST','betrivers':'Rivers','betmgm':'MGM','hard rock bet':'HR','kambi':'Kambi' });
@@ -1215,6 +1223,7 @@ const bookLabel = n => { const k=canonBook(n); return BOOKS.find(b=>b.toLowerCas
 // the book's own name, not merged (Courtside / Onyx stay themselves, not DraftKings)
 const rawBook = o => { const k=String(o?.sportsbook||'').toLowerCase(); return k==='hard rock'||k==='hardrock' ? 'hard rock bet' : k; };
 Object.assign(SHORT, { 'heritage sports':'HER', 'heritage':'HER' });
+Object.assign(SHORT, { '4cx':'4Cx' });
 const bookShort = n => SHORT[String(n||'').toLowerCase()] || SHORT[canonBook(n)] || n;
 // NBA "5 books" mode: the board only shows FanDuel, Fliff, Novig, Prophet X and Onyx (Onyx gets its
 // own row here instead of folding into DraftKings). Toggled from the top bar on the NBA tab.
@@ -1223,7 +1232,7 @@ const bookShort = n => SHORT[String(n||'').toLowerCase()] || SHORT[canonBook(n)]
 let bookMode = ({'1':2,'2':2,'3':3})[LS.get('props_nba5','')] || 0;   // NV·PX (dropped) -> NV·PX·FD
 // 3 = Paste books (what a pasted pick opens with): FD, PX, Novig, Kalshi, DK, Courtside, Onyx, MGM -- each its own row + link
 const MODE_BOOKS = { 1:new Set(['novig','prophet x']), 2:new Set(['novig','prophet x','fanduel']),
-  3:new Set(['fanduel','prophet x','novig','kalshi','draftkings','courtside','onyx odds','betmgm']) };
+  3:new Set(['fanduel','prophet x','novig','kalshi','4cx','draftkings','courtside','onyx odds','betmgm']) };
 const MODE_LBL = { 0:'My books', 1:'NV · PX', 2:'NV · PX · FD', 3:'Paste books' };
 const mode5On = () => !!bookMode && sportKey==='nba' && viewMode==='sport'; // board only -- never the parlay tool or tracker
 const inMode5 = o => { const S=MODE_BOOKS[bookMode]; if(!S) return true; const r=String(o.sportsbook||'').toLowerCase(); return S.has(r) || S.has(canonBook(r)); };
@@ -2311,9 +2320,9 @@ async function fetchSportData(sk, status, onPartial){
   // injuries (best-effort; schema read defensively) -- fetched alongside the lines, not before them
   const injP = (S.ml || OPTIC_INJ_OFF) ? Promise.resolve(null) : fetchInjuriesList(S).catch(e=>{ console.warn('[props] injuries failed',e.message); return null; });
   // main lines, 5 fixtures × 5 books per call
-  const rows=[]; let done=0; const fxChunks=chunk(fx,5), bkChunks=chunk(bookReqFor(sk),5); const total=fxChunks.length*bkChunks.length;
+  const rows=[]; let done=0; const fxChunks=chunk(fx,5), bkChunks=bookChunksFor(sk); const total=fxChunks.length*bkChunks.length;
   const jobs=[]; for(const fc of fxChunks) for(const bk of bkChunks) jobs.push(async()=>{
-    try{ const r=await oo('/fixtures/odds',{fixture_id:fc.map(f=>f.id),sportsbook:bk,is_main:true}); (r?.data||[]).forEach(d=>(d.odds||[]).forEach(o=>{ o._fx=d.id; if(mainBookRow(sk,o)) rows.push(o); })); }
+    try{ const r=await ooBk(bk,{fixture_id:fc.map(f=>f.id),sportsbook:bk,is_main:true}); (r?.data||[]).forEach(d=>(d.odds||[]).forEach(o=>{ o._fx=d.id; if(mainBookRow(sk,o)) rows.push(o); })); }
     catch(e){ console.warn('[props] chunk failed',e.message); }
     say(`${S.label} · loading lines ${++done}/${total}…`);
     // Players become searchable while the rest is still loading (every few chunks), so a name
@@ -3408,7 +3417,7 @@ let boardFullAt = { fx:null, at:0 }, boardTouchAt = Date.now();
 function startBoardTimer(){ clearInterval(boardTimer); boardTimer=setInterval(()=>{ if(!document.hidden && !boardBusy) refreshBoardOdds(); }, BOARD_MS);
   clearInterval(exFastTimer); exFastTimer=setInterval(()=>{ if(!document.hidden && !exFastBusy && mode5On()) exFast(); }, EX_FAST_MS); }
 // My books on: the exchanges' money moves fastest -- Novig + ProphetX alone, every second, just the market on screen
-const EX_FAST_MS = 1000, EX_FAST_BOOKS = ['Novig','Prophet X'];
+const EX_FAST_MS = 1000, EX_FAST_BOOKS = ['Novig','Prophet X'];   // (4Cx rides along when the feed knows it, see exFast)
 let exFastTimer = null, exFastBusy = false;
 async function exFast(){
   const p=current; if(!p || viewMode!=='sport' || !document.querySelector('.pcard')){ clearInterval(exFastTimer); exFastTimer=null; return; }
@@ -3416,10 +3425,11 @@ async function exFast(){
   const mk=pMkeys(p)[curMktIdx]; if(!mk) return;
   const bm=bookMode; bookMode=false; let names; try{ names=marketNamesFor(p,mk); } finally{ bookMode=bm; } if(!names.length) return;
   exFastBusy=true; const fx=p.fixtureId, rows=[];
-  try{ const r=await oo('/fixtures/odds',{fixture_id:[fx],sportsbook:EX_FAST_BOOKS,market:names}); (r?.data?.[0]?.odds||[]).forEach(o=>{ o._fx=fx; if(mainBookRow(sportKey,o)) rows.push(o); }); }
+  try{ const rs=await Promise.all([oo('/fixtures/odds',{fixture_id:[fx],sportsbook:EX_FAST_BOOKS,market:names}), ...(xcxOn()?[ooBk([XCX],{fixture_id:[fx],sportsbook:[XCX],market:names})]:[])]);
+    rs.forEach(r=>(r?.data?.[0]?.odds||[]).forEach(o=>{ o._fx=fx; if(mainBookRow(sportKey,o)) rows.push(o); })); }
   catch(e){ return; } finally{ exFastBusy=false; }
   if(current!==p || !rows.length || boardBusy) return;
-  const isEx=o=>EX_FAST_BOOKS.some(b=>b.toLowerCase()===String(o.sportsbook||'').toLowerCase()), nm=new Set(names.map(n=>String(n).toLowerCase())), mine=o=>o._fx===fx && nm.has(String(o.market||'').toLowerCase()) && isEx(o);
+  const isEx=o=>[...EX_FAST_BOOKS, XCX].some(b=>b.toLowerCase()===String(o.sportsbook||'').toLowerCase()), nm=new Set(names.map(n=>String(n).toLowerCase())), mine=o=>o._fx===fx && nm.has(String(o.market||'').toLowerCase()) && isEx(o);
   const got=new Set(rows.map(o=>String(o.sportsbook).toLowerCase()));   // only replace a book that answered
   const keep=o=>!(mine(o) && got.has(String(o.sportsbook).toLowerCase()));
   mainRows = mainRows.filter(keep).concat(rows.filter(o=>o.is_main!==false));
@@ -3441,9 +3451,9 @@ async function refreshBoardOdds0(){
   const S0=SPORTS[sportKey], mk0=pMkeys(p)[curMktIdx];
   const altNames=mk0?marketNamesFor(p,mk0):[], ack=altNames.length?altKey(p,mk0):null, altRows=[];
   const full = !altNames.length || boardFullAt.fx!==fx || Date.now()-boardFullAt.at > BOARD_FULL_MS;
-  try{ await Promise.all(chunk(bookReqFor(sportKey),5).flatMap(bk=>[
-      oo('/fixtures/odds', full ? {fixture_id:[fx],sportsbook:bk,is_main:true} : {fixture_id:[fx],sportsbook:bk,is_main:true,market:altNames}).then(r=>(r?.data||[]).forEach(d=>(d.odds||[]).forEach(o=>{ o._fx=d.id; if(mainBookRow(sportKey,o)) rows.push(o); }))),
-      ...(ack && altCache[ack] ? [oo('/fixtures/odds',{fixture_id:[fx],sportsbook:bk,market:altNames}).then(r=>(r?.data?.[0]?.odds||[]).forEach(o=>{ o._fx=fx; if(mainBookRow(sportKey,o)) altRows.push(o); }))] : []) ]));
+  try{ await Promise.all(bookChunksFor(sportKey).flatMap(bk=>[
+      ooBk(bk, full ? {fixture_id:[fx],sportsbook:bk,is_main:true} : {fixture_id:[fx],sportsbook:bk,is_main:true,market:altNames}).then(r=>(r?.data||[]).forEach(d=>(d.odds||[]).forEach(o=>{ o._fx=d.id; if(mainBookRow(sportKey,o)) rows.push(o); }))),
+      ...(ack && altCache[ack] ? [ooBk(bk,{fixture_id:[fx],sportsbook:bk,market:altNames}).then(r=>(r?.data?.[0]?.odds||[]).forEach(o=>{ o._fx=fx; if(mainBookRow(sportKey,o)) altRows.push(o); }))] : []) ]));
     if(ack && altCache[ack] && altRows.length) altCache[ack]=altRows; }
   catch(e){ console.warn('[props] board refresh failed', e.message); return; }
   if(current!==p || viewMode!=='sport' || !document.querySelector('.pcard')) return;
@@ -3985,7 +3995,7 @@ async function ensureAlts(p, mkey){
   if(altPending[ck]) return altPending[ck];
   altPending[ck]=(async()=>{
     const rows=[];
-    for(const bk of chunk(bookReqFor(sportKey),5)){ try{ const r=await oo('/fixtures/odds',{fixture_id:[p.fixtureId],sportsbook:bk,market:marketNames}); (r?.data?.[0]?.odds||[]).forEach(o=>{ o._fx=p.fixtureId; if(mainBookRow(sportKey,o)) rows.push(o); }); }catch(e){ console.warn('[props] alts chunk failed',e.message); } }
+    for(const bk of bookChunksFor(sportKey)){ try{ const r=await ooBk(bk,{fixture_id:[p.fixtureId],sportsbook:bk,market:marketNames}); (r?.data?.[0]?.odds||[]).forEach(o=>{ o._fx=p.fixtureId; if(mainBookRow(sportKey,o)) rows.push(o); }); }catch(e){ console.warn('[props] alts chunk failed',e.message); } }
     altCache[ck]=rows; delete altPending[ck]; return rows;
   })();
   return altPending[ck];
