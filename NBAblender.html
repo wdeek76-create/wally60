@@ -1956,7 +1956,7 @@ function renderTable() {
             // themselves (already shown via injury pill above).
             const inj = getInjuryForPlayer(r.rawName, r.team);
             if (inj) return "";
-            const ben = getBeneficiaryForPlayer(r.rawName);
+            const ben = getBeneficiaryForPlayer(r.rawName, r.team);
             if (!ben) return "";
             const benImp = _wmImportance(ben.causedBy, r.team);
             if (benImp.tier === "LOW") return "";      // a fringe player's absence isn't an upside signal
@@ -7651,7 +7651,7 @@ function saveBet() {
       const playerName = bet.player;
       if (playerName && typeof getInjuryForPlayer === "function") {
         const inj = getInjuryForPlayer(playerName, bet.team);
-        const ben = (typeof getBeneficiaryForPlayer === "function") ? getBeneficiaryForPlayer(playerName) : null;
+        const ben = (typeof getBeneficiaryForPlayer === "function") ? getBeneficiaryForPlayer(playerName, bet.team) : null;
         const ctx = {};
         if (inj) {
           const lbl = _injuryStatusLabel(inj.status);
@@ -9113,7 +9113,8 @@ function updateInjuryCtxInModal() {
   // Look up: is THIS player a beneficiary (ceiling)?
   let beneficiary = null;
   if (typeof getBeneficiaryForPlayer === "function") {
-    beneficiary = getBeneficiaryForPlayer(player);
+    let tm = ""; try { tm = (typeof teamForPlayer === "function" && teamForPlayer(player)) || ""; } catch (e) {}
+    beneficiary = getBeneficiaryForPlayer(player, tm);
   }
   // Look up: is THIS player herself injured?
   let ownInjury = null;
@@ -17236,6 +17237,7 @@ function _rebuildBeneficiariesCache() {
         beneficiariesCache.get(cand).push({
           causedBy: rec.name,
           causedByStatus: rec.status,
+          causedByTeam: rec.team || "",   // a note only ever moves a TEAMMATE's line
           reason,
           outPos, benPos, posOverlap: overlap
         });
@@ -17253,23 +17255,27 @@ function _firstNameCompat(a, b) {
   if (!x || !y) return true;
   return x.startsWith(y) || y.startsWith(x);
 }
-function getBeneficiaryForPlayer(rawName) {
+// team (optional but strongly recommended): the player's own team. With it, only notes on a TEAMMATE count: Embiid's note can never tag a Rocket,
+// and the last-name fallback can't land on a different Smith. Without it, the fallback is skipped (a wrong match is worse than none).
+function getBeneficiaryForPlayer(rawName, team) {
   if (!beneficiariesCache || !rawName) return null;
+  const tk = a => { if (!a) return ""; const u = String(a).toUpperCase(); return (typeof INTERNAL_TO_ESPN_ABBR !== "undefined" && INTERNAL_TO_ESPN_ABBR[u]) || (typeof normTeamAbbr === "function" && normTeamAbbr(u)) || u; };
+  const mine = tk(team);
+  const sameTeam = e => !mine || !e.causedByTeam || tk(e.causedByTeam) === mine;
   const n = norm(rawName);
   let ben = null;
-  const list = beneficiariesCache.get(n);
-  if (list && list.length) ben = list[0];
-  else {
-    // Last-name fallback (same logic as getInjuryForPlayer)
+  const list = (beneficiariesCache.get(n) || []).filter(sameTeam);
+  if (list.length) ben = list[0];
+  else if (mine) {
+    // Last-name fallback, same team only
     const parts = rawName.trim().split(/\s+/);
     const lastNorm = norm(parts[parts.length - 1].toLowerCase());
     const matches = [];
     const firstNorm = norm(parts[0] || "");
-    beneficiariesCache.forEach((v, k) => { if (k.endsWith(lastNorm) && (!firstNorm || parts.length < 2 || k.startsWith(firstNorm))) matches.push(v[0]); });
+    beneficiariesCache.forEach((v, k) => { if (k.endsWith(lastNorm) && (!firstNorm || parts.length < 2 || k.startsWith(firstNorm))) v.filter(sameTeam).forEach(e => matches.push(e)); });
     if (matches.length === 1) ben = matches[0];
   }
-  if (!ben) return null;
-  return ben;
+  return ben || null;
 }
 
 // Lookup helper for the Results table — given a player's raw name, return
@@ -24350,7 +24356,7 @@ function _wmInjuryGate(playerRaw, team) {
     if (depth && depth.status) { out.both = "depth chart " + depth.status; return out; }
     const rgSelf = rgInjFor(playerRaw);   // RG says he is in question / out even though RW and OpticOdds are silent
     if (rgSelf) { out.both = "RG injury report: " + rgSelf.status + (rgSelf.part ? " (" + rgSelf.part + ")" : "") + " \u00b7 impact " + rgSelf.impact; return out; }
-    const ben = (typeof getBeneficiaryForPlayer === "function") ? getBeneficiaryForPlayer(playerRaw) : null;
+    const ben = (typeof getBeneficiaryForPlayer === "function") ? getBeneficiaryForPlayer(playerRaw, team) : null;
     // Named in a teammate's blurb — same reading as the bet window: CEILING (upside) is
     // favourable for OVERS, FLOOR is favourable for UNDERS. So upside never blocks an over; it
     // only rules out the under against her. A floor-risk mention does the reverse.
@@ -27867,7 +27873,7 @@ function tabsSoloContext(player, team, ou) {
     const lc = lineupConflictFor(player); if (lc) return { cls: "flagged", why: "lineups disagree: " + lc };
     try { const ld = getLineupsData(), me = ld && ld.players ? ld.players[norm(player)] : null, st = me ? String(me.status || "").toUpperCase() : ""; if (st && st !== "STARTING") return { cls: "flagged", why: "lineups: " + st }; } catch (e) {}
     const tu = lineupTossupFor(player, ou); if (tu) return { cls: "flagged", why: "toss-up: " + tu };
-    const ben = (typeof getBeneficiaryForPlayer === "function") ? getBeneficiaryForPlayer(player) : null;
+    const ben = (typeof getBeneficiaryForPlayer === "function") ? getBeneficiaryForPlayer(player, team) : null;
     const ceil = !!(ben && /ceiling/i.test(ben.reason || "")), floor = !!(ben && /floor risk/i.test(ben.reason || ""));
     if (g[ou]) return { cls: "downside", why: g[ou] };
     if ((ou === "over" && ceil) || (ou === "under" && floor)) return { cls: "upside", why: (ceil ? "ceiling" : "floor risk") + " from " + ben.causedBy + "'s note" };
@@ -28854,7 +28860,7 @@ function _mStatusPills(b, esc, nick) {
     if (bk) out.push(pill(bk + (e.type ? " \u00b7 " + String(e.type).split(/[,(]/)[0].trim() : ""), COL[bk]));
   } catch (e) {}
   if (nick) try {                                     // Nick's card: why this player's minutes / role may move (the model's CEILING / floor-risk reading of RotoWire blurbs)
-    const ben = getBeneficiaryForPlayer(b.player);
+    const ben = getBeneficiaryForPlayer(b.player, b.team || _mTeamFor(b.player));
     if (ben) {
       const r = String(ben.reason || ""), who = `${ben.causedBy}${ben.causedByStatus ? " " + ben.causedByStatus : ""}`;
       if (/ceiling/i.test(r)) out.push(pill(`\u25b2 CEILING \u00b7 ${who}${ben.posOverlap === 2 ? " \u00b7 same pos" : ""}`, "#4ade80"));
