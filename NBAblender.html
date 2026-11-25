@@ -28654,8 +28654,16 @@ async function morningCopyLive() {
 }
 async function morningPostSalt() {
   const cfg = getSalt(); if (!cfg) { morningSetSalt(); return; }
-  const text = _copyOpenFiltered("props", true); if (!text) { showToast("No open props to send"); return; }
-  if (!confirm(`Send the open props to Telegram (${cfg.chat})?`)) return;
+  const noPlay = _mTipoffNoPlayGames("salt");
+  const send = async t => { const r = await fetch(`https://api.telegram.org/bot${cfg.token}/sendMessage`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ chat_id: cfg.chat, text: t, disable_web_page_preview: true }) }); const j = await r.json().catch(() => ({})); if (!r.ok || !j.ok) throw new Error(j.description || `Telegram said ${r.status}`); };
+  const text = _copyOpenFiltered("props", true);
+  if (!text) {
+    if (!noPlay.length) { showToast("No open props to send"); return; }
+    if (!confirm(`No open props. Tell the channel there are no plays for: ${noPlay.join(", ")}?`)) return;
+    try { for (const g of noPlay) { await send(`${MORNING_TITLE_NICE} \u00b7 ${g} \u2014 no plays`); _mTipoffNoPlayMark("salt", [g]); } showToast("Sent: no plays"); } catch (e) { showToast("Telegram send failed \u2014 " + (e && e.message || e)); }
+    return;
+  }
+  if (!confirm(`Send the open props to Telegram (${cfg.chat})?${noPlay.length ? `\n\nAlso "no plays" for: ${noPlay.join(", ")}` : ""}`)) return;
   try {
     // Telegram caps a message at 4096 chars: split on blank lines (player groups) when it is longer
     const chunks = []; let cur = "";
@@ -28664,7 +28672,8 @@ async function morningPostSalt() {
       const r = await fetch(`https://api.telegram.org/bot${cfg.token}/sendMessage`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ chat_id: cfg.chat, text: chunk, disable_web_page_preview: true }) });
       const j = await r.json().catch(() => ({})); if (!r.ok || !j.ok) throw new Error(j.description || `Telegram said ${r.status}`);
     }
-    showToast(`Sent to Telegram \u2713${chunks.length > 1 ? ` (${chunks.length} messages)` : ""}`);
+    for (const g of noPlay) { try { await send(`${MORNING_TITLE_NICE} \u00b7 ${g} \u2014 no plays`); _mTipoffNoPlayMark("salt", [g]); } catch (e) {} }
+    showToast(`Sent to Telegram \u2713${chunks.length > 1 ? ` (${chunks.length} messages)` : ""}${noPlay.length ? ` \u00b7 no plays: ${noPlay.join(", ")}` : ""}`);
   } catch (e) { showToast("Telegram send failed \u2014 " + (e && e.message || e)); }
 }
 let DISCORD_ROLE_KEY = "nba_morning_discord_role"; const DISCORD_ROLE_DEFAULT = "1555588372502683698";
@@ -28775,14 +28784,35 @@ async function _morningPostNickInner(hook) {
 }
 // TIP OFF → Nick, by game: every pick not yet sent to Nick, grouped by its game, one card + one post per game (earliest tip first).
 // Picks already on a Nick post (nickOdds stamped) are never re-sent, so pasting the next confirmed lineup and hitting NICK only posts that game.
+// TIP OFF: the games in play (the GAMES row pick, else every game on the boards) that have NO pick logged today → "no plays" notices, once per game per channel per day.
+function _mTipoffNoPlayGames(channel) {
+  if (MORNING_PROFILE !== "tipoff") return [];
+  const gt = g => _mGameTeams(g); const d = localYMD(new Date());
+  let games = [...morningGamesSel];
+  if (!games.length) { const seen = new Set(); MORNING_SRC_KEYS.forEach(k => (morningPs[k] || []).forEach(p => { const t = gt(p.game); if (t.length === 2) seen.add(t.join(" @ ")); })); games = [...seen]; }
+  const has = g => { const t = new Set(gt(g)); return morningBets.some(b => b.result === "pending" && (b.gameDate || "") === d && (gt(b.game).some(x => t.has(x)) || t.has(String(b.team || "").toUpperCase()))); };
+  let done = {}; try { done = JSON.parse(localStorage.getItem("nba_tipoff_noplay_v1") || "{}"); if (done.day !== d) done = { day: d }; } catch (e) { done = { day: d }; }
+  const sent = new Set(done[channel] || []);
+  return games.filter(g => !has(g) && !sent.has(g));
+}
+function _mTipoffNoPlayMark(channel, games) {
+  const d = localYMD(new Date()); let done = {}; try { done = JSON.parse(localStorage.getItem("nba_tipoff_noplay_v1") || "{}"); if (done.day !== d) done = { day: d }; } catch (e) { done = { day: d }; }
+  done[channel] = [...new Set((done[channel] || []).concat(games))]; try { localStorage.setItem("nba_tipoff_noplay_v1", JSON.stringify(done)); } catch (e) {}
+}
 async function _mPostNickByGame(hook, picks) {
   picks = (picks || []).filter(b => b.nickOdds == null);
-  if (!picks.length) { showToast("Nothing new for Nick \u2014 every pending pick has already been sent"); return; }
+  const noPlay = _mTipoffNoPlayGames("nick");
+  if (!picks.length && !noPlay.length) { showToast("Nothing new for Nick \u2014 every pending pick has already been sent"); return; }
+  if (!picks.length) {   // only "no plays" notices to send
+    if (!confirm(`No new picks. Tell Nick there are no plays for: ${noPlay.join(", ")}?`)) return;
+    let n = 0; for (const g of noPlay) { try { const r = await fetch(hook + (hook.includes("?") ? "&" : "?") + "wait=true", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content: `**${MORNING_TITLE_NICE} \u00b7 ${g} \u2014 no plays**`, allowed_mentions: { parse: [] } }) }); if (r.ok) { n++; _mTipoffNoPlayMark("nick", [g]); } } catch (e) {} }
+    showToast(`Told Nick: no plays for ${n} game${n === 1 ? "" : "s"}`); return;
+  }
   const gameOf = b => String(b.game || b.team || "?").trim();
   const timeOf = b => { const m = String(b.gameTime || "").match(/(\d{1,2}:\d{2}\s*[AP]M)/i); return m ? (Date.parse("1/1/2000 " + m[1].toUpperCase().replace(/\s+/, " ")) || 0) : 0; };
   const groups = {}; picks.forEach(b => { const g = gameOf(b); (groups[g] = groups[g] || []).push(b); });
   const games = Object.keys(groups).sort((a, b) => timeOf(groups[a][0]) - timeOf(groups[b][0]) || a.localeCompare(b));
-  if (!confirm(`Post ${picks.length} new pick${picks.length === 1 ? "" : "s"} to Nick's channel \u2014 ${games.length} post${games.length === 1 ? "" : "s"}, one per game?\n\n${games.map(g => `${g}: ${groups[g].length}`).join("\n")}`)) return;
+  if (!confirm(`Post ${picks.length} new pick${picks.length === 1 ? "" : "s"} to Nick's channel \u2014 ${games.length} post${games.length === 1 ? "" : "s"}, one per game?\n\n${games.map(g => `${g}: ${groups[g].length}`).join("\n")}${noPlay.length ? `\n\nNo plays (a note goes out): ${noPlay.join(", ")}` : ""}`)) return;
   showToast("Refreshing live prices + exchange depth\u2026");
   try { await morningRefreshPicks(picks); } catch (e) {}
   const role = getNickRole();
@@ -28804,7 +28834,8 @@ async function _mPostNickByGame(hook, picks) {
     { const at = Date.now(); gp.forEach(b => { if (b.nickOdds == null) Object.assign(b, { nickOdds: b.odds, nickBook: b.book, nickAt: at }); }); saveMorningBets(); }
     posted++; sentPicks += gp.length;
   }
-  showToast(posted ? `Posted ${sentPicks} pick${sentPicks === 1 ? "" : "s"} to Nick in ${posted} game post${posted === 1 ? "" : "s"} \u2713` : "Nothing posted");
+  for (const g of noPlay) { try { const r = await fetch(hook + (hook.includes("?") ? "&" : "?") + "wait=true", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content: `**${MORNING_TITLE_NICE} \u00b7 ${g} \u2014 no plays**`, allowed_mentions: { parse: [] } }) }); if (r.ok) _mTipoffNoPlayMark("nick", [g]); } catch (e) {} }
+  showToast(posted ? `Posted ${sentPicks} pick${sentPicks === 1 ? "" : "s"} to Nick in ${posted} game post${posted === 1 ? "" : "s"} \u2713${noPlay.length ? ` \u00b7 no plays: ${noPlay.join(", ")}` : ""}` : "Nothing posted");
   try { renderMorning(); } catch (e) {}
 }
 async function morningPostDiscord() {
