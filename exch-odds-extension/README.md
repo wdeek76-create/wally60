@@ -27,3 +27,6 @@ Prices are converted as shown (no fee added); anything under 3% or over 97% (fee
 
 ## v3.2
 - Hover helper removed. Instead a **yellow label right under the box you type your $ in**: "$300 wins $256 at -117 · to win $200: bet $235" (price taken from the slip; ProphetX after the fee). Live as you type.
+
+## v3.3
+- Works on 4Cx too (4cx.com / .io / .co / .us).

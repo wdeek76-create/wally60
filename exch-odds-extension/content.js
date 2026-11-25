@@ -1,4 +1,4 @@
-// Exchange American Odds: on Novig and ProphetX, every price shown as a % / ¢ ("54¢", "54%", "54.5¢") or as a
+// Exchange American Odds: on Novig, ProphetX and 4Cx, every price shown as a % / ¢ ("54¢", "54%", "54.5¢") or as a
 // share price ("$0.54", "0.54") is shown as American odds instead (54¢ -> -117). It rewrites only the text you
 // see -- the site's own numbers and buttons are untouched, and it never clicks anything. Live prices keep
 // converting as they move.
