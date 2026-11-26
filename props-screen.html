@@ -1912,6 +1912,17 @@ async function freshTrackedSnap(t){
   t.mainLineNow=snap.mainLine;
   return snap;
 }
+// "Copy open": every open bet, one plain line each, earliest game first -- "Max Strus o7.5 Points"
+function tkCopyOpen(){
+  const open=tracked.filter(t=>!t.final && t.src!=='sharp' && t.src!=='matrix').sort((a,b)=>new Date(a.start||0)-new Date(b.start||0));
+  if(!open.length){ toast('No open bets'); return; }
+  const line=t=>{ const sd=String(t.side||''), ou=/^over$/i.test(sd)?'o':/^under$/i.test(sd)?'u':'';
+    const mk=t.mkey==='pra'?'PRA':(t.marketLabel||'');
+    if(ou) return `${titleCase(t.playerName||'')} ${ou}${t.line??''} ${mk}`.replace(/\s+/g,' ').trim();
+    return `${titleCase(t.playerName||'')} ${sd}${t.line!=null?' '+(t.line>0?'+':'')+t.line:''} ${mk}`.replace(/\s+/g,' ').trim(); };
+  const txt=open.map(line).join('\n');
+  copyText(txt).then(()=>toast(`Copied ${open.length} open bet${open.length===1?'':'s'}`)).catch(()=>toast('Copy failed'));
+}
 // "Send open bets": every open bet as a Copy-summary line, with today's prices (fresh pull, pregame only).
 const TK_CLOSE_C = 10;
 async function tkSendOpen(btn){
@@ -5593,6 +5604,8 @@ async function refreshTracker(){
     // 1) fixture results (status, clock, scores)
     const res={};
     for(const ids of chunk(fids,5)){ try{ const r=await oo('/fixtures/results',{fixture_id:ids}); (r?.data||[]).forEach(x=>{ if(x?.fixture?.id) res[x.fixture.id]=x; }); }catch(e){ console.warn('[tracker] results',e.message); } }
+    // a stale bet only counts toward "void" once the results feed actually answered for its game (see tkVoidStale)
+    { const now=Date.now(); let ch=false; open.forEach(t=>{ if(t.start && now-new Date(t.start).getTime()>=TK_VOID_H*3600e3 && res[t.fixtureId]){ t.gradeTries=(t.gradeTries||0)+1; ch=true; } }); if(ch) saveTracked(); }
     // 2) player results for live/completed
     const liveOrDone=fids.filter(id=>{ const st=res[id]?.fixture?.status; return st&&st!=='unplayed'; });
     const pr={};
@@ -6011,9 +6024,15 @@ function tkVoidStale(){
   let ch=false; const now=Date.now();
   tracked.forEach(t=>{ if(t.final || t.src==='sharp' || t.src==='matrix' || !t.start) return;
     if(now-new Date(t.start).getTime() < TK_VOID_H*3600e3) return;
+    // only after the tracker really tried: 3 refreshes where the feed answered for this game and still no grade
+    // (opening the app the next afternoon no longer voids last night's bets before they get graded)
+    if((t.gradeTries||0) < 3) return;
     t.result='void'; t.final=true; t.live=false; t.voided=true; t.gradedAt=now; ch=true; });
   if(ch){ saveTracked(); if(viewMode==='tracker') renderTracker(); }
 }
+if(!LS.get('props_unvoid_v1','')){ const cut=Date.now()-4*86400e3; let n=0;
+  tracked.forEach(t=>{ if(t.voided && !t.manualGrade && t.start && new Date(t.start).getTime()>cut){ t.final=false; t.result=null; t.voided=false; delete t.gradedAt; t.gradeTries=0; n++; } });
+  if(n) saveTracked(); LS.set('props_unvoid_v1','1'); }
 setTimeout(tkVoidStale, 6000); setInterval(tkVoidStale, 10*60e3);
 let historyShown=false;
 // Bet history in sections by game day (newest first): each day's record, profit and ROI on its header;
@@ -6175,7 +6194,7 @@ function renderTracker(){
   // Matrix tracking is off: Matrix bets aren't shown either.
   const openList=tracked.filter(t=>!t.final && t.src!=='sharp' && t.src!=='matrix');
   const historyList=tracked.filter(t=>t.final && t.src!=='sharp' && t.src!=='matrix');
-  const openHtml = (openList.length||historyList.length ? `<div class="tksend"><button id="tkrecap" class="ed">📊 Post recap</button>${openList.length?'<button id="tksend" class="ed">📤 Send open bets</button>':''}</div>` : '') + (openList.length ? bySport(openList) : '<div class="empty">No open bets.<br>Open a player and tap <b>Track</b> on a side.</div>');
+  const openHtml = (openList.length||historyList.length ? `<div class="tksend"><button id="tkrecap" class="ed">📊 Post recap</button>${openList.length?'<button id="tkcopy" class="ed">⧉ Copy open</button><button id="tksend" class="ed">📤 Send open bets</button>':''}</div>` : '') + (openList.length ? bySport(openList) : '<div class="empty">No open bets.<br>Open a player and tap <b>Track</b> on a side.</div>');
   // ONE daily profit tracker, at the top: all-time line, then a row per day (tap a day for its bets)
   const allRec=ttRecord(historyList.filter(t=>t.result));
   const off=ptOfficial(), trk=ttRecord(ptGraded()), miss=off.n-trk.n;
@@ -6205,6 +6224,7 @@ function renderTracker(){
   $('#tkdph')?.addEventListener('click',()=>{ tkDpOpen=!tkDpOpen; renderTracker(); });
   $('#tkoff')?.addEventListener('click', ptSetBase);
   $('#tksend')?.addEventListener('click',ev=>tkSendOpen(ev.currentTarget));
+  $('#tkcopy')?.addEventListener('click',()=>tkCopyOpen());
   $('#tkrecap')?.addEventListener('click',()=>ptPostRecapNow());
   view.querySelectorAll('[data-tkday]').forEach(b=>b.addEventListener('click',()=>{ const d=b.dataset.tkday; tkDayOpen.has(d)?tkDayOpen.delete(d):tkDayOpen.add(d); renderTracker(); }));
   view.querySelectorAll('[data-rm]').forEach(b=>b.addEventListener('click',()=>{ tracked=tracked.filter(t=>t.id!==b.dataset.rm); saveTracked(); renderTracker(); }));
