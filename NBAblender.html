@@ -660,11 +660,12 @@ const BIG_KEYS = new Set(["nba_morning_solo_v1", "nba_tipoff_solo_v1", "nba_morn
   "nba_blender_bets", "nba_morning_bets_v1", "nba_tipoff_bets_v1", "nba_tabs_solo_v1", "nba_tabs_solo_meta_v1", "nba_model_log_v1"]);
 const _big = { cache: {}, ready: false, db: null, pending: {} };
 function _bigOpen() { return new Promise((res, rej) => { try { const r = indexedDB.open("nba_blender_big", 1); r.onupgradeneeded = () => { r.result.createObjectStore("kv"); }; r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); } catch (e) { rej(e); } }); }
-function _bigWrite(k, v) { try { if (!_big.db) return; const tx = _big.db.transaction("kv", "readwrite"); const st = tx.objectStore("kv"); if (v == null) st.delete(k); else st.put(v, k); } catch (e) { console.warn("[bigstore] write", k, e); } }
+function _bigFail(k, e) { console.error("[bigstore] SAVE FAILED", k, e); try { if (typeof showToast === "function") showToast("\u26a0 SAVE FAILED (" + k + ") \u2014 do not reload, export your bets"); } catch (e2) {} }
+function _bigWrite(k, v) { try { if (!_big.db) { _bigFail(k, "no database"); return; } const tx = _big.db.transaction("kv", "readwrite"); tx.onerror = tx.onabort = () => _bigFail(k, tx.error); const st = tx.objectStore("kv"); if (v == null) st.delete(k); else st.put(v, k); } catch (e) { _bigFail(k, e); } }
 (function () {
   const L = Storage.prototype, g = L.getItem, s = L.setItem, r = L.removeItem;
   L.getItem = function (k) { if (this === localStorage && BIG_KEYS.has(k)) { const v = _big.cache[k]; return v != null ? v : g.call(this, k); } return g.call(this, k); };
-  L.setItem = function (k, v) { if (this === localStorage && BIG_KEYS.has(k)) { v = String(v); if (!_big.ready) { console.warn("[bigstore] write before ready ignored:", k); return; } _big.cache[k] = v; _bigWrite(k, v); try { r.call(this, k); } catch (e) {} return; } return s.call(this, k, v); };
+  L.setItem = function (k, v) { if (this === localStorage && BIG_KEYS.has(k)) { v = String(v); if (!_big.ready) { console.warn("[bigstore] write before ready ignored:", k); _big.dropped = (_big.dropped || []).concat(k); return; } _big.cache[k] = v; _bigWrite(k, v); try { r.call(this, k); } catch (e) {} return; } return s.call(this, k, v); };
   L.removeItem = function (k) { if (this === localStorage && BIG_KEYS.has(k)) { delete _big.cache[k]; _bigWrite(k, null); } return r.call(this, k); };
   (async () => {
     try {
@@ -675,6 +676,7 @@ function _bigWrite(k, v) { try { if (!_big.db) return; const tx = _big.db.transa
       BIG_KEYS.forEach(k => { let v = null; try { v = g.call(localStorage, k); } catch (e) {} if (v != null) { _big.cache[k] = v; _bigWrite(k, v); try { r.call(localStorage, k); } catch (e) {} } });
     } catch (e) { console.warn("[bigstore] IndexedDB unavailable, staying on localStorage", e); }
     _big.ready = true;   // a save that fired before this point was built on empty data, so it was dropped rather than written over the store
+    if ((_big.dropped || []).some(k => /_bets/.test(k))) setTimeout(() => { try { showToast("A save fired before your data had loaded and was skipped \u2014 re-check your last change"); } catch (e) {} }, 1500);
     try { window.dispatchEvent(new Event("bigstore-ready")); } catch (e) {}
   })();
 })();
@@ -27040,24 +27042,6 @@ function morningLogBlocked(pn, stat, ou, line, date) {
   else showToast("Already logged");
   renderMorning();
 }
-// One-time fix: six TIP OFF picks were seeded with the game date 2026-11-26 although their games were played on the 25th (the grades
-// then failed to save while storage was full). While they are still open they are re-dated to the 25th, in the log and the Tracker, so
-// GRADE PENDING pulls the right box scores. Nothing is removed and a graded bet is never touched.
-function _mSeedTipoff20261126() {
-  if (!_big.ready || localStorage.getItem("nba_redate_tipoff_20261125")) return;
-  const picks = [["Michael Porter Jr.", "PTS", "under", 21.5], ["Max Strus", "AST", "over", 1.5], ["Kel'el Ware", "PTS", "over", 7.5], ["Michael Porter Jr.", "PRA", "under", 31.5], ["Egor Demin", "PTS", "over", 9.5], ["Brandon Ingram", "REB", "over", 3.5]];
-  const same = (b, [pl, st, ou, ln]) => resolveNorm(b.player || "") === resolveNorm(pl) && String(b.stat || "").toUpperCase() === st && String(b.ou || "").toLowerCase() === ou && Number(b.line) === ln;
-  const hit = b => b && b.result === "pending" && betDayLocal(b) === "2026-11-26" && picks.some(pk => same(b, pk));
-  const key = "nba_tipoff_bets_v1"; let log; const live = MORNING_PROFILE === "tipoff";
-  try { log = live ? morningBets : ((_mProfState.tipoff && _mProfState.tipoff.morningBets) || JSON.parse(localStorage.getItem(key) || "[]") || []); } catch (e) { log = []; }
-  let nL = 0, nT = 0;
-  log.forEach(b => { if (hit(b) && b.manual) { b.gameDate = "2026-11-25"; nL++; } });
-  bets.forEach(b => { if (b.source === "tipoff" && hit(b)) { b.gameDate = "2026-11-25"; b.date = "11/25/2026"; if (b.timestamp) b.timestamp = String(b.timestamp).replace(/\d{4}-\d{2}-\d{2}|\d{1,2}\/\d{1,2}\/\d{4}/, "11/25/2026"); nT++; } });
-  if (nL) { if (live) saveMorningBets(); else { localStorage.setItem(key, JSON.stringify(log, _slimGraded)); if (_mProfState.tipoff) _mProfState.tipoff.morningBets = log; } }
-  if (nT) saveBets();
-  localStorage.setItem("nba_redate_tipoff_20261125", "1");
-  if (nL || nT) { showToast(`${nT} open TIP OFF bet${nT === 1 ? "" : "s"} moved to Nov 25 \u2014 hit GRADE PENDING to grade them`); if (currentTab === "tracker") try { renderTracker(); } catch (e) {} }
-}
 // Every load: a hand-logged pick (manual) still without a Tracker twin gets one, in either model's log. Idempotent (the push dedupes).
 function _mManualToTracker() {
   if (!_big.ready) return;
@@ -27779,7 +27763,6 @@ window.addEventListener("bigstore-ready", () => {   // the logs that live in Ind
     loadMorningBets();
     try { loadBets(); } catch (e) {}
     try { tabsSolo = JSON.parse(localStorage.getItem(TABS_SOLO_KEY) || "[]") || []; tabsSoloMeta = JSON.parse(localStorage.getItem(TABS_SOLO_META_KEY) || "{}") || {}; } catch (e) {}
-    try { _mSeedTipoff20261126(); } catch (e) { console.warn("[seed]", e); }
     try { _mManualToTracker(); } catch (e) { console.warn("[manual→tracker]", e); }
     if (typeof _mIsMorningTab === "function" && _mIsMorningTab()) renderMorning();
     if (currentTab === "tracker") try { renderTracker(); } catch (e) {}
