@@ -656,7 +656,8 @@ table colgroup col.avg-col{width:16%;}
 // change each key is moved out of localStorage. Until IndexedDB has answered (a few ms) the mirror is empty, so the module reloads
 // its in-memory copies on "bigstore-ready".
 const BIG_KEYS = new Set(["nba_morning_solo_v1", "nba_tipoff_solo_v1", "nba_morning_solo_agg_v1", "nba_tipoff_solo_agg_v1", "nba_morning_shadow_v1", "nba_tipoff_shadow_v1",
-  "nba_morning_ps_v1", "nba_tipoff_ps_v1", "nba_morning_psx_v1", "nba_tipoff_psx_v1", "nba_season_logs_v1", "nba_season_logs_v1_meta", "nba_starter_log_v1", "nba_headshot_cache_v1", "nba_oo_logos_v1"]);
+  "nba_morning_ps_v1", "nba_tipoff_ps_v1", "nba_morning_psx_v1", "nba_tipoff_psx_v1", "nba_season_logs_v1", "nba_season_logs_v1_meta", "nba_starter_log_v1", "nba_headshot_cache_v1", "nba_oo_logos_v1",
+  "nba_blender_bets", "nba_morning_bets_v1", "nba_tipoff_bets_v1", "nba_tabs_solo_v1", "nba_tabs_solo_meta_v1", "nba_model_log_v1"]);
 const _big = { cache: {}, ready: false, db: null, pending: {} };
 function _bigOpen() { return new Promise((res, rej) => { try { const r = indexedDB.open("nba_blender_big", 1); r.onupgradeneeded = () => { r.result.createObjectStore("kv"); }; r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); } catch (e) { rej(e); } }); }
 function _bigWrite(k, v) { try { if (!_big.db) return; const tx = _big.db.transaction("kv", "readwrite"); const st = tx.objectStore("kv"); if (v == null) st.delete(k); else st.put(v, k); } catch (e) { console.warn("[bigstore] write", k, e); } }
@@ -27036,6 +27037,48 @@ function morningLogBlocked(pn, stat, ou, line, date) {
   else showToast("Already logged");
   renderMorning();
 }
+// One-time: the TIP OFF picks for Nov 26 2026 that could not be saved when storage was full. Runs once, only on that day.
+function _mSeedTipoff20261126() {
+  const d = "2026-11-26"; if (localYMD(new Date()) !== d || localStorage.getItem("nba_seed_tipoff_20261126")) return;
+  const picks = [["Michael Porter Jr.", "BKN", "PTS", "under", 21.5, false], ["Max Strus", "LAC", "AST", "over", 1.5, false], ["Kel'el Ware", "MIL", "PTS", "over", 7.5, false], ["Michael Porter Jr.", "BKN", "PRA", "under", 31.5, true], ["Egor Demin", "BKN", "PTS", "over", 9.5, true], ["Brandon Ingram", "LAC", "REB", "over", 3.5, true]];
+  const slate = (typeof _lineupGamesLoad === "function" && _lineupGamesLoad()) || [];
+  const key = "nba_tipoff_bets_v1"; let log = []; try { log = JSON.parse(localStorage.getItem(key) || "[]") || []; } catch (e) {}
+  const have = r => log.some(b => resolveNorm(b.player) === resolveNorm(r.player) && b.stat === r.stat && (b.gameDate || "") === d);
+  let n = 0;
+  picks.forEach(([player, team, stat, ou, line, alt], i) => {
+    const g = slate.find(x => x.away === team || x.home === team), game = g ? `${g.away} @ ${g.home}` : team, gameTime = g && g.at ? _gameClock(g.at) : "";
+    const r = { player, stat }; if (have(r)) return;
+    const s0 = calcStake(-110) || { stake: 1, toWin: 0.91, type: "fav" };
+    log.unshift({ id: Date.now() + i, gameDate: d, loggedAt: new Date().toISOString(), player, team, game, gameTime, sourcePrices: [{ src: "manual", book: "FanDuel", odds: -110, ev: null }], stat, ou, line, odds: -110, book: "FanDuel", fairOdds: null, fairProb: null, ev: null, anchorEv: null, minEv: null, proj: null, anchorSrc: null, sourceProjs: {}, sourceEvs: {}, sourceFairs: {}, sourcesAgreed: [], qualCount: 0, requiredQual: 0, stake: s0.stake, toWin: s0.toWin, result: "pending", actual: null, manual: true, altLine: alt });
+    n++;
+  });
+  if (n) { localStorage.setItem(key, JSON.stringify(log)); if (MORNING_PROFILE === "tipoff") morningBets = log; else if (_mProfState.tipoff) _mProfState.tipoff.morningBets = log; }
+  localStorage.setItem("nba_seed_tipoff_20261126", "1");
+  if (n) showToast(`TIP OFF: ${n} picks for tonight restored \u2014 run CHECK RANGE on the TIP OFF tab to price them`);
+}
+// MANUAL LOG: "Name u21.5 PTS -110 FanDuel" lines → this model's log (team / game / tip from the roster + slate)
+function morningManualLog() {
+  const ta = document.getElementById("morning-manual"); const raw = ta ? ta.value : ""; if (!raw.trim()) { showToast("Paste a pick first"); return; }
+  const STATS = { PTS: "PTS", POINTS: "PTS", REB: "REB", REBOUNDS: "REB", AST: "AST", ASSISTS: "AST", "3PM": "3PM", THREES: "3PM", "3PT": "3PM", PRA: "PRA", PR: "PR", PA: "PA", RA: "RA", STL: "STL", BLK: "BLK", SB: "SB", TOV: "TOV" };
+  const d = localYMD(new Date()); const slate = (typeof _lineupGamesLoad === "function" && _lineupGamesLoad()) || [];
+  let n = 0; const bad = [];
+  raw.split(/\r?\n/).map(l => l.trim()).filter(Boolean).forEach(line => {
+    const m = line.match(/^(.+?)\s+([ouOU])\s*(\d+(?:\.\d+)?)\s+([A-Za-z0-9]+)(?:\s+([+-]?\d{3,4}))?(?:\s+(.+))?$/);
+    const stat = m && STATS[String(m[4]).toUpperCase()];
+    if (!m || !stat) { bad.push(line); return; }
+    const player = m[1].trim(), ou = m[2].toLowerCase() === "o" ? "over" : "under", lineV = Number(m[3]), odds = m[5] != null ? parseInt(m[5], 10) : -110, book = (m[6] || "").trim();
+    const team = _mTeamFor(player) || "", tk = normTeamAbbr(team) || team;
+    const g = slate.find(x => x.away === tk || x.home === tk), game = g ? `${g.away} @ ${g.home}` : (team ? team : ""), gameTime = g && g.at ? _gameClock(g.at) : "";
+    const r = { player, team, game, gameTime, gameDateIso: d, stat, ou, line: lineV, odds, book, ev: null, minEv: null, fairProb: null, fairOdds: null, sourcePrices: book ? [{ src: "manual", book, odds, ev: null }] : [], sourceProjs: {}, sourceEvs: {}, sourceFairs: {}, sourcesAgreed: [], qualCount: 0, requiredQual: 0, manual: true };
+    if (_mAlreadyLogged(r)) { bad.push(line + " (already logged)"); return; }
+    const s0 = calcStake(odds) || { stake: 1, toWin: 1, type: "dog" };
+    morningBets.unshift({ id: Date.now() + Math.floor(Math.random() * 100000), gameDate: d, loggedAt: new Date().toISOString(), player, team, game, gameTime, sourcePrices: r.sourcePrices, stat, ou, line: lineV, odds, book: book || "PropShop", fairOdds: null, fairProb: null, ev: null, anchorEv: null, minEv: null, proj: null, anchorSrc: null, sourceProjs: {}, sourceEvs: {}, sourceFairs: {}, sourcesAgreed: [], qualCount: 0, requiredQual: 0, stake: s0.stake, toWin: s0.toWin, result: "pending", actual: null, manual: true });
+    n++;
+  });
+  if (n) { saveMorningBets(); if (ta) ta.value = bad.join("\n"); }
+  showToast(`${n} logged${bad.length ? ` \u00b7 ${bad.length} not read (left in the box)` : ""}`);
+  if (n) morningResolveUnbooked().then(() => renderMorning()).catch(() => renderMorning()); else renderMorning();
+}
 function morningAutoLog() {
   if (!morningNewsLoadedAt()) return 0;   // never auto-log blind — today's RW news has to be in
   try { morningShadowLog(); } catch (e) { console.warn("[MORNING extra] log failed", e); }
@@ -27351,7 +27394,7 @@ function _clvCellHtml(b) {
 }
 function _mSyncResults() {
   try {
-    if (!window._mbLoaded || !Array.isArray(bets) || !Array.isArray(morningBets)) return 0;
+    if (!window._mbLoaded || !_big.ready || !Array.isArray(bets) || !Array.isArray(morningBets)) return 0;
     let n = 0, dirtyB = false, dirtyM = false;
     morningBets.forEach(m => {
       const tb = bets.find(x => x && x.source === MORNING_TAG && (String(x.morningId) === String(m.id) || String(x.id) === String(m.trackerId)));
@@ -27368,7 +27411,7 @@ function _mSyncResults() {
 }
 function morningCleanOrphans() {
   try {
-    if (typeof bets === "undefined" || !Array.isArray(bets) || !Array.isArray(morningBets) || !window._mbLoaded) return 0;   // never prune before the Morning log has loaded
+    if (typeof bets === "undefined" || !Array.isArray(bets) || !Array.isArray(morningBets) || !window._mbLoaded || !_big.ready) return 0;   // never prune before the logs have loaded
     const ids = new Set(morningBets.map(m => String(m.id)));
     const n0 = bets.length;
     bets = bets.filter(b => !(b && b.source === MORNING_TAG && b.result === "pending" && !ids.has(String(b.morningId))));
@@ -27547,7 +27590,10 @@ function renderMorning() {
         ? `<span onclick="morningPickSlot('${k}','${st}')" title="${_mSrc(k).label} ${MORNING_STAT_LABEL[st]}: ${by[st]} props loaded — click to re-paste" style="cursor:pointer;text-align:center;color:#4ade80;font-weight:800;">✓<span style="color:#6b7380;font-weight:600;font-size:9px;"> ${by[st]}</span></span>`
         : `<span onclick="morningPickSlot('${k}','${st}')" title="${_mSrc(k).label} ${MORNING_STAT_LABEL[st]}: not pasted yet" style="cursor:pointer;text-align:center;color:#3a414b;">○</span>`).join("");
     }).join("") + `</div>`;
-  const pastePanel = _mGamesSelHtml() + `<div style="${card}">
+  const manualPanel = `<div style="${card}"><div style="font-size:13px;font-weight:800;color:#d4dae3;letter-spacing:1px;text-transform:uppercase;">Manual log</div>
+    <div style="font-size:10px;color:#a8b0bb;margin-top:2px;">One pick per line: <span style="font-family:'JetBrains Mono',monospace;color:#7dd3fc;">Michael Porter Jr. u21.5 PTS -110 FanDuel</span> (odds and book optional). Logged into this model like a cleared pick, kept on the cards, no play-to until the live refresh prices it.</div>
+    <div style="display:flex;gap:8px;margin-top:6px;align-items:flex-start;"><textarea id="morning-manual" spellcheck="false" placeholder="Max Strus o1.5 AST -120 FanDuel\nKel'el Ware o7.5 PTS" style="flex:1;height:52px;background:#050507;border:1px solid #1a1d22;border-radius:6px;padding:6px 8px;color:#e2e8f0;font-family:'JetBrains Mono','Menlo',monospace;font-size:11px;outline:none;resize:vertical;"></textarea><button onclick="morningManualLog()" style="background:#c4b5fd;border:none;color:#050507;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:800;cursor:pointer;white-space:nowrap;">LOG THESE</button></div></div>`;
+  const pastePanel = _mGamesSelHtml() + manualPanel + `<div style="${card}">
     <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;align-items:flex-start;">
       <div>
         <div style="font-size:13px;font-weight:800;color:#d4dae3;letter-spacing:1px;text-transform:uppercase;">Paste PropShop board</div>
@@ -27715,7 +27761,12 @@ window.addEventListener("bigstore-ready", () => {   // the logs that live in Ind
     try { morningSolo = JSON.parse(localStorage.getItem(MORNING_SOLO_KEY) || "[]") || []; } catch (e) {}
     try { const a = JSON.parse(localStorage.getItem(MORNING_SOLO_AGG_KEY) || "null"); if (a && Array.isArray(a.rows)) morningSoloAgg = { dates: a.dates || [], rows: a.rows }; } catch (e) {}
     try { morningShadow = JSON.parse(localStorage.getItem(MORNING_SHADOW_KEY) || "[]") || []; } catch (e) {}
+    loadMorningBets();
+    try { loadBets(); } catch (e) {}
+    try { tabsSolo = JSON.parse(localStorage.getItem(TABS_SOLO_KEY) || "[]") || []; tabsSoloMeta = JSON.parse(localStorage.getItem(TABS_SOLO_META_KEY) || "{}") || {}; } catch (e) {}
+    try { _mSeedTipoff20261126(); } catch (e) { console.warn("[seed]", e); }
     if (typeof _mIsMorningTab === "function" && _mIsMorningTab()) renderMorning();
+    if (currentTab === "tracker") try { renderTracker(); } catch (e) {}
   } catch (e) { console.warn("[bigstore] morning reload", e); }
 });
 try { const n0 = morningBets.length; morningBets = morningBets.filter(b => !(b.result === "pending" && b.cardSkip && !b.trackerId)); if (morningBets.length !== n0) saveMorningBets(); } catch (e) {}   // old board-only leftovers
@@ -28405,7 +28456,7 @@ function morningCardPicks() {
     if (MORNING_SRC_KEYS.some(k => (morningPs[k] || []).length)) {
       const ck = r => [resolveNorm(r.player || ""), String(r.stat || "").toUpperCase(), r.ou, Number(r.line)].join("|");
       const ens = computeMorningEnsemble(); const now = new Set(ens.cleared.concat(ens.blocked || []).map(ck));
-      open = open.filter(b => now.has(ck(b)));
+      open = open.filter(b => b.manual || now.has(ck(b)));   // a hand-logged pick always stays
     }
   } catch (e) {}
   const t = open.filter(b => b.gameDate === today);
