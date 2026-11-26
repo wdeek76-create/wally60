@@ -650,6 +650,33 @@ table colgroup col.avg-col{width:16%;}
 // The page's colours are written inline in thousands of places, so a stylesheet can't restyle them. Instead the light theme REMAPS the colours of
 // what is on screen: every element's inline style is swapped dark → light after each render (a MutationObserver re-runs it on every change). The
 // code, the data and the saved styles never change — flip the switch and everything is back. Cards / pictures use their own light palette already.
+// ── BIG STORE ───────────────────────────────────────────────────────────────────────────────────────────────────────────
+// localStorage is capped at ~5MB and the solo logs alone pass 1.5MB. The keys below live in IndexedDB instead (no such cap), behind a
+// synchronous in-memory mirror, so every localStorage.getItem / setItem in the app keeps working unchanged. On first load after this
+// change each key is moved out of localStorage. Until IndexedDB has answered (a few ms) the mirror is empty, so the module reloads
+// its in-memory copies on "bigstore-ready".
+const BIG_KEYS = new Set(["nba_morning_solo_v1", "nba_tipoff_solo_v1", "nba_morning_solo_agg_v1", "nba_tipoff_solo_agg_v1", "nba_morning_shadow_v1", "nba_tipoff_shadow_v1",
+  "nba_morning_ps_v1", "nba_tipoff_ps_v1", "nba_morning_psx_v1", "nba_tipoff_psx_v1", "nba_season_logs_v1", "nba_season_logs_v1_meta", "nba_starter_log_v1", "nba_headshot_cache_v1", "nba_oo_logos_v1"]);
+const _big = { cache: {}, ready: false, db: null, pending: {} };
+function _bigOpen() { return new Promise((res, rej) => { try { const r = indexedDB.open("nba_blender_big", 1); r.onupgradeneeded = () => { r.result.createObjectStore("kv"); }; r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); } catch (e) { rej(e); } }); }
+function _bigWrite(k, v) { try { if (!_big.db) return; const tx = _big.db.transaction("kv", "readwrite"); const st = tx.objectStore("kv"); if (v == null) st.delete(k); else st.put(v, k); } catch (e) { console.warn("[bigstore] write", k, e); } }
+(function () {
+  const L = Storage.prototype, g = L.getItem, s = L.setItem, r = L.removeItem;
+  L.getItem = function (k) { if (this === localStorage && BIG_KEYS.has(k)) { const v = _big.cache[k]; return v != null ? v : g.call(this, k); } return g.call(this, k); };
+  L.setItem = function (k, v) { if (this === localStorage && BIG_KEYS.has(k)) { v = String(v); if (!_big.ready) { console.warn("[bigstore] write before ready ignored:", k); return; } _big.cache[k] = v; _bigWrite(k, v); try { r.call(this, k); } catch (e) {} return; } return s.call(this, k, v); };
+  L.removeItem = function (k) { if (this === localStorage && BIG_KEYS.has(k)) { delete _big.cache[k]; _bigWrite(k, null); } return r.call(this, k); };
+  (async () => {
+    try {
+      _big.db = await _bigOpen();
+      const all = await new Promise((res, rej) => { const tx = _big.db.transaction("kv", "readonly"), st = tx.objectStore("kv"), out = {}; const q = st.openCursor(); q.onsuccess = () => { const c = q.result; if (c) { out[c.key] = c.value; c.continue(); } else res(out); }; q.onerror = () => rej(q.error); });
+      Object.assign(_big.cache, all);
+      // first run: whatever is still in localStorage moves over (localStorage wins if both exist: it is the newer copy)
+      BIG_KEYS.forEach(k => { let v = null; try { v = g.call(localStorage, k); } catch (e) {} if (v != null) { _big.cache[k] = v; _bigWrite(k, v); try { r.call(localStorage, k); } catch (e) {} } });
+    } catch (e) { console.warn("[bigstore] IndexedDB unavailable, staying on localStorage", e); }
+    _big.ready = true;   // a save that fired before this point was built on empty data, so it was dropped rather than written over the store
+    try { window.dispatchEvent(new Event("bigstore-ready")); } catch (e) {}
+  })();
+})();
 const THEME_KEY = "nba_theme";
 const LIGHT_MAP = {
   // page / panel backgrounds
@@ -2781,6 +2808,7 @@ function storageReport() {
       out.push({ key: k, kb: Math.round((localStorage[k] || "").length / 1024) });
     }
   } } catch (e) {}
+  try { Object.keys(_big.cache).forEach(k => out.push({ key: k + " (IndexedDB, no cap)", kb: Math.round((_big.cache[k] || "").length / 1024), big: true })); } catch (e) {}
   return out.sort((a, b) => b.kb - a.kb);
 }
 // Free space by dropping refetchable caches, largest first. Never touches bets.
@@ -8653,6 +8681,7 @@ function _storageKind(key) {
   return { label: "setting", color: "#7a8390", safe: true };
 }
 function deleteStorageKey(key) {
+  key = String(key).replace(/ \(IndexedDB, no cap\)$/, "");   // the report labels the IndexedDB keys
   if (STORAGE_PROTECTED.includes(key)) { showToast("Bets can't be deleted here"); return; }
   let kb = 0;
   try { const v = localStorage.getItem(key); kb = v ? Math.round(v.length / 1024) : 0; } catch (e) {}
@@ -27679,6 +27708,16 @@ function renderMorning() {
 }
 loadMorningPs();
 loadMorningBets();
+window.addEventListener("bigstore-ready", () => {   // the logs that live in IndexedDB are in now: re-read them (the profile's own keys) and redraw
+  try {
+    loadMorningPs();
+    try { const p = JSON.parse(localStorage.getItem(MORNING_PSX_KEY) || "null"); const today = localYMD(new Date()); if (p) MORNING_SRC_KEYS.forEach(k => { morningPsX[k] = (Array.isArray(p[k]) ? p[k] : []).filter(r => !r.gameDateIso || r.gameDateIso >= today); }); } catch (e) {}
+    try { morningSolo = JSON.parse(localStorage.getItem(MORNING_SOLO_KEY) || "[]") || []; } catch (e) {}
+    try { const a = JSON.parse(localStorage.getItem(MORNING_SOLO_AGG_KEY) || "null"); if (a && Array.isArray(a.rows)) morningSoloAgg = { dates: a.dates || [], rows: a.rows }; } catch (e) {}
+    try { morningShadow = JSON.parse(localStorage.getItem(MORNING_SHADOW_KEY) || "[]") || []; } catch (e) {}
+    if (typeof _mIsMorningTab === "function" && _mIsMorningTab()) renderMorning();
+  } catch (e) { console.warn("[bigstore] morning reload", e); }
+});
 try { const n0 = morningBets.length; morningBets = morningBets.filter(b => !(b.result === "pending" && b.cardSkip && !b.trackerId)); if (morningBets.length !== n0) saveMorningBets(); } catch (e) {}   // old board-only leftovers
 
 // ── SOLO SOURCES ────────────────────────────────────────────────────────────
