@@ -1494,7 +1494,7 @@ function syncPropsAlias() {
   if (currentSource === 'ensemble') {
     // For the ensemble tab, `props` is the aggregated view — computed live
     // but ALSO merged with any manually-logged ensemble bets. Filtered by the tier dropdown.
-    const all = computeEnsembleProps();
+    const all = computeEnsembleProps().filter(p => !_ensUntracked(p)); // only what made Nick's card
     // Yardage is a whole-tab filter (per the button's own title), so it has
     // to apply BEFORE the tier split — otherwise the "Ensemble Tiers" panel
     // (which reads props._unfiltered to show the 10%+ / 5-10% breakdown
@@ -2304,6 +2304,25 @@ function _forgetManualPick(id) {
   const del = _manualLoad(MANUAL_DELETED_KEY).map(String);
   if (!del.includes(String(id))) del.push(String(id));
   try { localStorage.setItem(MANUAL_DELETED_KEY, JSON.stringify(del)); localStorage.setItem(MANUAL_KEY, JSON.stringify(_manualLoad(MANUAL_KEY).filter(p => String(p.id) !== String(id)))); } catch (e) {}
+}
+// Ensemble tracks only what made Nick's card (like the NBA tool). Applies to picks formed after
+// this rule shipped (older history untouched) and never to hand-added picks. A pick that was up for
+// a Nick card and wasn't drawn on it, or reached kickoff without ever being on one, is UNTRACKED:
+// kept in storage, but left out of the Ensemble tabs/stats, the model recap and the Blender.
+// A later Nick card that includes it tracks it again.
+function _nickGateSince() {
+  try { let v = Number(localStorage.getItem('nfl_nickgate_since')); if (!v) { v = Date.now(); localStorage.setItem('nfl_nickgate_since', String(v)); } return v; } catch (e) { return Infinity; }
+}
+function _ensUntracked(p) {
+  if (!p || _isManualPick(p) || p.nickCarded) return false;
+  if ((Number(p.createdAt) || 0) < _nickGateSince()) return false;
+  return !!p.nickDropped || (typeof _kickoffPassed === 'function' && !!p.date && _kickoffPassed(p));
+}
+// Persist the flag on the saved picks so the Blender (separate page) can skip them too
+function _flagUntracked() {
+  const arr = propsBySource.ensemble || []; let dirty = false;
+  arr.forEach(p => { const u = _ensUntracked(p); if (!!p.untracked !== u) { if (u) p.untracked = true; else delete p.untracked; dirty = true; } });
+  if (dirty) { try { localStorage.setItem(storageKey('ensemble'), JSON.stringify(arr)); } catch (e) {} }
 }
 function _validPlayerName(s) {
   const n = String(s || '').trim();
@@ -4313,6 +4332,7 @@ function renderSourceBar() {
 // ===== RENDER DISPATCH =====
 function render() {
   _keepManualPicks(); // hand-added Ensemble picks can't go missing
+  _flagUntracked();   // Ensemble: only picks that made Nick's card are tracked
   syncPropsAlias(); // recompute ensemble props on every render
   renderSourceBar();
   if (_sched.events.length) renderTicker();
@@ -5979,7 +5999,7 @@ async function copySentWeek(wk) {
 // (Sent tab, card prices); MTD / YTD = the overall model — Ensemble with the dashboard's tier +
 // Yardage settings, the same set the other recap uses.
 function _modelProps() {
-  let all = []; try { all = computeEnsembleProps(); } catch (e) { return []; }
+  let all = []; try { all = computeEnsembleProps().filter(p => !_ensUntracked(p)); } catch (e) { return []; }
   if (_noYards) all = all.filter(p => !_YARDAGE_MARKETS.has(p.market) || _isManualPick(p));
   const sel = document.getElementById('ensTierSel'), mode = sel ? sel.value : 'all';
   return mode === 'all' ? all : all.filter(p => _isManualPick(p) || (mode === 'strong' ? p.tier === 'strong' : p.tier !== 'strong'));
@@ -6456,7 +6476,10 @@ async function makeDiscordCard(mode = 'partners', opts = {}) {
         const depthTo = o => ooDepthLevels(o, pt?.odds).reduce((a, l) => a + l.size, 0);
         const deepEnough = o => !_ooIsExch(o.sportsbook) || depthTo(o) >= 500;
         // headline: best price among books that are either a sportsbook or an exchange with ≥$500 to the stop
-        const headline = okAll.find(deepEnough) || okAll[0] || null;
+        // Best price = the best of Pinnacle / FanDuel / Props Builder / an exchange with $500+ to the stop.
+        // DraftKings (+ clones) and every other book are only the backup when none of those clears.
+        const _prefHead = o => ['pinnacle', 'fanduel', 'propbuilder', 'propsbuilder'].includes(_bookKey(o.sportsbook)) || (_ooIsExch(o.sportsbook) && deepEnough(o));
+        const headline = okAll.find(_prefHead) || okAll.find(o => !_DK_FAMILY.has(_bookKey(o.sportsbook)) && deepEnough(o)) || okAll[0] || null;
         const ok = headline ? [headline].concat(okAll.filter(o => o !== headline)) : okAll;
         if (!ok.length) { console.log('[card] dropped (nothing at stop):', p.player, p.side + p.line, mkt, '| stop', pt.odds, '| board:', m.exact.map(o => o.sportsbook + ' ' + o.price).join(', ') || 'no rows at this line'); return; }
         shown++;
@@ -6555,6 +6578,17 @@ async function makeDiscordCard(mode = 'partners', opts = {}) {
         catch(e) { _downloadBlob(blob, fname); }
       } else {
         _downloadBlob(blob, fname);
+      }
+      if (forNick && cardShown.length) {
+        // Nick card made: drawn picks are tracked; candidates that didn't make it are dropped from tracking
+        const drawn = new Set(cardShown.map(x => x.p.id)); const now = Date.now(); let dropped = 0;
+        plays.forEach(p => {
+          if (drawn.has(p.id)) { p.nickCarded = now; delete p.nickDropped; delete p.untracked; }
+          else if (!p.nickCarded && !_isManualPick(p)) { p.nickDropped = now; dropped++; }
+        });
+        try { localStorage.setItem(storageKey('ensemble'), JSON.stringify(propsBySource.ensemble || [])); } catch (e) {}
+        console.log('[nick card]', drawn.size, 'picks tracked,', dropped, 'not on the card -> dropped from tracking');
+        render();
       }
     } catch(e) { console.error(opts.send ? 'discord send failed' : 'card render failed', e); alert((opts.send ? 'Send to Discord failed: ' : 'Card render failed: ') + e.message + (opts.send ? `\n${forNick ? 'Nothing was sent' : 'Nothing was logged to Sent'}. Check the ${forNick ? 'Nick' : 'Partners'} webhook URL (Sent tab → Change webhook).` : '')); }
     document.body.removeChild(panel);
