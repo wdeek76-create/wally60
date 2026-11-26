@@ -1121,6 +1121,8 @@ a.plbk{color:var(--cyan)}
 .bbx .bbxbar .bbxlv{margin-left:4px;font-size:12px;letter-spacing:-.2px}
 .bbx .bbxbar .bbxlv .lc{font-size:10.5px;padding:0 3px;letter-spacing:-.2px;margin-left:2px}
 .bbx .bbxbar .bbxtot{padding:0 4px}
+
+.pfleg.pfdone{opacity:.55}.pfleg.pfdone::before{content:'✓ opened';display:inline-block;margin:0 6px 2px 0;padding:1px 7px;border-radius:999px;background:rgb(22,163,74);color:#fff;font-size:10px;font-weight:900;vertical-align:middle}
 </style>
 </head>
 <body>
@@ -4753,6 +4755,10 @@ const pfExclude = new Set();
 // legs you opened a bet link for (a leg's own link, the full-parlay link or a book chip): left out of future
 // parlays for the rest of the day -- saved on this device, cleared the next day or with "Show again"
 const pfPlaced = new Set((()=>{ try{ const o=JSON.parse(LS.get('props_pf_placed','null')); return o && o.day===new Date().toDateString() ? o.keys : []; }catch(e){ return []; } })());
+// a parlay you're in the middle of betting (tapping its legs one by one, e.g. DraftKings): its legs stay on screen
+// for 10 minutes after your last tap, opened legs get a ✓ -- they only drop out of NEW parlays after that
+const pfHold = new Map();
+const pfHeld = k => (pfHold.get(k)||0) > Date.now();
 const pfPlacedSave = () => LS.set('props_pf_placed', JSON.stringify({ day:new Date().toDateString(), keys:[...pfPlaced] }));
 // type a team to find its game (college especially): plays / auto parlays only from matching games
 let pfTeamQ = '';
@@ -5201,7 +5207,7 @@ function pfDetHtml(ref, tgt, L, mine, sharp){
 // other side (props) or the sharp books' devig (mains); ranked by EV at the target. Not SGP: one
 // leg per game. SGP: the best game's legs. Up to 5 different parlays.
 function pfAutoParlays(){
-  const all=pfSports().flatMap(sk=>pfCacheBy[sk]?.list||[]).filter(pfSideOk).filter(pfLongOk).filter(pfTeamOk).filter(c=>!pfExclude.has(pfCandKey(c)) && !pfPlaced.has(pfCandKey(c))).filter(c=>(c.src!=='exch' || c.liq>=pfMin) && c.refRow && c.fairP!=null && Math.abs(Number(c.refRow.price))<1000).sort((a,b)=>b.ev-a.ev);
+  const all=pfSports().flatMap(sk=>pfCacheBy[sk]?.list||[]).filter(pfSideOk).filter(pfLongOk).filter(pfTeamOk).filter(c=>!pfExclude.has(pfCandKey(c)) && (!pfPlaced.has(pfCandKey(c)) || pfHeld(pfCandKey(c)))).filter(c=>(c.src!=='exch' || c.liq>=pfMin) && c.refRow && c.fairP!=null && Math.abs(Number(c.refRow.price))<1000).sort((a,b)=>b.ev-a.ev);
   const seen=new Set(), pool=all.filter(c=>{ const k=c.p.fixtureId+'|'+c.p.key+'|'+c.mkey; if(seen.has(k)) return false; seen.add(k); return true; });
   const oneGame = !pfSgp && new Set(pool.map(c=>c.p.fixtureId)).size>=pfLegs;
   const pick=(list,start)=>{ const out=[], team=new Map(), games=new Set();
@@ -5351,7 +5357,12 @@ function bindPf(view){
   // opening a bet link in a parlay card = you're betting it: those legs stop showing up in new parlays
   view.querySelectorAll('.pfpar').forEach(card=>card.addEventListener('click',ev=>{ const a=ev.target.closest('a[href]'); if(!a || a.getAttribute('href')==='#') return;
     const leg=a.closest('.pfleg'), keys = leg ? [leg.querySelector('[data-pfswap]')?.dataset.pfswap].filter(Boolean) : String(card.dataset.pfkeys||'').split('~').filter(Boolean);
-    keys.forEach(k=>pfPlaced.add(k)); pfPlacedSave(); setTimeout(()=>{ if(viewMode==='parlay') renderParlay(); }, 800); }));
+    keys.forEach(k=>pfPlaced.add(k)); pfPlacedSave();
+    // keep this whole parlay up while you tap the rest of its legs; tick the ones you've opened (no re-render)
+    const until=Date.now()+10*60e3; String(card.dataset.pfkeys||'').split('~').filter(Boolean).forEach(k=>pfHold.set(k, until));
+    (leg ? [leg] : [...card.querySelectorAll('.pfleg')]).forEach(l=>l.classList.add('pfdone')); }));
+  // after any re-render: ✓ the legs you've already opened
+  view.querySelectorAll('.pfleg').forEach(l=>{ const k=l.querySelector('[data-pfswap]')?.dataset.pfswap; if(k && pfPlaced.has(k)) l.classList.add('pfdone'); });
   view.querySelectorAll('[data-pfside]').forEach(b=>b.addEventListener('click',()=>{ pfPropSide=b.dataset.pfside; LS.set('props_pfside',pfPropSide); renderParlay(); }));
   $('#pfGame')?.addEventListener('change',e=>{ pfGame=e.target.value; renderParlay(); });
   { let t=null; $('#pfTeam')?.addEventListener('input',e=>{ pfTeamQ=e.target.value; clearTimeout(t); t=setTimeout(()=>{ renderParlay(); const i=$('#pfTeam'); if(i){ i.focus(); i.setSelectionRange(i.value.length,i.value.length); } },250); }); }
