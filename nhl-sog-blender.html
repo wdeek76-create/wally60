@@ -283,8 +283,9 @@ _nhlApplyTheme();
       </div>
       <div class="slot" id="sl-saber">
         <div class="sh"><span class="badge b4">SABER</span><span style="font-size:11px;color:#7ab3e0;">SOG col</span><span class="wt">1.0×</span></div>
-        <label class="drop" for="f-saber">Click to upload CSV<input type="file" id="f-saber" accept=".csv" style="display:none" onchange="loadFile('saber',this)"/></label>
+        <label class="drop" for="f-saber">Click to upload CSV <span style="font-size:10px;opacity:.75;">(1–3 files · they merge)</span><input type="file" id="f-saber" accept=".csv" multiple style="display:none" onchange="loadSaberFiles(this)"/></label>
         <div class="ss" id="ss-saber">No file loaded</div>
+        <div style="text-align:right;margin-top:2px;"><a href="#" onclick="clearSaberFiles();return false;" style="font-size:10px;color:#7ab3e0;">clear Saber (start fresh)</a></div>
       </div>
     </div>
     <button class="run" id="run-btn" onclick="runBlend();_nhlModelAuto({ totals: true })" disabled>RUN SOG BLEND</button>
@@ -442,6 +443,59 @@ function loadFile(src,inp){
   r.readAsText(file);
 }
 
+// Saber can come in as several files on the same day (one per slate / game window). Every file picked — at once or one
+// after another — merges into today's Saber: new players are added, a player in a newer file replaces his older row.
+const NHL_SABER_FILES_KEY = "nhl_saber_files";
+function _nhlSaberFilesToday() {
+  try { const o = JSON.parse(localStorage.getItem(NHL_SABER_FILES_KEY) || "null"); return o && o.date === _ymdLocal(new Date()) ? o.names || [] : []; } catch (e) { return []; }
+}
+function _nhlSaberStatus(n, extra) {
+  const names = _nhlSaberFilesToday();
+  const el = document.getElementById('ss-saber'); if (!el) return;
+  el.textContent = '✓ ' + n + ' players loaded' + (names.length > 1 ? ' · ' + names.length + ' files merged' : '') + (extra || '');
+  el.title = names.join('\n');
+  el.className = 'ss ok';
+}
+function loadSaberFiles(inp) {
+  const files = [...(inp.files || [])]; if (!files.length) return;
+  const today = _ymdLocal(new Date());
+  Promise.all(files.map(f => new Promise((res, rej) => { const r = new FileReader(); r.onload = e => res({ name: f.name, text: e.target.result }); r.onerror = () => rej(new Error('could not read ' + f.name)); r.readAsText(f); })))
+    .then(list => {
+      const merged = Object.assign({}, srcs.saber || {});
+      let names = srcs.saber ? _nhlSaberFilesToday() : [];
+      const bad = [];
+      let totTeams = 0;
+      for (const f of list) {
+        let d; try { d = parse('saber', f.text); } catch (err) { bad.push(f.name + ': ' + err.message); continue; }
+        if (!Object.keys(d).length) { bad.push(f.name + ': 0 players'); continue; }
+        Object.assign(merged, d);
+        names = names.filter(x => x !== f.name).concat(f.name);
+        try { totTeams = nhltIngestSaber(f.text, today, true) || totTeams; } catch (err) { console.warn('[NHL totals] saber ingest', err && err.message); }
+      }
+      const n = Object.keys(merged).length;
+      if (!n) throw new Error(bad.join(' · ') || '0 players found — check file format');
+      if (srcs.saber) _nhlNoteCsvMoves('saber', srcs.saber, merged);
+      srcs.saber = merged;
+      try { localStorage.setItem(NHL_SABER_FILES_KEY, JSON.stringify({ date: today, names })); } catch (e) {}
+      _nhlSaveCsvs();
+      document.getElementById('sl-saber').classList.add('loaded');
+      _nhlSaberStatus(n, (totTeams ? ' · totals: ' + totTeams + ' teams' : ' · no team-total columns (Totals tab needs Team / Opp / Saber Team)') + (bad.length ? ' · skipped ' + bad.join(' · ') : ''));
+      checkReady();
+    })
+    .catch(err => { const el = document.getElementById('ss-saber'); el.textContent = 'Error: ' + err.message; el.className = 'ss'; })
+    .finally(() => { inp.value = ''; });
+}
+function clearSaberFiles() {
+  srcs.saber = null;
+  try { localStorage.removeItem(NHL_SABER_FILES_KEY); } catch (e) {}
+  const today = _ymdLocal(new Date());
+  if (typeof nhltSaber !== 'undefined' && nhltSaber[today]) { delete nhltSaber[today]; try { nhltSave(); } catch (e) {} }
+  _nhlSaveCsvs();
+  document.getElementById('sl-saber').classList.remove('loaded');
+  const el = document.getElementById('ss-saber'); el.textContent = 'No file loaded'; el.className = 'ss'; el.title = '';
+  checkReady();
+}
+
 function parse(src,text){
   const rows=parseCSV(text); const d={};
   // Beyond SOG, several sources also carry Pos/TOI/Goals/Assists/Blocks —
@@ -581,6 +635,7 @@ function _nhlRestoreCsvs() {
       const slot = document.getElementById('sl-' + k), el = document.getElementById('ss-' + k);
       if (slot) slot.classList.add('loaded');
       if (el) { el.textContent = '✓ ' + n + ' players (restored from earlier today)'; el.className = 'ss ok'; }
+      if (k === 'saber' && el) { const fl = _nhlSaberFilesToday(); if (fl.length > 1) { el.textContent += ' · ' + fl.length + ' files merged'; el.title = fl.join('\n'); } }
     });
     checkReady();
   } catch (e) { console.warn("[NHL] CSV restore failed", e); }
@@ -7381,7 +7436,7 @@ function nhltSave() {
 function nhltMinEv() { const v = parseFloat(localStorage.getItem(NHLT_MINEV_KEY)); return isFinite(v) ? v : 3; }
 
 // ── Saber CSV → team goals ─────────────────────────────────────────────────────
-function nhltIngestSaber(text, dateIso) {
+function nhltIngestSaber(text, dateIso, merge) {
   const rows = parseCSV(text);
   if (!rows.length) return 0;
   const h = rows[0].map(x => String(x).replace(/^\uFEFF/, "").replace(/"/g, "").trim().toLowerCase());
@@ -7397,9 +7452,10 @@ function nhltIngestSaber(text, dateIso) {
   }
   const n = Object.keys(teams).length;
   if (!n) return 0;
-  nhltSaber[dateIso] = { at: Date.now(), teams };
+  const prev = merge && nhltSaber[dateIso] && nhltSaber[dateIso].teams;
+  nhltSaber[dateIso] = { at: Date.now(), teams: prev ? Object.assign({}, prev, teams) : teams };
   nhltSave();
-  return n;
+  return Object.keys(nhltSaber[dateIso].teams).length;
 }
 function nhltUploadSaber(inp) {
   const file = inp.files && inp.files[0]; if (!file) return;
